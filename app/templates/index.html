@@ -1651,6 +1651,209 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .subtab-btn:hover { color: var(--text); }
 .subtab-btn.active { color: var(--text); border-bottom-color: var(--blue); font-weight: 500; }
 .sport-page-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Mobile responsive
+   ── 768px ── tablet / small laptop in portrait
+   ── 480px ── phone
+   On mobile the centre-tab list in the topnav collapses into a hamburger
+   menu that opens a vertical dropdown.  Sidebar moves below main content.
+   Game-card bet-type tiles stack vertically.  All tap targets ≥ 44px.
+═══════════════════════════════════════════════════════════════════════════ */
+
+/* Hamburger button — hidden on desktop, shown ≤768px via media query below */
+.topnav-hamburger {
+  display: none;
+  width: 44px; height: 44px;
+  background: none; border: 1px solid var(--border);
+  border-radius: var(--radius); cursor: pointer;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; flex-shrink: 0; padding: 0;
+}
+.topnav-hamburger span {
+  display: block; width: 20px; height: 2px; background: var(--text);
+  border-radius: 1px; transition: transform .2s, opacity .2s;
+}
+.topnav.menu-open .topnav-hamburger span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+.topnav.menu-open .topnav-hamburger span:nth-child(2) { opacity: 0; }
+.topnav.menu-open .topnav-hamburger span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+html { -webkit-text-size-adjust: 100%; }
+
+@media (max-width: 768px) {
+  /* ── Topnav: hamburger replaces tab row, tabs become dropdown ─────── */
+  .topnav { padding: 0 12px; gap: 8px; }
+  .topnav-logo { font-size: 13px; flex: 1; }
+  .topnav-hamburger { display: flex; }
+  .topnav-tabs {
+    display: none;
+    position: absolute; top: var(--topnav-h); left: 0; right: 0;
+    flex-direction: column; align-items: stretch; justify-content: flex-start;
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    padding: 8px 10px; gap: 4px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.55);
+    max-height: calc(100vh - var(--topnav-h)); overflow-y: auto;
+  }
+  .topnav.menu-open .topnav-tabs { display: flex; }
+  .topnav-tab {
+    width: 100%; text-align: left;
+    min-height: 44px; padding: 10px 14px; font-size: 14px;
+  }
+  .topnav-sports-wrap { width: 100%; }
+  .topnav-sports-wrap #tnav-sport { width: 100%; text-align: left; }
+  .topnav-sports-menu {
+    position: static; transform: none; display: none;
+    width: 100%; margin-top: 4px; box-shadow: none;
+  }
+  .topnav-sports-wrap.open .topnav-sports-menu { display: block; }
+  .topnav-sports-item { min-height: 44px; display: flex; align-items: center; }
+  .topnav-right { gap: 6px; }
+  .topnav-right .status-pill { display: none; }
+  #debug-live-btn { display: none !important; }
+  #reload-app-btn { min-height: 36px; min-width: 36px; }
+
+  /* ── Sport page header: stack actions below sub-tabs ───────────────── */
+  .sport-page-header {
+    position: static;
+    flex-direction: column; align-items: stretch;
+    height: auto; padding: 8px 12px; gap: 8px;
+  }
+  .sport-subtabs {
+    width: 100%; overflow-x: auto; gap: 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .sport-subtabs::-webkit-scrollbar { display: none; }
+  .subtab-btn {
+    min-height: 44px; padding: 8px 14px; font-size: 13px;
+    flex-shrink: 0;
+  }
+  .sport-page-actions {
+    width: 100%; flex-wrap: wrap; gap: 6px; margin-left: 0;
+  }
+  .sport-page-actions .analysis-timer,
+  .sport-page-actions .snapshot-badge { flex: 1 1 auto; min-width: 0; }
+  #refresh-boards-btn,
+  #run-all-btn { min-height: 44px; flex: 1 1 auto; }
+  .run-all-wrap { flex: 1 1 auto; display: flex; }
+  .run-all-wrap #run-all-btn { width: 100%; }
+  .prog-steps { flex-basis: 100%; flex-wrap: wrap; }
+
+  /* ── Layout: single column, sidebar below main ─────────────────────── */
+  .layout-wrapper {
+    flex-direction: column;
+    padding: 12px;
+    gap: 14px;
+    max-width: 100%;
+  }
+  .picks-sidebar {
+    order: 2;
+    width: 100%;
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+    padding: 12px;
+  }
+  main { width: 100%; min-width: 0; order: 1; }
+
+  /* ── Game cards: stack the 3 bet tiles vertically ──────────────────── */
+  .game-card-props { grid-template-columns: 1fr; }
+  .prop-card {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .prop-card:last-child { border-bottom: none; }
+  .game-card-hdr { flex-wrap: wrap; gap: 6px; }
+
+  /* ── Home page: single column, smaller hero ────────────────────────── */
+  .home-wrap { padding: 18px 12px; }
+  .home-hero h1 { font-size: 18px; }
+  .home-grid { grid-template-columns: 1fr; gap: 12px; }
+  .home-card { padding: 14px 16px; }
+  .home-card-team { font-size: 18px; }
+  .home-card-action { min-height: 44px; }
+  .home-run-banner {
+    flex-direction: column; align-items: stretch;
+    padding: 14px 16px; gap: 10px;
+  }
+  .home-perf-cols, .home-perf-row {
+    grid-template-columns: 1fr 60px 60px 60px;
+    padding: 8px 12px; font-size: 11px;
+  }
+  .model-perf-grid { grid-template-columns: 1fr; }
+
+  /* ── AI Breakdown: full-width chat ─────────────────────────────────── */
+  #page-ai > div { max-width: 100% !important; padding: 12px !important; }
+  .chat-outer { max-width: 100%; height: calc(100vh - var(--topnav-h) - 24px) !important; }
+  .chat-msg { max-width: 92%; }
+  .chat-input { font-size: 16px; }  /* iOS: ≥16px prevents focus-zoom */
+  .chat-send-btn { min-height: 44px; }
+  .chat-suggestions { gap: 6px; padding: 10px 0; }
+
+  /* ── My Bets / Model pages: tighten gutters ────────────────────────── */
+  #page-mybets > div,
+  #page-model  > div { max-width: 100% !important; padding: 12px !important; }
+
+  /* ── Inputs: ≥16px prevents iOS zoom-on-focus; full-width feels right ─ */
+  input[type="number"],
+  input[type="text"],
+  input[type="email"],
+  textarea, select { font-size: 16px; }
+
+  /* ── Modals: shrink padding so they fit small screens ─────────────── */
+  .rmc-box { padding: 18px 18px; }
+  .rmc-actions { flex-direction: column; align-items: stretch; }
+  .rmc-btn { min-height: 44px; }
+
+  /* ── Section header: allow wrap ────────────────────────────────────── */
+  .section-hdr { flex-wrap: wrap; }
+
+  /* ── Page-container offset shrinks when sport-page-header de-stickies ─ */
+  body { font-size: 12.5px; }
+}
+
+@media (max-width: 480px) {
+  :root { --topnav-h: 50px; }
+  body { font-size: 12px; }
+
+  .topnav { padding: 0 10px; }
+  .topnav-logo { font-size: 12px; letter-spacing: 0; }
+  .topnav-logo .logo-accent { display: none; }   /* "📊 Analysis" only */
+
+  /* Sub-tabs: ensure entire row scrolls without breaking */
+  .subtab-btn { padding: 8px 12px; font-size: 12px; }
+
+  /* Game cards: tighter padding so content fits */
+  .game-card-hdr { padding: 10px 12px; }
+  .prop-card { padding: 10px 12px; }
+  .pc-conf-pct { font-size: 14px; }
+
+  /* Home cards: more compact */
+  .home-hero h1 { font-size: 16px; }
+  .home-hero p  { font-size: 12px; }
+  .home-card { padding: 12px 14px; }
+  .home-card-team { font-size: 16px; }
+  .home-perf-cols, .home-perf-row {
+    grid-template-columns: 1fr 50px 50px 50px;
+    padding: 6px 10px; font-size: 10.5px;
+  }
+
+  /* Chat: a hair smaller */
+  .chat-msg { max-width: 96%; }
+  .chat-bubble { font-size: 12.5px; padding: 9px 12px; }
+  .chat-chip { padding: 6px 10px; font-size: 11.5px; min-height: 32px; }
+
+  /* Sidebar tighter */
+  .picks-sidebar { padding: 10px; }
+  .sb-pick { padding: 9px 0; }
+
+  /* Toast: clamp to viewport — drop the desktop translateX so it spans full width */
+  .toast {
+    left: 12px; right: 12px; transform: none;
+    white-space: normal; max-width: calc(100% - 24px);
+    animation: none;
+  }
+}
 </style>
 </head>
 <body>
@@ -1658,6 +1861,11 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 <!-- ── Top Nav ──────────────────────────────────────────────────────────────── -->
 <header class="topnav" id="topnav">
   <div class="topnav-logo">📊 <span class="logo-accent">Betting</span> Analysis</div>
+
+  <button class="topnav-hamburger" id="topnav-hamburger" aria-label="Open menu"
+          aria-expanded="false" onclick="toggleMobileMenu()">
+    <span></span><span></span><span></span>
+  </button>
 
   <nav class="topnav-tabs" id="topnav-tabs">
     <button class="topnav-tab active" id="tnav-home"   onclick="showPage('home')">Home</button>
@@ -2152,6 +2360,21 @@ _rebuildSportMenu();
 let _page = 'home';
 const _PAGE_NAMES = ['home', 'sport', 'ai', 'mybets', 'model'];
 
+function toggleMobileMenu() {
+  const nav = document.getElementById('topnav');
+  const btn = document.getElementById('topnav-hamburger');
+  if (!nav) return;
+  const open = !nav.classList.contains('menu-open');
+  nav.classList.toggle('menu-open', open);
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+function closeMobileMenu() {
+  const nav = document.getElementById('topnav');
+  const btn = document.getElementById('topnav-hamburger');
+  if (nav) nav.classList.remove('menu-open');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
 function showPage(name) {
   _page = name;
   _PAGE_NAMES.forEach(p => {
@@ -2163,6 +2386,7 @@ function showPage(name) {
     const btn = document.getElementById(`tnav-${p}`);
     if (btn) btn.classList.toggle('active', p === name);
   });
+  closeMobileMenu();
   // Side effects
   if (name === 'mybets') { loadLedger(); return; }
   if (name === 'model')  { loadLedger(); loadModelPerformance(); loadRetrainStatus(); return; }
