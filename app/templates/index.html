@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sports Betting Analysis</title>
+
+<!-- ── Progressive Web App metadata ─────────────────────────────────────────
+     When installed to the iOS or Android home screen the app launches in
+     standalone mode (no browser chrome).  iOS reads the apple-* meta tags
+     directly; Android / Chrome reads manifest.json.  background_color and
+     theme_color match the dark UI so the splash + status bar blend in. -->
+<link rel="manifest" href="/static/manifest.json">
+<meta name="apple-mobile-web-app-capable"           content="yes">
+<meta name="apple-mobile-web-app-status-bar-style"  content="black-translucent">
+<meta name="apple-mobile-web-app-title"             content="Betting Analysis">
+<meta name="mobile-web-app-capable"                 content="yes">
+<meta name="theme-color"                            content="#000000">
 <style>
 :root {
   --bg:       #000000;
