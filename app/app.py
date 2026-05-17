@@ -190,6 +190,7 @@ _ARCHIVE_PATH             = Path("data/bet_history_archive.json")
 # Lightweight timestamp file — survives container restarts without reading the
 # full results payloads.  Shape: {"mlb": {"analyzed_at": "<iso>", "date": "YYYY-MM-DD"}, "wnba": {...}}
 _ANALYSIS_TIMESTAMPS_FILE = Path("data/analysis_timestamps.json")
+_DAILY_SNAPSHOT_FILE      = Path("data/daily_snapshot.json")
 
 
 def _read_analysis_timestamps() -> dict:
@@ -211,6 +212,54 @@ def _write_analysis_timestamp(sport: str, ts: datetime) -> None:
         }
         _ANALYSIS_TIMESTAMPS_FILE.write_text(
             json.dumps(data, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _today_et() -> str:
+    """Return today's date string in US/Eastern (handles DST automatically)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        # Fallback for environments without zoneinfo: approximate with UTC-4 (EDT)
+        return datetime.now(timezone(timedelta(hours=-4))).date().isoformat()
+
+
+def _read_daily_snapshot() -> dict:
+    """Read daily snapshot file; return {} on any error."""
+    try:
+        return json.loads(_DAILY_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _snapshot_is_today(snap: dict) -> bool:
+    """True if snapshot's date equals today in Eastern time."""
+    return bool(snap) and snap.get("date") == _today_et()
+
+
+def _write_daily_snapshot(sport: str, payload: dict, ts: datetime) -> None:
+    """
+    Persist sport's analysis into the daily snapshot file.
+    Write-once per day per sport — if an entry already exists for today's
+    ET date this is a no-op (snapshot is the immutable pre-game record).
+    Resets the entire file when a new ET day begins.
+    """
+    try:
+        Path("data").mkdir(exist_ok=True)
+        today = _today_et()
+        snap  = _read_daily_snapshot()
+        # Fresh day → start a new file
+        if snap.get("date") != today:
+            snap = {"date": today}
+        # Never overwrite an existing entry for this sport
+        if snap.get(sport):
+            return
+        snap[sport] = {"analyzed_at": ts.isoformat(), **payload}
+        _DAILY_SNAPSHOT_FILE.write_text(
+            json.dumps(snap, indent=2, default=str), encoding="utf-8"
         )
     except Exception:
         pass
@@ -1792,11 +1841,41 @@ def debug_live_scores():
         })
 
 
+@app.route("/api/snapshot", methods=["GET"])
+def get_snapshot():
+    """Return today's locked pre-game snapshot, or {exists: false} if none."""
+    snap = _read_daily_snapshot()
+    if not _snapshot_is_today(snap):
+        return jsonify({"exists": False})
+    return jsonify({"exists": True, **snap})
+
+
 @app.route("/api/init", methods=["GET"])
 def init_analysis():
     """Return today's cached analysis for auto-load on startup. No API calls."""
     try:
-        today = datetime.now(timezone.utc).date().isoformat()
+        # Snapshot takes priority — it's the permanent pre-game record for today.
+        _snap = _read_daily_snapshot()
+        if _snapshot_is_today(_snap) and _snap.get("mlb"):
+            _sp = _snap["mlb"]
+            _at = _sp.get("analyzed_at")
+            if _at and _analysis_state.get("last_analyzed_at") is None:
+                try:
+                    _analysis_state["last_analyzed_at"] = datetime.fromisoformat(_at)
+                except Exception:
+                    pass
+            return jsonify({
+                "has_predictions": True,
+                "snapshot":        True,
+                "analyzed_at":     _at,
+                "sport":           "mlb",
+                "games_loaded":    _sp.get("games_loaded", 0),
+                "cv_accuracy":     _sp.get("cv_accuracy"),
+                "lr_cv_accuracy":  _sp.get("lr_cv_accuracy"),
+                "nn_val_accuracy": _sp.get("nn_val_accuracy"),
+                "results":         _sp.get("results", []),
+                "parlays":         _sp.get("parlays", {}),
+            })
 
         # Always read the lightweight timestamp file so we can show the real
         # last-run time even when the analysis cache is stale or absent.
@@ -1881,6 +1960,34 @@ def analyze():
         return jsonify({"error": "ODDS_API_KEY not configured in .env"}), 400
     if not sports_key or sports_key == "your_api_sports_key_here":
         return jsonify({"error": "API_SPORTS_KEY not configured in .env"}), 400
+
+    # ── Snapshot guard — return locked picks immediately if snapshot exists ─────
+    _asnap = _read_daily_snapshot()
+    if _snapshot_is_today(_asnap) and _asnap.get(sport):
+        _asp = _asnap[sport]
+        _analysis_state["bankroll"] = bankroll
+        if _analysis_state.get("last_analyzed_at") is None:
+            try:
+                _analysis_state["last_analyzed_at"] = datetime.fromisoformat(
+                    _asp.get("analyzed_at", "")
+                )
+            except Exception:
+                pass
+        return jsonify({
+            "success":         True,
+            "cached":          True,
+            "snapshot":        True,
+            "sport":           sport,
+            "bankroll":        bankroll,
+            "analyzed_at":     _asp.get("analyzed_at"),
+            "results":         _asp.get("results", []),
+            "parlays":         _asp.get("parlays", {}),
+            "games_loaded":    _asp.get("games_loaded", 0),
+            "cv_accuracy":     _asp.get("cv_accuracy"),
+            "lr_cv_accuracy":  _asp.get("lr_cv_accuracy"),
+            "nn_val_accuracy": _asp.get("nn_val_accuracy"),
+            "model_status":    _asp.get("model_status", "snapshot"),
+        })
 
     # Auto-settle any completed open bets before running fresh analysis
     try:
@@ -2089,6 +2196,15 @@ def analyze():
         _save_analysis_cache(serialized, parlays, sport, n_completed,
                              cv_acc, lr_cv_acc, nn_val_acc, analyzed_at=_ts)
         _write_analysis_timestamp("mlb", _ts)
+        _write_daily_snapshot(sport, {
+            "results":         serialized,
+            "parlays":         parlays,
+            "games_loaded":    n_completed,
+            "cv_accuracy":     cv_acc,
+            "lr_cv_accuracy":  lr_cv_acc,
+            "nn_val_accuracy": nn_val_acc,
+            "model_status":    status,
+        }, _ts)
         ensemble_store.save(serialized, "mlb")
         return jsonify({
             "success":         True,
@@ -3515,6 +3631,33 @@ def analyze_wnba():
     if not odds_key or odds_key == "your_odds_api_key_here":
         return jsonify({"error": "ODDS_API_KEY not configured in .env"}), 400
 
+    # ── Snapshot guard ────────────────────────────────────────────────────────
+    _wsnap2 = _read_daily_snapshot()
+    if _snapshot_is_today(_wsnap2) and _wsnap2.get("wnba"):
+        _wsp2 = _wsnap2["wnba"]
+        _wnba_analysis_state["bankroll"] = bankroll
+        if _wnba_analysis_state.get("last_analyzed_at") is None:
+            try:
+                _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(
+                    _wsp2.get("analyzed_at", "")
+                )
+            except Exception:
+                pass
+        return jsonify({
+            "success":        True,
+            "cached":         True,
+            "snapshot":       True,
+            "sport":          "wnba",
+            "bankroll":       bankroll,
+            "analyzed_at":    _wsp2.get("analyzed_at"),
+            "results":        _wsp2.get("results", []),
+            "parlays":        _wsp2.get("parlays", {}),
+            "games_loaded":   _wsp2.get("games_loaded", 0),
+            "cv_accuracy":    _wsp2.get("cv_accuracy"),
+            "lr_cv_accuracy": _wsp2.get("lr_cv_accuracy"),
+            "model_status":   _wsp2.get("model_status", "snapshot"),
+        })
+
     # Cache control
     _last     = _wnba_analysis_state.get("last_analyzed_at")
     _has_res  = bool(_wnba_analysis_state.get("results"))
@@ -3656,6 +3799,14 @@ def analyze_wnba():
         _save_wnba_analysis_cache(serialized, parlays, n_completed, cv_acc, lr_cv_acc,
                                   analyzed_at=_ts)
         _write_analysis_timestamp("wnba", _ts)
+        _write_daily_snapshot("wnba", {
+            "results":        serialized,
+            "parlays":        parlays,
+            "games_loaded":   n_completed,
+            "cv_accuracy":    cv_acc,
+            "lr_cv_accuracy": lr_cv_acc,
+            "model_status":   status,
+        }, _ts)
         ensemble_store.save(serialized, "wnba")
 
         return jsonify({
@@ -3681,6 +3832,28 @@ def analyze_wnba():
 def init_wnba():
     """Return today's cached WNBA analysis for auto-load on startup."""
     try:
+        # Snapshot takes priority — permanent pre-game record for today.
+        _wsnap = _read_daily_snapshot()
+        if _snapshot_is_today(_wsnap) and _wsnap.get("wnba"):
+            _wsp = _wsnap["wnba"]
+            _wat = _wsp.get("analyzed_at")
+            if _wat and _wnba_analysis_state.get("last_analyzed_at") is None:
+                try:
+                    _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(_wat)
+                except Exception:
+                    pass
+            return jsonify({
+                "has_predictions": True,
+                "snapshot":        True,
+                "analyzed_at":     _wat,
+                "sport":           "wnba",
+                "games_loaded":    _wsp.get("games_loaded", 0),
+                "cv_accuracy":     _wsp.get("cv_accuracy"),
+                "lr_cv_accuracy":  _wsp.get("lr_cv_accuracy"),
+                "results":         _wsp.get("results", []),
+                "parlays":         _wsp.get("parlays", {}),
+            })
+
         today = datetime.now(timezone.utc).date().isoformat()
 
         _ts_store   = _read_analysis_timestamps()

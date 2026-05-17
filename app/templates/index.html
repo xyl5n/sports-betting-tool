@@ -343,6 +343,14 @@ input[type="number"]:focus { outline: none; border-color: var(--blue); }
 }
 .sb-track:hover { border-color: var(--blue); color: var(--text); }
 .sb-track:disabled { opacity: .5; cursor: default; }
+.sb-pick-win  { background: rgba(63,185,80,.06);  border-radius: var(--radius); padding-left: 6px; margin-left: -6px; }
+.sb-pick-loss { background: rgba(248,81,73,.06);  border-radius: var(--radius); padding-left: 6px; margin-left: -6px; }
+.sb-status-chip {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+  padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
+}
+.sb-status-chip.live  { color: var(--green); background: rgba(63,185,80,.15); }
+.sb-status-chip.final { color: var(--dim);   background: rgba(255,255,255,.06); }
 
 /* ── Sidebar stats section ───────────────────────────────────────────────── */
 .sb-stats-sep {
@@ -1433,6 +1441,12 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .analysis-timer.timer-fresh { color: var(--green);  border-color: rgba(63,185,80,.35);  background: rgba(63,185,80,.07);  }
 .analysis-timer.timer-mod   { color: var(--dim);    border-color: var(--border); }
 .analysis-timer.timer-stale { color: var(--red);    border-color: rgba(248,81,73,.3);   background: rgba(248,81,73,.05);  }
+.snapshot-badge {
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  padding: 4px 10px; border-radius: var(--radius); flex-shrink: 0;
+  color: var(--blue); border: 1px solid rgba(88,166,255,.35);
+  background: rgba(88,166,255,.07); letter-spacing: .2px;
+}
 
 /* ── Top Nav (replaces fixed header + tabs bar) ───────────────────────── */
 :root { --topnav-h: 54px; }
@@ -1715,6 +1729,7 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
     </nav>
     <div class="sport-page-actions">
       <span class="analysis-timer timer-new" id="analysis-timer">Never run</span>
+      <span class="snapshot-badge" id="snapshot-badge" style="display:none"></span>
       <button id="refresh-boards-btn" onclick="refreshModels()"
               title="Reruns models on cached data — no API calls" disabled>⟳ Refresh Models</button>
       <div class="run-all-wrap">
@@ -1902,6 +1917,7 @@ let _gamePkMap      = {};   // game_id → MLB gamePk
 let _completedGames = new Set(); // game_ids confirmed Final by live feed
 let _lastLiveMap    = {};   // last fetched MLB linescore map; reapplied on tab return
 let _finalScoreMap  = {};   // game_id → {awayR, homeR} for completed games
+let _snapshotLockedAt = null; // Date when today's snapshot was locked (null = no snapshot yet)
 let _chatHistory = [];   // [{role, content}] conversation history sent to the backend
 let _chatPending = false; // guard against concurrent requests
 let _chatInited  = false; // true once the welcome message has been shown
@@ -2602,6 +2618,24 @@ function updateTimerDisplay() {
 setInterval(updateTimerDisplay, 30000); // tick every 30 s
 setInterval(updateLiveScores,  60000); // live score poll every 60 s
 
+/**
+ * Renders a compact snapshot-lock badge next to the analysis timer.
+ * Shows "📌 Locked HH:MM AM/PM" when a snapshot exists for today,
+ * or nothing when no snapshot has been captured yet.
+ */
+function _renderSnapshotBadge() {
+  const el = document.getElementById('snapshot-badge');
+  if (!el) return;
+  if (!_snapshotLockedAt) {
+    el.textContent = '';
+    el.style.display = 'none';
+    return;
+  }
+  const timeStr = _snapshotLockedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  el.textContent = `📌 Locked ${timeStr}`;
+  el.style.display = '';
+}
+
 async function fetchLiveScores(date) {
   try {
     const resp = await fetch(
@@ -2959,8 +2993,8 @@ function buildHomePage() {
         <p>Select a sport and run analysis to see today's best picks</p>
       </div>
       <div class="home-run-banner">
-        <span>No analysis run yet today. Head to Sports to get started.</span>
-        <button class="home-card-action" onclick="showPage('sport');runAllAnalysis()" style="white-space:nowrap">▶ Run All Analysis</button>
+        <span>No snapshot yet for today. Run Analysis to lock in today's picks, odds, and bet sizing.</span>
+        <button class="home-card-action" onclick="showPage('sport');runAllAnalysis()" style="white-space:nowrap">▶ Lock Today's Picks</button>
       </div>
       ${_buildPerfTable()}`;
     return;
@@ -3127,6 +3161,7 @@ async function initApp() {
     _parlays = data.parlays || {};
     _confirmed.clear();
     _lastAnalyzedAt = new Date(data.analyzed_at);
+    if (data.snapshot && data.analyzed_at) _snapshotLockedAt = new Date(data.analyzed_at);
     updateTimerDisplay();
     if (_results.length) document.getElementById('refresh-boards-btn').disabled = false;
 
@@ -3147,6 +3182,7 @@ async function initApp() {
 
     _updateMetaGames();
     buildHomePage(); // populate home cards from loaded data
+    _renderSnapshotBadge();
     setStatus(`✓ ${_results.length} MLB games loaded`);
     updateLiveScores();
   } catch {}
@@ -3203,7 +3239,9 @@ async function _doAnalysis(opts) {
   const analyzeBtn  = document.getElementById('run-all-btn');
   if (analyzeBtn) analyzeBtn.disabled = true;
   document.getElementById('spinner').style.display = 'block';
-  setStatus('Running analysis… (30-60 s first run)');
+  setStatus(_snapshotLockedAt
+    ? 'Loading today\'s locked snapshot…'
+    : 'Running analysis… (30-60 s first run)');
 
   try {
     const resp = await fetch('/api/analyze', {
@@ -3246,11 +3284,15 @@ async function _doAnalysis(opts) {
     _updateMetaGames();
     buildHomePage();
 
+    if (data.snapshot && data.analyzed_at) _snapshotLockedAt = new Date(data.analyzed_at);
+    _renderSnapshotBadge();
     if (!data.cached) setAnalyzedNow(data.analyzed_at ? new Date(data.analyzed_at) : new Date());
     updateLiveScores();
-    setStatus(data.cached
-      ? `✓ ${_results.length} MLB games · cached`
-      : `✓ ${_results.length} MLB games analysed`);
+    setStatus(data.snapshot
+      ? `✓ ${_results.length} MLB games · snapshot locked`
+      : data.cached
+        ? `✓ ${_results.length} MLB games · cached`
+        : `✓ ${_results.length} MLB games analysed`);
   } catch (err) {
     setStatus('');
     renderError('Request failed: ' + err.message);
@@ -3325,9 +3367,11 @@ async function runAllAnalysis() {
         _updateMetaGames();
       }
 
+      if (data.snapshot && data.analyzed_at) _snapshotLockedAt = new Date(data.analyzed_at);
+      _renderSnapshotBadge();
       if (!data.cached) setAnalyzedNow(data.analyzed_at ? new Date(data.analyzed_at) : new Date());
       stepMlb.className   = 'prog-step done';
-      stepMlb.textContent = `MLB (${_results.length})`;
+      stepMlb.textContent = data.snapshot ? `MLB (📌 locked)` : `MLB (${_results.length})`;
       updateLiveScores();
     }
   } catch (err) {
@@ -4557,8 +4601,6 @@ function buildPickItems(results) {
   for (const g of results) {
     // Today-only rule: only show games scheduled for the currently selected view date
     if (_etDateStr(g.commence_time) !== targetDate) continue;
-    // Skip games that have already started
-    if (new Date(g.commence_time) <= now) continue;
     // Rule 5 — never surface picks from Conflict games in the Top Plays sidebar
     if (g.correlation_status === 'conflict') continue;
 
@@ -4641,7 +4683,22 @@ function renderSidebar(results) {
     const oddsStr  = _dpOddsStr(item.pick_odds);
     const amtStr   = item.bet_dollars > 0 ? ` · $${item.bet_dollars.toFixed(0)}` : '';
     const betType  = item.type === 'ml' ? 'single' : item.type === 'rl' ? 'run_line' : 'totals';
-    const resIcon  = _resultIcon(_pickResult(item.game_id, betType));
+
+    // Use full game object for score-aware result lookup
+    const gameObj  = _results.find(r => r.game_id === item.game_id) || item;
+    const result   = _getPickResult(gameObj, betType);
+    const resIcon  = _resultIcon(result);
+
+    // Game status indicator for non-upcoming games
+    const isFinal  = _completedGames.has(item.game_id);
+    const isLive   = !isUpcoming(item) && !isFinal;
+    const fs       = _finalScoreMap[item.game_id];
+    let statusChip = '';
+    if (isFinal && fs) {
+      statusChip = `<span class="sb-status-chip final">Final ${fs.awayR}–${fs.homeR}</span>`;
+    } else if (isLive) {
+      statusChip = `<span class="sb-status-chip live">● Live</span>`;
+    }
 
     // Format pick line: "Cubs ML", "Cubs -1.5", "9.5 Over"
     let pickLine;
@@ -4654,23 +4711,28 @@ function renderSidebar(results) {
       pickLine = item.pick_desc; // RL: "Cubs -1.5"
     }
 
-    let trackBtn;
-    if (item.type === 'ml' && _confirmed.has(item.game_id)) {
-      trackBtn = `<button class="sb-track" disabled>✓</button>`;
-    } else if (item.type === 'ml') {
-      trackBtn = `<button class="sb-track" id="sb-trk-${item.game_id}" onclick="trackBet('${item.game_id}')">Track</button>`;
-    } else if (item.type === 'rl') {
-      trackBtn = `<button class="sb-track" id="sb-rl-${item.game_id}" onclick="trackProp('${item.game_id}','run_line')">Track</button>`;
-    } else {
-      trackBtn = `<button class="sb-track" id="sb-tot-${item.game_id}" onclick="trackProp('${item.game_id}','totals')">Track</button>`;
+    // Track button only shown for upcoming games (can't track a game already in progress)
+    let trackBtn = '';
+    if (isUpcoming(item)) {
+      if (item.type === 'ml' && _confirmed.has(item.game_id)) {
+        trackBtn = `<button class="sb-track" disabled>✓</button>`;
+      } else if (item.type === 'ml') {
+        trackBtn = `<button class="sb-track" id="sb-trk-${item.game_id}" onclick="trackBet('${item.game_id}')">Track</button>`;
+      } else if (item.type === 'rl') {
+        trackBtn = `<button class="sb-track" id="sb-rl-${item.game_id}" onclick="trackProp('${item.game_id}','run_line')">Track</button>`;
+      } else {
+        trackBtn = `<button class="sb-track" id="sb-tot-${item.game_id}" onclick="trackProp('${item.game_id}','totals')">Track</button>`;
+      }
     }
 
-    return `<div class="sb-pick">
+    const resultCls = result === 'win' ? ' sb-pick-win' : result === 'loss' ? ' sb-pick-loss' : '';
+    return `<div class="sb-pick${resultCls}">
       <div class="sb-rank">${i + 1}</div>
       <div class="sb-info">
         <div class="sb-matchup">
           <span class="sb-sport-badge mlb">MLB</span>
           <span class="sb-matchup-text">${matchup}</span>
+          ${statusChip}
         </div>
         <div class="sb-pick-name">${pickLine}${resIcon}</div>
         <div class="sb-meta">edge ${edgeStr} · ${oddsStr}${amtStr}</div>
@@ -6219,30 +6281,50 @@ function renderCrossSportSidebar() {
     const edgeStr  = `+${(p.edge * 100).toFixed(1)}%`;
     const oddsStr  = _dpOddsStr(p.odds);
     const amtStr   = p.model_amount > 0 ? ` · $${p.model_amount.toFixed(0)}` : '';
-    const resIcon  = _resultIcon(_pickResult(p.game_id, p.bet_type));
 
-    // Track button
-    let trackBtn;
-    if (p.bet_type === 'single') {
-      if (_confirmed.has(p.game_id)) {
-        trackBtn = `<button class="sb-track" disabled>✓</button>`;
-      } else {
-        trackBtn = `<button class="sb-track" id="sb-trk-${p.game_id}" onclick="trackBet('${p.game_id}')">Track</button>`;
-      }
-    } else if (p.bet_type === 'run_line') {
-      trackBtn = `<button class="sb-track" id="sb-rl-${p.game_id}" onclick="trackProp('${p.game_id}','run_line')">Track</button>`;
-    } else if (p.bet_type === 'spread') {
-      trackBtn = `<button class="sb-track" id="sb-sp-${p.game_id}" onclick="trackProp('${p.game_id}','spread')">Track</button>`;
-    } else {
-      trackBtn = `<button class="sb-track" id="sb-tot-${p.game_id}" onclick="trackProp('${p.game_id}','totals')">Track</button>`;
+    // Result-aware lookup using full game object
+    const pool    = sport === 'wnba' ? _wnbaResults : _results;
+    const gameObj = pool.find(r => r.game_id === p.game_id) || p;
+    const result  = _getPickResult(gameObj, p.bet_type);
+    const resIcon = _resultIcon(result);
+
+    // Game status chip for non-upcoming games
+    const isFinal  = _completedGames.has(p.game_id);
+    const isLiveP  = p.commence_time && !isUpcoming(p) && !isFinal;
+    const fs       = _finalScoreMap[p.game_id];
+    let statusChip = '';
+    if (isFinal && fs) {
+      statusChip = `<span class="sb-status-chip final">Final ${fs.awayR}–${fs.homeR}</span>`;
+    } else if (isLiveP) {
+      statusChip = `<span class="sb-status-chip live">● Live</span>`;
     }
 
-    return `<div class="sb-pick">
+    // Track button only for upcoming games
+    let trackBtn = '';
+    if (!p.commence_time || isUpcoming(p)) {
+      if (p.bet_type === 'single') {
+        if (_confirmed.has(p.game_id)) {
+          trackBtn = `<button class="sb-track" disabled>✓</button>`;
+        } else {
+          trackBtn = `<button class="sb-track" id="sb-trk-${p.game_id}" onclick="trackBet('${p.game_id}')">Track</button>`;
+        }
+      } else if (p.bet_type === 'run_line') {
+        trackBtn = `<button class="sb-track" id="sb-rl-${p.game_id}" onclick="trackProp('${p.game_id}','run_line')">Track</button>`;
+      } else if (p.bet_type === 'spread') {
+        trackBtn = `<button class="sb-track" id="sb-sp-${p.game_id}" onclick="trackProp('${p.game_id}','spread')">Track</button>`;
+      } else {
+        trackBtn = `<button class="sb-track" id="sb-tot-${p.game_id}" onclick="trackProp('${p.game_id}','totals')">Track</button>`;
+      }
+    }
+
+    const resultCls = result === 'win' ? ' sb-pick-win' : result === 'loss' ? ' sb-pick-loss' : '';
+    return `<div class="sb-pick${resultCls}">
       <div class="sb-rank">${i + 1}</div>
       <div class="sb-info">
         <div class="sb-matchup">
           <span class="sb-sport-badge ${sport}">${p.sport_label || sport.toUpperCase()}</span>
           <span class="sb-matchup-text">${matchup}</span>
+          ${statusChip}
         </div>
         <div class="sb-pick-name">${pickLine}${resIcon}</div>
         <div class="sb-meta">edge ${edgeStr} · ${oddsStr}${amtStr}</div>
@@ -6878,7 +6960,6 @@ function _renderWnbaSidebar() {
   for (const g of _wnbaResults) {
     // Today-only rule: only show games for the currently selected view date
     if (_etDateStr(g.commence_time) !== _wsbTargetDate) continue;
-    if (new Date(g.commence_time) <= now) continue;
     if (g.correlation_status === 'conflict') continue;
 
     // Moneyline
