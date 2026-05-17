@@ -1,5 +1,5 @@
 """
-The Odds API client.
+The Odds API client — fetches baseball (MLB) and basketball (WNBA) markets only.
 Docs: https://the-odds-api.com/liveapi/guides/v4/
 """
 import requests
@@ -7,7 +7,6 @@ from typing import Optional
 from .cache import Cache
 
 BASE_URL = "https://api.the-odds-api.com/v4"
-NFL_SPORT = "americanfootball_nfl"
 
 
 def _american_to_prob(american: int) -> float:
@@ -47,13 +46,18 @@ class OddsClient:
     # Public methods
     # ------------------------------------------------------------------
 
-    def get_nfl_odds(
+    def get_odds(
         self,
-        sport_key: str = NFL_SPORT,
+        sport_key: str,
         markets: str = "h2h,spreads,totals",
         regions: str = "us",
     ) -> list[dict]:
-        """Return upcoming games for *sport_key* with implied probabilities."""
+        """Return upcoming games for *sport_key* with implied probabilities.
+
+        sport_key must be an active Odds API sport key, e.g.:
+          "baseball_mlb"      — MLB moneylines / run lines / totals
+          "basketball_wnba"   — WNBA moneylines / spreads / totals
+        """
         cache_key = f"odds_{sport_key}_{markets}_{regions}"
         cached = self.cache.get(cache_key, ttl=900)  # 15-min TTL
         if cached is not None:
@@ -71,7 +75,7 @@ class OddsClient:
         self.cache.set(cache_key, games)
         return games
 
-    def get_scores(self, sport_key: str = NFL_SPORT, days_from: int = 3) -> list[dict]:
+    def get_scores(self, sport_key: str, days_from: int = 3) -> list[dict]:
         """Return recently completed games (free tier = 3 days)."""
         cache_key = f"scores_{sport_key}_{days_from}"
         cached = self.cache.get(cache_key, ttl=3600)

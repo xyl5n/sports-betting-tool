@@ -1650,7 +1650,7 @@ def analyze():
     data       = request.get_json() or {}
     sport      = data.get("sport", "mlb")
     bankroll   = float(data.get("bankroll", 250))
-    season     = int(data.get("season", int(os.getenv("NFL_SEASON", 2024))))
+    season     = int(data.get("season", int(os.getenv("SEASON", 2025))))
     games_lim  = int(data.get("games", 0))
 
     odds_key   = os.getenv("ODDS_API_KEY", "")
@@ -1727,13 +1727,9 @@ def analyze():
         )
         n_completed = store.load(season)
 
-        # Step 2 — feature builder
-        if sport == "nfl":
-            from src.features import FeatureBuilder
-            fb = FeatureBuilder(store)
-        else:
-            from src.mlb_features import MLBFeatureBuilder
-            fb = MLBFeatureBuilder(store)
+        # Step 2 — feature builder (MLB only; WNBA uses its own dedicated builder)
+        from src.mlb_features import MLBFeatureBuilder
+        fb = MLBFeatureBuilder(store)
 
         # Step 3 — models (moneyline + run line + totals for MLB)
         model  = BettingModel(sport_cfg)
@@ -1754,9 +1750,9 @@ def analyze():
             tot_status = totals_model.train_or_load(store, fb, season)
             print(f"  {tot_status}")
 
-        # Step 4 — odds
+        # Step 4 — odds (baseball_mlb only)
         odds_client = OddsClient(odds_key, _cache)
-        games = odds_client.get_nfl_odds(sport_key=sport_cfg.odds_key)
+        games = odds_client.get_odds(sport_key=sport_cfg.odds_key)
 
         # Freeze pre-game odds: for started games, restore market odds from before first pitch
         games = _lock_in_pre_game_odds(games)
@@ -1880,7 +1876,7 @@ def refresh_models():
     data     = request.get_json() or {}
     sport    = data.get("sport", _analysis_state.get("sport", "mlb"))
     bankroll = float(data.get("bankroll", _analysis_state.get("bankroll", 250)))
-    season   = int(data.get("season", int(os.getenv("NFL_SEASON", 2024))))
+    season   = int(data.get("season", int(os.getenv("SEASON", 2025))))
 
     if not _analysis_state.get("results"):
         # Fall back to disk cache so the button works after an app restart
@@ -1911,12 +1907,8 @@ def refresh_models():
         )
         n_completed = store.load(season)
 
-        if sport == "nfl":
-            from src.features import FeatureBuilder
-            fb = FeatureBuilder(store)
-        else:
-            from src.mlb_features import MLBFeatureBuilder
-            fb = MLBFeatureBuilder(store)
+        from src.mlb_features import MLBFeatureBuilder
+        fb = MLBFeatureBuilder(store)
 
         # Force-retrain all models
         model  = BettingModel(sport_cfg)
@@ -3173,7 +3165,7 @@ def analyze_wnba():
 
         # Step 4 — odds from The Odds API
         odds_client = OddsClient(odds_key, _cache)
-        games       = odds_client.get_nfl_odds(sport_key="basketball_wnba")
+        games       = odds_client.get_odds(sport_key="basketball_wnba")
         games       = _lock_in_pre_game_odds(games)
 
         if not games:

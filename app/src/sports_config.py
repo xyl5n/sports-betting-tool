@@ -1,5 +1,6 @@
 """
 Per-sport configuration: API endpoints, feature names, and heuristic weights.
+Active sports: MLB (baseball_mlb) and WNBA (basketball_wnba).
 Feature sets are limited to what the free API-Sports plan actually returns.
 """
 from dataclasses import dataclass
@@ -23,37 +24,6 @@ class SportConfig:
     home_field_logit: float = 0.15
     min_training_games: int = 30
 
-
-# ── NFL ────────────────────────────────────────────────────────────────────────
-# Stats available from free plan via game results:
-# PPG, PAPG, win%, home/away win%, last-5 form, scoring margin
-
-NFL_FEATURES = [
-    "net_scoring_diff",    # (home PPG − home PAPG) − (away PPG − away PAPG)
-    "ppg_diff",            # home PPG − away PPG
-    "papg_diff",           # home PAPG − away PAPG  (positive → home allows fewer)
-    "win_pct_diff",        # home win% − away win%
-    "home_away_split_diff",# home team's home win% − away team's away win%
-    "last5_diff",          # last-5 win% differential
-    "home_implied_prob",   # market vig-free P(home wins)
-    "spread",              # point spread (negative = home favoured)
-]
-
-NFL = SportConfig(
-    name="NFL",
-    odds_key="americanfootball_nfl",
-    api_sports_base="https://v1.american-football.api-sports.io",
-    league_id=1,
-    feature_names=NFL_FEATURES,
-    heuristic_weights=np.array([
-        0.22, 0.15, 0.13, 0.18, 0.10, 0.12, 0.00, 0.00,
-    ], dtype=np.float32),
-    heuristic_stds=np.array([
-        10.0, 7.0, 7.0, 0.30, 0.30, 0.30, 0.10, 5.0,
-    ], dtype=np.float32),
-    home_field_logit=0.15,
-    min_training_games=20,
-)
 
 # ── MLB ────────────────────────────────────────────────────────────────────────
 # Team stats come from API-Sports game results (free plan).
@@ -206,7 +176,6 @@ WNBA = SportConfig(
 )
 
 SPORTS: dict[str, SportConfig] = {
-    "nfl": NFL,
-    "mlb": MLB,
+    "mlb":  MLB,
     "wnba": WNBA,
 }

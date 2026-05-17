@@ -1,10 +1,10 @@
 """
-Sports Betting Analysis Tool — NFL & MLB
+Sports Betting Analysis Tool — MLB & WNBA
 Usage:
-    python main.py                          # analyse upcoming NFL games
-    python main.py --sport mlb              # analyse upcoming MLB games
-    python main.py --sport nfl --retrain    # force re-train the XGBoost model
-    python main.py --season 2024            # override season year for training
+    python main.py                          # analyse upcoming MLB games (default)
+    python main.py --sport wnba             # analyse upcoming WNBA games
+    python main.py --retrain                # force re-train the XGBoost model
+    python main.py --season 2025            # override season year for training
     python main.py --games 5               # limit output to first 5 games
 """
 import argparse
@@ -28,11 +28,11 @@ def main() -> None:
     load_dotenv()
 
     parser = argparse.ArgumentParser(description="Sports betting analysis — XGBoost + SHAP")
-    parser.add_argument("--sport", choices=list(SPORTS.keys()), default="nfl")
+    parser.add_argument("--sport", choices=list(SPORTS.keys()), default="mlb")
     parser.add_argument("--retrain", action="store_true", help="Force model retraining")
     parser.add_argument(
-        "--season", type=int, default=int(os.getenv("NFL_SEASON", 2024)),
-        help="Season year for training data (default: NFL_SEASON env or 2024)",
+        "--season", type=int, default=int(os.getenv("SEASON", 2025)),
+        help="Season year for training data (default: SEASON env or 2025)",
     )
     parser.add_argument("--games", type=int, default=0, help="Limit to first N games (0 = all)")
     args = parser.parse_args()
@@ -100,12 +100,8 @@ def main() -> None:
     console.print(f"  Loaded [bold]{n_completed}[/bold] completed games for training.\n")
 
     # ── Build sport-specific feature builder ────────────────────────────────────
-    if args.sport == "nfl":
-        from src.features import FeatureBuilder
-        feature_builder = FeatureBuilder(store)
-    else:
-        from src.mlb_features import MLBFeatureBuilder
-        feature_builder = MLBFeatureBuilder(store)
+    from src.mlb_features import MLBFeatureBuilder
+    feature_builder = MLBFeatureBuilder(store)
 
     # ── Train / load model ──────────────────────────────────────────────────────
     console.print("[bold]Step 2 — Model[/bold]")
@@ -122,12 +118,12 @@ def main() -> None:
     # ── Fetch upcoming games + odds ─────────────────────────────────────────────
     console.print("[bold]Step 3 — Upcoming games[/bold]")
     with console.status(f"Fetching current {sport_cfg.name} odds…"):
-        games = odds_client.get_nfl_odds(sport_key=sport_cfg.odds_key)
+        games = odds_client.get_odds(sport_key=sport_cfg.odds_key)
 
     if not games:
         hints = {
-            "nfl": "NFL regular season runs September–January.",
-            "mlb": "MLB regular season runs March–October.",
+            "mlb":  "MLB regular season runs March–October.",
+            "wnba": "WNBA regular season runs May–September.",
         }
         console.print(f"[yellow]No upcoming {sport_cfg.name} games found.[/yellow]")
         console.print(f"[dim]{hints.get(args.sport, '')}[/dim]")

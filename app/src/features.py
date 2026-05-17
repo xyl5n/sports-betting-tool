@@ -1,14 +1,19 @@
 """
-NFL feature engineering — built from GameStore computed stats.
+UNUSED — NFL feature engineering built from GameStore computed stats.
+NFL support has been removed; active sports are MLB and WNBA only.
+This file is kept for reference but is not imported anywhere in the app.
 """
 from typing import Optional
 import numpy as np
 
 from .game_store import GameStore
-from .sports_config import NFL_FEATURES
 from .utils import _safe  # shared across all feature builders
 
-N_NFL_FEATURES = len(NFL_FEATURES)
+_NFL_FEATURES = [
+    "net_scoring_diff", "ppg_diff", "papg_diff", "win_pct_diff",
+    "home_away_split_diff", "last5_diff", "home_implied_prob", "spread",
+]
+N_NFL_FEATURES = len(_NFL_FEATURES)
 
 
 class FeatureBuilder:

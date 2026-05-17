@@ -1,7 +1,7 @@
 """
-API-Sports American Football client.
-Docs: https://api-sports.io/documentation/american-football/v1
-Direct API (no RapidAPI wrapper): header x-apisports-key
+UNUSED — NFL-only API-Sports American Football client.
+NFL support has been removed; active sports are MLB and WNBA only.
+This file is kept for reference but is not imported anywhere in the app.
 """
 import requests
 from typing import Optional
