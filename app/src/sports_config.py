@@ -65,6 +65,21 @@ MLB_FEATURES = [
     "trend_diff",           # (home last-20 win% − home season win%) −
                             # (away last-20 win% − away season win%)
                             # positive = home team improving relative to away
+    # ── Player-level pitcher features (24-26) ────────────────────────────────
+    "bb9_diff",                 # away SP BB/9 − home SP BB/9 (pos = home pitcher better control)
+    "sp_split_era_diff",        # (home SP away-ERA) − (home SP home-ERA)
+                                # − [(away SP home-ERA) − (away SP away-ERA)]
+                                # positive = home SP gets a venue boost vs away SP
+    "sp_recent_form_diff",      # away SP last-3-start ERA − home SP last-3-start ERA
+                                # positive = home pitcher is currently hotter
+    # ── Composite features (27-29) ───────────────────────────────────────────
+    "pitcher_dominance_diff",   # z(K%) − z(ERA) − z(WHIP) for home SP minus same for away SP
+                                # positive = home pitcher dominates by composite measure
+    "lineup_vuln_diff",         # (home top-5 OPS vs away SP hand) − (away top-5 OPS vs home SP hand)
+                                # positive = home offence more dangerous against opposing starter
+                                # NOTE: NEUTRAL in historical training (batter splits not backfilled)
+    "blowout_prob",             # logistic(sum of pitcher/bullpen/run advantages) ∈ [0,1]
+                                # informational signal feeding the run-line classifier
 ]
 
 MLB = SportConfig(
@@ -90,6 +105,14 @@ MLB = SportConfig(
         0.07,
         # Season trend (1) — within-season momentum signal
         0.05,
+        # Player-level pitcher features (3)
+        0.04,   # bb9_diff
+        0.03,   # sp_split_era_diff
+        0.04,   # sp_recent_form_diff
+        # Composites (3) — modest weights; LR will reweight via training
+        0.06,   # pitcher_dominance_diff
+        0.04,   # lineup_vuln_diff   (neutral in historical → effective weight ~0)
+        0.05,   # blowout_prob
     ], dtype=np.float32),
     heuristic_stds=np.array([
         # Team stats
@@ -106,6 +129,14 @@ MLB = SportConfig(
         0.03,
         # Season trend — typical last-20 vs. season-avg diff, ±0.15 → std ≈ 0.15
         0.15,
+        # Player-level pitcher features
+        1.2,    # bb9_diff (BB/9 typically 2-5 → diff std ~1)
+        1.0,    # sp_split_era_diff
+        1.5,    # sp_recent_form_diff (3-start ERA more volatile)
+        # Composites
+        1.0,    # pitcher_dominance_diff (z-score scale)
+        0.10,   # lineup_vuln_diff (OPS diff typically ±0.10)
+        0.20,   # blowout_prob (already in [0,1], centered ~0.5)
     ], dtype=np.float32),
     home_field_logit=0.10,
     min_training_games=30,

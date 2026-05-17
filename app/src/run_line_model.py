@@ -70,8 +70,9 @@ class RunLineModel:
                       high_change_team_ids: "set[int] | None" = None) -> str:
         if not force_retrain and self.model_path.exists():
             saved = joblib.load(self.model_path)
-            # Verify saved model uses the current feature count (24)
-            expected_n_feat = 24
+            # Verify saved model uses the current feature count.
+            from .sports_config import MLB_FEATURES
+            expected_n_feat = len(MLB_FEATURES)
             actual_n_feat   = getattr(saved.get("scaler"), "n_features_in_", expected_n_feat)
             if saved.get("target_type") == "run_line" and "lr" in saved \
                     and actual_n_feat == expected_n_feat:
@@ -173,7 +174,8 @@ class RunLineModel:
             game_team_pairs.append((home_id, away_id))
 
         n = len(X_rows)
-        X = np.vstack(X_rows) if n > 0 else np.empty((0, 24), dtype=np.float32)
+        from .sports_config import MLB_FEATURES
+        X = np.vstack(X_rows) if n > 0 else np.empty((0, len(MLB_FEATURES)), dtype=np.float32)
         y = np.array(y_rows)
 
         # ── Augment with enriched historical run-line labels + recency weights ─

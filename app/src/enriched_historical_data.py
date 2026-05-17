@@ -56,8 +56,18 @@ _SEASONS      = (2022, 2023, 2024, 2025)   # 2025 added for recency weighting
 _BASE         = "https://statsapi.mlb.com/api/v1"
 
 # Neutral pitcher values used as fallback
-_NEUTRAL_SP = {"era": 4.50, "whip": 1.30, "k_rate": 0.215, "hand": 0, "rest": 4}
+_NEUTRAL_SP = {
+    "era": 4.50, "whip": 1.30, "k_rate": 0.215,
+    "bb9": 3.30, "era_home": 4.50, "era_away": 4.50, "last3_era": 4.50,
+    "hand": 0, "rest": 4,
+}
 _NEUTRAL_BP = 4.20
+
+# League baselines (mirror mlb_features._LEAGUE so the historical and live
+# composites use the same z-score reference).
+_LG_K, _LG_K_STD = 0.215, 0.05
+_LG_E, _LG_E_STD = 4.50,  1.5
+_LG_W, _LG_W_STD = 1.30,  0.30
 
 _RETRO_TO_MLB: dict[str, str] = {
     "ANA": "Los Angeles Angels",  "ARI": "Arizona Diamondbacks",
@@ -240,15 +250,28 @@ def _fetch_date_schedule(date_str: str) -> list[dict]:
     return []
 
 
+def _ip_to_float(ip_str) -> float:
+    """MLB Stats API reports innings pitched as '123.1' = 123 + 1/3 innings."""
+    s = str(ip_str or "0")
+    try:
+        whole, frac = s.split(".") if "." in s else (s, "0")
+        return float(whole) + (float(frac) / 3.0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _fetch_pitcher_stats(pid: int, season: int) -> dict:
     """
-    Return pitcher season stats for the given season year.
-    Cached per (pitcher_id, season) for 1 year.
+    Return pitcher season stats for the given season year, enriched with
+    BB/9 (computed from baseOnBalls + inningsPitched) and home/away ERA
+    splits (separate API call). Cached per (pitcher_id, season) for 1 year.
     """
     if not pid:
         return dict(_NEUTRAL_SP)
 
-    key = f"mlb_hist_sp_{pid}_{season}"
+    # Bump cache key suffix so old (era/whip/k_rate/hand/rest)-only caches
+    # are invalidated and regenerated with the new BB/9 + split fields.
+    key = f"mlb_hist_sp_{pid}_{season}_v2"
     cached = _cache_get(key, ttl_days=365)
     if cached is not None:
         return cached
@@ -257,7 +280,7 @@ def _fetch_pitcher_stats(pid: int, season: int) -> dict:
            f"?stats=season&season={season}&group=pitching&sportId=1")
     data = _fetch(url)
 
-    era = whip = k_rate = None
+    era = whip = k_rate = bb9 = None
     for grp in data.get("stats", []):
         for split in grp.get("splits", []):
             st = split.get("stat", {})
@@ -266,24 +289,117 @@ def _fetch_pitcher_stats(pid: int, season: int) -> dict:
                 whip_val = float(st.get("whip", ""))
                 k   = float(st.get("strikeOuts", 0) or 0)
                 bf  = float(st.get("battersFaced", 1) or 1)
+                bb  = float(st.get("baseOnBalls", 0) or 0)
+                ip  = _ip_to_float(st.get("inningsPitched", "0"))
                 era = era_val; whip = whip_val
                 k_rate = k / bf if bf > 0 else 0.215
+                bb9    = (bb * 9.0 / ip) if ip > 0 else None
             except (TypeError, ValueError):
                 pass
             break
         if era is not None:
             break
 
-    # Handedness from pitcher info (already returned by schedule endpoint)
+    # Home/away splits — separate endpoint, cached implicitly by inclusion below
+    splits = _fetch_pitcher_home_away_splits(pid, season)
+
     result = {
-        "era":    era    if era    is not None else 4.50,
-        "whip":   whip   if whip   is not None else 1.30,
-        "k_rate": k_rate if k_rate is not None else 0.215,
-        "hand":   0,   # filled in from schedule data if available
-        "rest":   4,   # computed separately from game log dates
+        "era":      era    if era    is not None else 4.50,
+        "whip":     whip   if whip   is not None else 1.30,
+        "k_rate":   k_rate if k_rate is not None else 0.215,
+        "bb9":      bb9    if bb9    is not None else 3.30,
+        "era_home": splits.get("home", era if era is not None else 4.50),
+        "era_away": splits.get("away", era if era is not None else 4.50),
+        "hand":     0,   # filled in from schedule data if available
+        "rest":     4,   # computed separately from game log dates
     }
     _cache_set(key, result)
     return result
+
+
+def _fetch_pitcher_home_away_splits(pid: int, season: int) -> dict:
+    """
+    Return {'home': ERA, 'away': ERA} for a pitcher's H/A splits in a season.
+    One API call per (pid, season); cached for 1 year. Empty dict on failure.
+    """
+    if not pid:
+        return {}
+    key = f"mlb_hist_sp_splits_{pid}_{season}"
+    cached = _cache_get(key, ttl_days=365)
+    if cached is not None:
+        return cached
+
+    url = (f"{_BASE}/people/{pid}/stats"
+           f"?stats=statSplits&season={season}&group=pitching"
+           f"&sitCodes=h,a&sportId=1")
+    data = _fetch(url)
+    result: dict[str, float] = {}
+    for grp in data.get("stats", []):
+        for split in grp.get("splits", []):
+            code = (split.get("split") or {}).get("code", "").lower()
+            try:
+                era = float((split.get("stat") or {}).get("era", "")) if (
+                    split.get("stat") or {}).get("era") not in (None, "", "-.--") else None
+            except (TypeError, ValueError):
+                era = None
+            if era is None:
+                continue
+            if code == "h":
+                result["home"] = era
+            elif code == "a":
+                result["away"] = era
+    _cache_set(key, result)
+    return result
+
+
+def _fetch_pitcher_gamelog(pid: int, season: int) -> list[dict]:
+    """
+    Return the pitcher's gameLog for one season as a list of
+    {'date': 'YYYY-MM-DD', 'ip': float, 'er': int} entries (chronological).
+    One API call per (pid, season); cached for 1 year. Empty list on failure.
+    """
+    if not pid:
+        return []
+    key = f"mlb_hist_sp_gamelog_{pid}_{season}"
+    cached = _cache_get(key, ttl_days=365)
+    if cached is not None:
+        return cached
+
+    url = (f"{_BASE}/people/{pid}/stats"
+           f"?stats=gameLog&season={season}&group=pitching&sportId=1")
+    data = _fetch(url)
+    out: list[dict] = []
+    for grp in data.get("stats", []):
+        for split in grp.get("splits", []):
+            d  = (split.get("date") or "")[:10]
+            st = split.get("stat") or {}
+            if not d:
+                continue
+            ip = _ip_to_float(st.get("inningsPitched", "0"))
+            try:
+                er = int(float(st.get("earnedRuns", 0) or 0))
+            except (TypeError, ValueError):
+                er = 0
+            out.append({"date": d, "ip": ip, "er": er})
+    out.sort(key=lambda r: r["date"])
+    _cache_set(key, out)
+    return out
+
+
+def _last3_era_before(gamelog: list[dict], game_date: str) -> Optional[float]:
+    """
+    Compute ERA over the pitcher's last ≤3 starts strictly before game_date.
+    Returns None if fewer than 1 prior start with non-zero IP.
+    """
+    if not gamelog or not game_date:
+        return None
+    prior = [g for g in gamelog if g["date"] < game_date]
+    if not prior:
+        return None
+    window = prior[-3:]
+    ip_total = sum(g["ip"] for g in window)
+    er_total = sum(g["er"] for g in window)
+    return (er_total * 9.0 / ip_total) if ip_total > 0 else None
 
 
 def _hand_adv(h_hand: int, a_hand: int) -> float:
@@ -369,16 +485,40 @@ class _PitcherRestTracker:
 # Build feature vector (identical layout to historical_data._build_vec)
 # ---------------------------------------------------------------------------
 
+def _pitcher_dominance(sp: dict) -> float:
+    """Mirrors mlb_features._pitcher_dominance using the same league baselines."""
+    z_k = (sp.get("k_rate", _LG_K) - _LG_K) / _LG_K_STD
+    z_e = (sp.get("era",    _LG_E) - _LG_E) / _LG_E_STD
+    z_w = (sp.get("whip",   _LG_W) - _LG_W) / _LG_W_STD
+    return float(z_k - z_e - z_w)
+
+
+def _blowout_prob_hist(
+    sp_era_diff: float, bullpen_era_diff: float,
+    net_run_diff: float, sp_recent_form_diff: float,
+) -> float:
+    """Mirrors mlb_features._blowout_probability (same weights / sigma)."""
+    score = (0.40 * net_run_diff
+             + 0.30 * sp_era_diff
+             + 0.20 * bullpen_era_diff
+             + 0.10 * sp_recent_form_diff)
+    return float(np.clip(1.0 / (1.0 + np.exp(-score / 2.0)), 0.02, 0.98))
+
+
 def _build_vec(
     hs: dict, as_: dict,
     h_bat: dict, a_bat: dict,
     h_era: float, a_era: float,    # bullpen ERA
     park_run: float,
     h_sp: dict, a_sp: dict,
+    h_last3_era: Optional[float] = None,
+    a_last3_era: Optional[float] = None,
 ) -> np.ndarray:
     """
-    Assemble the 24-element MLB_FEATURES vector (index 23 = trend_diff added).
-    Fills pitcher features (indices 10-15) with real values.
+    Assemble the 30-element MLB_FEATURES vector.
+    Indices 10-15 + 19 + 24-27 + 29 are populated from REAL values where the
+    historical pipeline has them. Index 28 (lineup_vuln_diff) stays neutral 0
+    because batter-platoon splits were skipped from the backfill (user choice).
     """
     h_rpg  = hs["rpg"];  a_rpg  = as_["rpg"]
     h_rapg = hs["rapg"]; a_rapg = as_["rapg"]
@@ -389,37 +529,68 @@ def _build_vec(
     h_trend = hs.get("season_trend", 0.0)
     a_trend = as_.get("season_trend", 0.0)
 
+    net_diff   = (h_rpg - h_rapg) - (a_rpg - a_rapg)
+    sp_era_d   = a_sp["era"]  - h_sp["era"]
+    sp_whip_d  = a_sp["whip"] - h_sp["whip"]
+    sp_k_d     = h_sp["k_rate"] - a_sp["k_rate"]
+    bp_era_d   = a_era - h_era
+
+    bb9_diff = a_sp.get("bb9", 3.30) - h_sp.get("bb9", 3.30)
+    sp_split_era_diff = (
+        a_sp.get("era_away", a_sp["era"])
+        - h_sp.get("era_home", h_sp["era"])
+    )
+    # last-3-start ERA: fall back to season ERA when prior-3 unavailable so the
+    # diff is 0 rather than misleading.
+    h_l3 = h_last3_era if h_last3_era is not None else h_sp["era"]
+    a_l3 = a_last3_era if a_last3_era is not None else a_sp["era"]
+    sp_recent_form_diff = a_l3 - h_l3
+
+    pitcher_dom_diff = _pitcher_dominance(h_sp) - _pitcher_dominance(a_sp)
+    blowout = _blowout_prob_hist(
+        sp_era_diff=sp_era_d, bullpen_era_diff=bp_era_d,
+        net_run_diff=net_diff, sp_recent_form_diff=sp_recent_form_diff,
+    )
+
     return np.array([
         # ── Team statistics (0-9) ────────────────────────────────────────────
-        (h_rpg - h_rapg) - (a_rpg - a_rapg),    # 0  net_run_diff
-        h_rpg  - a_rpg,                           # 1  rpg_diff
-        h_rapg - a_rapg,                          # 2  rapg_diff
-        hs["win_pct"]      - as_["win_pct"],       # 3  win_pct_diff
-        hs["home_win_pct"] - as_["away_win_pct"],  # 4  home_away_split_diff
-        hs["last10"]       - as_["last10"],         # 5  last10_diff
-        h_hpg - a_hpg,                             # 6  hits_diff
-        0.0,                                        # 7  errors_diff (neutral)
-        0.54,                                       # 8  home_implied_prob (neutral)
-        -1.5,                                       # 9  run_line (neutral)
+        net_diff,                                   # 0  net_run_diff
+        h_rpg  - a_rpg,                              # 1  rpg_diff
+        h_rapg - a_rapg,                             # 2  rapg_diff
+        hs["win_pct"]      - as_["win_pct"],         # 3  win_pct_diff
+        hs["home_win_pct"] - as_["away_win_pct"],    # 4  home_away_split_diff
+        hs["last10"]       - as_["last10"],          # 5  last10_diff
+        h_hpg - a_hpg,                               # 6  hits_diff
+        0.0,                                          # 7  errors_diff (neutral)
+        0.54,                                         # 8  home_implied_prob (neutral)
+        -1.5,                                         # 9  run_line (neutral)
         # ── Starting pitcher (10-15) — REAL values ───────────────────────────
-        a_sp["era"]    - h_sp["era"],               # 10 sp_era_diff
-        a_sp["whip"]   - h_sp["whip"],              # 11 sp_whip_diff
-        h_sp["k_rate"] - a_sp["k_rate"],            # 12 sp_k_rate_diff
-        float(h_sp["rest"]),                        # 13 home_sp_rest
-        float(a_sp["rest"]),                        # 14 away_sp_rest
-        _hand_adv(h_sp["hand"], a_sp["hand"]),      # 15 sp_hand_adv
+        sp_era_d,                                     # 10 sp_era_diff
+        sp_whip_d,                                    # 11 sp_whip_diff
+        sp_k_d,                                       # 12 sp_k_rate_diff
+        float(h_sp["rest"]),                          # 13 home_sp_rest
+        float(a_sp["rest"]),                          # 14 away_sp_rest
+        _hand_adv(h_sp["hand"], a_sp["hand"]),        # 15 sp_hand_adv
         # ── Ballpark (16-18) ─────────────────────────────────────────────────
-        park_run,                                   # 16 park_run_factor (real)
-        0.0,                                        # 17 wind_speed (neutral)
-        0.0,                                        # 18 wind_direction (neutral)
+        park_run,                                     # 16 park_run_factor (real)
+        0.0,                                          # 17 wind_speed (neutral)
+        0.0,                                          # 18 wind_direction (neutral)
         # ── Bullpen (19-20) ──────────────────────────────────────────────────
-        a_era - h_era,                              # 19 bullpen_era_diff (real proxy)
-        0.0,                                        # 20 bullpen_fatigue_diff (neutral)
+        bp_era_d,                                     # 19 bullpen_era_diff
+        0.0,                                          # 20 bullpen_fatigue_diff (neutral)
         # ── Lineup / market (21-22) ──────────────────────────────────────────
-        0.0,                                        # 21 lineup_confirmed (neutral)
-        0.0,                                        # 22 line_movement (neutral)
+        0.0,                                          # 21 lineup_confirmed (neutral)
+        0.0,                                          # 22 line_movement (neutral)
         # ── Season trend (23) ────────────────────────────────────────────────
-        h_trend - a_trend,                          # 23 trend_diff (real rolling signal)
+        h_trend - a_trend,                            # 23 trend_diff
+        # ── Player-level pitcher (24-26) — REAL where backfilled ─────────────
+        bb9_diff,                                     # 24 bb9_diff
+        sp_split_era_diff,                            # 25 sp_split_era_diff
+        sp_recent_form_diff,                          # 26 sp_recent_form_diff
+        # ── Composites (27-29) ───────────────────────────────────────────────
+        pitcher_dom_diff,                             # 27 pitcher_dominance_diff (REAL)
+        0.0,                                          # 28 lineup_vuln_diff (NEUTRAL: batters not backfilled)
+        blowout,                                      # 29 blowout_prob (REAL)
     ], dtype=np.float32)
 
 
@@ -503,18 +674,23 @@ def build_enriched_dataset(
     """
     _CACHE_DIR.mkdir(exist_ok=True)
 
+    # Import locally to avoid circular import at module load
+    from .sports_config import MLB_FEATURES
+    expected_n_features = len(MLB_FEATURES)
+
     if not force_rebuild and _DATASET_PATH.exists():
         age = (datetime.now() - datetime.fromtimestamp(
             _DATASET_PATH.stat().st_mtime)).days
         if age < _CACHE_DAYS:
             saved = joblib.load(_DATASET_PATH)
-            # Validate that cached data has current feature count (24) and
-            # includes the seasons tuple we expect.
+            # Validate that cached data matches the current MLB_FEATURES count
+            # and the seasons tuple we expect. Adding new player-level features
+            # (n_features=30) invalidates older 24-column caches automatically.
             cached_seasons = tuple(saved.get("seasons_list", ()))
             n_features     = saved["X"].shape[1] if "X" in saved and len(saved.get("y_ml", [])) else 0
             if (
                 "X" in saved and "y_ml" in saved and "y_rl" in saved
-                and n_features == 24
+                and n_features == expected_n_features
                 and cached_seasons == tuple(seasons)
             ):
                 n = len(saved["y_ml"])
@@ -551,6 +727,10 @@ def build_enriched_dataset(
 
         trackers: dict[str, _TeamSeason] = {}
         rest_tracker = _PitcherRestTracker()
+
+        # Per-pitcher game log cache for last-3-start ERA. Populated lazily
+        # on first appearance of each pid in this season.
+        pitcher_gamelogs: dict[int, list[dict]] = {}
 
         # Pre-fetch all unique game dates for this season (batched)
         unique_dates = sorted({g["date"] for g in games})
@@ -623,8 +803,20 @@ def build_enriched_dataset(
             # Park factor
             park_run, _ = get_park_factors(home_name)
 
+            # Last-3-start ERA (one gameLog fetch per pid-season, then sliced)
+            h_l3 = a_l3 = None
+            if h_pid:
+                if h_pid not in pitcher_gamelogs:
+                    pitcher_gamelogs[h_pid] = _fetch_pitcher_gamelog(h_pid, season)
+                h_l3 = _last3_era_before(pitcher_gamelogs[h_pid], date_str)
+            if a_pid:
+                if a_pid not in pitcher_gamelogs:
+                    pitcher_gamelogs[a_pid] = _fetch_pitcher_gamelog(a_pid, season)
+                a_l3 = _last3_era_before(pitcher_gamelogs[a_pid], date_str)
+
             vec = _build_vec(hs_pre, as_pre, h_bat, a_bat,
-                             h_bp_era, a_bp_era, park_run, h_sp, a_sp)
+                             h_bp_era, a_bp_era, park_run, h_sp, a_sp,
+                             h_last3_era=h_l3, a_last3_era=a_l3)
             tvec = _build_totals_vec(hs_pre, as_pre, h_sp, a_sp,
                                      h_bp_era, a_bp_era, park_run)
 
@@ -641,7 +833,7 @@ def build_enriched_dataset(
 
     if not X_rows:
         print("  No enriched data available — returning empty arrays")
-        empty = np.empty((0, 24), dtype=np.float32)   # 24 features (includes trend_diff)
+        empty = np.empty((0, expected_n_features), dtype=np.float32)
         return empty, np.array([], np.int32), np.array([], np.int32), np.array([], np.float32)
 
     X           = np.vstack(X_rows).astype(np.float32)

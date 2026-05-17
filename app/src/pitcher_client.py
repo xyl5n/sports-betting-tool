@@ -22,12 +22,19 @@ _BASE = "https://statsapi.mlb.com/api/v1"
 _CACHE_FILE = Path(".cache/pitcher_cache.json")
 _CACHE_TTL = 3600  # 1 hour
 
+# Neutral baselines used when a pitcher's real data is unavailable.
+# bb9 ~ league avg ~3.3 walks per 9; era_home/era_away mirror season ERA;
+# last3_era equals season ERA so "recent form" diff is zero by default.
 _NEUTRAL_PITCHER = {
-    "era": 4.50,
-    "whip": 1.30,
-    "k_rate": 0.215,
-    "hand": 0,    # 0 = RHP, 1 = LHP
-    "rest": 4,
+    "era":       4.50,
+    "whip":      1.30,
+    "k_rate":    0.215,
+    "bb9":       3.30,
+    "era_home":  4.50,
+    "era_away":  4.50,
+    "last3_era": 4.50,
+    "hand":      0,    # 0 = RHP, 1 = LHP
+    "rest":      4,
 }
 
 # Shared helpers — imported from utils instead of defined locally
@@ -153,7 +160,7 @@ class PitcherClient:
         url = f"{_BASE}/people/{pid}/stats?stats=season&group=pitching&sportId=1"
         data = _fetch(url)
 
-        era = whip = k_rate = None
+        era = whip = k_rate = bb9 = None
         for grp in data.get("stats", []):
             for split in grp.get("splits", []):
                 st = split.get("stat", {})
@@ -162,6 +169,15 @@ class PitcherClient:
                 k     = _safe(st.get("strikeOuts"), 0)
                 bf    = _safe(st.get("battersFaced"), 1)
                 k_rate = k / bf if bf > 0 else None
+                # BB/9 = walks per 9 innings. inningsPitched is a string like "123.1".
+                bb     = _safe(st.get("baseOnBalls"), 0)
+                ip_str = str(st.get("inningsPitched", "0"))
+                try:
+                    whole, frac = ip_str.split(".") if "." in ip_str else (ip_str, "0")
+                    ip = float(whole) + (float(frac) / 3.0)   # 0.1 = 1/3 inning
+                except (ValueError, TypeError):
+                    ip = 0.0
+                bb9 = (bb * 9.0 / ip) if ip > 0 else None
                 break
             if era is not None:
                 break
@@ -172,17 +188,89 @@ class PitcherClient:
             else "R"
         )
 
+        splits     = self._pitcher_home_away_splits(pid)
+        last3_era  = self._pitcher_last3_era(pid)
+
         result = {
-            "era":    era    if era    is not None else 4.50,
-            "whip":   whip   if whip   is not None else 1.30,
-            "k_rate": k_rate if k_rate is not None else 0.215,
-            "hand":   1 if hand_code == "L" else 0,
-            "rest":   _parse_rest(pitcher_info.get("note", "")),
+            "era":       era      if era       is not None else 4.50,
+            "whip":      whip     if whip      is not None else 1.30,
+            "k_rate":    k_rate   if k_rate    is not None else 0.215,
+            "bb9":       bb9      if bb9       is not None else 3.30,
+            "era_home":  splits.get("home", 4.50),
+            "era_away":  splits.get("away", 4.50),
+            "last3_era": last3_era if last3_era is not None else (
+                era if era is not None else 4.50
+            ),
+            "hand":      1 if hand_code == "L" else 0,
+            "rest":      _parse_rest(pitcher_info.get("note", "")),
         }
 
         self._cache[cache_key] = result
         self._dirty = True
         return result
+
+    def _pitcher_home_away_splits(self, pid: int) -> dict:
+        """
+        Return {'home': ERA, 'away': ERA} from the pitcher's season statSplits.
+        Falls back to {} when the API doesn't return both. Cached by pid.
+        """
+        cache_key = f"p_splits_{pid}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        url = (f"{_BASE}/people/{pid}/stats"
+               f"?stats=statSplits&group=pitching&sitCodes=h,a&sportId=1")
+        data = _fetch(url)
+        result: dict[str, float] = {}
+        for grp in data.get("stats", []):
+            for split in grp.get("splits", []):
+                code = (split.get("split") or {}).get("code", "").lower()
+                era  = _safe((split.get("stat") or {}).get("era"), None)
+                if era is None:
+                    continue
+                if code == "h":
+                    result["home"] = float(era)
+                elif code == "a":
+                    result["away"] = float(era)
+
+        self._cache[cache_key] = result
+        self._dirty = True
+        return result
+
+    def _pitcher_last3_era(self, pid: int) -> Optional[float]:
+        """
+        Compute ERA over the pitcher's most recent ≤3 starts using the gameLog
+        endpoint. Cached per pid for the day. Returns None when unavailable.
+        ERA = (earnedRuns * 9) / innings_pitched, summed across the window.
+        """
+        cache_key = f"p_l3_{pid}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        url = (f"{_BASE}/people/{pid}/stats"
+               f"?stats=gameLog&group=pitching&sportId=1")
+        data = _fetch(url)
+        splits = []
+        for grp in data.get("stats", []):
+            splits.extend(grp.get("splits", []))
+        # gameLog returns oldest-first; take the last 3
+        recent = splits[-3:] if splits else []
+        ip_total = er_total = 0.0
+        for s in recent:
+            st = s.get("stat") or {}
+            ip_str = str(st.get("inningsPitched", "0"))
+            try:
+                whole, frac = ip_str.split(".") if "." in ip_str else (ip_str, "0")
+                ip = float(whole) + (float(frac) / 3.0)
+            except (ValueError, TypeError):
+                ip = 0.0
+            ip_total += ip
+            er_total += float(_safe(st.get("earnedRuns"), 0))
+        last3 = (er_total * 9.0 / ip_total) if ip_total > 0 else None
+
+        self._cache[cache_key] = last3
+        self._dirty = True
+        return last3
 
 
 # Module-level singleton so we don't re-instantiate on every call

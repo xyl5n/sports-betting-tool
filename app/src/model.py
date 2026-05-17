@@ -330,8 +330,14 @@ class BettingModel:
         if len(y_combined) < 100:
             return "NN skipped (insufficient data)"
 
+        # Widen base (n, 24) → (n, 30) by appending NN-only player-level
+        # extras.  XGB/LR were already fitted on the unwidened matrix above
+        # and use the shared `self.scaler`; this widening is NN-only.
+        from .nn_player_features import widen_to_nn_features
+        X_nn = widen_to_nn_features(X_combined).astype(np.float32)
+
         self.nn_scaler = StandardScaler()
-        X_all_scaled   = self.nn_scaler.fit_transform(X_combined.astype(np.float32))
+        X_all_scaled   = self.nn_scaler.fit_transform(X_nn)
 
         from sklearn.calibration import CalibratedClassifierCV
         from sklearn.model_selection import train_test_split
@@ -425,7 +431,12 @@ class BettingModel:
         nn_method  = "n/a"
         if self.nn_is_trained and self.nn is not None and self.nn_scaler is not None:
             try:
-                X_nn      = self.nn_scaler.transform(feature_vec.reshape(1, -1))
+                from .nn_player_features import widen_to_nn_features
+                # Live _assemble() returns a 30-col vector; training-row paths
+                # return 24.  Widen here so the NN scaler always sees its
+                # expected feature count regardless of caller.
+                v_nn      = widen_to_nn_features(feature_vec).reshape(1, -1)
+                X_nn      = self.nn_scaler.transform(v_nn)
                 raw_prob  = float(self.nn.predict_proba(X_nn)[0, 1])
                 # Hard clip prevents saturated NN outputs from blowing up the
                 # ensemble even when calibration leaves a tail near 0/1.

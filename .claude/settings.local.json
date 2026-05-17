@@ -28,7 +28,8 @@
       "Bash(ls \"C:\\\\sports-betting-ai\\\\\" && echo \"---\" && ls \"C:\\\\sports-betting-ai\\\\app\\\\\")",
       "Bash(dir \"C:\\\\sports-betting-ai\" /b)",
       "Bash(dir \"C:\\\\sports-betting-ai\\\\app\" /b)",
-      "Bash(set PYTHONIOENCODING=utf-8)"
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(xargs cat)"
     ]
   }
 }
