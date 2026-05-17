@@ -1379,6 +1379,16 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .pc-conflict-note {
   font-size: 11px; color: var(--yellow); font-weight: 600;
 }
+.pc-corr-note {
+  font-size: 10px; font-weight: 600;
+  color: #b39ddb;
+  background: rgba(139,92,246,.12);
+  border: 1px solid rgba(139,92,246,.28);
+  border-radius: 3px;
+  padding: 2px 6px;
+  display: inline-block;
+  margin-top: 4px;
+}
 .pc-track-btn {
   margin-top: auto; align-self: flex-end;
   padding: 4px 12px; font-size: 11px; font-weight: 600;
@@ -1569,6 +1579,56 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 }
 .model-perf-recommend strong { color: #fff; }
 
+/* ── Nightly Retrain panel ───────────────────────────────────────────── */
+.retrain-section { margin-top: 32px; }
+.retrain-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden;
+}
+.retrain-card-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.retrain-card-header .retrain-icon { font-size: 18px; }
+.retrain-card-header h3 { font-size: 14px; font-weight: 700; margin: 0; flex: 1; }
+.retrain-meta {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 0; border-bottom: 1px solid var(--border);
+}
+@media (max-width: 700px) { .retrain-meta { grid-template-columns: 1fr; } }
+.retrain-meta-cell {
+  padding: 14px 18px; border-right: 1px solid var(--border);
+}
+.retrain-meta-cell:last-child { border-right: none; }
+.retrain-meta-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim); margin-bottom: 4px; }
+.retrain-meta-value { font-size: 14px; font-weight: 600; color: var(--text); }
+.retrain-meta-value.dim { color: var(--text-dim); font-weight: 400; }
+.retrain-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.retrain-badge.success { background: rgba(52,199,89,.15); color: var(--green); }
+.retrain-badge.partial { background: rgba(255,159,10,.15); color: var(--yellow); }
+.retrain-badge.error   { background: rgba(255,69,58,.15);  color: var(--red); }
+.retrain-badge.pending { background: rgba(130,130,150,.15); color: var(--text-dim); }
+.retrain-log { padding: 0; }
+.retrain-log-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 18px; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.retrain-log-row:last-child { border-bottom: none; }
+.retrain-log-date { color: var(--text-dim); flex: 0 0 160px; font-size: 12px; }
+.retrain-log-dur  { color: var(--text-dim); flex: 0 0 70px; font-size: 12px; text-align: right; }
+.retrain-log-codes { display: flex; gap: 6px; margin-left: auto; }
+.retrain-sport-chip {
+  font-size: 11px; padding: 1px 7px; border-radius: 6px; font-weight: 600;
+}
+.retrain-sport-chip.ok  { background: rgba(52,199,89,.15); color: var(--green); }
+.retrain-sport-chip.err { background: rgba(255,69,58,.15);  color: var(--red); }
+.retrain-empty { padding: 20px 18px; color: var(--text-dim); font-size: 13px; text-align: center; }
+.retrain-trigger-row { padding: 14px 18px; display: flex; align-items: center; gap: 12px; }
+.retrain-trigger-row .retrain-note { font-size: 12px; color: var(--text-dim); }
+
 /* ── Sport page sub-header (sticky below topnav) ─────────────────────── */
 .sport-page-header {
   position: sticky; top: var(--topnav-h); z-index: 90;
@@ -1652,7 +1712,7 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
       <button class="subtab-btn"        id="stab-export"    onclick="showTab('export')">Export Picks</button>
     </nav>
     <div class="sport-page-actions">
-      <span class="analysis-timer timer-new" id="analysis-timer">Not run today</span>
+      <span class="analysis-timer timer-new" id="analysis-timer">Never run</span>
       <button id="refresh-boards-btn" onclick="refreshModels()"
               title="Reruns models on cached data — no API calls" disabled>⟳ Refresh Models</button>
       <div class="run-all-wrap">
@@ -1797,6 +1857,22 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
       </p>
       <div id="model-perf-inner">
         <div class="empty"><div class="icon">📊</div>Loading performance data…</div>
+      </div>
+    </div>
+
+    <!-- Nightly Retrain Scheduler -->
+    <div class="retrain-section" id="retrain-section" style="display:none">
+      <div class="section-hdr" style="margin-top:32px">
+        <h2>Nightly Retrain Scheduler</h2>
+        <button onclick="loadRetrainStatus()" class="btn-track"
+                style="font-size:12px;margin-left:auto">↻ Refresh</button>
+      </div>
+      <p style="color:var(--text-dim);font-size:13px;margin:0 0 16px">
+        Models are automatically retrained every night at 2:00 AM Eastern time
+        inside the app process — no external cron job required.
+      </p>
+      <div id="retrain-inner">
+        <div class="empty"><div class="icon">⏰</div>Loading scheduler status…</div>
       </div>
     </div>
   </div>
@@ -2027,7 +2103,7 @@ function showPage(name) {
   });
   // Side effects
   if (name === 'mybets') { loadLedger(); return; }
-  if (name === 'model')  { loadLedger(); loadModelPerformance(); return; }
+  if (name === 'model')  { loadLedger(); loadModelPerformance(); loadRetrainStatus(); return; }
   if (name === 'ai')     { initChatTab(); return; }
   if (name === 'home')   { buildHomePage(); return; }
 }
@@ -2446,7 +2522,7 @@ function updateTimerDisplay() {
   const el = document.getElementById('analysis-timer');
   if (!el) return;
   if (!_lastAnalyzedAt) {
-    el.textContent = 'Not run today';
+    el.textContent = 'Never run';
     el.className   = 'analysis-timer timer-new';
     return;
   }
@@ -2980,6 +3056,10 @@ async function initApp() {
     const resp = await fetch('/api/init');
     const data = await resp.json();
     if (!data.has_predictions) {
+      if (data.analyzed_at) {
+        _lastAnalyzedAt = new Date(data.analyzed_at);
+        updateTimerDisplay();
+      }
       loadSidebarStats();
       buildHomePage(); // show empty home state
       return;
@@ -3108,7 +3188,7 @@ async function _doAnalysis(opts) {
     _updateMetaGames();
     buildHomePage();
 
-    if (!data.cached) setAnalyzedNow(new Date());
+    if (!data.cached) setAnalyzedNow(data.analyzed_at ? new Date(data.analyzed_at) : new Date());
     updateLiveScores();
     setStatus(data.cached
       ? `✓ ${_results.length} MLB games · cached`
@@ -3187,7 +3267,7 @@ async function runAllAnalysis() {
         _updateMetaGames();
       }
 
-      if (!data.cached) setAnalyzedNow(new Date());
+      if (!data.cached) setAnalyzedNow(data.analyzed_at ? new Date(data.analyzed_at) : new Date());
       stepMlb.className   = 'prog-step done';
       stepMlb.textContent = `MLB (${_results.length})`;
       updateLiveScores();
@@ -3870,6 +3950,10 @@ function buildMlCard(g) {
   const edgeDisplay  = `<span style="color:${edgeColor};font-weight:600;font-size:12px">${edgeVal}</span>`;
   const conflictNote = isSplit ? `<div class="pc-conflict-note">⚡ Split signal</div>`
                      : conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
+  // Correlation indicator: ML confidence was floored up to match RL
+  const corrNote = g.ml_correlated_with_rl
+    ? `<div class="pc-corr-note" title="ML confidence floored to match Run Line — P(cover) ≤ P(win)">🔗 Correlated with RL</div>`
+    : '';
   let trackHtml = '';
   if (isUpcoming(g)) {
     if (_confirmed.has(g.game_id)) {
@@ -3891,7 +3975,7 @@ function buildMlCard(g) {
     <div class="pc-pick">${g.pick_team} ${oddsHtml(g.pick_odds)}</div>
     ${probsHtml}
     <div class="pc-edge-row">${valueBadge}${edgeDisplay}</div>
-    ${conflictNote}${trackHtml}
+    ${conflictNote}${corrNote}${trackHtml}
     <button class="pc-explain-btn" id="exp-btn-${g.game_id}-ml"
       onclick="explainPick('${g.game_id}','ml')">✦ Explain This Pick</button>
     <div class="pc-explain-panel" id="explain-${g.game_id}-ml" style="display:none"></div>
@@ -3913,6 +3997,10 @@ function buildRlCard(g) {
   const valueBadge   = rl.value_bet ? `<span class="pc-value-badge">Value</span>` : '';
   const conflictNote = isSplit ? `<div class="pc-conflict-note">⚡ Split signal</div>`
                      : conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
+  // Correlation indicator: RL confidence was capped down to match ML skepticism
+  const corrNote = rl.rl_correlated_with_ml
+    ? `<div class="pc-corr-note" title="RL confidence reduced — ML predicts low win probability; P(cover) ≤ P(win)">🔗 Correlated with ML</div>`
+    : '';
   const trackHtml = isUpcoming(g)
     ? `<button class="pc-track-btn ${conflict ? 'conflict' : ''}"
          id="rl-trk-${g.game_id}" onclick="trackProp('${g.game_id}','run_line')">
@@ -3937,7 +4025,7 @@ function buildRlCard(g) {
       <span class="prob-avg">Avg ${(pickCp*100).toFixed(0)}%</span>
     </div>
     <div class="pc-edge-row">${valueBadge}${edgeDisplay}</div>
-    ${conflictNote}${trackHtml}
+    ${conflictNote}${corrNote}${trackHtml}
     <button class="pc-explain-btn" id="exp-btn-${g.game_id}-run_line"
       onclick="explainPick('${g.game_id}','run_line')">✦ Explain This Pick</button>
     <div class="pc-explain-panel" id="explain-${g.game_id}-run_line" style="display:none"></div>
@@ -5040,6 +5128,151 @@ async function loadModelPerformance() {
     inner.innerHTML = `<div class="empty">Failed to load performance data.</div>`;
   }
 }
+
+
+// ── Nightly Retrain Status ────────────────────────────────────────────────────
+async function loadRetrainStatus() {
+  const section = document.getElementById('retrain-section');
+  const inner   = document.getElementById('retrain-inner');
+  if (!section || !inner) return;
+  section.style.display = '';
+
+  try {
+    const resp = await fetch('/api/retrain_status');
+    const data = await resp.json();
+    if (data.error) { inner.innerHTML = `<div class="retrain-empty">Error: ${data.error}</div>`; return; }
+
+    const runs    = data.runs     || [];
+    const lastRun = runs[0]       || null;
+    const nextRun = data.next_run || null;
+    const lastSuccess = data.last_success || null;
+    const isRunning   = data.scheduler_running;
+
+    // ── Formatter helpers ────────────────────────────────────────────────────
+    function _fmtTs(iso) {
+      if (!iso) return '<span class="dim">—</span>';
+      try {
+        return new Date(iso).toLocaleString('en-US', {
+          month: 'short', day: 'numeric',
+          hour: 'numeric', minute: '2-digit', hour12: true,
+        });
+      } catch { return iso; }
+    }
+    function _fmtDur(s) {
+      if (s == null) return '—';
+      if (s < 60)  return `${s}s`;
+      return `${Math.floor(s/60)}m ${Math.round(s%60)}s`;
+    }
+    function _badge(status) {
+      const map = { success: 'success', partial: 'partial', error: 'error' };
+      const cls = map[status] || 'pending';
+      return `<span class="retrain-badge ${cls}">${status || 'pending'}</span>`;
+    }
+    function _sportChip(result, label) {
+      if (!result) return '';
+      const ok = result.exit_code === 0;
+      return `<span class="retrain-sport-chip ${ok ? 'ok' : 'err'}">${label} ${ok ? '✓' : '✗'}</span>`;
+    }
+
+    // ── Next run countdown ───────────────────────────────────────────────────
+    let countdownHtml = '<span class="dim">—</span>';
+    if (nextRun) {
+      const diffMs = new Date(nextRun) - Date.now();
+      if (diffMs > 0) {
+        const h = Math.floor(diffMs / 3600000);
+        const m = Math.floor((diffMs % 3600000) / 60000);
+        countdownHtml = h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+      } else {
+        countdownHtml = 'imminent';
+      }
+    }
+
+    // ── Summary meta bar ─────────────────────────────────────────────────────
+    const metaHtml = `
+      <div class="retrain-meta">
+        <div class="retrain-meta-cell">
+          <div class="retrain-meta-label">Scheduler</div>
+          <div class="retrain-meta-value">${isRunning
+            ? '<span style="color:var(--green)">● Running</span>'
+            : '<span style="color:var(--red)">● Stopped</span>'}</div>
+        </div>
+        <div class="retrain-meta-cell">
+          <div class="retrain-meta-label">Last successful retrain</div>
+          <div class="retrain-meta-value ${lastSuccess ? '' : 'dim'}">${_fmtTs(lastSuccess)}</div>
+        </div>
+        <div class="retrain-meta-cell">
+          <div class="retrain-meta-label">Next scheduled run</div>
+          <div class="retrain-meta-value">${_fmtTs(nextRun)}<br>
+            <span style="font-size:11px;color:var(--text-dim);font-weight:400">${countdownHtml}</span></div>
+        </div>
+      </div>`;
+
+    // ── Recent runs log ───────────────────────────────────────────────────────
+    let logHtml = '';
+    if (runs.length === 0) {
+      logHtml = '<div class="retrain-empty">No retrain runs recorded yet. The first run is scheduled for tonight at 2:00 AM ET.</div>';
+    } else {
+      const rows = runs.slice(0, 10).map(r => `
+        <div class="retrain-log-row">
+          <span class="retrain-log-date">${_fmtTs(r.started_at)}</span>
+          ${_badge(r.status)}
+          <div class="retrain-log-codes">
+            ${_sportChip(r.mlb,  'MLB')}
+            ${_sportChip(r.wnba, 'WNBA')}
+          </div>
+          <span class="retrain-log-dur">${_fmtDur(r.duration_s)}</span>
+        </div>`).join('');
+      logHtml = `<div class="retrain-log">${rows}</div>`;
+    }
+
+    // ── Manual trigger row ────────────────────────────────────────────────────
+    const triggerHtml = `
+      <div class="retrain-trigger-row" style="border-top:1px solid var(--border)">
+        <button class="btn-track" style="font-size:12px" onclick="_triggerRetrainNow(this)">
+          ⚡ Run Retrain Now
+        </button>
+        <span class="retrain-note">
+          Kicks off a full MLB + WNBA retrain in the background. The page will reflect
+          results once the job completes (typically 5–20 min).
+        </span>
+      </div>`;
+
+    inner.innerHTML = `
+      <div class="retrain-card">
+        <div class="retrain-card-header">
+          <span class="retrain-icon">⏰</span>
+          <h3>Automated Retrain — 2:00 AM Eastern</h3>
+          ${lastRun ? _badge(lastRun.status) : ''}
+        </div>
+        ${metaHtml}
+        ${logHtml}
+        ${triggerHtml}
+      </div>`;
+
+  } catch (e) {
+    inner.innerHTML = `<div class="retrain-empty">Failed to load retrain status: ${e.message}</div>`;
+  }
+}
+
+async function _triggerRetrainNow(btn) {
+  btn.disabled = true;
+  btn.textContent = '⏳ Starting…';
+  try {
+    const resp = await fetch('/api/retrain_now', { method: 'POST' });
+    const data = await resp.json();
+    if (data.success) {
+      btn.textContent = '✓ Running in background';
+      setTimeout(() => { btn.disabled = false; btn.textContent = '⚡ Run Retrain Now'; }, 5000);
+    } else {
+      btn.textContent = `Error: ${data.error || 'unknown'}`;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    btn.textContent = 'Request failed';
+    btn.disabled = false;
+  }
+}
+
 
 // ── Ledger ─────────────────────────────────────────────────────────────────────
 async function loadLedger() {

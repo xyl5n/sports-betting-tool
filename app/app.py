@@ -62,6 +62,7 @@ import src.ensemble_store as ensemble_store
 from src.game_store import GameStore
 from src.kelly import size_bet, american_to_decimal, confidence_tier
 from src.ledger import Ledger
+import src.nightly_retrain as nightly_retrain
 from src.odds_client import OddsClient
 from src.sports_config import SPORTS
 from src.upset import UpsetCalculator
@@ -81,6 +82,34 @@ _PRE_GAME_ODDS_FILE       = Path("data/pre_game_odds.json")
 _EXPLAIN_CACHE_FILE       = Path("data/explain_cache.json")
 _AI_BREAKDOWN_CACHE_FILE  = Path("data/ai_breakdown_cache.json")
 _ARCHIVE_PATH             = Path("data/bet_history_archive.json")
+# Lightweight timestamp file — survives container restarts without reading the
+# full results payloads.  Shape: {"mlb": {"analyzed_at": "<iso>", "date": "YYYY-MM-DD"}, "wnba": {...}}
+_ANALYSIS_TIMESTAMPS_FILE = Path("data/analysis_timestamps.json")
+
+
+def _read_analysis_timestamps() -> dict:
+    """Read the timestamps file; return {} on any error."""
+    try:
+        return json.loads(_ANALYSIS_TIMESTAMPS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_analysis_timestamp(sport: str, ts: datetime) -> None:
+    """Persist a single sport's analysis timestamp.  Best-effort; never raises."""
+    try:
+        Path("data").mkdir(exist_ok=True)
+        data = _read_analysis_timestamps()
+        data[sport] = {
+            "analyzed_at": ts.isoformat(),
+            "date":        ts.date().isoformat(),
+        }
+        _ANALYSIS_TIMESTAMPS_FILE.write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
 
 _ANALYST_SYSTEM_PROMPT = (
     "You are a professional sports analyst with 20 years of experience in MLB and WNBA "
@@ -564,20 +593,7 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
             float(rl_pred.get("lr_prob",  0.5)),
             float(rl_pred["nn_prob"]) if rl_pred.get("nn_prob") is not None else None,
         )
-        rl_kelly = 0.0
-        rl_is_value = (
-            rl_pred.get("value_bet") and
-            rl_conf in ("strong", "moderate", "split") and
-            rl_prob_adj >= 0.52
-        )
-        if bankroll > 0 and rl_is_value:
-            _, rl_kelly, _, _ = size_bet(
-                rl_prob_adj, rl_pred["pick_odds"], bankroll, s_bankroll,
-                upset_score, rl_conf, is_user_bet=True,
-            )
-            rl_kelly = round(rl_kelly, 2)
         rl_shap = rl_pred.get("shap")
-        # Adjusted edge for run line
         rl_mkt_side = "home" if rl_pred["side"] == "home" else "away"
         rl_mkt_prob = (
             game.get("home_implied_prob", 0.5)
@@ -585,24 +601,98 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
             else 1.0 - game.get("home_implied_prob", 0.5)
         )
         rl_edge_adj = rl_prob_adj - rl_mkt_prob
+
+        # ── Correlation consistency: P(cover -1.5) ≤ P(win outright) ─────────
+        # Invariant: for the SAME team, covering -1.5 is a strictly harder event
+        # than winning outright, so RL confidence must never exceed ML confidence.
+        # When the models violate this invariant we repair it in the direction that
+        # best reflects each model's certainty:
+        #
+        #   • RL > ML on same team, ML ≥ 45 %  →  floor ML up to RL
+        #       (RL model believes a comfortable win; ML is being too conservative)
+        #   • RL > ML on same team, ML < 45 %  →  cap RL down to ML
+        #       (ML doubts the team wins at all; RL can't coherently say they cover)
+        _TIER_RANK = {"strong": 3, "moderate": 2, "split": 1, "low": 0}
+
+        def _stronger(t1: str, t2: str) -> str:
+            return t1 if _TIER_RANK.get(t1, 0) >= _TIER_RANK.get(t2, 0) else t2
+
+        def _weaker(t1: str, t2: str) -> str:
+            return t1 if _TIER_RANK.get(t1, 0) <= _TIER_RANK.get(t2, 0) else t2
+
+        ml_corr  = False   # ML was floored up to RL
+        rl_corr  = False   # RL was capped down to ML
+
+        if pick_side == rl_pred["side"] and rl_prob_adj > pick_prob_adj:
+            if pick_prob_adj < 0.45:
+                # ── Reverse cap: ML is skeptical, rein in RL ─────────────────
+                rl_prob_adj = pick_prob_adj
+                rl_conf     = _weaker(rl_conf, ml_conf)
+                rl_edge_adj = rl_prob_adj - rl_mkt_prob
+                rl_corr     = True
+            else:
+                # ── Forward floor: RL is confident, lift ML to match ──────────
+                floored_prob = rl_prob_adj
+                floored_edge = floored_prob - (market_prob if pick_side == "home" else 1.0 - market_prob)
+                floored_conf = _stronger(ml_conf, rl_conf)
+                floored_is_value = (
+                    floored_conf in ("strong", "moderate", "split") and
+                    floored_edge >= 0.05 and
+                    pick_odds > -300 and
+                    floored_prob >= 0.52
+                )
+                floored_dollars = floored_units = 0.0
+                if bankroll > 0 and floored_is_value:
+                    _, floored_dollars, floored_units, _ = size_bet(
+                        floored_prob, pick_odds, bankroll, s_bankroll,
+                        upset_score, floored_conf, is_user_bet=True,
+                    )
+                    floored_dollars = round(floored_dollars, 2)
+                    floored_units   = round(floored_units, 1)
+                out.update({
+                    "pick_prob":             round(floored_prob, 4),
+                    "pick_edge":             round(floored_edge, 4),
+                    "confidence_tier":       floored_conf,
+                    "value_pick":            floored_is_value,
+                    "bet_dollars":           floored_dollars,
+                    "bet_units":             floored_units,
+                    "ml_correlated_with_rl": True,
+                })
+                ml_corr = True
+
+        # Re-derive RL sizing from final (possibly capped) rl_prob_adj
+        rl_is_value = (
+            rl_pred.get("value_bet") and
+            rl_conf in ("strong", "moderate", "split") and
+            rl_prob_adj >= 0.52
+        )
+        rl_kelly = 0.0
+        if bankroll > 0 and rl_is_value:
+            _, rl_kelly, _, _ = size_bet(
+                rl_prob_adj, rl_pred["pick_odds"], bankroll, s_bankroll,
+                upset_score, rl_conf, is_user_bet=True,
+            )
+            rl_kelly = round(rl_kelly, 2)
+
         out["run_line"] = {
-            "home_cover_prob":    round(rl_pred["home_cover_prob"], 4),
-            "xgb_prob":           round(rl_pred["xgb_prob"], 4),
-            "lr_prob":            round(rl_pred["lr_prob"], 4),
-            "models_agree":       rl_pred["models_agree"],
-            "conflict":           rl_pred["conflict"],
-            "confidence_tier":    rl_conf,
-            "side":               rl_pred["side"],
-            "pick_team":          rl_pred["pick_team"],
-            "pick_odds":          rl_pred["pick_odds"],
-            "pick_prob":          rl_prob_adj,
-            "edge":               round(rl_edge_adj, 4),
-            "value_bet":          rl_is_value,
-            "confidence":         round(rl_prob_adj, 4),
-            "run_line_point":     rl_pred["run_line_point"],
-            "run_line_home_odds": rl_pred["run_line_home_odds"],
-            "run_line_away_odds": rl_pred["run_line_away_odds"],
-            "bet_dollars":        rl_kelly,
+            "home_cover_prob":      round(rl_pred["home_cover_prob"], 4),
+            "xgb_prob":             round(rl_pred["xgb_prob"], 4),
+            "lr_prob":              round(rl_pred["lr_prob"], 4),
+            "models_agree":         rl_pred["models_agree"],
+            "conflict":             rl_pred["conflict"],
+            "confidence_tier":      rl_conf,
+            "side":                 rl_pred["side"],
+            "pick_team":            rl_pred["pick_team"],
+            "pick_odds":            rl_pred["pick_odds"],
+            "pick_prob":            round(rl_prob_adj, 4),
+            "edge":                 round(rl_edge_adj, 4),
+            "value_bet":            rl_is_value,
+            "confidence":           round(rl_prob_adj, 4),
+            "run_line_point":       rl_pred["run_line_point"],
+            "run_line_home_odds":   rl_pred["run_line_home_odds"],
+            "run_line_away_odds":   rl_pred["run_line_away_odds"],
+            "bet_dollars":          rl_kelly,
+            "rl_correlated_with_ml": rl_corr,
             "shap": _format_rl_shap(rl_shap) if rl_shap else None,
         }
         # Validate: ML favorite must always carry -1.5; correct if API data is flipped
@@ -826,12 +916,14 @@ def _serialize_wnba(r: dict, bankroll: float, starting_bankroll: float | None = 
     return out
 
 
-def _save_wnba_analysis_cache(serialized, parlays, games_loaded, cv_acc, lr_cv_acc):
+def _save_wnba_analysis_cache(serialized, parlays, games_loaded, cv_acc, lr_cv_acc,
+                              analyzed_at: datetime | None = None):
     try:
+        _ts = analyzed_at or datetime.now(timezone.utc)
         Path("data").mkdir(exist_ok=True)
         payload = {
-            "date":          datetime.now(timezone.utc).date().isoformat(),
-            "analyzed_at":   datetime.now(timezone.utc).isoformat(),
+            "date":          _ts.date().isoformat(),
+            "analyzed_at":   _ts.isoformat(),
             "sport":         "wnba",
             "games_loaded":  games_loaded,
             "cv_accuracy":   cv_acc,
@@ -1231,13 +1323,15 @@ def _generate_parlays(serialized: list, bankroll: float) -> dict:
 # ── Analysis disk cache ───────────────────────────────────────────────────────
 
 def _save_analysis_cache(serialized: list, parlays: dict, sport: str,
-                         games_loaded: int, cv_acc, lr_cv_acc, nn_val_acc) -> None:
+                         games_loaded: int, cv_acc, lr_cv_acc, nn_val_acc,
+                         analyzed_at: datetime | None = None) -> None:
     """Persist today's serialized analysis to disk for cross-session auto-load."""
     try:
+        _ts = analyzed_at or datetime.now(timezone.utc)
         Path("data").mkdir(exist_ok=True)
         payload = {
-            "date":            datetime.now(timezone.utc).date().isoformat(),
-            "analyzed_at":     datetime.now(timezone.utc).isoformat(),
+            "date":            _ts.date().isoformat(),
+            "analyzed_at":     _ts.isoformat(),
             "sport":           sport,
             "games_loaded":    games_loaded,
             "cv_accuracy":     cv_acc,
@@ -1597,15 +1691,38 @@ def debug_live_scores():
 def init_analysis():
     """Return today's cached analysis for auto-load on startup. No API calls."""
     try:
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        # Always read the lightweight timestamp file so we can show the real
+        # last-run time even when the analysis cache is stale or absent.
+        _ts_store  = _read_analysis_timestamps()
+        _mlb_stamp = _ts_store.get("mlb", {})
+        _saved_at  = _mlb_stamp.get("analyzed_at")   # ISO string | None
+
+        # Restore in-memory state from timestamp file when app just restarted.
+        if _saved_at and _analysis_state.get("last_analyzed_at") is None:
+            try:
+                _analysis_state["last_analyzed_at"] = datetime.fromisoformat(_saved_at)
+            except Exception:
+                pass
+
         if not _ANALYSIS_CACHE_FILE.exists():
-            return jsonify({"has_predictions": False})
+            return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
         payload = json.loads(_ANALYSIS_CACHE_FILE.read_text(encoding="utf-8"))
-        today   = datetime.now(timezone.utc).date().isoformat()
         if payload.get("date") != today:
-            return jsonify({"has_predictions": False})
+            return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
+
+        # Cache is current — authoritative timestamp comes from the cache payload.
+        _at = payload.get("analyzed_at") or _saved_at
+        if _at and _analysis_state.get("last_analyzed_at") is None:
+            try:
+                _analysis_state["last_analyzed_at"] = datetime.fromisoformat(_at)
+            except Exception:
+                pass
+
         return jsonify({
             "has_predictions": True,
-            "analyzed_at":     payload.get("analyzed_at"),
+            "analyzed_at":     _at,
             "sport":           payload.get("sport", "mlb"),
             "games_loaded":    payload.get("games_loaded", 0),
             "cv_accuracy":     payload.get("cv_accuracy"),
@@ -1699,6 +1816,7 @@ def analyze():
         meta       = _analysis_state.get("last_analysis_meta", {})
         _analysis_state["parlays"]  = parlays
         _analysis_state["bankroll"] = bankroll
+        _cached_ts = _analysis_state.get("last_analyzed_at")
         return jsonify({
             "success":         True,
             "cached":          True,
@@ -1709,6 +1827,7 @@ def analyze():
             "cv_accuracy":     meta.get("cv_accuracy"),
             "lr_cv_accuracy":  meta.get("lr_cv_accuracy"),
             "nn_val_accuracy": meta.get("nn_val_accuracy"),
+            "analyzed_at":     _cached_ts.isoformat() if _cached_ts else None,
             "results":         serialized,
             "parlays":         parlays,
         })
@@ -1844,8 +1963,9 @@ def analyze():
 
         serialized = [_serialize(r, bankroll, sport, personal_starting) for r in results]
         parlays    = _generate_parlays(serialized, bankroll)
+        _ts = datetime.now(timezone.utc)
         _analysis_state["parlays"]            = parlays
-        _analysis_state["last_analyzed_at"]   = datetime.now(timezone.utc)
+        _analysis_state["last_analyzed_at"]   = _ts
         _analysis_state["last_analysis_meta"] = {
             "games_loaded":    n_completed,
             "model_status":    status,
@@ -1854,7 +1974,8 @@ def analyze():
             "nn_val_accuracy": nn_val_acc,
         }
         _save_analysis_cache(serialized, parlays, sport, n_completed,
-                             cv_acc, lr_cv_acc, nn_val_acc)
+                             cv_acc, lr_cv_acc, nn_val_acc, analyzed_at=_ts)
+        _write_analysis_timestamp("mlb", _ts)
         ensemble_store.save(serialized, "mlb")
         return jsonify({
             "success":         True,
@@ -1866,6 +1987,7 @@ def analyze():
             "cv_accuracy":     cv_acc,
             "lr_cv_accuracy":  lr_cv_acc,
             "nn_val_accuracy": nn_val_acc,
+            "analyzed_at":     _ts.isoformat(),
             "results":         serialized,
             "parlays":         parlays,
             "bankroll":        bankroll,
@@ -2239,6 +2361,41 @@ def get_model_performance():
 
     except Exception as exc:
         return jsonify({"error": str(exc), "detail": traceback.format_exc()}), 500
+
+
+@app.route("/api/retrain_status", methods=["GET"])
+def get_retrain_status():
+    """
+    Return the nightly retrain log and scheduler metadata.
+
+    Response shape:
+      {
+        "runs":              [...],  # newest-first list of run entries
+        "last_success":      str | null,
+        "next_run":          str | null,  # ISO datetime of next scheduled fire
+        "scheduler_running": bool,
+      }
+    """
+    try:
+        return jsonify(nightly_retrain.get_log())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/retrain_now", methods=["POST"])
+def trigger_retrain_now():
+    """
+    Manually trigger the nightly retrain job immediately (admin use / testing).
+    Runs in the background so the HTTP response returns right away.
+    """
+    try:
+        import threading
+        t = threading.Thread(target=nightly_retrain.run_nightly_retrain,
+                             daemon=True, name="manual_retrain")
+        t.start()
+        return jsonify({"success": True, "message": "Retrain job started in background."})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/ledger", methods=["GET"])
@@ -3252,12 +3409,14 @@ def analyze_wnba():
         _wnba_analysis_state["parlays"]  = parlays
         _wnba_analysis_state["bankroll"] = bankroll
         meta = _wnba_analysis_state.get("last_analysis_meta", {})
+        _wnba_cached_ts = _wnba_analysis_state.get("last_analyzed_at")
         return jsonify({
             "success": True, "cached": True, "sport": "wnba", "bankroll": bankroll,
             "games_loaded":   meta.get("games_loaded", 0),
             "model_status":   meta.get("model_status", ""),
             "cv_accuracy":    meta.get("cv_accuracy"),
             "lr_cv_accuracy": meta.get("lr_cv_accuracy"),
+            "analyzed_at":    _wnba_cached_ts.isoformat() if _wnba_cached_ts else None,
             "results": serialized, "parlays": parlays,
         })
 
@@ -3362,15 +3521,18 @@ def analyze_wnba():
 
         serialized = [_serialize_wnba(r, bankroll, s_br) for r in results]
         parlays    = _generate_parlays(serialized, bankroll)
+        _ts = datetime.now(timezone.utc)
         _wnba_analysis_state["parlays"]            = parlays
-        _wnba_analysis_state["last_analyzed_at"]   = datetime.now(timezone.utc)
+        _wnba_analysis_state["last_analyzed_at"]   = _ts
         _wnba_analysis_state["last_analysis_meta"] = {
             "games_loaded":  n_completed,
             "model_status":  status,
             "cv_accuracy":   cv_acc,
             "lr_cv_accuracy": lr_cv_acc,
         }
-        _save_wnba_analysis_cache(serialized, parlays, n_completed, cv_acc, lr_cv_acc)
+        _save_wnba_analysis_cache(serialized, parlays, n_completed, cv_acc, lr_cv_acc,
+                                  analyzed_at=_ts)
+        _write_analysis_timestamp("wnba", _ts)
         ensemble_store.save(serialized, "wnba")
 
         return jsonify({
@@ -3383,6 +3545,7 @@ def analyze_wnba():
             "model_status":   status,
             "cv_accuracy":    cv_acc,
             "lr_cv_accuracy": lr_cv_acc,
+            "analyzed_at":    _ts.isoformat(),
             "results":        serialized,
             "parlays":        parlays,
         })
@@ -3395,15 +3558,34 @@ def analyze_wnba():
 def init_wnba():
     """Return today's cached WNBA analysis for auto-load on startup."""
     try:
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        _ts_store   = _read_analysis_timestamps()
+        _wnba_stamp = _ts_store.get("wnba", {})
+        _saved_at   = _wnba_stamp.get("analyzed_at")
+
+        if _saved_at and _wnba_analysis_state.get("last_analyzed_at") is None:
+            try:
+                _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(_saved_at)
+            except Exception:
+                pass
+
         if not _WNBA_ANALYSIS_CACHE_FILE.exists():
-            return jsonify({"has_predictions": False})
+            return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
         payload = json.loads(_WNBA_ANALYSIS_CACHE_FILE.read_text(encoding="utf-8"))
-        today   = datetime.now(timezone.utc).date().isoformat()
         if payload.get("date") != today:
-            return jsonify({"has_predictions": False})
+            return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
+
+        _at = payload.get("analyzed_at") or _saved_at
+        if _at and _wnba_analysis_state.get("last_analyzed_at") is None:
+            try:
+                _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(_at)
+            except Exception:
+                pass
+
         return jsonify({
             "has_predictions": True,
-            "analyzed_at":     payload.get("analyzed_at"),
+            "analyzed_at":     _at,
             "sport":           "wnba",
             "games_loaded":    payload.get("games_loaded", 0),
             "cv_accuracy":     payload.get("cv_accuracy"),
@@ -3487,6 +3669,20 @@ def settle_wnba_manual(bet_id: str):
     if settled is None:
         return jsonify({"error": "Bet not found"}), 404
     return jsonify({"success": True, "settled": _py(settled)})
+
+
+# ── Nightly retrain scheduler ─────────────────────────────────────────────────
+# Start the APScheduler background job that fires every night at 2 AM ET.
+# Guard against Werkzeug's double-import when debug=True / use_reloader=True:
+# the reloader spawns a child process and sets WERKZEUG_RUN_MAIN=true there;
+# we only want the scheduler running in that child, not the parent watcher.
+_werkzeug_main = os.environ.get("WERKZEUG_RUN_MAIN", "false") == "true"
+_in_debug_mode  = app.debug
+if not _in_debug_mode or _werkzeug_main:
+    try:
+        nightly_retrain.start()
+    except Exception as _sched_err:
+        _logger.warning("nightly retrain scheduler failed to start: %s", _sched_err)
 
 
 if __name__ == "__main__":
