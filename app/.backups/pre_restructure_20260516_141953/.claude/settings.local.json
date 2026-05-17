@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"C:\\\\sports-betting-ai\" -Recurse | Where-Object { -not $_.PSIsContainer } | Select-Object FullName)",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(dir C:\\\\sports-betting-ai\\\\.cache)",
+      "Bash(pip show *)",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/api/refresh_models -H \"Content-Type: application/json\" -d \"{}\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\sports-betting-ai\\\\src\\\\\" -File | Select-Object Name)",
+      "PowerShell(ls \"C:\\\\sports-betting-ai\\\\src\\\\\" | ForEach-Object { $_.Name })",
+      "Bash(Get-ChildItem -Path \"C:\\\\sports-betting-ai\" -Recurse -Force)",
+      "Bash(Select-Object FullName)",
+      "Bash(Head -50)",
+      "Bash(ls -la \"C:\\\\sports-betting-ai\\\\\" | head -30)",
+      "PowerShell(head -30)",
+      "Bash(Get-ChildItem -Path \"C:\\\\sports-betting-ai\" -Recurse -Depth 3)",
+      "Bash(Select-Object FullName, PSIsContainer)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "date": "2026-05-17",
+  "data": {
+    "games": [
+      {
+        "matchup": "Miami Marlins @ Tampa Bay Rays",
+        "analysis": "Tampa Bay's pitching depth and home field advantage make them slight favorites despite Miami's recent competitive efforts. The 64.3% confidence with +15.8% edge suggests modest but real value in backing the Rays at -148."
+      },
+      {
+        "matchup": "Boston Red Sox @ Atlanta Braves",
+        "analysis": "Atlanta's strong offensive lineup and pitching matchup favor them heavily, with the model showing solid 69.5% confidence and +14.5% edge. This is a high-conviction play on the Braves' home dominance."
+      },
+      {
+        "matchup": "Baltimore Orioles @ Washington Nationals",
+        "analysis": "Model conflict suggests uncertainty; this matchup lacks clear statistical advantage and warrants avoidance given conflicting signals."
+      },
+      {
+        "matchup": "Philadelphia Phillies @ Pittsburgh Pirates",
+        "analysis": "The model shows Philadelphia as undervalued at +110 with 48.5% confidence but exceptional +18.6% edge\u2014this is a classic positive-expectation underdog spot. The Pirates' recent struggles make this an attractive contrarian play."
+      },
+      {
+        "matchup": "Cincinnati Reds @ Cleveland Guardians",
+        "analysis": "Cleveland's 76.1% confidence is the highest on the slate, but the +6.0% edge is concerning\u2014this suggests the market may have already priced in most of the Guardians' advantage. Proceed with caution despite high confidence."
+      },
+      {
+        "matchup": "Toronto Blue Jays @ Detroit Tigers",
+        "analysis": "Model conflict indicates statistical uncertainty between these AL Central rivals; the 6/10 chaos factor suggests lineup-dependent variance that models struggle to capture."
+      },
+      {
+        "matchup": "New York Yankees @ New York Mets",
+        "analysis": "The Mets' -120 price shows strong model conviction at 73.6% with +11.7% edge, making this one of the most reliable plays on the board. New York's home advantage combined with recent form favors the Mets."
+      },
+      {
+        "matchup": "Chicago Cubs @ Chicago White Sox",
+        "analysis": "Despite low 43.5% confidence, the Cubs have strong +12.6% edge value at -134, indicating market mispricing relative to true win probability. This is an underrated edge play on limited information."
+      },
+      {
+        "matchup": "Texas Rangers @ Houston Astros",
+        "analysis": "Model conflict on this division matchup suggests the Rangers-Astros series has lineup and situational factors that resist statistical modeling."
+      },
+      {
+        "matchup": "Milwaukee Brewers @ Minnesota Twins",
+        "analysis": "Model conflict prevents clear directional bias; the 6/10 chaos factor combined with statistical disagreement makes this an avoidable spot."
+      },
+      {
+        "matchup": "Kansas City Royals @ St. Louis Cardinals",
+        "analysis": "Model conflict on this matchup; avoid without clear statistical direction despite the low 5/10 chaos rating."
+      },
+      {
+        "matchup": "Arizona Diamondbacks @ Colorado Rockies",
+        "analysis": "Arizona's -144 price carries concerning 39.3% confidence\u2014this is a low-conviction play that happens to show edge, likely due to Colorado's struggles at altitude. The 6/10 chaos factor adds risk."
+      },
+      {
+        "matchup": "San Francisco Giants @ Oakland Athletics",
+        "analysis": "Oakland's -148 moneyline shows solid 66.4% confidence with +10.9% edge, making this a trustworthy play on the home team. The 4/10 chaos rating confirms this is a stable matchup."
+      },
+      {
+        "matchup": "Los Angeles Dodgers @ Los Angeles Angels",
+        "analysis": "Model conflict combined with the highest chaos factor (7/10) on the slate suggests significant uncertainty; this Freeway Series matchup should be avoided given conflicting analytical signals."
+      }
+    ],
+    "best_bets": [
+      {
+        "pick": "New York Mets ML (-120)",
+        "reason": "Highest confidence (73.6%) combined with strong +11.7% edge creates the most reliable single play. Mets' home field, recent form, and matchup advantages are well-captured by the model."
+      },
+      {
+        "pick": "Philadelphia Phillies ML (+110)",
+        "reason": "Exceptional +18.6% edge despite 48.5% confidence is textbook positive-expectation value. The market is underpricing Philadelphia's chances against a struggling Pirates team\u2014classic underdog edge."
+      },
+      {
+        "pick": "Atlanta Braves ML (-162)",
+        "reason": "Strong 69.5% confidence with +14.5% edge is second-highest conviction play. Braves' dominant lineup and pitching staff justify moderate chalk at home."
+      },
+      {
+        "pick": "San Francisco Giants @ Oakland Athletics ML (-148)",
+        "reason": "Solid 66.4% confidence with +10.9% edge and lowest chaos rating (4/10) confirms this is a stable, predictable matchup with real value."
+      },
+      {
+        "pick": "Chicago Cubs ML (-134)",
+        "reason": "While confidence is low (43.5%), the +12.6% edge is substantial and suggests market inefficiency. Cubs show better underlying metrics than market pricing indicates."
+      }
+    ],
+    "parlays": {
+      "2-team": [
+        {
+          "legs": [
+            "New York Mets ML (-120)",
+            "Atlanta Braves ML (-162)"
+          ],
+          "note": "Pairing the two highest-confidence plays from the slate creates a parlay with combined confidence around 74-75% and eliminates chaos factor exposure. Both teams are home favorites with strong offensive matchups, reducing correlation risk while maintaining edge accumulation."
+        }
+      ],
+      "3-team": [
+        {
+          "legs": [
+            "New York Mets ML (-120)",
+            "Atlanta Braves ML (-162)",
+            "San Francisco Giants @ Oakland Athletics ML (-148)"
+          ],
+          "note": "Combines the three most reliable plays with highest combined confidence and lowest individual chaos ratings (4-6/10). All three have +10.9% or higher edges, creating genuine parlay value rather than stacking risk. This parlay targets predictable matchups rather than chasing low-probability parlays."
+        }
+      ]
+    }
+  }
+}

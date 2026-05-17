@@ -1,0 +1,329 @@
+"""
+WNBA totals model: XGBoost + Linear Regression ensemble (regression).
+Target: predicted combined points (home_score + away_score).
+At inference, compare to the posted O/U total line.
+P(over) = sigmoid(k * (predicted_total − line) / sigma_total)
+
+Uses the 8-feature WNBA totals vector (unchanged from original).
+Training uses the recency-weighting scheme from recency_weights.py:
+60 / 25 / 15 % for current / previous / older seasons, with a 75 %
+boost for teams that changed win-rate by > 15 pp.
+
+Model path: .cache/model_totals_wnba.joblib
+"""
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Optional
+
+import joblib
+import numpy as np
+import xgboost as xgb
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import cross_val_score
+from sklearn.preprocessing import StandardScaler
+
+_MODEL_PATH = Path(".cache/model_totals_wnba.joblib")
+
+# Typical WNBA combined-score standard deviation in points
+_SIGMA = 9.0
+# Logistic steepness
+_K = 0.5
+
+
+def _prob_over(predicted_total: float, line: float) -> float:
+    """
+    Convert (predicted_total − line) to P(over) via a logistic
+    approximation calibrated to WNBA scoring variance.
+    """
+    margin = predicted_total - line
+    return 1.0 / (1.0 + math.exp(-_K * margin / _SIGMA))
+
+
+class WNBATotalsModel:
+    """
+    Two-model regression ensemble (XGBoost + LinearRegression) that predicts
+    combined points scored and compares the result to the posted O/U line.
+    """
+
+    def __init__(self) -> None:
+        self.model_path: Path = _MODEL_PATH
+        self.xgb: Optional[xgb.XGBRegressor] = None
+        self.lr: Optional[LinearRegression] = None
+        self.scaler: StandardScaler = StandardScaler()
+        self.is_trained: bool = False
+        self.lr_is_trained: bool = False
+        self.xgb_rmse: Optional[float] = None
+        self.lr_rmse: Optional[float] = None
+
+    # ------------------------------------------------------------------
+    # Training / loading
+    # ------------------------------------------------------------------
+
+    def train_or_load(
+        self,
+        stats_client,
+        feature_builder,
+        season: int,
+        force_retrain: bool = False,
+    ) -> str:
+        """
+        Load a previously saved model if it exists and was trained with
+        recency weighting (target_type == "wnba_totals_v2").
+        Otherwise trains from scratch.  Returns a human-readable status string.
+        """
+        if not force_retrain and self.model_path.exists():
+            try:
+                saved = joblib.load(self.model_path)
+                if saved.get("target_type") == "wnba_totals_v2" and "lr" in saved:
+                    self.xgb = saved["xgb"]
+                    self.lr = saved["lr"]
+                    self.scaler = saved["scaler"]
+                    self.xgb_rmse = saved.get("xgb_rmse")
+                    self.lr_rmse = saved.get("lr_rmse")
+                    self.is_trained = True
+                    self.lr_is_trained = True
+                    xgb_s = f"{self.xgb_rmse:.2f}" if self.xgb_rmse is not None else "N/A"
+                    lr_s = f"{self.lr_rmse:.2f}" if self.lr_rmse is not None else "N/A"
+                    return (
+                        f"Loaded WNBA totals model (recency-weighted) "
+                        f"(XGB RMSE: {xgb_s} pts | LR RMSE: {lr_s} pts)"
+                    )
+            except Exception:
+                pass  # Fall through to retrain if load fails
+
+        return self._train(stats_client, feature_builder, season)
+
+    def _train(self, stats_client, feature_builder, season: int) -> str:
+        """
+        Train on 3 seasons of completed games using recency weighting
+        (60 / 25 / 15 % for current / previous / older seasons).
+        The 8-feature totals vector is unchanged from the original.
+        """
+        from .recency_weights import compute_sample_weights, build_boost_mask
+
+        # Collect all completed games tagged by season
+        all_games = stats_client.get_completed_games_with_season()
+
+        X_rows: list[np.ndarray] = []
+        y_rows: list[float] = []
+        season_tags: list[int] = []
+        game_team_pairs: list[tuple[int, int]] = []
+
+        for game, s in all_games:
+            teams  = game.get("teams", {})
+            scores = game.get("scores", {})
+            home_id    = teams.get("home", {}).get("id")
+            away_id    = teams.get("away", {}).get("id")
+            home_score = scores.get("home", {}).get("total")
+            away_score = scores.get("away", {}).get("total")
+
+            if not all([home_id, away_id,
+                        home_score is not None, away_score is not None]):
+                continue
+
+            vec = feature_builder.build_totals_training_row(home_id, away_id)
+            if vec is None:
+                continue
+
+            total = float(int(home_score) + int(away_score))
+            X_rows.append(vec)
+            y_rows.append(total)
+            season_tags.append(s)
+            game_team_pairs.append((home_id, away_id))
+
+        n = len(X_rows)
+        if n < 30:
+            return f"Totals: insufficient data ({n} games)"
+
+        # Build season counts and recency weights
+        n_old     = sum(1 for s in season_tags if s <= season - 2)
+        n_prev    = sum(1 for s in season_tags if s == season - 1)
+        n_current = sum(1 for s in season_tags if s == season)
+
+        high_change_ids = stats_client.find_high_change_wnba_teams()
+        current_pairs   = [p for p, s in zip(game_team_pairs, season_tags) if s == season]
+        boost_mask      = build_boost_mask(current_pairs, high_change_ids)
+        sample_weight   = compute_sample_weights(n_old, n_prev, n_current, boost_mask)
+
+        print(f"  [wnba totals] Training rows: old={n_old}  prev={n_prev}  current={n_current}")
+
+        # Reorder to [old | prev | current] as required by compute_sample_weights
+        order = (
+            [i for i, s in enumerate(season_tags) if s <= season - 2]
+            + [i for i, s in enumerate(season_tags) if s == season - 1]
+            + [i for i, s in enumerate(season_tags) if s == season]
+        )
+        X = np.vstack([X_rows[i] for i in order])
+        y = np.array([y_rows[i] for i in order], dtype=np.float32)
+
+        X_scaled = self.scaler.fit_transform(X)
+
+        # XGBoost regressor
+        self.xgb = xgb.XGBRegressor(
+            n_estimators=200,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_weight=5,
+            reg_lambda=2.0,
+            eval_metric="rmse",
+            random_state=42,
+        )
+        try:
+            xgb_cv = cross_val_score(
+                self.xgb, X_scaled, y, cv=5,
+                scoring="neg_root_mean_squared_error",
+                fit_params={"sample_weight": sample_weight},
+            )
+        except TypeError:
+            xgb_cv = cross_val_score(
+                self.xgb, X_scaled, y, cv=5,
+                scoring="neg_root_mean_squared_error",
+            )
+        self.xgb_rmse = float(-xgb_cv.mean())
+        self.xgb.fit(X_scaled, y, sample_weight=sample_weight)
+        self.is_trained = True
+
+        # Linear Regression
+        self.lr = LinearRegression()
+        try:
+            lr_cv = cross_val_score(
+                self.lr, X_scaled, y, cv=5,
+                scoring="neg_root_mean_squared_error",
+                fit_params={"sample_weight": sample_weight},
+            )
+        except TypeError:
+            lr_cv = cross_val_score(
+                self.lr, X_scaled, y, cv=5,
+                scoring="neg_root_mean_squared_error",
+            )
+        self.lr_rmse = float(-lr_cv.mean())
+        self.lr.fit(X_scaled, y, sample_weight=sample_weight)
+        self.lr_is_trained = True
+
+        self.model_path.parent.mkdir(exist_ok=True)
+        joblib.dump(
+            {
+                "xgb":                self.xgb,
+                "lr":                 self.lr,
+                "scaler":             self.scaler,
+                "xgb_rmse":          self.xgb_rmse,
+                "lr_rmse":           self.lr_rmse,
+                "target_type":       "wnba_totals_v2",
+                "sample_weight_info": {
+                    "n_old": n_old, "n_prev": n_prev, "n_current": n_current,
+                    "n_boosted": int(boost_mask.sum()),
+                },
+            },
+            self.model_path,
+        )
+
+        return (
+            f"Totals: XGB RMSE {self.xgb_rmse:.2f} pts | "
+            f"LR RMSE {self.lr_rmse:.2f} pts  "
+            f"({n} games: {n_current} current / {n_prev} prev / {n_old} old)"
+        )
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
+
+    def predict(
+        self,
+        totals_vec: np.ndarray,
+        game: dict,
+        weights: Optional[dict] = None,
+    ) -> Optional[dict]:
+        """
+        Return a totals prediction dict, or None if model is not trained or
+        no O/U line is present in *game*.
+
+        *totals_vec* must be the 8-feature WNBA totals vector.
+        *game* should contain total_line, over_odds, under_odds.
+        """
+        if not self.is_trained:
+            return None
+
+        total_line = game.get("total_line")
+        if total_line is None:
+            return None
+
+        over_odds = game.get("over_odds")
+        under_odds = game.get("under_odds")
+
+        try:
+            X = self.scaler.transform(totals_vec.reshape(1, -1))
+        except Exception:
+            return None
+
+        xgb_pred = float(self.xgb.predict(X)[0])
+        lr_pred = (
+            float(self.lr.predict(X)[0])
+            if self.lr_is_trained and self.lr is not None
+            else xgb_pred
+        )
+
+        # Ensemble weights
+        w = weights or {}
+        w_xgb = float(w.get("xgb", 0.5))
+        w_lr = float(w.get("lr", 0.5))
+        total_w = w_xgb + w_lr
+        if total_w > 0:
+            combined = (xgb_pred * w_xgb + lr_pred * w_lr) / total_w
+            eff_w = {"xgb": w_xgb / total_w, "lr": w_lr / total_w}
+        else:
+            combined = (xgb_pred + lr_pred) / 2.0
+            eff_w = {"xgb": 0.5, "lr": 0.5}
+
+        line = float(total_line)
+        prob_over = _prob_over(combined, line)
+
+        direction = "over" if combined > line else "under"
+        models_agree = (xgb_pred > line) == (lr_pred > line)
+
+        if direction == "over":
+            pick_prob = prob_over
+            pick_odds = int(over_odds) if over_odds is not None else -110
+        else:
+            pick_prob = 1.0 - prob_over
+            pick_odds = int(under_odds) if under_odds is not None else -110
+
+        if pick_odds > 0:
+            market_prob = 100.0 / (pick_odds + 100.0)
+        else:
+            market_prob = abs(pick_odds) / (abs(pick_odds) + 100.0)
+
+        edge = pick_prob - market_prob
+        is_value = models_agree and edge >= 0.05 and pick_odds > -300
+
+        return {
+            "predicted_total": round(combined, 2),
+            "xgb_pred": round(xgb_pred, 2),
+            "lr_pred": round(lr_pred, 2),
+            "effective_weights": eff_w,
+            "total_line": line,
+            "direction": direction,
+            "models_agree": models_agree,
+            "conflict": not models_agree,
+            "pick_odds": pick_odds,
+            "pick_prob": round(pick_prob, 4),
+            "market_prob": round(market_prob, 4),
+            "edge": round(edge, 4),
+            "value_bet": is_value,
+            "over_odds": int(over_odds) if over_odds is not None else -110,
+            "under_odds": int(under_odds) if under_odds is not None else -110,
+            "confidence": round(abs(prob_over - 0.5) * 2, 4),
+        }
+
+    # ------------------------------------------------------------------
+    # Accessors
+    # ------------------------------------------------------------------
+
+    def get_raw_model(self) -> Optional[xgb.XGBRegressor]:
+        return self.xgb
+
+    def get_scaler(self) -> StandardScaler:
+        return self.scaler
