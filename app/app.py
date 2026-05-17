@@ -14,12 +14,30 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import numpy as np
-from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request
+print("STARTUP [1/6]: stdlib imports OK", flush=True, file=sys.stderr)
+
+try:
+    import numpy as np
+    print("STARTUP [2/6]: numpy OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: numpy import failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from dotenv import load_dotenv
+except Exception as _e:
+    print(f"STARTUP WARNING: python-dotenv not available: {_e}", flush=True, file=sys.stderr)
+    load_dotenv = lambda: None  # noqa: E731
+
+try:
+    from flask import Flask, jsonify, render_template, request
+    print("STARTUP [3/6]: Flask OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: Flask import failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
 
 load_dotenv()
-print("App starting...", flush=True, file=sys.stderr)
+print("STARTUP: env loaded", flush=True, file=sys.stderr)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
@@ -56,22 +74,109 @@ sys.stdout = _StdoutToLogger()
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.cache import Cache
-from src.daily_picks import select_daily_picks, load_daily_picks
-import src.ensemble_store as ensemble_store
-from src.game_store import GameStore
-from src.kelly import size_bet, american_to_decimal, confidence_tier
-from src.ledger import Ledger
-import src.nightly_retrain as nightly_retrain
-from src.odds_client import OddsClient
-from src.sports_config import SPORTS
-from src.upset import UpsetCalculator
+# ── src/ imports — each wrapped individually so one missing module can't kill  ──
+# the entire startup.  Failures print to stderr (visible in Railway deploy logs)
+# and fall back to a safe stub so Flask can still start and serve health checks.
+
+print("STARTUP [4/6]: loading src/ modules...", flush=True, file=sys.stderr)
+
+try:
+    from src.cache import Cache
+    print("STARTUP:   src.cache OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.cache failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)   # Cache is used everywhere; can't continue without it
+
+try:
+    from src.daily_picks import select_daily_picks, load_daily_picks
+    print("STARTUP:   src.daily_picks OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.daily_picks failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+# ensemble_store — graceful stub if unavailable
+class _EnsembleStoreStub:
+    """No-op stub used when src.ensemble_store fails to import."""
+    def save(self, picks, sport): pass
+    def get_picks(self, sport=None): return {}
+    def load(self): return {}
+
+try:
+    import src.ensemble_store as ensemble_store
+    print("STARTUP:   src.ensemble_store OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP WARNING: src.ensemble_store failed ({_e}) — using stub",
+          flush=True, file=sys.stderr)
+    ensemble_store = _EnsembleStoreStub()  # type: ignore[assignment]
+
+try:
+    from src.game_store import GameStore
+    print("STARTUP:   src.game_store OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.game_store failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from src.kelly import size_bet, american_to_decimal, confidence_tier
+    print("STARTUP:   src.kelly OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.kelly failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from src.ledger import Ledger
+    print("STARTUP:   src.ledger OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.ledger failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+# nightly_retrain — graceful stub if APScheduler is absent or any import fails
+class _NightlyRetrainStub:
+    """No-op stub used when src.nightly_retrain fails to import."""
+    def start(self, **kw): return None
+    def get_log(self):
+        return {"runs": [], "last_success": None,
+                "next_run": None, "scheduler_running": False,
+                "error": "nightly_retrain module unavailable"}
+    def run_nightly_retrain(self): pass
+
+try:
+    import src.nightly_retrain as nightly_retrain
+    print("STARTUP:   src.nightly_retrain OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP WARNING: src.nightly_retrain failed ({_e}) — scheduler disabled",
+          flush=True, file=sys.stderr)
+    nightly_retrain = _NightlyRetrainStub()  # type: ignore[assignment]
+
+try:
+    from src.odds_client import OddsClient
+    print("STARTUP:   src.odds_client OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.odds_client failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from src.sports_config import SPORTS
+    print("STARTUP:   src.sports_config OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.sports_config failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from src.upset import UpsetCalculator
+    print("STARTUP:   src.upset OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP FATAL: src.upset failed: {_e}", flush=True, file=sys.stderr)
+    sys.exit(1)
+
+print("STARTUP [5/6]: all src/ modules loaded", flush=True, file=sys.stderr)
 # Heavy analysis packages (xgboost, sklearn, shap, anthropic) are imported lazily
 # inside each route handler so Flask starts and passes its health check in < 2 s.
 
 app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
+print("STARTUP [6/6]: Flask app created — registering routes...", flush=True, file=sys.stderr)
 
 # ── Global state (single-user desktop app) ────────────────────────────────────
 _cache = Cache()
@@ -2389,9 +2494,10 @@ def trigger_retrain_now():
     Runs in the background so the HTTP response returns right away.
     """
     try:
-        import threading
-        t = threading.Thread(target=nightly_retrain.run_nightly_retrain,
-                             daemon=True, name="manual_retrain")
+        fn = getattr(nightly_retrain, "run_nightly_retrain", None)
+        if fn is None or isinstance(nightly_retrain, _NightlyRetrainStub):
+            return jsonify({"error": "Nightly retrain module not available (APScheduler missing)."}), 503
+        t = threading.Thread(target=fn, daemon=True, name="manual_retrain")
         t.start()
         return jsonify({"success": True, "message": "Retrain job started in background."})
     except Exception as exc:
@@ -3672,6 +3778,8 @@ def settle_wnba_manual(bet_id: str):
 
 
 # ── Nightly retrain scheduler ─────────────────────────────────────────────────
+print("STARTUP: all routes registered — starting scheduler...", flush=True, file=sys.stderr)
+
 # Start the APScheduler background job that fires every night at 2 AM ET.
 # Guard against Werkzeug's double-import when debug=True / use_reloader=True:
 # the reloader spawns a child process and sets WERKZEUG_RUN_MAIN=true there;
@@ -3680,9 +3788,19 @@ _werkzeug_main = os.environ.get("WERKZEUG_RUN_MAIN", "false") == "true"
 _in_debug_mode  = app.debug
 if not _in_debug_mode or _werkzeug_main:
     try:
-        nightly_retrain.start()
+        _sched = nightly_retrain.start()
+        if _sched is None:
+            print("STARTUP: nightly retrain scheduler not started (APScheduler unavailable or disabled)",
+                  flush=True, file=sys.stderr)
+        else:
+            print("STARTUP: nightly retrain scheduler running — fires 2 AM ET",
+                  flush=True, file=sys.stderr)
     except Exception as _sched_err:
+        print(f"STARTUP WARNING: nightly retrain scheduler failed: {_sched_err}",
+              flush=True, file=sys.stderr)
         _logger.warning("nightly retrain scheduler failed to start: %s", _sched_err)
+
+print("STARTUP: app ready", flush=True, file=sys.stderr)
 
 
 if __name__ == "__main__":

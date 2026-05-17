@@ -42,10 +42,13 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+# APScheduler is imported lazily inside start() so this module can always be
+# imported even when APScheduler is not yet installed (e.g. during a Railway
+# build where pip install is still in flight, or when the package is absent).
+# A missing APScheduler causes start() to return None; everything else keeps
+# working normally without the scheduler.
 
 _logger = logging.getLogger(__name__)
 
@@ -59,7 +62,7 @@ _TAIL_CHARS      = 4000  # chars of stdout/stderr to capture per script
 _PROC_TIMEOUT_S  = 7200  # 2 h hard ceiling per script
 
 # Singleton — created by start(), read by get_log() and the /api/retrain_status route
-_scheduler: Optional[BackgroundScheduler] = None
+_scheduler: Optional[Any] = None
 
 
 # ── Log helpers ───────────────────────────────────────────────────────────────
@@ -194,40 +197,62 @@ def run_nightly_retrain() -> None:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def start(*, timezone_str: str = "America/New_York",
-          hour: int = 2, minute: int = 0) -> BackgroundScheduler:
+          hour: int = 2, minute: int = 0) -> Optional[Any]:
     """
     Create and start the BackgroundScheduler.
 
-    Returns the scheduler so the caller can shut it down on exit if needed.
+    Returns the scheduler, or None if APScheduler is not installed.
     Calling start() more than once returns the existing scheduler.
     """
     global _scheduler
     if _scheduler is not None:
         return _scheduler
 
-    sched = BackgroundScheduler(timezone=timezone_str)
-    sched.add_job(
-        run_nightly_retrain,
-        CronTrigger(hour=hour, minute=minute, timezone=timezone_str),
-        id="nightly_retrain",
-        replace_existing=True,
-        # Allow the job to fire up to 1 hour late (e.g. if the process was
-        # briefly down at 2 AM and comes back at 2:45 AM).
-        misfire_grace_time=3600,
-        max_instances=1,       # never run two retrains in parallel
-    )
-    sched.start()
-    _scheduler = sched
+    # Lazy import — keeps this module importable even when APScheduler is absent.
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+    except ImportError as _imp_err:
+        print(
+            f"STARTUP WARNING: APScheduler not available — nightly retrain scheduler "
+            f"disabled. Install APScheduler to enable it. Error: {_imp_err}",
+            file=sys.stderr, flush=True,
+        )
+        _logger.warning("APScheduler not installed; nightly retrain scheduler disabled")
+        return None
 
-    # Register a clean shutdown so APScheduler's threads don't linger.
-    atexit.register(_shutdown)
+    try:
+        sched = BackgroundScheduler(timezone=timezone_str)
+        sched.add_job(
+            run_nightly_retrain,
+            CronTrigger(hour=hour, minute=minute, timezone=timezone_str),
+            id="nightly_retrain",
+            replace_existing=True,
+            # Allow the job to fire up to 1 hour late (e.g. if the process was
+            # briefly down at 2 AM and comes back at 2:45 AM).
+            misfire_grace_time=3600,
+            max_instances=1,       # never run two retrains in parallel
+        )
+        sched.start()
+        _scheduler = sched
 
-    next_run = _next_run_iso()
-    _logger.info(
-        "nightly retrain scheduler started — fires at %02d:%02d %s, next run: %s",
-        hour, minute, timezone_str, next_run,
-    )
-    return sched
+        # Register a clean shutdown so APScheduler's threads don't linger.
+        atexit.register(_shutdown)
+
+        next_run = _next_run_iso()
+        _logger.info(
+            "nightly retrain scheduler started — fires at %02d:%02d %s, next run: %s",
+            hour, minute, timezone_str, next_run,
+        )
+        return sched
+    except Exception as _sched_err:
+        print(
+            f"STARTUP WARNING: APScheduler scheduler failed to initialize "
+            f"(timezone='{timezone_str}'): {_sched_err}",
+            file=sys.stderr, flush=True,
+        )
+        _logger.warning("APScheduler failed to initialize: %s", _sched_err)
+        return None
 
 
 def _shutdown() -> None:
