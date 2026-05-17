@@ -1,4 +1,3 @@
-# Force Python 3.11 — Railway's default (3.13) breaks several packages.
-# This file is read by Railway's nixpacks builder before anything else runs.
-[phases.setup]
-nixPkgs = ["python311", "python311Packages.pip"]
+# Python version is pinned via runtime.txt (python-3.11.9) at the repo root.
+# railway.toml sets builder = 'nixpacks' which reads runtime.txt automatically.
+# This file is intentionally minimal to avoid overriding nixpacks auto-detection.

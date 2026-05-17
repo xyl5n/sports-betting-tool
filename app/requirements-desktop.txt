@@ -1,0 +1,18 @@
+# Desktop-only packages — install these manually in your local Windows environment.
+# DO NOT add these to requirements.txt; they will crash the Railway pip install
+# because they require Qt, X11, or display hardware not available on Linux servers.
+#
+# Install locally with:
+#   pip install -r requirements-desktop.txt
+
+# Qt GUI framework (used by desktop.pyw via QWebEngineView)
+PySide6==6.11.0
+PySide6_Addons==6.11.0
+PySide6_Essentials==6.11.0
+shiboken6==6.11.0
+
+# Desktop webview bridge (used by desktop.pyw)
+pywebview==6.2.1
+# pywebview's own deps (installed automatically, listed here for completeness):
+#   bottle==0.13.4
+#   proxy_tools==0.1.0

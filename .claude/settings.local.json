@@ -29,7 +29,8 @@
       "Bash(dir \"C:\\\\sports-betting-ai\" /b)",
       "Bash(dir \"C:\\\\sports-betting-ai\\\\app\" /b)",
       "Bash(set PYTHONIOENCODING=utf-8)",
-      "Bash(xargs cat)"
+      "Bash(xargs cat)",
+      "Bash(pip freeze *)"
     ]
   }
 }
