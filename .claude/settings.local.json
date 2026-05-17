@@ -24,7 +24,10 @@
       "Bash(rm patch_card2.py patch_card.py)",
       "Bash(python3 patch_debug.py)",
       "Bash(python3 -c \"import app; print\\('Import OK'\\)\")",
-      "Bash(start \"\" pythonw desktop.pyw)"
+      "Bash(start \"\" pythonw desktop.pyw)",
+      "Bash(ls \"C:\\\\sports-betting-ai\\\\\" && echo \"---\" && ls \"C:\\\\sports-betting-ai\\\\app\\\\\")",
+      "Bash(dir \"C:\\\\sports-betting-ai\" /b)",
+      "Bash(dir \"C:\\\\sports-betting-ai\\\\app\" /b)"
     ]
   }
 }
