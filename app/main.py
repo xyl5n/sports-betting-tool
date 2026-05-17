@@ -63,11 +63,14 @@ def main() -> None:
         if _env_bankroll > 0
         else "  Bankroll ($ amount, Enter to skip): "
     )
-    try:
-        _raw = input(_prompt).strip().lstrip("$").replace(",", "")
-        bankroll = float(_raw) if _raw else _env_bankroll
-    except (ValueError, EOFError):
-        bankroll = _env_bankroll
+    if sys.stdin.isatty():
+        try:
+            _raw = input(_prompt).strip().lstrip("$").replace(",", "")
+            bankroll = float(_raw) if _raw else _env_bankroll
+        except (ValueError, EOFError):
+            bankroll = _env_bankroll
+    else:
+        bankroll = _env_bankroll  # non-interactive (Railway / piped stdin) — use default
     if bankroll > 0:
         console.print(f"  Bankroll: [bold]${bankroll:,.2f}[/bold]  "
                       f"[dim](Half Kelly sizing, capped at 5% per bet)[/dim]")
@@ -281,10 +284,13 @@ def main() -> None:
                 f"  |  Edge: {pick_edge:+.1%}{tag}"
             )
 
-        try:
-            raw = input("\n  Track (comma-separated numbers, or Enter to skip): ").strip()
-        except EOFError:
-            raw = ""
+        if sys.stdin.isatty():
+            try:
+                raw = input("\n  Track (comma-separated numbers, or Enter to skip): ").strip()
+            except EOFError:
+                raw = ""
+        else:
+            raw = ""  # non-interactive (Railway / piped stdin) — skip tracking prompt
 
         manual_count = 0
         if raw:
