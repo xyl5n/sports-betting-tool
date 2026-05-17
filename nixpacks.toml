@@ -1,0 +1,4 @@
+# Force Python 3.11 — Railway's default (3.13) breaks several packages.
+# This file is read by Railway's nixpacks builder before anything else runs.
+[phases.setup]
+nixPkgs = ["python311", "python311Packages.pip"]

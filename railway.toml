@@ -1,2 +1,10 @@
+[build]
+builder = "nixpacks"
+
+[build.nixpacksPlan.phases.setup]
+# Pin Python 3.11 — Railway defaults to 3.13 which breaks several packages.
+# runtime.txt at repo root also tells nixpacks to use 3.11.9; this is belt-and-suspenders.
+nixPkgs = ["python311", "python311Packages.pip"]
+
 [deploy]
-startCommand = "python app.py"
+startCommand = "cd app && python app.py"
