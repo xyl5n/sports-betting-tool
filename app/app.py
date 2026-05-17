@@ -58,22 +58,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.cache import Cache
 from src.daily_picks import select_daily_picks, load_daily_picks
-from src.explainer import PredictionExplainer
 from src.game_store import GameStore
 from src.kelly import size_bet, american_to_decimal, confidence_tier
 from src.ledger import Ledger
-from src.model import BettingModel
 from src.odds_client import OddsClient
-from src.run_line_model import RunLineModel
 from src.sports_config import SPORTS
-from src.totals_model import TotalsModel
 from src.upset import UpsetCalculator
-from src.wnba_stats_client import WNBAStatsClient
-from src.wnba_features import WNBAFeatureBuilder
-from src.wnba_spread_model import WNBASpreadModel
-from src.wnba_totals_model import WNBATotalsModel
-from src.wnba_college_client import WNBACollegeClient
-import anthropic as _anthropic
+# Heavy analysis packages (xgboost, sklearn, shap, anthropic) are imported lazily
+# inside each route handler so Flask starts and passes its health check in < 2 s.
 
 app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -110,6 +102,7 @@ _upset_calc          = UpsetCalculator(cache=_cache)
 
 def _call_analyst(prompt: str, max_tokens: int = 600) -> str:
     """Call the Anthropic analyst model with a single user prompt."""
+    import anthropic as _anthropic
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
@@ -130,6 +123,7 @@ def _call_analyst_chat(extra_context: str, messages: list, max_tokens: int = 800
     game data in every reply.  messages is the full history including the latest
     user message, in [{role, content}] form.
     """
+    import anthropic as _anthropic
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
@@ -1327,10 +1321,10 @@ def mlb_schedule_proxy():
         with _urlreq.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except _urlerr.URLError as exc:
-        print(f"  [mlb proxy] URLError fetching {url}: {exc}")
+        _logger.warning("mlb proxy URLError: %s", exc)
         return jsonify({"dates": []}), 200
     except Exception as exc:
-        print(f"  [mlb proxy] Error fetching {url}: {exc}")
+        _logger.warning("mlb proxy error: %s", exc)
         return jsonify({"dates": []}), 200
 
     # ── Store in appropriate cache ─────────────────────────────────────────────
@@ -1354,7 +1348,7 @@ _DEBUG_LOG = Path("data/debug_live.log")
 def _debug_print(msg: str) -> None:
     """Print to stdout and append to log file with timestamp."""
     line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
-    print(line, flush=True)
+    _logger.debug("%s", line)
     try:
         _DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
         with _DEBUG_LOG.open("a", encoding="utf-8") as fh:
@@ -1640,8 +1634,7 @@ def _run_daily_picks_selection() -> None:
         select_daily_picks(mlb_results, wnba_results, mlb_ledger, wnba_ledger)
     except Exception as exc:
         # Daily picks selection should never crash the main analyze route
-        import traceback as _tb
-        print(f"[daily_picks] Warning: selection failed — {exc}\n{_tb.format_exc()}")
+        _logger.warning("daily_picks selection failed: %s", exc)
 
 
 @app.route("/api/analyze", methods=["POST"])
@@ -1717,6 +1710,11 @@ def analyze():
     sport_cfg = SPORTS[sport]
 
     try:
+        from src.model import BettingModel
+        from src.run_line_model import RunLineModel
+        from src.totals_model import TotalsModel
+        from src.explainer import PredictionExplainer
+
         # Step 1 — season data
         store = GameStore(
             api_key=sports_key,
@@ -1745,10 +1743,10 @@ def analyze():
         if sport == "mlb":
             rl_model = RunLineModel()
             rl_status = rl_model.train_or_load(store, fb, season)
-            print(f"  {rl_status}")
+            _logger.info("run_line model: %s", rl_status)
             totals_model = TotalsModel()
             tot_status = totals_model.train_or_load(store, fb, season)
-            print(f"  {tot_status}")
+            _logger.info("totals model: %s", tot_status)
 
         # Step 4 — odds (baseball_mlb only)
         odds_client = OddsClient(odds_key, _cache)
@@ -1873,6 +1871,10 @@ def analyze():
 @app.route("/api/refresh_models", methods=["POST"])
 def refresh_models():
     """Retrain all ML models on cached data and rerun predictions. No odds/stats API calls."""
+    from src.model import BettingModel
+    from src.run_line_model import RunLineModel
+    from src.totals_model import TotalsModel
+    from src.explainer import PredictionExplainer
     data     = request.get_json() or {}
     sport    = data.get("sport", _analysis_state.get("sport", "mlb"))
     bankroll = float(data.get("bankroll", _analysis_state.get("bankroll", 250)))
@@ -3061,6 +3063,12 @@ def ai_chat():
 @app.route("/api/wnba/analyze", methods=["POST"])
 def analyze_wnba():
     """Full WNBA analysis pipeline: team stats + odds + ensemble predictions."""
+    from src.model import BettingModel
+    from src.wnba_stats_client import WNBAStatsClient
+    from src.wnba_features import WNBAFeatureBuilder
+    from src.wnba_spread_model import WNBASpreadModel
+    from src.wnba_totals_model import WNBATotalsModel
+    from src.wnba_college_client import WNBACollegeClient
     data       = request.get_json() or {}
     bankroll   = float(data.get("bankroll", _wnba_analysis_state.get("bankroll", 1000)))
     season     = int(data.get("season", 2025))
@@ -3128,23 +3136,12 @@ def analyze_wnba():
                 college_adjs = college_client.get_college_adjustments(all_team_ids, season)
                 college_diag = {tid: college_client.get_diagnostics(tid) for tid in all_team_ids}
                 fb.set_college_adjustments(college_adjs, college_diag)
-                # Print diagnostic summary for any team with non-zero adjustment
+                # Log diagnostic summary for any team with non-zero adjustment
                 n_adjusted = sum(1 for a in college_adjs.values() if abs(a) > 0.01)
                 if n_adjusted:
-                    print(f"  [college] {n_adjusted} team(s) with college adjustments applied:")
-                    for tid, adj in sorted(college_adjs.items(), key=lambda x: abs(x[1]), reverse=True):
-                        if abs(adj) > 0.01:
-                            diag_rows = college_diag.get(tid, [])
-                            found_players = [d for d in diag_rows if d.get("found")]
-                            print(f"    team_id={tid} adj={adj:+.3f} ({len(found_players)} young players with college data)")
-                            for d in found_players:
-                                print(f"      {d['name']} ({d['exp_years']}yr) "
-                                      f"college={d['college'] or 'N/A'}  "
-                                      f"ppg={d['ppg']:.1f} fg%={d['fg_pct']:.3f} "
-                                      f"rpg={d['rpg']:.1f} apg={d['apg']:.1f}  "
-                                      f"adj={d['adj']:+.3f}")
+                    _logger.info("college adjustments: %d team(s)", n_adjusted)
         except Exception as _college_err:
-            print(f"  [college] College adjustment skipped: {_college_err}")
+            _logger.warning("college adjustment skipped: %s", _college_err)
 
         # Step 3 — models
         ml_model = BettingModel(wnba_cfg)
@@ -3157,11 +3154,11 @@ def analyze_wnba():
 
         spread_model = WNBASpreadModel()
         sp_status = spread_model.train_or_load(wnba_client, fb, season)
-        print(f"  {sp_status}")
+        _logger.info("wnba spread model: %s", sp_status)
 
         totals_model = WNBATotalsModel()
         tot_status = totals_model.train_or_load(wnba_client, fb, season)
-        print(f"  {tot_status}")
+        _logger.info("wnba totals model: %s", tot_status)
 
         # Step 4 — odds from The Odds API
         odds_client = OddsClient(odds_key, _cache)
