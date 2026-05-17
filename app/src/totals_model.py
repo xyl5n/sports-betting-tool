@@ -427,6 +427,10 @@ class TotalsModel:
         _raw_avg    = (pred_xgb + pred_lr + _nn_for_raw) / 3.0 if pred_nn is not None \
                       else (pred_xgb + pred_lr) / 2.0
 
+        # Pure-confidence tier (function of pick_prob alone, no odds reference).
+        from .kelly import confidence_tier_from_prob
+        conf_tier = confidence_tier_from_prob(pick_prob)
+
         return {
             "predicted_total":     round(combined, 2),
             "raw_predicted_total": round(_raw_avg, 2),   # pre-cap ensemble avg
@@ -436,6 +440,7 @@ class TotalsModel:
             "effective_weights":   eff_w,
             "total_line":          line,
             "direction":           direction,
+            "pick_side":           direction,            # alias for cross-model consistency
             "models_agree":        models_agree,
             "conflict":            not models_agree,
             "pick_prob":           pick_prob,
@@ -444,6 +449,7 @@ class TotalsModel:
             "edge":                edge,
             "value_bet":           is_value,
             "confidence":          min(abs(combined - line) / _SIGMA, 1.0),
+            "confidence_tier":     conf_tier,            # Strong/Moderate/Low by pick_prob
             "over_odds":           int(over_odds)  if over_odds  is not None else -110,
             "under_odds":          int(under_odds) if under_odds is not None else -110,
             "park_run_factor":     round(park_factor, 3),

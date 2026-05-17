@@ -89,13 +89,17 @@ def _save_history(data: dict) -> None:
 
 
 # ── Confidence bucketing (uniform across all bet types) ──────────────────────
+# Canonical thresholds from prediction_tiers / kelly: Strong >= 62%, Moderate
+# 52-62%, Low < 52%.  Picks store `xgb_confidence = |2*prob - 1|` so we
+# translate the bucket edges accordingly:
+#   pick_prob 0.62  ->  confidence 0.24
+#   pick_prob 0.52  ->  confidence 0.04
 
 def _confidence_tier(conf: float) -> str:
-    """conf is the 0-1 scale stored on each pick."""
-    if conf >= 0.30:  return "strong (65%+)"
-    if conf >= 0.20:  return "confident (60-65%)"
-    if conf >= 0.10:  return "lean (55-60%)"
-    return "toss-up (50-55%)"
+    """conf is |2*p - 1| (the pick-side advantage above 50%) in [0, 1]."""
+    if conf >= 0.24:  return "Strong (62%+)"
+    if conf >= 0.04:  return "Moderate (52-62%)"
+    return "Low (<52%)"
 
 
 # ── Recording ────────────────────────────────────────────────────────────────
@@ -361,7 +365,7 @@ def get_xgb_accuracy() -> dict:
         "pending_picks": int,
         "overall":            {correct, wrong, push, settled, accuracy},
         "by_bet_type":        {moneyline: {...}, run_line: {...}, totals: {...}},
-        "by_confidence_tier": {"toss-up (50-55%)": {...}, ...},
+        "by_confidence_tier": {"Low (<52%)": {...}, "Moderate (52-62%)": {...}, "Strong (62%+)": {...}},
       }
 
     Pushes are counted separately and excluded from accuracy denominators.
@@ -434,8 +438,7 @@ def format_xgb_accuracy_report(stats: Optional[dict] = None) -> str:
     if s["by_confidence_tier"]:
         lines.append("")
         lines.append("By confidence tier:")
-        for tier in ("toss-up (50-55%)", "lean (55-60%)",
-                     "confident (60-65%)", "strong (65%+)"):
+        for tier in ("Low (<52%)", "Moderate (52-62%)", "Strong (62%+)"):
             if tier in s["by_confidence_tier"]:
                 lines.append(_fmt_row(tier, s["by_confidence_tier"][tier], label_width=22))
 

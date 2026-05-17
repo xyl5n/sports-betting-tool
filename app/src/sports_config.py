@@ -82,6 +82,30 @@ MLB_FEATURES = [
                                 # informational signal feeding the run-line classifier
 ]
 
+# ── XGBoost "pure confidence" feature selection ──────────────────────────────
+# The XGBoost moneyline + run-line classifiers train on a SUBSET of MLB_FEATURES
+# that excludes every column derived from the betting market. This makes the
+# model's probability output a pure team / pitcher / situation signal, with
+# zero reference to the odds line.  Edge against the market is then computed
+# as a separate downstream step: edge = model_prob - implied_market_prob.
+#
+# Excluded names:
+#   home_implied_prob -- vig-free P(home wins) parsed from the market
+#   run_line          -- the bookmaker's spread (almost always +/- 1.5 in MLB)
+#   line_movement     -- change in implied prob since open
+MLB_XGB_ODDS_FEATURE_NAMES: tuple[str, ...] = (
+    "home_implied_prob",
+    "run_line",
+    "line_movement",
+)
+MLB_XGB_CONFIDENCE_COLUMNS: tuple[int, ...] = tuple(
+    i for i, name in enumerate(MLB_FEATURES)
+    if name not in MLB_XGB_ODDS_FEATURE_NAMES
+)
+MLB_XGB_CONFIDENCE_FEATURE_NAMES: tuple[str, ...] = tuple(
+    name for name in MLB_FEATURES if name not in MLB_XGB_ODDS_FEATURE_NAMES
+)
+
 MLB = SportConfig(
     name="MLB",
     odds_key="baseball_mlb",

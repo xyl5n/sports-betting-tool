@@ -76,6 +76,9 @@ class RunLineModel:
         self.xgb_cv:       Optional[float] = None
         self.lr_cv:        Optional[float] = None
         self.nn_val_accuracy: Optional[float] = None
+        # Column subset XGB trains/predicts on (market-derived features removed).
+        self._xgb_cols:  Optional[list[int]] = None
+        self._xgb_names: Optional[list[str]] = None
 
     # ------------------------------------------------------------------
     # Training / loading
@@ -96,6 +99,8 @@ class RunLineModel:
             lr_kind_ok = saved.get("lr_target_kind") == LR_TARGET_KIND_CONDITIONAL
             # XGB was also reformulated to a conditional model -- reject pre-fix caches.
             xgb_kind_ok = saved.get("xgb_target_kind") == "conditional_cover_given_home_win"
+            # XGB input kind must be "market_free" (the pure-confidence feature subset).
+            xgb_input_ok = saved.get("xgb_input_kind") == "market_free"
             # NN must also be on the conditional target (or the explicit
             # marginal-fallback flag if there weren't enough home-win rows).
             # An unflagged cache predates the NN hurdle reformulation and
@@ -106,7 +111,7 @@ class RunLineModel:
             )
             if saved.get("target_type") == "run_line" and "lr" in saved \
                     and actual_n_feat == expected_n_feat \
-                    and lr_kind_ok and xgb_kind_ok and nn_kind_ok:
+                    and lr_kind_ok and xgb_kind_ok and nn_kind_ok and xgb_input_ok:
                 self.xgb              = saved["xgb"]
                 self.lr               = saved["lr"]
                 self.nn               = saved.get("nn")
@@ -115,6 +120,8 @@ class RunLineModel:
                 self.xgb_cv           = saved.get("xgb_cv")
                 self.lr_cv            = saved.get("lr_cv")
                 self.nn_val_accuracy  = saved.get("nn_val_accuracy")
+                self._xgb_cols        = saved.get("xgb_cols")
+                self._xgb_names       = saved.get("xgb_names")
                 self.is_trained       = True
                 self.lr_is_trained    = True
                 self.nn_is_trained    = self.nn is not None
@@ -130,6 +137,8 @@ class RunLineModel:
                 print("  Run line: XGB target kind upgraded to conditional cover -- retraining.")
             elif not nn_kind_ok:
                 print("  Run line: NN target kind upgraded to conditional cover -- retraining.")
+            elif not xgb_input_ok:
+                print("  Run line: XGB input kind upgraded to market_free -- retraining.")
         return self._train(stats_client, feature_builder, season, high_change_team_ids)
 
     def _train_nn(
@@ -274,17 +283,32 @@ class RunLineModel:
         cv_fit_params = ({"sample_weight": sample_weights}
                          if sample_weights is not None else {})
 
-        # ── XGB: train CONDITIONAL P(margin >= 2 | home wins) ───────────────
-        # The marginal model (P(home covers -1.5) directly) could output a
-        # higher probability than the moneyline P(home wins) for the same
-        # game -- mathematically impossible, since covering -1.5 is a strict
-        # subset of winning.  Training XGB only on home-win rows makes the
-        # target P(margin >= 2 | home won), a number in [0,1].  At inference
-        # time predict() multiplies this by the moneyline xgb_prob, so the
-        # final P(home covers) is bounded above by P(home wins) BY
-        # CONSTRUCTION.  Inconsistency is impossible.
+        # ── XGB: CONDITIONAL P(margin >= 2 | home wins) on a PURE-CONFIDENCE
+        # feature subset (market-derived columns removed) ────────────────────
+        #
+        # Two structural constraints, both enforced at the model level rather
+        # than by post-processing:
+        #
+        #   1. P(covers) <= P(wins)
+        #      Achieved by training only on home-win rows so the target is
+        #      P(margin >= 2 | home wins) in [0, 1].  predict() then returns
+        #      ml_prob_home * cond_prob, bounded above by ml_prob_home.
+        #
+        #   2. Confidence references no market signal.
+        #      Achieved by stripping the odds-derived columns
+        #      (home_implied_prob, run_line, line_movement) from the feature
+        #      vector before fitting.  Edge against the market is computed
+        #      separately downstream.
+        from .sports_config import (
+            MLB_XGB_CONFIDENCE_COLUMNS,
+            MLB_XGB_CONFIDENCE_FEATURE_NAMES,
+        )
+        self._xgb_cols  = list(MLB_XGB_CONFIDENCE_COLUMNS)
+        self._xgb_names = list(MLB_XGB_CONFIDENCE_FEATURE_NAMES)
+        X_xgb_full      = X_scaled[:, self._xgb_cols]
+
         home_won_mask = (y_ml_combined == 1)
-        X_cond  = X_scaled[home_won_mask]
+        X_cond  = X_xgb_full[home_won_mask]
         y_cond  = y_combined[home_won_mask]   # 1 iff margin >= 2 given home won
         sw_cond = (sample_weights[home_won_mask]
                    if sample_weights is not None else None)
@@ -307,22 +331,23 @@ class RunLineModel:
                 X_cond, y_cond,
                 **({"sample_weight": sw_cond} if sw_cond is not None else {}),
             )
-            print(f"  Run line XGB: CONDITIONAL P(margin>=2 | home wins) on "
+            print(f"  Run line XGB: CONDITIONAL P(margin>=2 | home wins), "
+                  f"pure-confidence features only -- "
                   f"{len(y_cond):,} rows  base={y_cond.mean():.1%}  CV={self.xgb_cv:.1%}")
         else:
             # Degenerate: not enough home-win rows.  Train marginal as fallback
-            # so predict() still returns something.
+            # so predict() still returns something.  Still on the pure-confidence
+            # feature subset.
             self.xgb.fit(
-                X_scaled, y_combined,
+                X_xgb_full, y_combined,
                 **({"sample_weight": sample_weights} if sample_weights is not None else {}),
             )
             self.xgb_cv = None
             print("  Run line XGB: fallback to marginal training (too few home-win rows)")
 
-        # Attach feature names so SHAP / get_score() show real names, not f0..f23.
+        # Attach the actual feature names XGB trained on (subset of MLB_FEATURES).
         try:
-            from .sports_config import MLB_FEATURES
-            self.xgb.get_booster().feature_names = list(MLB_FEATURES)
+            self.xgb.get_booster().feature_names = list(self._xgb_names)
         except Exception:
             pass
         self.is_trained = True
@@ -403,6 +428,12 @@ class RunLineModel:
             # the joint P(home covers -1.5).  Old caches without this flag
             # are still marginal and will be detected as stale.
             "xgb_target_kind": "conditional_cover_given_home_win",
+            # XGB also drops market-derived features (home_implied_prob,
+            # run_line, line_movement) so the probability output is "pure
+            # confidence" -- a team / pitcher / situation signal only.
+            "xgb_input_kind":  "market_free",
+            "xgb_cols":        self._xgb_cols,
+            "xgb_names":       self._xgb_names,
             # LR follows the same hurdle structure as XGB — see the
             # LR_TARGET_KIND_CONDITIONAL constant. Old caches without this
             # flag are invalidated by train_or_load().
@@ -459,7 +490,9 @@ class RunLineModel:
             return None
 
         # Both heads now model P(margin >= 2 | home wins) — conditional probs.
-        xgb_cond = float(self.xgb.predict_proba(X)[0, 1])
+        # XGB also runs on the pure-confidence feature subset (no market columns).
+        X_xgb = X[:, self._xgb_cols] if self._xgb_cols is not None else X
+        xgb_cond = float(self.xgb.predict_proba(X_xgb)[0, 1])
         lr_cond  = (float(self.lr.predict_proba(X)[0, 1])
                     if self.lr_is_trained else xgb_cond)
 
@@ -610,6 +643,13 @@ class RunLineModel:
             f"confidence={abs(combined - 0.5) * 2:.3f}"
         )
 
+        # ── Step 1 → Step 2 separation ────────────────────────────────────────
+        # `pick_prob` is the model's pure-confidence probability for the
+        # picked side (no odds reference). `edge` is the separate Step-2
+        # quantity. `confidence_tier` is a function of pick_prob ONLY.
+        from .kelly import confidence_tier_from_prob
+        conf_tier = confidence_tier_from_prob(pick_prob)
+
         return {
             "home_cover_prob":   combined,
             "xgb_prob":          xgb_prob,
@@ -619,6 +659,7 @@ class RunLineModel:
             "models_agree":      models_agree,
             "conflict":          not models_agree,
             "side":            side,
+            "pick_side":       side,                # alias for cross-model consistency
             "pick_team":       pick_team,
             "pick_prob":       pick_prob,
             "pick_odds":       pick_odds,
@@ -626,6 +667,7 @@ class RunLineModel:
             "edge":            edge,
             "value_bet":       is_value,
             "confidence":      abs(combined - 0.5) * 2,
+            "confidence_tier": conf_tier,           # Strong/Moderate/Low by pick_prob
             "run_line_point":  rl_point if rl_point is not None else -1.5,
             "run_line_home_odds": int(rl_home_odds) if rl_home_odds else -110,
             "run_line_away_odds": int(rl_away_odds) if rl_away_odds else -110,

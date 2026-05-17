@@ -117,7 +117,7 @@ except Exception as _e:
     sys.exit(1)
 
 try:
-    from src.kelly import size_bet, american_to_decimal, confidence_tier
+    from src.kelly import size_bet, american_to_decimal, confidence_tier_from_prob
     print("STARTUP:   src.kelly OK", flush=True, file=sys.stderr)
 except Exception as _e:
     print(f"STARTUP FATAL: src.kelly failed: {_e}", flush=True, file=sys.stderr)
@@ -612,16 +612,17 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
     upset_score = float(upset.get("score", 0.0))
     s_bankroll  = starting_bankroll if starting_bankroll is not None else bankroll
 
-    # ML confidence tier (drives label colour and sizing; "split" allows half-Kelly bet)
-    ml_conf = confidence_tier(xgb_prob, lr_prob, nn_prob)
-
     # Adjust displayed probability (floor at 0.48)
     pick_prob_adj = max(0.48, pick_prob - conf_red)
     pick_edge_adj = pick_prob_adj - (market_prob if pick_side == "home" else 1.0 - market_prob)
 
-    # Tier drives the value gate; adj prob < 0.52 always blocks the bet
+    # ML confidence tier — pure probability of the picked outcome, no edge
+    # or model-agreement input.  Strong > 0.62, Moderate 0.52-0.62, Low < 0.52.
+    ml_conf = confidence_tier_from_prob(pick_prob_adj)
+
+    # Edge is computed independently and gates value separately from tier.
     is_value = (
-        ml_conf in ("strong", "moderate", "split") and
+        ml_conf in ("strong", "moderate") and
         pick_edge_adj >= 0.05 and
         pick_odds > -300 and
         pick_prob_adj >= 0.52
@@ -742,11 +743,11 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
     # ── Run line ──────────────────────────────────────────────────────────────
     if rl_pred is not None:
         rl_prob_adj = max(0.48, float(rl_pred["pick_prob"]) - conf_red)
-        rl_conf = confidence_tier(
-            float(rl_pred.get("xgb_prob", 0.5)),
-            float(rl_pred.get("lr_prob",  0.5)),
-            float(rl_pred["nn_prob"]) if rl_pred.get("nn_prob") is not None else None,
-        )
+        # RL tier from pick_prob only.  Composed with the conditional hurdle
+        # in run_line_model.predict, rl_prob_adj is bounded above by the
+        # moneyline pick_prob for the same home team, so the resulting tier
+        # is bounded above by ml_conf when both pick HOME.
+        rl_conf = confidence_tier_from_prob(rl_prob_adj)
         rl_shap = rl_pred.get("shap")
         rl_mkt_side = "home" if rl_pred["side"] == "home" else "away"
         rl_mkt_prob = (
@@ -756,68 +757,22 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
         )
         rl_edge_adj = rl_prob_adj - rl_mkt_prob
 
-        # ── Correlation consistency: P(cover -1.5) ≤ P(win outright) ─────────
-        # Invariant: for the SAME team, covering -1.5 is a strictly harder event
-        # than winning outright, so RL confidence must never exceed ML confidence.
-        # When the models violate this invariant we repair it in the direction that
-        # best reflects each model's certainty:
-        #
-        #   • RL > ML on same team, ML ≥ 45 %  →  floor ML up to RL
-        #       (RL model believes a comfortable win; ML is being too conservative)
-        #   • RL > ML on same team, ML < 45 %  →  cap RL down to ML
-        #       (ML doubts the team wins at all; RL can't coherently say they cover)
-        _TIER_RANK = {"strong": 3, "moderate": 2, "split": 1, "low": 0}
+        # ── Correlation consistency is now structural, not patched ───────────
+        # The conditional run-line hurdle in run_line_model._train guarantees
+        # P(cover -1.5) <= P(win outright) by construction (each sub-model
+        # multiplied by the matching moneyline sub-model probability).
+        # Combined with the prob-based confidence_tier_from_prob (monotonic
+        # in pick_prob), this implies rl_conf <= ml_conf whenever both pick
+        # the same HOME team — no downstream floor/cap needed.  The flags
+        # remain in the response schema for backwards compatibility but are
+        # always False since no repair is performed.
+        ml_corr = False
+        rl_corr = False
 
-        def _stronger(t1: str, t2: str) -> str:
-            return t1 if _TIER_RANK.get(t1, 0) >= _TIER_RANK.get(t2, 0) else t2
-
-        def _weaker(t1: str, t2: str) -> str:
-            return t1 if _TIER_RANK.get(t1, 0) <= _TIER_RANK.get(t2, 0) else t2
-
-        ml_corr  = False   # ML was floored up to RL
-        rl_corr  = False   # RL was capped down to ML
-
-        if pick_side == rl_pred["side"] and rl_prob_adj > pick_prob_adj:
-            if pick_prob_adj < 0.45:
-                # ── Reverse cap: ML is skeptical, rein in RL ─────────────────
-                rl_prob_adj = pick_prob_adj
-                rl_conf     = _weaker(rl_conf, ml_conf)
-                rl_edge_adj = rl_prob_adj - rl_mkt_prob
-                rl_corr     = True
-            else:
-                # ── Forward floor: RL is confident, lift ML to match ──────────
-                floored_prob = rl_prob_adj
-                floored_edge = floored_prob - (market_prob if pick_side == "home" else 1.0 - market_prob)
-                floored_conf = _stronger(ml_conf, rl_conf)
-                floored_is_value = (
-                    floored_conf in ("strong", "moderate", "split") and
-                    floored_edge >= 0.05 and
-                    pick_odds > -300 and
-                    floored_prob >= 0.52
-                )
-                floored_dollars = floored_units = 0.0
-                if bankroll > 0 and floored_is_value:
-                    _, floored_dollars, floored_units, _ = size_bet(
-                        floored_prob, pick_odds, bankroll, s_bankroll,
-                        upset_score, floored_conf, is_user_bet=True,
-                    )
-                    floored_dollars = round(floored_dollars, 2)
-                    floored_units   = round(floored_units, 1)
-                out.update({
-                    "pick_prob":             round(floored_prob, 4),
-                    "pick_edge":             round(floored_edge, 4),
-                    "confidence_tier":       floored_conf,
-                    "value_pick":            floored_is_value,
-                    "bet_dollars":           floored_dollars,
-                    "bet_units":             floored_units,
-                    "ml_correlated_with_rl": True,
-                })
-                ml_corr = True
-
-        # Re-derive RL sizing from final (possibly capped) rl_prob_adj
+        # Re-derive RL sizing from rl_prob_adj
         rl_is_value = (
             rl_pred.get("value_bet") and
-            rl_conf in ("strong", "moderate", "split") and
+            rl_conf in ("strong", "moderate") and
             rl_prob_adj >= 0.52
         )
         rl_kelly = 0.0
@@ -934,11 +889,12 @@ def _serialize_wnba(r: dict, bankroll: float, starting_bankroll: float | None = 
         pick_odds  = int(game.get("h2h_away_odds") or -110)
         pick_prob  = 1.0 - home_prob;  pick_edge = -home_edge
 
-    ml_conf       = confidence_tier(xgb_prob, lr_prob, None)
     pick_prob_adj = max(0.48, pick_prob)
     pick_edge_adj = pick_prob_adj - (market_prob if pick_side == "home" else 1.0 - market_prob)
+    # Tier from pick_prob only — independent of edge or model-agreement
+    ml_conf       = confidence_tier_from_prob(pick_prob_adj)
     is_value      = (
-        ml_conf in ("strong", "moderate", "split") and
+        ml_conf in ("strong", "moderate") and
         pick_edge_adj >= 0.05 and pick_odds > -300 and pick_prob_adj >= 0.52
     )
 
@@ -997,12 +953,8 @@ def _serialize_wnba(r: dict, bankroll: float, starting_bankroll: float | None = 
     # Spread prediction
     if spread_pred is not None:
         sp_prob_adj = max(0.48, float(spread_pred["pick_prob"]))
-        sp_conf     = confidence_tier(
-            float(spread_pred.get("xgb_pred", 0) > 0),
-            float(spread_pred.get("lr_pred",  0) > 0),
-            None,
-        )
-        sp_conf = "strong" if spread_pred.get("models_agree") else "low"
+        # Tier from pick_prob only — independent of edge or model-agreement
+        sp_conf     = confidence_tier_from_prob(sp_prob_adj)
         sp_is_value = (
             spread_pred.get("value_bet") and sp_conf in ("strong",) and sp_prob_adj >= 0.52
         )
@@ -2400,11 +2352,9 @@ def model_detail():
         rl   = r.get("rl_pred")   or {}
         tot  = r.get("totals_pred") or {}
 
-        ml_conf = confidence_tier(
-            float(pred.get("xgb_prob", 0.5)),
-            float(pred.get("lr_prob",  0.5)),
-            float(pred["nn_prob"]) if pred.get("nn_prob") is not None else None,
-        )
+        # Tier from picked-outcome probability (pure confidence, no agreement).
+        _ml_hp = float(pred.get("home_win_prob", 0.5))
+        ml_conf = confidence_tier_from_prob(_ml_hp if _ml_hp >= 0.5 else 1.0 - _ml_hp)
 
         entry = {
             "game_id":    g.get("id"),
@@ -2427,10 +2377,8 @@ def model_detail():
                 "effective_weights": rl.get("effective_weights"),
                 "home_cover_prob":   rl.get("home_cover_prob"),
                 "models_agree":      rl.get("models_agree"),
-                "confidence_tier":   confidence_tier(
-                    float(rl.get("xgb_prob", 0.5)),
-                    float(rl.get("lr_prob",  0.5)),
-                    float(rl["nn_prob"]) if rl.get("nn_prob") is not None else None,
+                "confidence_tier":   confidence_tier_from_prob(
+                    float(rl.get("pick_prob", 0.5))
                 ) if rl else None,
             } if rl else None,
             "totals": {
@@ -3046,11 +2994,8 @@ def confirm_bet(game_id: str):
         model_p, edge = 1 - hp, -he
 
     pred_full = raw["prediction"]
-    ml_conf = confidence_tier(
-        float(pred_full.get("xgb_prob", model_p)),
-        float(pred_full.get("lr_prob",  model_p)),
-        float(pred_full["nn_prob"]) if pred_full.get("nn_prob") is not None else None,
-    )
+    # Tier from the picked-outcome probability (model_p), not model agreement.
+    ml_conf = confidence_tier_from_prob(model_p)
     model_amt, conf_amt = ledger.kelly_amounts(model_p, odds)
     ledger.add_bet(
         game=g, sport=sport, sport_key=sport_cfg.odds_key,

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .kelly import confidence_tier, size_bet
+from .kelly import confidence_tier_from_prob, size_bet
 
 if TYPE_CHECKING:
     from .ledger import Ledger
@@ -156,26 +156,30 @@ def _collect_mlb(results: list[dict], now_utc: datetime, ledger: "Ledger") -> di
         matchup     = f"{g['away_team']} @ {g['home_team']}"
 
         # ── Moneyline ─────────────────────────────────────────────────────────
+        # Step 1 — pure confidence: probability of the picked outcome, then
+        # tier from that prob (no odds, no edge, no model-agreement).
+        # Step 2 — edge: model prob vs market implied prob, computed AFTER
+        # the side is fixed.  The two are deliberately independent.
         hp   = float(pred["home_win_prob"])
         mp   = float(g.get("home_implied_prob", 0.5))
-        edge = hp - mp
         _xgb = float(pred.get("xgb_prob", hp))
         _lr  = float(pred.get("lr_prob",  hp))
         _nn_raw = pred.get("nn_prob")
         _nn  = float(_nn_raw) if _nn_raw is not None else None
-        ml_conf = confidence_tier(_xgb, _lr, _nn)
 
-        # Always pick model-preferred side (edge >= 0 → home, else → away)
-        if edge >= 0:
+        # Always pick model-preferred side (home if model prob >= 0.5)
+        if hp >= 0.5:
             ml_side, ml_team = "home", g["home_team"]
             ml_odds = int(g.get("h2h_home_odds") or -110)
             ml_p    = hp
+            pick_edge = hp - mp
         else:
             ml_side, ml_team = "away", g["away_team"]
             ml_odds = int(g.get("h2h_away_odds") or -110)
             ml_p    = 1.0 - hp
+            pick_edge = (1.0 - hp) - (1.0 - mp)
 
-        pick_edge = abs(edge)
+        ml_conf = confidence_tier_from_prob(ml_p)
 
         if ml_odds > -300:   # sanity check: skip heavily juiced lines
             cands["moneyline"].append({
@@ -197,12 +201,13 @@ def _collect_mlb(results: list[dict], now_utc: datetime, ledger: "Ledger") -> di
             _rl2 = float(rl.get("lr_prob",  0.5))
             _rn_raw = rl.get("nn_prob")
             _rn  = float(_rn_raw) if _rn_raw is not None else None
-            rl_conf = confidence_tier(_rx, _rl2, _rn)
             rl_edge = float(rl.get("edge", 0.0))
             rl_side = rl.get("side", "home")
             rl_team = rl.get("pick_team", g["home_team"] if rl_side == "home" else g["away_team"])
             rl_odds = int(rl.get("pick_odds", -110))
             rl_prob = float(rl.get("pick_prob", 0.5))
+            # Tier from pick_prob only — independent of edge or model-agreement
+            rl_conf = confidence_tier_from_prob(rl_prob)
             # Signed pick-team line: home_pt is the home team's handicap (e.g. -1.5).
             # If we're picking the home side, the pick team gets home_pt.
             # If picking the away side, the pick team gets -home_pt.
@@ -225,11 +230,12 @@ def _collect_mlb(results: list[dict], now_utc: datetime, ledger: "Ledger") -> di
         tp = r.get("totals_pred")
         if tp:
             tp_edge = float(tp.get("edge", 0.0))
-            tp_conf = "strong" if tp.get("models_agree", True) else "moderate"
             tp_dir  = tp.get("direction", "over")
             tp_line = tp.get("total_line", 8.5)
             tp_odds = int(tp.get("pick_odds", -110))
             tp_prob = float(tp.get("pick_prob", 0.5))
+            # Tier from pick_prob only — independent of edge or model-agreement
+            tp_conf = confidence_tier_from_prob(tp_prob)
             cands["totals"].append({
                 "sport": "mlb", "sport_label": "MLB",
                 "game": g, "upset_score": 0.0,
@@ -265,24 +271,25 @@ def _collect_wnba(results: list[dict], now_utc: datetime, ledger: "Ledger") -> d
         matchup = f"{g['away_team']} @ {g['home_team']}"
 
         # ── Moneyline ─────────────────────────────────────────────────────────
+        # Step 1 — pure confidence: pick the side, derive tier from pick_prob.
+        # Step 2 — edge: model prob vs market implied prob. Independent.
         hp   = float(pred["home_win_prob"])
         mp   = float(g.get("home_implied_prob", 0.5))
-        edge = hp - mp
         _xgb = float(pred.get("xgb_prob", hp))
         _lr  = float(pred.get("lr_prob",  hp))
-        ml_conf = confidence_tier(_xgb, _lr, None)
 
-        # Always pick model-preferred side (edge >= 0 → home, else → away)
-        if edge >= 0:
+        if hp >= 0.5:
             ml_side, ml_team = "home", g["home_team"]
             ml_odds = int(g.get("h2h_home_odds") or -110)
             ml_p    = hp
+            pick_edge = hp - mp
         else:
             ml_side, ml_team = "away", g["away_team"]
             ml_odds = int(g.get("h2h_away_odds") or -110)
             ml_p    = 1.0 - hp
+            pick_edge = (1.0 - hp) - (1.0 - mp)
 
-        pick_edge = abs(edge)
+        ml_conf = confidence_tier_from_prob(ml_p)
 
         if ml_odds > -300:   # sanity check: skip heavily juiced lines
             cands["moneyline"].append({
@@ -301,11 +308,12 @@ def _collect_wnba(results: list[dict], now_utc: datetime, ledger: "Ledger") -> d
         sp = r.get("spread_pred")
         if sp:
             sp_edge = float(sp.get("edge", 0.0))
-            sp_conf = "strong" if sp.get("models_agree") else "moderate"
             sp_side = sp.get("side", "home")
             sp_team = sp.get("pick_team", g["home_team"] if sp_side == "home" else g["away_team"])
             sp_odds = int(sp.get("pick_odds", -110))
             sp_prob = float(sp.get("pick_prob", 0.5))
+            # Tier from pick_prob only — independent of edge or model-agreement
+            sp_conf = confidence_tier_from_prob(sp_prob)
             # Signed pick-team spread: spread_line is the home team's handicap.
             _sp_home_pt  = float(sp.get("spread_line", -5.5))
             _sp_pick_ln  = _sp_home_pt if sp_side == "home" else -_sp_home_pt
@@ -326,11 +334,12 @@ def _collect_wnba(results: list[dict], now_utc: datetime, ledger: "Ledger") -> d
         tp = r.get("totals_pred")
         if tp:
             tp_edge = float(tp.get("edge", 0.0))
-            tp_conf = "strong" if tp.get("models_agree", True) else "moderate"
             tp_dir  = tp.get("direction", "over")
             tp_line = tp.get("total_line", 165.5)
             tp_odds = int(tp.get("pick_odds", -110))
             tp_prob = float(tp.get("pick_prob", 0.5))
+            # Tier from pick_prob only — independent of edge or model-agreement
+            tp_conf = confidence_tier_from_prob(tp_prob)
             cands["totals"].append({
                 "sport": "wnba", "sport_label": "WNBA",
                 "game": g, "upset_score": 0.0,

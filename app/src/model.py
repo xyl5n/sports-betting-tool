@@ -77,6 +77,10 @@ class BettingModel:
         self.cv_accuracy:     Optional[float] = None
         self.lr_cv_accuracy:  Optional[float] = None
         self.nn_val_accuracy: Optional[float] = None   # held-out val accuracy
+        # Subset of feature-vector columns the XGB confidence model trains on
+        # (market-derived columns removed for MLB; None = use all).
+        self._xgb_cols:  Optional[list[int]] = None
+        self._xgb_names: Optional[list[str]] = None
 
     # ------------------------------------------------------------------
     # Training / loading
@@ -108,6 +112,14 @@ class BettingModel:
                 print("  Neural network not in saved model — retraining to add it.")
                 return self._train(stats_client, feature_builder, season)
 
+            # Pure-confidence XGB caches must have the market-free flag.
+            # Older caches were trained with the full feature vector and
+            # would leak market signal into the confidence probability.
+            if (self.sport.odds_key == _MLB_ODDS_KEY
+                    and saved.get("xgb_input_kind") != "market_free"):
+                print("  XGB input kind upgraded to market_free -- retraining.")
+                return self._train(stats_client, feature_builder, season)
+
             self.xgb          = saved["xgb"]
             self.lr           = saved["lr"]
             self.nn           = saved.get("nn")
@@ -116,6 +128,8 @@ class BettingModel:
             self.cv_accuracy     = saved.get("cv_accuracy")
             self.lr_cv_accuracy  = saved.get("lr_cv_accuracy")
             self.nn_val_accuracy = saved.get("nn_val_accuracy")
+            self._xgb_cols    = saved.get("xgb_cols")
+            self._xgb_names   = saved.get("xgb_names")
             self.is_trained    = True
             self.lr_is_trained = self.lr is not None
             self.nn_is_trained = self.nn is not None
@@ -242,22 +256,41 @@ class BettingModel:
         X_scaled = self.scaler.fit_transform(X_combined)
 
         # ── XGBoost (moneyline) ──────────────────────────────────────────────
+        # PURE CONFIDENCE: XGB trains on a feature subset that excludes every
+        # market-derived column (home_implied_prob, run_line, line_movement).
+        # The model's probability output therefore depends only on team /
+        # pitcher / situation state.  Edge against the market is a SEPARATE
+        # downstream step (see prediction_tiers.compute_edge).  LR and NN
+        # still train on the full feature vector -- only XGB is constrained.
+        if self.sport.odds_key == _MLB_ODDS_KEY:
+            from .sports_config import (
+                MLB_XGB_CONFIDENCE_COLUMNS,
+                MLB_XGB_CONFIDENCE_FEATURE_NAMES,
+            )
+            self._xgb_cols  = list(MLB_XGB_CONFIDENCE_COLUMNS)
+            self._xgb_names = list(MLB_XGB_CONFIDENCE_FEATURE_NAMES)
+            X_xgb = X_scaled[:, self._xgb_cols]
+        else:
+            self._xgb_cols  = None
+            self._xgb_names = list(self.sport.feature_names)
+            X_xgb = X_scaled
+
         self.xgb = xgb.XGBClassifier(**XGB_MONEYLINE_PARAMS)
         cv_fit_params = ({"sample_weight": sample_weights}
                          if sample_weights is not None else {})
         try:
             xgb_cv = cross_val_score(
-                self.xgb, X_scaled, y_combined, cv=5, scoring="accuracy",
+                self.xgb, X_xgb, y_combined, cv=5, scoring="accuracy",
                 fit_params=cv_fit_params,
             )
         except TypeError:
             # Older sklearn versions don't support fit_params in cross_val_score
-            xgb_cv = cross_val_score(self.xgb, X_scaled, y_combined, cv=5, scoring="accuracy")
+            xgb_cv = cross_val_score(self.xgb, X_xgb, y_combined, cv=5, scoring="accuracy")
         self.cv_accuracy = float(xgb_cv.mean())
-        self.xgb.fit(X_scaled, y_combined,
+        self.xgb.fit(X_xgb, y_combined,
                      **({"sample_weight": sample_weights} if sample_weights is not None else {}))
-        # Attach feature names so SHAP / get_score() show real names, not f0..f23.
-        self.xgb.get_booster().feature_names = list(self.sport.feature_names)
+        # Attach feature names matching the columns XGB actually trained on.
+        self.xgb.get_booster().feature_names = list(self._xgb_names)
         self.is_trained = True
 
         # ── Logistic Regression ───────────────────────────────────────────────
@@ -298,6 +331,11 @@ class BettingModel:
                 "cv_accuracy":     self.cv_accuracy,
                 "lr_cv_accuracy":  self.lr_cv_accuracy,
                 "nn_val_accuracy": self.nn_val_accuracy,
+                # XGB column subset (market-derived features removed).
+                # Loaders enforce the "market_free" contract via xgb_input_kind.
+                "xgb_cols":        self._xgb_cols,
+                "xgb_names":       self._xgb_names,
+                "xgb_input_kind":  "market_free",
             },
             self.model_path,
         )
@@ -421,9 +459,12 @@ class BettingModel:
         except Exception:
             scaled_ok = False
 
-        # XGBoost
+        # XGBoost (PURE CONFIDENCE -- market-derived columns removed for MLB).
+        # Edge against the market is computed downstream as a separate step,
+        # never folded back into this probability.
         if scaled_ok and self.is_trained and self.xgb is not None:
-            xgb_prob   = float(self.xgb.predict_proba(X)[0, 1])
+            X_xgb = X[:, self._xgb_cols] if self._xgb_cols is not None else X
+            xgb_prob   = float(self.xgb.predict_proba(X_xgb)[0, 1])
             xgb_method = "xgboost"
         else:
             xgb_prob   = _heuristic_prob(feature_vec, self.sport)
@@ -539,6 +580,21 @@ class BettingModel:
             except Exception:
                 pass
 
+        # ── Step 1: pure-probability pick + confidence tier ──────────────────
+        # The pick side is determined SOLELY by the probability the model
+        # assigns to home winning. Edge / odds / market implied probability
+        # are NEVER consulted here — that separation is the whole point of
+        # this restructure. The downstream display/picks layer computes
+        # edge against the market odds independently.
+        from .kelly import confidence_tier_from_prob
+        if combined >= 0.5:
+            pick_side = "home"
+            pick_prob = combined
+        else:
+            pick_side = "away"
+            pick_prob = 1.0 - combined
+        conf_tier = confidence_tier_from_prob(pick_prob)
+
         return {
             "home_win_prob":      combined,
             "xgb_prob":           xgb_prob,
@@ -551,6 +607,10 @@ class BettingModel:
             "nn_confidence":      abs(nn_prob  - 0.5) * 2 if nn_prob is not None else None,
             "models_agree":       models_agree,
             "method":             method_str,
+            # ── New Step-1 fields: separated from edge ─────────────────────
+            "pick_side":          pick_side,
+            "pick_prob":          pick_prob,
+            "confidence_tier":    conf_tier,
         }
 
     def get_raw_model(self):

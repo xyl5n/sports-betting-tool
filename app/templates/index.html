@@ -1389,16 +1389,6 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .pc-conflict-note {
   font-size: 11px; color: var(--yellow); font-weight: 600;
 }
-.pc-corr-note {
-  font-size: 10px; font-weight: 600;
-  color: #b39ddb;
-  background: rgba(139,92,246,.12);
-  border: 1px solid rgba(139,92,246,.28);
-  border-radius: 3px;
-  padding: 2px 6px;
-  display: inline-block;
-  margin-top: 4px;
-}
 .pc-track-btn {
   margin-top: auto; align-self: flex-end;
   padding: 4px 12px; font-size: 11px; font-weight: 600;
@@ -3996,19 +3986,14 @@ function _buildExplainPayload(g, betType) {
 // Green  : strong tier  AND  edge > 0
 // Yellow : strong tier  AND  edge <= 0  —OR—  moderate / split  AND  edge > 0
 // Red    : moderate / split AND edge <= 0  —OR—  low (any edge)
-function _confLevel(tier, edge) {
-  const e = edge ?? 0;
-  if (tier === 'strong') {
-    return e > 0
-      ? { cls: 'conf-strong', label: 'Strong Pick'    }
-      : { cls: 'conf-mod',    label: 'Moderate Pick'  };
-  }
-  if (tier === 'moderate' || tier === 'split') {
-    return e > 0
-      ? { cls: 'conf-mod',    label: 'Moderate Pick'  }
-      : { cls: 'conf-low',    label: 'Low Confidence' };
-  }
-  return { cls: 'conf-low', label: 'Low Confidence' };
+// Label is purely confidence-tier-based.
+// Edge never promotes or demotes the Strong / Moderate / Low label.
+// The second parameter is kept for backward compatibility with existing call
+// sites but is intentionally ignored.
+function _confLevel(tier, _edge) {
+  if (tier === 'strong')                       return { cls: 'conf-strong', label: 'Strong Pick'    };
+  if (tier === 'moderate' || tier === 'split') return { cls: 'conf-mod',    label: 'Moderate Pick'  };
+  return                                              { cls: 'conf-low',    label: 'Low Confidence' };
 }
 
 /**
@@ -4052,10 +4037,6 @@ function buildMlCard(g) {
   const edgeDisplay  = `<span class="pc-edge-lbl" style="color:${edgeColor}">${edgeVal} Edge</span>`;
   const conflictNote = isSplit ? `<div class="pc-conflict-note">⚡ Split signal</div>`
                      : conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
-  // Correlation indicator: ML confidence was floored up to match RL
-  const corrNote = g.ml_correlated_with_rl
-    ? `<div class="pc-corr-note" title="ML confidence floored to match Run Line — P(cover) ≤ P(win)">🔗 Correlated with RL</div>`
-    : '';
   let trackHtml = '';
   if (isUpcoming(g)) {
     if (_confirmed.has(g.game_id)) {
@@ -4077,7 +4058,7 @@ function buildMlCard(g) {
     <div class="pc-pick">${g.pick_team} ${oddsHtml(g.pick_odds)}</div>
     ${probsHtml}
     <div class="pc-edge-row">${valueBadge}${edgeDisplay}</div>
-    ${conflictNote}${corrNote}${trackHtml}
+    ${conflictNote}${trackHtml}
     <button class="pc-explain-btn" id="exp-btn-${g.game_id}-ml"
       onclick="explainPick('${g.game_id}','ml')">✦ Explain This Pick</button>
     <div class="pc-explain-panel" id="explain-${g.game_id}-ml" style="display:none"></div>
@@ -4099,10 +4080,6 @@ function buildRlCard(g) {
   const valueBadge   = rl.value_bet ? `<span class="pc-value-badge">Value</span>` : '';
   const conflictNote = isSplit ? `<div class="pc-conflict-note">⚡ Split signal</div>`
                      : conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
-  // Correlation indicator: RL confidence was capped down to match ML skepticism
-  const corrNote = rl.rl_correlated_with_ml
-    ? `<div class="pc-corr-note" title="RL confidence reduced — ML predicts low win probability; P(cover) ≤ P(win)">🔗 Correlated with ML</div>`
-    : '';
   const trackHtml = isUpcoming(g)
     ? `<button class="pc-track-btn ${conflict ? 'conflict' : ''}"
          id="rl-trk-${g.game_id}" onclick="trackProp('${g.game_id}','run_line')">
@@ -4127,7 +4104,7 @@ function buildRlCard(g) {
       <span class="pc-conf-pct">${(pickCp*100).toFixed(0)}% Confidence</span>
     </div>
     <div class="pc-edge-row">${valueBadge}${edgeDisplay}</div>
-    ${conflictNote}${corrNote}${trackHtml}
+    ${conflictNote}${trackHtml}
     <button class="pc-explain-btn" id="exp-btn-${g.game_id}-run_line"
       onclick="explainPick('${g.game_id}','run_line')">✦ Explain This Pick</button>
     <div class="pc-explain-panel" id="explain-${g.game_id}-run_line" style="display:none"></div>
@@ -6345,8 +6322,8 @@ function _buildExportText() {
   const viewDate = _viewDateET();
 
   // Reuse _confLevel() so confidence labels match the Full Slate UI exactly.
-  const confLabel = (tier, edge) => {
-    const c = _confLevel(tier ?? 'strong', edge ?? 0);
+  const confLabel = (tier) => {
+    const c = _confLevel(tier ?? 'strong');
     if (c.cls === 'conf-strong') return 'Strong';
     if (c.cls === 'conf-mod')    return 'Moderate';
     return 'Low Confidence';
@@ -6468,7 +6445,7 @@ function _buildExportText() {
     lines.push(`${g.sport_label} — ${g.away_team} vs ${g.home_team}`);
 
     if (g.ml) {
-      const cl = confLabel(g.ml.tier, g.ml.edge);
+      const cl = confLabel(g.ml.tier);
       _tally(cl);
       lines.push(`  Moneyline — ${g.ml.team}${fmtOdds(g.ml.odds)} · ${cl}`);
     } else {
@@ -6476,7 +6453,7 @@ function _buildExportText() {
     }
 
     if (g.rl) {
-      const cl      = confLabel(g.rl.tier, g.rl.edge);
+      const cl      = confLabel(g.rl.tier);
       _tally(cl);
       const lineVal = g.rl.line != null ? ` ${g.rl.line > 0 ? '+' : ''}${g.rl.line}` : '';
       lines.push(`  ${g.rl.label} — ${g.rl.team}${lineVal}${fmtOdds(g.rl.odds)} · ${cl}`);
@@ -6485,7 +6462,7 @@ function _buildExportText() {
     }
 
     if (g.tot) {
-      const cl  = confLabel(g.tot.tier, g.tot.edge);
+      const cl  = confLabel(g.tot.tier);
       _tally(cl);
       const dir     = g.tot.direction.charAt(0).toUpperCase() + g.tot.direction.slice(1);
       const lineVal = g.tot.line != null ? ` ${g.tot.line}` : '';

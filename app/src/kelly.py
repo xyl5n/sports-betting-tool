@@ -51,6 +51,10 @@ def implied_prob(american: int) -> float:
 
 def confidence_tier(xgb_prob: float, lr_prob: float, nn_prob=None) -> str:
     """
+    DEPRECATED — kept for any external scripts still calling it. Live picks
+    should use confidence_tier_from_prob() instead, which classifies a pick
+    by its raw probability rather than by model agreement.
+
     Determine pick confidence from model agreement.
     strong   – all available models unanimous
     moderate – 2-of-3 majority (with NN present)
@@ -69,6 +73,39 @@ def confidence_tier(xgb_prob: float, lr_prob: float, nn_prob=None) -> str:
     nn_home    = nn_prob >= 0.5
     home_votes = sum([xgb_home, lr_home, nn_home])
     return "strong" if home_votes in (0, 3) else "moderate"
+
+
+# ── Probability-based confidence tiering ──────────────────────────────────────
+# Independent of model agreement, market odds, or edge. The tier is a
+# function of the raw probability the model assigns to the picked outcome
+# (P(team wins) for moneyline, P(team covers -1.5) for run line at -1.5,
+# P(combined > line) for totals over).  Edge is reported separately.
+CONFIDENCE_STRONG_MIN:   float = 0.62   # > 62%  → strong
+CONFIDENCE_MODERATE_MIN: float = 0.52   # 52-62% → moderate; below → low
+
+
+def confidence_tier_from_prob(pick_prob: float | None) -> str:
+    """
+    Return 'strong' | 'moderate' | 'low' based solely on the model's
+    raw probability for the picked outcome.
+
+        prob > 0.62   → 'strong'
+        prob in [0.52, 0.62]  → 'moderate'
+        prob < 0.52   → 'low'
+
+    Edge and model-agreement information are deliberately not consulted —
+    the tier reflects how confident the model is about the OUTCOME, and
+    edge is a separately reported number that compares this confidence
+    to the market's implied probability.
+    """
+    if pick_prob is None:
+        return "low"
+    p = float(pick_prob)
+    if p > CONFIDENCE_STRONG_MIN:
+        return "strong"
+    if p >= CONFIDENCE_MODERATE_MIN:
+        return "moderate"
+    return "low"
 
 
 def size_bet(
