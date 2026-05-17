@@ -30604,6 +30604,66 @@
       "settled": false,
       "actual_outcome": null,
       "correct": null
+    },
+    {
+      "pick_id": "2026-05-17_New_York_Yankees_at_New_York_Mets_moneyline",
+      "recorded_at": "2026-05-17T21:15:11Z",
+      "game_date": "2026-05-17",
+      "matchup": "New York Yankees @ New York Mets",
+      "sport": "MLB",
+      "bet_type": "moneyline",
+      "nn_pick": "home",
+      "nn_prob": 0.95,
+      "nn_confidence": 0.9,
+      "settled": false,
+      "actual_outcome": null,
+      "correct": null
+    },
+    {
+      "pick_id": "2026-05-17_New_York_Yankees_at_New_York_Mets_run_line",
+      "recorded_at": "2026-05-17T21:15:12Z",
+      "game_date": "2026-05-17",
+      "matchup": "New York Yankees @ New York Mets",
+      "sport": "MLB",
+      "bet_type": "run_line",
+      "nn_pick": "home",
+      "nn_prob": 0.928865,
+      "nn_confidence": 0.85773,
+      "settled": false,
+      "actual_outcome": null,
+      "correct": null
+    },
+    {
+      "pick_id": "2026-05-17_New_York_Yankees_at_New_York_Mets_totals",
+      "recorded_at": "2026-05-17T21:15:12Z",
+      "game_date": "2026-05-17",
+      "matchup": "New York Yankees @ New York Mets",
+      "sport": "MLB",
+      "bet_type": "totals",
+      "nn_pick": "under",
+      "nn_prob": 0.690881,
+      "nn_confidence": 0.381763,
+      "settled": false,
+      "actual_outcome": null,
+      "correct": null,
+      "extra": {
+        "nn_run_total": 10.149,
+        "line": 13.5
+      }
+    },
+    {
+      "pick_id": "2026-05-17_Chicago_Cubs_at_Chicago_White_Sox_moneyline",
+      "recorded_at": "2026-05-17T21:31:24Z",
+      "game_date": "2026-05-17",
+      "matchup": "Chicago Cubs @ Chicago White Sox",
+      "sport": "MLB",
+      "bet_type": "moneyline",
+      "nn_pick": "home",
+      "nn_prob": 0.95,
+      "nn_confidence": 0.9,
+      "settled": false,
+      "actual_outcome": null,
+      "correct": null
     }
   ]
 }

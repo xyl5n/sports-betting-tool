@@ -191,6 +191,14 @@ _ARCHIVE_PATH             = Path("data/bet_history_archive.json")
 # full results payloads.  Shape: {"mlb": {"analyzed_at": "<iso>", "date": "YYYY-MM-DD"}, "wnba": {...}}
 _ANALYSIS_TIMESTAMPS_FILE = Path("data/analysis_timestamps.json")
 _DAILY_SNAPSHOT_FILE      = Path("data/daily_snapshot.json")
+_DAILY_SNAPSHOT_TMP       = Path("data/daily_snapshot.json.tmp")
+
+# Step 2: single lock so concurrent requests (init + analyze) never race on the file.
+import threading as _threading
+_snapshot_lock = _threading.Lock()
+
+# Step 3: master kill-switch.  Set env var SNAPSHOT_ENABLED=0 to bypass entirely.
+_SNAPSHOT_ENABLED = os.environ.get("SNAPSHOT_ENABLED", "1").strip() not in ("0", "false", "False", "FALSE")
 
 
 def _read_analysis_timestamps() -> dict:
@@ -228,41 +236,99 @@ def _today_et() -> str:
 
 
 def _read_daily_snapshot() -> dict:
-    """Read daily snapshot file; return {} on any error."""
-    try:
-        return json.loads(_DAILY_SNAPSHOT_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    """Read daily snapshot file; return {} on any error.  Thread-safe."""
+    if not _SNAPSHOT_ENABLED:
         return {}
+    with _snapshot_lock:
+        try:
+            if not _DAILY_SNAPSHOT_FILE.exists():
+                return {}
+            raw = _DAILY_SNAPSHOT_FILE.read_text(encoding="utf-8")
+            if not raw.strip():
+                return {}
+            return json.loads(raw)
+        except Exception as _e:
+            print(f"SNAPSHOT read error (ignored): {_e}", flush=True, file=sys.stderr)
+            return {}
 
 
 def _snapshot_is_today(snap: dict) -> bool:
     """True if snapshot's date equals today in Eastern time."""
-    return bool(snap) and snap.get("date") == _today_et()
+    if not _SNAPSHOT_ENABLED:
+        return False
+    try:
+        return bool(snap) and snap.get("date") == _today_et()
+    except Exception:
+        return False
 
 
 def _write_daily_snapshot(sport: str, payload: dict, ts: datetime) -> None:
     """
-    Persist sport's analysis into the daily snapshot file.
-    Write-once per day per sport — if an entry already exists for today's
-    ET date this is a no-op (snapshot is the immutable pre-game record).
-    Resets the entire file when a new ET day begins.
+    Persist sport's analysis into the daily snapshot file.  Write-once per day
+    per sport — if an entry already exists for today's ET date this is a no-op.
+    Uses an atomic temp-file + rename so the file is never partially written.
+    Thread-safe via _snapshot_lock.
     """
-    try:
-        Path("data").mkdir(exist_ok=True)
-        today = _today_et()
-        snap  = _read_daily_snapshot()
-        # Fresh day → start a new file
-        if snap.get("date") != today:
-            snap = {"date": today}
-        # Never overwrite an existing entry for this sport
-        if snap.get(sport):
-            return
-        snap[sport] = {"analyzed_at": ts.isoformat(), **payload}
-        _DAILY_SNAPSHOT_FILE.write_text(
-            json.dumps(snap, indent=2, default=str), encoding="utf-8"
-        )
-    except Exception:
-        pass
+    if not _SNAPSHOT_ENABLED:
+        return
+    with _snapshot_lock:
+        try:
+            Path("data").mkdir(exist_ok=True)
+            today = _today_et()
+            # Read current state without re-acquiring the lock (already held)
+            snap: dict = {}
+            try:
+                if _DAILY_SNAPSHOT_FILE.exists():
+                    raw = _DAILY_SNAPSHOT_FILE.read_text(encoding="utf-8")
+                    if raw.strip():
+                        snap = json.loads(raw)
+            except Exception:
+                snap = {}
+            # Fresh day → start clean
+            if snap.get("date") != today:
+                snap = {"date": today}
+            # Write-once: never overwrite an existing entry for this sport
+            if snap.get(sport):
+                return
+            snap[sport] = {"analyzed_at": ts.isoformat(), **payload}
+            # Step 4: atomic write — temp file then rename so the live file is
+            # never in a partially-written state.
+            raw_out = json.dumps(snap, indent=2, default=str)
+            _DAILY_SNAPSHOT_TMP.write_text(raw_out, encoding="utf-8")
+            _DAILY_SNAPSHOT_TMP.replace(_DAILY_SNAPSHOT_FILE)
+        except Exception as _e:
+            print(f"SNAPSHOT write error (ignored): {_e}", flush=True, file=sys.stderr)
+            try:
+                _DAILY_SNAPSHOT_TMP.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _clear_snapshot_sport(sport: str) -> None:
+    """
+    Remove a single sport's entry from today's snapshot so a fresh run can
+    overwrite it.  Used by force_refresh.  Atomic write; never raises.
+    """
+    if not _SNAPSHOT_ENABLED:
+        return
+    with _snapshot_lock:
+        try:
+            if not _DAILY_SNAPSHOT_FILE.exists():
+                return
+            raw = _DAILY_SNAPSHOT_FILE.read_text(encoding="utf-8")
+            snap = json.loads(raw) if raw.strip() else {}
+            if sport not in snap:
+                return
+            del snap[sport]
+            raw_out = json.dumps(snap, indent=2, default=str)
+            _DAILY_SNAPSHOT_TMP.write_text(raw_out, encoding="utf-8")
+            _DAILY_SNAPSHOT_TMP.replace(_DAILY_SNAPSHOT_FILE)
+        except Exception as _e:
+            print(f"SNAPSHOT clear error (ignored): {_e}", flush=True, file=sys.stderr)
+            try:
+                _DAILY_SNAPSHOT_TMP.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 _ANALYST_SYSTEM_PROMPT = (
@@ -1845,6 +1911,7 @@ def init_analysis():
         if not _ANALYSIS_CACHE_FILE.exists():
             return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
         payload = json.loads(_ANALYSIS_CACHE_FILE.read_text(encoding="utf-8"))
+        today   = _today_et()
         if payload.get("date") != today:
             return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
 
@@ -1881,10 +1948,10 @@ def _run_daily_picks_selection() -> None:
     picks always reflect the most-recent data from whichever sport was last
     analyzed.
     """
-    # Use the ensemble store as the single source of truth when available
-    ensemble = ensemble_store.get_picks()
-    mlb_results  = ensemble.get("mlb")  or _analysis_state.get("results")  or []
-    wnba_results = ensemble.get("wnba") or _wnba_analysis_state.get("results") or []
+    # Always use in-memory results so _collect_mlb gets the raw nested structure
+    # (ensemble_store returns serialized flat dicts which lack r["game"] etc.)
+    mlb_results  = _analysis_state.get("results") or []
+    wnba_results = _wnba_analysis_state.get("results") or []
     if not mlb_results and not wnba_results:
         return
     try:
@@ -1913,9 +1980,21 @@ def analyze():
     if not sports_key or sports_key == "your_api_sports_key_here":
         return jsonify({"error": "API_SPORTS_KEY not configured in .env"}), 400
 
+    # Step 5: health check — printed to stderr before any logic runs so even a
+    # fast crash shows *something* in the logs.
+    print(f"ANALYZE [{sport.upper()}] health-check: route entered, force_refresh={data.get('force_refresh')}, snapshot_enabled={_SNAPSHOT_ENABLED}", flush=True, file=sys.stderr)
+
+    # ── Cache control params — parsed early so force_refresh can bypass snapshot ─
+    force_refresh = bool(data.get("force_refresh", False))
+
     # ── Snapshot guard — return locked picks immediately if snapshot exists ─────
+    # Bypassed when force_refresh=True (explicit re-run request).  In that case
+    # the snapshot entry for this sport is cleared so a fresh one gets written
+    # at the end of the new run.
+    if force_refresh:
+        _clear_snapshot_sport(sport)   # atomic, locked, never raises
     _asnap = _read_daily_snapshot()
-    if _snapshot_is_today(_asnap) and _asnap.get(sport):
+    if not force_refresh and _snapshot_is_today(_asnap) and _asnap.get(sport):
         _asp = _asnap[sport]
         _analysis_state["bankroll"] = bankroll
         if _analysis_state.get("last_analyzed_at") is None:
@@ -1954,7 +2033,8 @@ def analyze():
     # force_refresh=True  → always hit the API, ignore any cached results
     # use_cached=True     → return existing in-memory results without any API call,
     #                       even if the TTL has expired (user chose "Use Cached Data")
-    force_refresh = bool(data.get("force_refresh", False))
+    # (force_refresh was already parsed above the snapshot guard — kept here for
+    #  use_cached which wasn't needed earlier)
     use_cached    = bool(data.get("use_cached",    False))
     _last         = _analysis_state.get("last_analyzed_at")
     _has_results  = (
@@ -1996,15 +2076,24 @@ def analyze():
             "parlays":         parlays,
         })
 
+    if sport not in SPORTS:
+        print(f"ANALYZE FATAL: unknown sport {sport!r}", flush=True, file=sys.stderr)
+        return jsonify({"error": f"Unknown sport: {sport}"}), 400
     sport_cfg = SPORTS[sport]
 
+    # ── Step checkpoint helper — prints to stderr so errors appear in Railway logs ──
+    def _step(label: str) -> None:
+        print(f"ANALYZE [{sport.upper()}] {label}", flush=True, file=sys.stderr)
+
     try:
+        _step("importing model modules")
         from src.model import BettingModel
         from src.run_line_model import RunLineModel
         from src.totals_model import TotalsModel
         from src.explainer import PredictionExplainer
 
         # Step 1 — season data
+        _step("Step 1: loading season stats from GameStore")
         store = GameStore(
             api_key=sports_key,
             base_url=sport_cfg.api_sports_base,
@@ -2013,12 +2102,15 @@ def analyze():
             cache=_cache,
         )
         n_completed = store.load(season)
+        _step(f"Step 1 done: {n_completed} completed games loaded")
 
         # Step 2 — feature builder (MLB only; WNBA uses its own dedicated builder)
+        _step("Step 2: building MLBFeatureBuilder")
         from src.mlb_features import MLBFeatureBuilder
         fb = MLBFeatureBuilder(store)
 
         # Step 3 — models (moneyline + run line + totals for MLB)
+        _step("Step 3: training / loading moneyline model")
         model  = BettingModel(sport_cfg)
         status = model.train_or_load(
             stats_client=store, feature_builder=fb,
@@ -2027,24 +2119,34 @@ def analyze():
         cv_acc     = float(model.cv_accuracy)      if model.cv_accuracy      else None
         lr_cv_acc  = float(model.lr_cv_accuracy)  if model.lr_cv_accuracy  else None
         nn_val_acc = float(model.nn_val_accuracy) if model.nn_val_accuracy else None
+        _step(f"Step 3 moneyline done: status={status!r}")
 
         rl_model = totals_model = None
         if sport == "mlb":
+            _step("Step 3b: training / loading run-line model")
             rl_model = RunLineModel()
             rl_status = rl_model.train_or_load(store, fb, season)
             _logger.info("run_line model: %s", rl_status)
+            _step(f"Step 3b done: run_line status={rl_status!r}")
+
+            _step("Step 3c: training / loading totals model")
             totals_model = TotalsModel()
             tot_status = totals_model.train_or_load(store, fb, season)
             _logger.info("totals model: %s", tot_status)
+            _step(f"Step 3c done: totals status={tot_status!r}")
 
         # Step 4 — odds (baseball_mlb only)
+        _step("Step 4: fetching odds from Odds API")
         odds_client = OddsClient(odds_key, _cache)
         games = odds_client.get_odds(sport_key=sport_cfg.odds_key)
+        _step(f"Step 4 done: {len(games)} games with odds")
 
         # Freeze pre-game odds: for started games, restore market odds from before first pitch
+        _step("Step 4b: locking pre-game odds")
         games = _lock_in_pre_game_odds(games)
 
         if not games:
+            _step("Step 4: no games found — returning empty result")
             return jsonify({
                 "success": True, "no_games": True, "results": [],
                 "model_status": status,
@@ -2056,27 +2158,32 @@ def analyze():
             games = games[:games_lim]
 
         # Step 5 — load model weights then predict + explain
+        _step(f"Step 5: running predictions on {len(games)} games")
         _wt_ledger    = Ledger(path="data/ledger.json", starting_bankroll=bankroll)
         model_weights = _wt_ledger.get_model_weights()
 
         explainer    = PredictionExplainer(sport_cfg)
         rl_explainer = PredictionExplainer(sport_cfg) if rl_model else None
         results = []
-        for game in games:
+        for _gi, game in enumerate(games):
+            _step(f"  game {_gi+1}/{len(games)}: {game.get('away_team','?')} @ {game.get('home_team','?')}")
             built = fb.build_for_game(game)
             if built is None:
+                _step(f"  game {_gi+1}: build_for_game returned None — skipping")
                 continue
             feature_vec, meta = built
+
+            _step(f"  game {_gi+1}: moneyline predict")
             prediction  = model.predict(feature_vec, weights=model_weights, game_meta=game)
             shap_result = explainer.explain(
                 feature_vec, model=model.get_raw_model(),
                 scaler=model.get_scaler(), is_trained=model.is_trained,
             )
+
             # Run line prediction (MLB only).
-            # The RL XGB models P(margin>=2 | home wins); we must pass the
-            # moneyline P(home wins) so it can recover the joint probability.
             rl_pred = None
             if rl_model and rl_model.is_trained:
+                _step(f"  game {_gi+1}: run-line predict")
                 rl_pred = rl_model.predict(
                     feature_vec, game,
                     weights=model_weights,
@@ -2091,9 +2198,10 @@ def analyze():
                     )
                     rl_pred["shap"] = rl_shap
 
-            # Totals prediction (MLB only, requires O/U line from odds API)
+            # Totals prediction
             totals_pred = None
             if totals_model and totals_model.is_trained and game.get("total_line") is not None:
+                _step(f"  game {_gi+1}: totals predict")
                 totals_vec = fb.build_totals_from_meta(meta)
                 if totals_vec is not None:
                     totals_pred = totals_model.predict(totals_vec, game, weights=model_weights)
@@ -2107,8 +2215,11 @@ def analyze():
                 "totals_pred": totals_pred,
             })
 
+        _step(f"Step 5 done: {len(results)} games predicted")
+
         # Compute upset factor for each game (MLB only; cached 1h per team)
         if sport == "mlb":
+            _step("Step 5b: computing upset factors")
             _upset_calc.season = season
             for r in results:
                 g = r["game"]
@@ -2127,9 +2238,11 @@ def analyze():
         _analysis_state["parlays"]  = {}  # reset until computed below
 
         # Step 6 — cross-sport daily picks selection (top-5 per category, Half Kelly)
+        _step("Step 6: daily picks selection")
         _run_daily_picks_selection()
 
         # Reload ledger to get current personal_starting_bankroll for serialization
+        _step("Step 7: serializing results")
         _ledger_for_serial  = Ledger(path="data/ledger.json", starting_bankroll=bankroll)
         personal_starting   = _ledger_for_serial.data.get("personal_starting_bankroll", bankroll)
 
@@ -2145,6 +2258,8 @@ def analyze():
             "lr_cv_accuracy":  lr_cv_acc,
             "nn_val_accuracy": nn_val_acc,
         }
+
+        _step("Step 8: saving cache and snapshot")
         _save_analysis_cache(serialized, parlays, sport, n_completed,
                              cv_acc, lr_cv_acc, nn_val_acc, analyzed_at=_ts)
         _write_analysis_timestamp("mlb", _ts)
@@ -2158,6 +2273,7 @@ def analyze():
             "model_status":    status,
         }, _ts)
         ensemble_store.save(serialized, "mlb")
+        _step(f"DONE: {len(serialized)} games serialized and saved")
         return jsonify({
             "success":         True,
             "cached":          False,
@@ -2175,7 +2291,16 @@ def analyze():
         })
 
     except Exception as exc:
-        return jsonify({"error": str(exc), "detail": traceback.format_exc()}), 500
+        _tb = traceback.format_exc()
+        print(
+            f"\nANALYZE [{sport.upper()}] CRASHED ──────────────────────────────────\n"
+            f"  type:    {type(exc).__name__}\n"
+            f"  message: {exc}\n"
+            f"  traceback:\n{_tb}"
+            f"────────────────────────────────────────────────────────────────\n",
+            flush=True, file=sys.stderr,
+        )
+        return jsonify({"error": str(exc), "detail": _tb}), 500
 
 
 @app.route("/api/refresh_models", methods=["POST"])
@@ -3576,9 +3701,13 @@ def analyze_wnba():
     if not odds_key or odds_key == "your_odds_api_key_here":
         return jsonify({"error": "ODDS_API_KEY not configured in .env"}), 400
 
+    print(f"ANALYZE [WNBA] health-check: route entered, force_refresh={force_refresh}, snapshot_enabled={_SNAPSHOT_ENABLED}", flush=True, file=sys.stderr)
+
     # ── Snapshot guard ────────────────────────────────────────────────────────
+    if force_refresh:
+        _clear_snapshot_sport("wnba")   # atomic, locked, never raises
     _wsnap2 = _read_daily_snapshot()
-    if _snapshot_is_today(_wsnap2) and _wsnap2.get("wnba"):
+    if not force_refresh and _snapshot_is_today(_wsnap2) and _wsnap2.get("wnba"):
         _wsp2 = _wsnap2["wnba"]
         _wnba_analysis_state["bankroll"] = bankroll
         if _wnba_analysis_state.get("last_analyzed_at") is None:

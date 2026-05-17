@@ -30,7 +30,9 @@
       "Bash(dir \"C:\\\\sports-betting-ai\\\\app\" /b)",
       "Bash(set PYTHONIOENCODING=utf-8)",
       "Bash(xargs cat)",
-      "Bash(pip freeze *)"
+      "Bash(pip freeze *)",
+      "Bash(dir \"C:\\\\sports-betting-ai\\\\app\\\\.cache\")",
+      "Bash(findstr /i \"run_line\\\\|rl_model\\\\|model_rl\")"
     ]
   }
 }

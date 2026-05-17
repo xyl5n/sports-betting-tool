@@ -3320,7 +3320,7 @@ async function runAllAnalysis() {
     const resp = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sport: 'mlb', bankroll: _bankroll, season: 2024 }),
+      body: JSON.stringify({ sport: 'mlb', bankroll: _bankroll, season: 2024, force_refresh: true }),
     });
     const data = await resp.json();
 
@@ -3376,7 +3376,7 @@ async function runAllAnalysis() {
     const resp = await fetch('/api/wnba/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bankroll: _wnbaBankroll, season: 2025 }),
+      body: JSON.stringify({ bankroll: _wnbaBankroll, season: 2025, force_refresh: true }),
     });
     const data = await resp.json();
 

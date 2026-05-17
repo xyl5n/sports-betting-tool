@@ -490,10 +490,12 @@ class RunLineModel:
             return None
 
         # Both heads now model P(margin >= 2 | home wins) — conditional probs.
-        # XGB also runs on the pure-confidence feature subset (no market columns).
+        # Both XGB and LR run on the pure-confidence feature subset (no market
+        # columns) because the LR was also trained on that same subset
+        # (X_cond = X_scaled[:, self._xgb_cols][home_won_mask] in _train).
         X_xgb = X[:, self._xgb_cols] if self._xgb_cols is not None else X
         xgb_cond = float(self.xgb.predict_proba(X_xgb)[0, 1])
-        lr_cond  = (float(self.lr.predict_proba(X)[0, 1])
+        lr_cond  = (float(self.lr.predict_proba(X_xgb)[0, 1])
                     if self.lr_is_trained else xgb_cond)
 
         # Multiply each classifier's conditional output by THAT classifier's
