@@ -4,6 +4,7 @@ All existing src/ modules are reused unchanged — only the display layer change
 from Rich terminal output to JSON served to the PyWebView browser frontend.
 """
 import json
+import logging
 import os
 import sys
 import threading
@@ -18,6 +19,41 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 load_dotenv()
+print("App starting...", flush=True, file=sys.stderr)
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
+#   WARNING  — only errors/warnings printed; safe for Railway's 500-line/sec cap (default)
+#   INFO     — adds one summary line per analysis run ("MLB analysis complete: N games")
+#   DEBUG    — full print() output restored; for local development only
+_LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.WARNING),
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
+_logger = logging.getLogger("sports_betting")
+
+
+class _StdoutToLogger:
+    """Route every print() call through the logger at DEBUG level.
+
+    A single redirect here silences all print() calls across app.py and every
+    src/ module without touching those files.  Railway operators control
+    verbosity via the LOG_LEVEL environment variable (default WARNING).
+    """
+    def write(self, msg: str) -> None:
+        msg = msg.rstrip()
+        if msg:
+            _logger.debug("%s", msg)
+
+    def flush(self) -> None:
+        pass
+
+
+sys.stdout = _StdoutToLogger()
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.cache import Cache
@@ -73,8 +109,7 @@ _upset_calc          = UpsetCalculator(cache=_cache)
 # ── Anthropic helper ──────────────────────────────────────────────────────────
 
 def _call_analyst(prompt: str, max_tokens: int = 600) -> str:
-    """Call the Anthropic analyst model and return the raw response text.
-    Raises ValueError if API key is missing; re-raises Anthropic errors as-is."""
+    """Call the Anthropic analyst model with a single user prompt."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
@@ -86,6 +121,103 @@ def _call_analyst(prompt: str, max_tokens: int = 600) -> str:
         messages=[{"role": "user", "content": prompt}],
     )
     return msg.content[0].text.strip()
+
+
+def _call_analyst_chat(extra_context: str, messages: list, max_tokens: int = 800) -> str:
+    """Call the Anthropic analyst model with a multi-turn conversation.
+
+    extra_context is appended to the system prompt so the analyst has today's
+    game data in every reply.  messages is the full history including the latest
+    user message, in [{role, content}] form.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not set in .env")
+    system = _ANALYST_SYSTEM_PROMPT
+    if extra_context:
+        system += f"\n\n{extra_context}"
+    client = _anthropic.Anthropic(api_key=api_key)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=max_tokens,
+        system=system,
+        messages=messages,
+    )
+    return msg.content[0].text.strip()
+
+
+def _build_chat_context(results: list, bankroll: float, sport: str) -> str:
+    """Build a compact text summary of today's games for the chat system prompt."""
+    if not results:
+        return "No games have been analyzed yet for today. Tell the user to run analysis first."
+
+    try:
+        ledger     = Ledger(path="data/ledger.json", starting_bankroll=bankroll)
+        s_bankroll = ledger.data.get("personal_starting_bankroll", bankroll)
+        serialized = [_serialize(r, bankroll, sport, s_bankroll) for r in results]
+    except Exception:
+        serialized = [
+            {"away_team": r.get("game", {}).get("away_team", ""),
+             "home_team": r.get("game", {}).get("home_team", "")}
+            for r in results
+        ]
+
+    lines = [f"TODAY'S {sport.upper()} SLATE — {len(serialized)} GAMES\n"]
+
+    for g in serialized[:16]:
+        away = g.get("away_team", "Away")
+        home = g.get("home_team", "Home")
+
+        pick_team = g.get("pick_team", "")
+        pick_odds = g.get("pick_odds")
+        ml_conf   = g.get("ml_confidence") or g.get("xgb_prob") or 0
+        edge      = g.get("pick_edge") or 0
+        conflict  = g.get("conflict", False)
+
+        rl_pick  = g.get("run_line_pick_team", "")
+        rl_point = g.get("run_line_point", -1.5)
+        rl_side  = g.get("run_line_side", "")
+        rl_odds  = g.get("run_line_pick_odds")
+
+        total_dir  = (g.get("direction") or "").upper()
+        total_line = g.get("total_line", "")
+
+        h_sp_name = g.get("home_sp_name", "")
+        a_sp_name = g.get("away_sp_name", "")
+        h_sp      = g.get("home_sp") or {}
+        a_sp      = g.get("away_sp") or {}
+
+        shap_vals = ((g.get("shap") or {}).get("values") or [])[:3]
+        uf_score  = (g.get("upset_factor") or {}).get("score", "n/a")
+
+        parts = [f"{away} @ {home}:"]
+        if conflict:
+            parts.append("  ML: SKIP (models conflict)")
+        elif pick_team:
+            parts.append(
+                f"  ML: {pick_team} {_format_odds(pick_odds)} | "
+                f"{ml_conf * 100:.1f}% conf | {edge * 100:+.1f}% edge"
+            )
+        if rl_pick:
+            pt_str = f"{rl_point:+.1f}" if rl_side == "home" else f"{-rl_point:+.1f}"
+            parts.append(f"  RL: {rl_pick} {pt_str} {_format_odds(rl_odds)}")
+        if total_dir and total_line:
+            parts.append(f"  Total: {total_dir} {total_line}")
+        sp_parts = []
+        if a_sp_name:
+            sp_parts.append(f"{a_sp_name} ERA:{a_sp.get('era', '?')} WHIP:{a_sp.get('whip', '?')}")
+        if h_sp_name:
+            sp_parts.append(f"{h_sp_name} ERA:{h_sp.get('era', '?')} WHIP:{h_sp.get('whip', '?')}")
+        if sp_parts:
+            parts.append(f"  SPs: {' vs '.join(sp_parts)}")
+        if shap_vals:
+            top = ", ".join(v.get("label") or v.get("feature", "") for v in shap_vals)
+            parts.append(f"  Key factors: {top}")
+        parts.append(f"  Upset risk: {uf_score}/10")
+
+        lines.append("\n".join(parts))
+
+    return "\n\n".join(lines)
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -484,10 +616,10 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
         _expected_pt = -1.5 if _hml < _aml else 1.5
         _actual_pt   = out["run_line"].get("run_line_point")
         if _actual_pt is not None and abs(float(_actual_pt) - _expected_pt) > 0.01:
-            print(
-                f"[RL Validation] {out['home_team']} vs {out['away_team']}: "
-                f"run_line_point={_actual_pt} but home_ml={_hml} vs away_ml={_aml}, "
-                f"expected {_expected_pt}. Auto-correcting."
+            _logger.warning(
+                "[RL Validation] %s vs %s: run_line_point=%s but home_ml=%s vs away_ml=%s, "
+                "expected %s — auto-correcting.",
+                out["home_team"], out["away_team"], _actual_pt, _hml, _aml, _expected_pt,
             )
             out["run_line"]["run_line_point"] = _expected_pt
             out["run_line"]["run_line_home_odds"], out["run_line"]["run_line_away_odds"] = (
@@ -1127,6 +1259,11 @@ def _save_analysis_cache(serialized: list, parlays: dict, sport: str,
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
 
 @app.route("/")
 def index():
@@ -2895,6 +3032,36 @@ def ai_breakdown():
         pass
 
     return jsonify(parsed)
+
+
+@app.route("/api/ai/chat", methods=["POST"])
+def ai_chat():
+    """Handle a single chat turn with the AI sports analyst.
+
+    Accepts {message: str, history: [{role, content}]} and returns {response: str}.
+    Today's game data is loaded into the system prompt so the analyst can answer
+    questions about any game without extra API calls.
+    """
+    data    = request.get_json() or {}
+    message = (data.get("message") or "").strip()
+    history = data.get("history") or []
+
+    if not message:
+        return jsonify({"error": "No message provided"}), 400
+
+    results  = _analysis_state.get("results", [])
+    bankroll = float(_analysis_state.get("bankroll", 250))
+    sport    = _analysis_state.get("sport", "mlb") or "mlb"
+
+    context  = _build_chat_context(results, bankroll, sport)
+    messages = list(history) + [{"role": "user", "content": message}]
+
+    try:
+        response = _call_analyst_chat(context, messages, max_tokens=800)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({"response": response})
 
 
 # ── WNBA analysis endpoint ────────────────────────────────────────────────────

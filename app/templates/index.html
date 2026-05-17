@@ -945,58 +945,74 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .ep-verdict-disagree { background: rgba(244,67,54,.15);  color: #f44336; }
 .ep-verdict-lean     { background: rgba(255,165,0,.15);  color: #ffa500; }
 
-/* ── AI Breakdown tab ────────────────────────────────────────────────────── */
-.ai-section { margin-bottom: 28px; }
-.ai-section-hdr {
-  font-size: 12px; font-weight: 700; color: var(--accent);
-  text-transform: uppercase; letter-spacing: .7px;
-  margin-bottom: 12px; padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
+/* ── AI Chat tab ─────────────────────────────────────────────────────────── */
+.chat-outer {
+  display: flex; flex-direction: column;
+  height: calc(100vh - var(--header-h) - var(--tab-h) - 48px);
+  max-width: 820px; margin: 0 auto;
 }
-.ai-game-row {
-  display: flex; flex-direction: column; gap: 5px;
-  padding: 11px 14px; background: var(--bg2); border-radius: 8px;
-  margin-bottom: 8px; border: 1px solid var(--border);
+.chat-suggestions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 12px 0 14px; border-bottom: 1px solid var(--border);
+  margin-bottom: 12px; flex-shrink: 0;
 }
-.ai-game-matchup { font-size: 13px; font-weight: 600; color: var(--text); }
-.ai-game-analysis { font-size: 12px; color: var(--dim); line-height: 1.55; }
-.ai-best-bet {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 11px 14px; background: var(--bg2); border-radius: 8px;
-  margin-bottom: 8px; border: 1px solid rgba(76,175,80,.35);
+.chat-suggestion-label { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.chat-chip {
+  padding: 5px 12px; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 20px; color: var(--dim); cursor: pointer; font-size: 12px;
+  transition: background .12s, color .12s, border-color .12s; white-space: nowrap;
 }
-.ai-best-bet-pick { font-size: 13px; font-weight: 700; color: #4caf50; }
-.ai-best-bet-reason { font-size: 12px; color: var(--dim); line-height: 1.5; }
-.ai-parlay-card {
-  padding: 11px 14px; background: var(--bg2); border-radius: 8px;
-  margin-bottom: 8px; border: 1px solid rgba(140,100,220,.4);
+.chat-chip:hover { background: rgba(96,165,250,.12); border-color: var(--blue); color: var(--blue); }
+.chat-messages {
+  flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  padding: 4px 0 12px;
 }
-.ai-parlay-legs { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
-.ai-parlay-note { font-size: 12px; color: var(--dim); line-height: 1.5; }
-.ai-sub-label {
-  font-size: 10px; color: var(--dim); text-transform: uppercase;
-  letter-spacing: .5px; margin: 10px 0 6px;
+.chat-msg { display: flex; flex-direction: column; max-width: 82%; }
+.chat-msg.user { align-self: flex-end; align-items: flex-end; }
+.chat-msg.ai   { align-self: flex-start; align-items: flex-start; }
+.chat-bubble {
+  padding: 10px 14px; border-radius: 14px; font-size: 13px; line-height: 1.6;
 }
-.ai-run-btn {
-  padding: 5px 14px; font-size: 12px; font-weight: 600;
-  background: rgba(var(--accent-rgb,74,144,226),.12);
-  border: 1px solid rgba(var(--accent-rgb,74,144,226),.35);
-  border-radius: 6px; color: var(--accent); cursor: pointer;
-  transition: background .15s, border-color .15s;
+.chat-msg.user .chat-bubble {
+  background: var(--blue); color: #fff; border-bottom-right-radius: 4px;
 }
-.ai-run-btn:hover:not(:disabled) {
-  background: rgba(var(--accent-rgb,74,144,226),.2);
-  border-color: rgba(var(--accent-rgb,74,144,226),.6);
+.chat-msg.ai .chat-bubble {
+  background: var(--bg2); border: 1px solid var(--border);
+  color: var(--text); border-bottom-left-radius: 4px;
 }
-.ai-run-btn:disabled { opacity: .5; cursor: default; }
-.ai-loading {
-  display: flex; align-items: center; gap: 10px;
-  color: var(--dim); font-size: 13px; padding: 24px 0;
+.chat-msg-time { font-size: 10px; color: var(--dim2); margin-top: 3px; }
+.chat-input-row {
+  display: flex; gap: 8px; align-items: flex-end;
+  border-top: 1px solid var(--border); padding-top: 12px; flex-shrink: 0;
 }
-.ai-loading-spinner {
-  width: 16px; height: 16px; border-radius: 50%;
-  border: 2px solid var(--border); border-top-color: var(--accent);
-  animation: spin .7s linear infinite; flex-shrink: 0;
+.chat-input {
+  flex: 1; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 10px; color: var(--text); padding: 9px 12px;
+  font-size: 13px; resize: none; font-family: inherit;
+  max-height: 120px; overflow-y: auto; line-height: 1.5;
+}
+.chat-input:focus { outline: none; border-color: var(--blue); }
+.chat-send-btn {
+  padding: 9px 18px; background: var(--blue); border: none;
+  border-radius: 10px; color: #fff; cursor: pointer; font-size: 13px;
+  font-weight: 600; white-space: nowrap; flex-shrink: 0; transition: opacity .12s;
+}
+.chat-send-btn:hover:not(:disabled) { opacity: .85; }
+.chat-send-btn:disabled { opacity: .45; cursor: default; }
+.chat-thinking {
+  display: flex; align-items: center; gap: 8px; color: var(--dim);
+  font-size: 12px; padding: 10px 14px; background: var(--bg2);
+  border: 1px solid var(--border); border-radius: 14px; border-bottom-left-radius: 4px;
+}
+.chat-thinking-dots span {
+  display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--dim); margin: 0 1px; animation: chat-bounce .9s ease-in-out infinite;
+}
+.chat-thinking-dots span:nth-child(2) { animation-delay: .15s; }
+.chat-thinking-dots span:nth-child(3) { animation-delay: .30s; }
+@keyframes chat-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: .5; }
+  40%            { transform: translateY(-5px); opacity: 1; }
 }
 
 /* ── Value picks sections ─────────────────────────────────────────────────── */
@@ -1527,49 +1543,29 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
   </div>
 
 
-  <!-- AI Breakdown -->
+  <!-- AI Chat -->
   <div id="tab-ai" class="tab-pane">
-    <div class="section-hdr" style="margin-bottom:20px">
-      <h2>AI Breakdown</h2>
-      <button class="ai-run-btn" id="ai-run-btn" onclick="runAiBreakdown()" style="margin-left:auto">
-        🤖 Run AI Analysis
-      </button>
-    </div>
+    <div class="chat-outer">
 
-    <!-- Loading state -->
-    <div id="ai-loading" class="ai-loading" style="display:none">
-      <span class="ai-loading-spinner"></span>
-      Analyzing today's slate — this takes about 10 seconds…
-    </div>
-
-    <!-- Error state -->
-    <div id="ai-error" style="display:none; color:var(--red); font-size:13px; padding:12px 0;"></div>
-
-    <!-- Empty / pre-run state -->
-    <div id="ai-empty" class="empty" style="display:flex">
-      <div class="icon">🤖</div>
-      Run analysis first, then click <strong style="margin:0 4px">Run AI Analysis</strong> for the AI breakdown
-    </div>
-
-    <!-- Main content — hidden until data loads -->
-    <div id="ai-content" style="display:none">
-
-      <!-- Section 1: Game-by-Game Analysis -->
-      <div class="ai-section">
-        <div class="ai-section-hdr">📋 Game-by-Game Analysis</div>
-        <div id="ai-games-list"></div>
+      <!-- Suggested questions -->
+      <div class="chat-suggestions">
+        <span class="chat-suggestion-label">Try asking:</span>
+        <button class="chat-chip" onclick="sendChatMessage(&quot;What are today&#39;s best bets?&quot;)">What are today's best bets?</button>
+        <button class="chat-chip" onclick="sendChatMessage(&quot;Any strong parlays today?&quot;)">Any strong parlays today?</button>
+        <button class="chat-chip" onclick="sendChatMessage(&quot;Which games have the most value?&quot;)">Which games have the most value?</button>
+        <button class="chat-chip" onclick="sendChatMessage(&quot;What is the upset risk today?&quot;)">What is the upset risk today?</button>
       </div>
 
-      <!-- Section 2: Best Bets -->
-      <div class="ai-section">
-        <div class="ai-section-hdr">⭐ Best Bets Today</div>
-        <div id="ai-best-bets-list"></div>
-      </div>
+      <!-- Messages -->
+      <div class="chat-messages" id="chat-messages"></div>
 
-      <!-- Section 3: Parlay Builder -->
-      <div class="ai-section">
-        <div class="ai-section-hdr">🔗 Parlay Builder</div>
-        <div id="ai-parlays-list"></div>
+      <!-- Input -->
+      <div class="chat-input-row">
+        <textarea id="chat-input" class="chat-input" rows="1"
+          placeholder="Ask me anything about today's games…"
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChatMessage();}"
+        ></textarea>
+        <button class="chat-send-btn" id="chat-send-btn" onclick="sendChatMessage()">Send</button>
       </div>
 
     </div>
@@ -1650,8 +1646,9 @@ let _ledgerHistory  = [];
 let _gamePkMap      = {};   // game_id → MLB gamePk
 let _completedGames = new Set(); // game_ids confirmed Final by live feed
 let _lastLiveMap    = {};   // last fetched MLB linescore map; reapplied on tab return
-let _aiBreakdownData    = null;  // cached AI breakdown result
-let _aiBreakdownRunning = false; // guard against concurrent requests
+let _chatHistory = [];   // [{role, content}] conversation history sent to the backend
+let _chatPending = false; // guard against concurrent requests
+let _chatInited  = false; // true once the welcome message has been shown
 
 function _pickResult(gameId, betType) {
   return _ledgerHistory.find(h => h.game_id === gameId && h.bet_type === betType)?.result ?? null;
@@ -1875,11 +1872,7 @@ function showTab(name) {
   // Export tab — build from current daily picks
   if (name === 'export') { renderExportTab(); return; }
 
-  // AI Breakdown — restore cached data if available, otherwise show empty state
-  if (name === 'ai') {
-    if (_aiBreakdownData) renderAiBreakdown(_aiBreakdownData);
-    return;
-  }
+  if (name === 'ai') { initChatTab(); return; }
 
   // Dispatch rendering to the active sport
   if (_sport === 'wnba') {
@@ -2781,7 +2774,6 @@ async function _doAnalysis(opts) {
 
     if (!data.cached) setAnalyzedNow(new Date());
     updateLiveScores();
-    if (_results.length && !data.cached) runAiBreakdown();
     setStatus(data.cached
       ? `✓ ${_results.length} MLB games · cached`
       : `✓ ${_results.length} MLB games analysed`);
@@ -2863,7 +2855,6 @@ async function runAllAnalysis() {
       stepMlb.className   = 'prog-step done';
       stepMlb.textContent = `MLB (${_results.length})`;
       updateLiveScores();
-      if (!data.cached) runAiBreakdown();
     }
   } catch (err) {
     stepMlb.className   = 'prog-step skipped';
@@ -2990,7 +2981,6 @@ async function refreshModels() {
     renderSidebar(_results);
     renderBreakdown(_results);
     updateLiveScores();
-    if (_sport === 'mlb' && _results.length) runAiBreakdown();
 
     const cnt = _sport === 'wnba' ? (_wnbaResults||[]).length : (_results||[]).length;
     setStatus(`✓ ${cnt} ${lbl} games · models refreshed`);
@@ -3234,99 +3224,89 @@ function chaosUpsetNote(g) {
   return '';
 }
 
-// ── AI Breakdown tab ──────────────────────────────────────────────────────────
+// ── AI Chat tab ───────────────────────────────────────────────────────────────
 
-/** Replace newlines with <br> for safe inline HTML display. */
+/** Replace newlines with &lt;br&gt; for safe inline HTML display. */
 function _nl2br(text) { return (text || '').replace(/\n/g, '<br>'); }
 
-async function runAiBreakdown() {
-  if (_aiBreakdownRunning) return;
+/** Escape HTML special characters to prevent XSS when inserting user text. */
+function _escHtml(str) {
+  return (str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
-  const emptyEl   = document.getElementById('ai-empty');
-  const loadingEl = document.getElementById('ai-loading');
-  const errorEl   = document.getElementById('ai-error');
-  const contentEl = document.getElementById('ai-content');
-  const btn       = document.getElementById('ai-run-btn');
+function initChatTab() {
+  if (_chatInited) return;
+  _chatInited = true;
+  _appendChatMsg('ai',
+    "Hi! I'm your sports analyst. I have today's full slate loaded — ask me " +
+    "anything about today's games, picks, parlays, or value bets!"
+  );
+}
 
-  // Show loading state
-  _aiBreakdownRunning = true;
-  if (emptyEl)   emptyEl.style.display   = 'none';
-  if (errorEl)   { errorEl.style.display = 'none'; errorEl.textContent = ''; }
-  if (contentEl) contentEl.style.display = 'none';
-  if (loadingEl) loadingEl.style.display = 'flex';
-  if (btn)       { btn.disabled = true; btn.textContent = '⏳ Analyzing…'; }
+function _appendChatMsg(role, text) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  const now  = new Date();
+  const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const div  = document.createElement('div');
+  div.className = `chat-msg ${role}`;
+  div.innerHTML =
+    `<div class="chat-bubble">${_nl2br(_escHtml(text))}</div>` +
+    `<div class="chat-msg-time">${time}</div>`;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+async function sendChatMessage(preset) {
+  if (_chatPending) return;
+  const input = document.getElementById('chat-input');
+  const text  = preset !== undefined ? preset : (input ? input.value.trim() : '');
+  if (!text) return;
+  if (input && preset === undefined) input.value = '';
+
+  _appendChatMsg('user', text);
+
+  // Thinking indicator
+  const container  = document.getElementById('chat-messages');
+  const thinkingEl = document.createElement('div');
+  thinkingEl.className = 'chat-msg ai';
+  thinkingEl.id = 'chat-thinking';
+  thinkingEl.innerHTML =
+    '<div class="chat-thinking">' +
+    '<span class="chat-thinking-dots"><span></span><span></span><span></span></span>' +
+    'Thinking…</div>';
+  if (container) { container.appendChild(thinkingEl); container.scrollTop = container.scrollHeight; }
+
+  const sendBtn = document.getElementById('chat-send-btn');
+  _chatPending = true;
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = '…'; }
 
   try {
-    const resp = await fetch('/api/ai/breakdown', {
+    const resp = await fetch('/api/ai/chat', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({}),
+      body:    JSON.stringify({ message: text, history: _chatHistory }),
     });
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
-    _aiBreakdownData = data;
-    renderAiBreakdown(data);
+
+    _chatHistory.push({ role: 'user', content: text });
+    _chatHistory.push({ role: 'assistant', content: data.response });
+    // Keep history bounded to last 40 messages (~20 turns)
+    if (_chatHistory.length > 40) _chatHistory = _chatHistory.slice(-40);
+
+    thinkingEl.remove();
+    _appendChatMsg('ai', data.response);
   } catch (err) {
-    if (loadingEl) loadingEl.style.display = 'none';
-    if (errorEl)   { errorEl.textContent = `Error: ${err.message}`; errorEl.style.display = 'block'; }
-    if (emptyEl)   emptyEl.style.display = 'none';
+    thinkingEl.remove();
+    _appendChatMsg('ai', `Sorry, I ran into an error: ${err.message}`);
   } finally {
-    _aiBreakdownRunning = false;
-    if (btn) { btn.disabled = false; btn.textContent = '🔄 Refresh Analysis'; }
-    if (loadingEl) loadingEl.style.display = 'none';
+    _chatPending = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
   }
-}
-
-function renderAiBreakdown(data) {
-  const emptyEl   = document.getElementById('ai-empty');
-  const contentEl = document.getElementById('ai-content');
-  const loadingEl = document.getElementById('ai-loading');
-  if (emptyEl)   emptyEl.style.display   = 'none';
-  if (loadingEl) loadingEl.style.display = 'none';
-  if (contentEl) contentEl.style.display = '';
-
-  const gamesList    = document.getElementById('ai-games-list');
-  const bestBetsList = document.getElementById('ai-best-bets-list');
-  const parlaysList  = document.getElementById('ai-parlays-list');
-
-  if (gamesList)    gamesList.innerHTML    = _renderAiGames(data.games || []);
-  if (bestBetsList) bestBetsList.innerHTML = _renderAiBestBets(data.best_bets || []);
-  if (parlaysList)  parlaysList.innerHTML  = _renderAiParlays(data.parlays || {});
-}
-
-function _renderAiGames(games) {
-  if (!games.length) return '<div class="empty" style="display:flex;padding:20px 0">No game analysis available.</div>';
-  return games.map(g => `
-    <div class="ai-game-row">
-      <div class="ai-game-matchup">${g.matchup || ''}</div>
-      <div class="ai-game-analysis">${_nl2br(g.analysis)}</div>
-    </div>`).join('');
-}
-
-function _renderAiBestBets(bets) {
-  if (!bets.length) return '<div class="empty" style="display:flex;padding:20px 0">No standout bets identified.</div>';
-  return bets.map((b, i) => `
-    <div class="ai-best-bet">
-      <div class="ai-best-bet-pick">${i + 1}. ${b.pick || ''}</div>
-      <div class="ai-best-bet-reason">${_nl2br(b.reason)}</div>
-    </div>`).join('');
-}
-
-function _renderParlayGroup(items, label) {
-  if (!items.length) return '';
-  return `<div class="ai-sub-label">${label}</div>` +
-    items.map(p => `
-      <div class="ai-parlay-card">
-        <div class="ai-parlay-legs">${(p.legs || []).join(' &nbsp;+&nbsp; ')}</div>
-        <div class="ai-parlay-note">${_nl2br(p.note)}</div>
-      </div>`).join('');
-}
-
-function _renderAiParlays(parlays) {
-  const p2 = parlays['2-team'] || [];
-  const p3 = parlays['3-team'] || [];
-  if (!p2.length && !p3.length) return '<div class="empty" style="display:flex;padding:20px 0">No parlays suggested.</div>';
-  return _renderParlayGroup(p2, '2-Team Parlays') + _renderParlayGroup(p3, '3-Team Parlays');
 }
 
 // ── Explain This Pick ─────────────────────────────────────────────────────────
