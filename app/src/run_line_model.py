@@ -45,6 +45,22 @@ XGB_RUN_LINE_PARAMS = dict(
 # (64/36 split), and heavy L2 prevents the LR from overfitting the majority class.
 LR_RUN_LINE_C: float = 0.01
 
+# ── LR hurdle / conditional reformulation ────────────────────────────────────
+# The LR component of the run-line ensemble is now trained as a CONDITIONAL
+# classifier on the home-won subset:
+#
+#     P(margin >= 2)  =  P(margin > 0)  *  P(margin >= 2  |  margin > 0)
+#                        └ ml_lr_prob ─┘   └─── self.lr (this model) ───┘
+#
+# Because the conditional factor is in [0, 1], the composed LR run-line
+# probability is, by construction, always <= the moneyline LR probability
+# for the same game. Two independent classifiers can't enforce that — a
+# multiplicative hurdle can.
+#
+# A schema flag on the persisted joblib (`lr_target_kind = "conditional"`)
+# tells train_or_load() to invalidate any older "marginal" LR cache.
+LR_TARGET_KIND_CONDITIONAL = "conditional"
+
 
 class RunLineModel:
     def __init__(self):
@@ -74,8 +90,23 @@ class RunLineModel:
             from .sports_config import MLB_FEATURES
             expected_n_feat = len(MLB_FEATURES)
             actual_n_feat   = getattr(saved.get("scaler"), "n_features_in_", expected_n_feat)
+            # Old caches stored a "marginal" LR (independent classifier on margin>=2).
+            # The new LR is a conditional/hurdle model — caches lacking the schema
+            # flag must be retrained so the LR head is regenerated correctly.
+            lr_kind_ok = saved.get("lr_target_kind") == LR_TARGET_KIND_CONDITIONAL
+            # XGB was also reformulated to a conditional model -- reject pre-fix caches.
+            xgb_kind_ok = saved.get("xgb_target_kind") == "conditional_cover_given_home_win"
+            # NN must also be on the conditional target (or the explicit
+            # marginal-fallback flag if there weren't enough home-win rows).
+            # An unflagged cache predates the NN hurdle reformulation and
+            # would silently let the ensemble produce P(cover) > P(win).
+            nn_kind_ok  = saved.get("nn_target_kind") in (
+                "conditional_cover_given_home_win",
+                "marginal_cover_minus_1_5",
+            )
             if saved.get("target_type") == "run_line" and "lr" in saved \
-                    and actual_n_feat == expected_n_feat:
+                    and actual_n_feat == expected_n_feat \
+                    and lr_kind_ok and xgb_kind_ok and nn_kind_ok:
                 self.xgb              = saved["xgb"]
                 self.lr               = saved["lr"]
                 self.nn               = saved.get("nn")
@@ -92,7 +123,13 @@ class RunLineModel:
                 nn_s  = f"{self.nn_val_accuracy:.1%}" if self.nn_val_accuracy else "N/A"
                 return f"Loaded run line model (XGB CV: {xgb_s} | LR CV: {lr_s} | NN: {nn_s})"
             if actual_n_feat != expected_n_feat:
-                print(f"  Run line: feature count changed ({actual_n_feat} → {expected_n_feat}) — retraining.")
+                print(f"  Run line: feature count changed ({actual_n_feat} -> {expected_n_feat}) -- retraining.")
+            elif not lr_kind_ok:
+                print("  Run line: LR target kind upgraded to conditional -- retraining.")
+            elif not xgb_kind_ok:
+                print("  Run line: XGB target kind upgraded to conditional cover -- retraining.")
+            elif not nn_kind_ok:
+                print("  Run line: NN target kind upgraded to conditional cover -- retraining.")
         return self._train(stats_client, feature_builder, season, high_change_team_ids)
 
     def _train_nn(
@@ -148,7 +185,7 @@ class RunLineModel:
         except Exception as exc:
             print(f"  Warning: could not fetch run-line season {season} ({exc}) — historical only.")
             completed = []
-        X_rows, y_rows, game_team_pairs, skipped = [], [], [], 0
+        X_rows, y_rows, y_ml_rows, game_team_pairs, skipped = [], [], [], [], 0
 
         for game in completed:
             teams  = game.get("teams", {})
@@ -171,37 +208,48 @@ class RunLineModel:
             margin = int(home_score) - int(away_score)
             X_rows.append(vec)
             y_rows.append(1 if margin > 1.5 else 0)
+            # Track home-win labels in parallel — used to subset the conditional
+            # XGB training data without touching the LR/NN training paths.
+            y_ml_rows.append(1 if int(home_score) > int(away_score) else 0)
             game_team_pairs.append((home_id, away_id))
 
         n = len(X_rows)
         from .sports_config import MLB_FEATURES
         X = np.vstack(X_rows) if n > 0 else np.empty((0, len(MLB_FEATURES)), dtype=np.float32)
         y = np.array(y_rows)
+        y_ml = np.array(y_ml_rows, dtype=np.int32)
 
         # ── Augment with enriched historical run-line labels + recency weights ─
-        X_combined, y_combined = X, y
-        sample_weights = None
+        X_combined,  y_combined  = X, y
+        y_ml_combined            = y_ml
+        sample_weights           = None
         try:
             from .enriched_historical_data import (
                 build_enriched_dataset, get_enriched_seasons,
             )
             from .recency_weights import compute_sample_weights, build_boost_mask
 
-            X_hist, _, y_rl_hist, _ = build_enriched_dataset()
-            seasons_hist             = get_enriched_seasons()
+            X_hist, y_ml_hist, y_rl_hist, _ = build_enriched_dataset()
+            seasons_hist                     = get_enriched_seasons()
 
             if len(y_rl_hist) >= 100:
                 mask_prev = (seasons_hist == 2025)
                 mask_old  = ~mask_prev
 
-                X_hist_old  = X_hist[mask_old];   y_rl_old  = y_rl_hist[mask_old]
-                X_hist_prev = X_hist[mask_prev];  y_rl_prev = y_rl_hist[mask_prev]
+                X_hist_old  = X_hist[mask_old]
+                y_rl_old    = y_rl_hist[mask_old]
+                y_ml_old    = y_ml_hist[mask_old]
+
+                X_hist_prev = X_hist[mask_prev]
+                y_rl_prev   = y_rl_hist[mask_prev]
+                y_ml_prev   = y_ml_hist[mask_prev]
 
                 n_old  = len(y_rl_old)
                 n_prev = len(y_rl_prev)
 
-                X_combined = np.vstack([X_hist_old, X_hist_prev, X])
-                y_combined = np.concatenate([y_rl_old, y_rl_prev, y])
+                X_combined    = np.vstack([X_hist_old, X_hist_prev, X])
+                y_combined    = np.concatenate([y_rl_old, y_rl_prev, y])
+                y_ml_combined = np.concatenate([y_ml_old, y_ml_prev, y_ml])
 
                 boost_mask = (
                     build_boost_mask(game_team_pairs, set(high_change_team_ids))
@@ -213,10 +261,10 @@ class RunLineModel:
                 print(
                     f"  Run line combined: {n_old:,} old + {n_prev:,} prev + {n} current "
                     f"= {len(y_combined):,} total  |  weights 15/25/60%"
-                    + (f"  |  {boosted} boosted → 75%" if boosted else "")
+                    + (f"  |  {boosted} boosted -> 75%" if boosted else "")
                 )
         except Exception as exc:
-            print(f"  Run line: historical unavailable ({exc}) — current-season only")
+            print(f"  Run line: historical unavailable ({exc}) -- current-season only")
 
         if len(y_combined) < 30:
             return f"Run line: insufficient data ({len(y_combined)} combined games)"
@@ -226,17 +274,51 @@ class RunLineModel:
         cv_fit_params = ({"sample_weight": sample_weights}
                          if sample_weights is not None else {})
 
+        # ── XGB: train CONDITIONAL P(margin >= 2 | home wins) ───────────────
+        # The marginal model (P(home covers -1.5) directly) could output a
+        # higher probability than the moneyline P(home wins) for the same
+        # game -- mathematically impossible, since covering -1.5 is a strict
+        # subset of winning.  Training XGB only on home-win rows makes the
+        # target P(margin >= 2 | home won), a number in [0,1].  At inference
+        # time predict() multiplies this by the moneyline xgb_prob, so the
+        # final P(home covers) is bounded above by P(home wins) BY
+        # CONSTRUCTION.  Inconsistency is impossible.
+        home_won_mask = (y_ml_combined == 1)
+        X_cond  = X_scaled[home_won_mask]
+        y_cond  = y_combined[home_won_mask]   # 1 iff margin >= 2 given home won
+        sw_cond = (sample_weights[home_won_mask]
+                   if sample_weights is not None else None)
+        cv_fit_params_cond = ({"sample_weight": sw_cond}
+                              if sw_cond is not None else {})
+
         self.xgb = xgb.XGBClassifier(**XGB_RUN_LINE_PARAMS)
-        try:
-            cv_scores = cross_val_score(
-                self.xgb, X_scaled, y_combined, cv=5, scoring="accuracy",
-                fit_params=cv_fit_params,
+        if len(y_cond) >= 30 and len(np.unique(y_cond)) >= 2:
+            try:
+                cv_scores = cross_val_score(
+                    self.xgb, X_cond, y_cond, cv=5, scoring="accuracy",
+                    fit_params=cv_fit_params_cond,
+                )
+            except TypeError:
+                cv_scores = cross_val_score(
+                    self.xgb, X_cond, y_cond, cv=5, scoring="accuracy",
+                )
+            self.xgb_cv = float(cv_scores.mean())
+            self.xgb.fit(
+                X_cond, y_cond,
+                **({"sample_weight": sw_cond} if sw_cond is not None else {}),
             )
-        except TypeError:
-            cv_scores = cross_val_score(self.xgb, X_scaled, y_combined, cv=5, scoring="accuracy")
-        self.xgb_cv = float(cv_scores.mean())
-        self.xgb.fit(X_scaled, y_combined,
-                     **({"sample_weight": sample_weights} if sample_weights is not None else {}))
+            print(f"  Run line XGB: CONDITIONAL P(margin>=2 | home wins) on "
+                  f"{len(y_cond):,} rows  base={y_cond.mean():.1%}  CV={self.xgb_cv:.1%}")
+        else:
+            # Degenerate: not enough home-win rows.  Train marginal as fallback
+            # so predict() still returns something.
+            self.xgb.fit(
+                X_scaled, y_combined,
+                **({"sample_weight": sample_weights} if sample_weights is not None else {}),
+            )
+            self.xgb_cv = None
+            print("  Run line XGB: fallback to marginal training (too few home-win rows)")
+
         # Attach feature names so SHAP / get_score() show real names, not f0..f23.
         try:
             from .sports_config import MLB_FEATURES
@@ -245,22 +327,69 @@ class RunLineModel:
             pass
         self.is_trained = True
 
+        # ── LR: train CONDITIONAL P(margin >= 2 | home wins) ────────────────
+        # Same hurdle reformulation as XGB above. Two independent classifiers
+        # on margin>=2 vs margin>0 can produce P_rl > P_ml for the same game,
+        # which is mathematically impossible. Training LR on the home-won
+        # subset with label (margin >= 2) makes its raw output a number in
+        # [0,1] that predict() multiplies by the moneyline LR's home_win_prob
+        # to get the joint P(home covers -1.5). The product is, by
+        # construction, always <= ml_lr_prob — no clip needed.
         self.lr = LogisticRegression(
             C=LR_RUN_LINE_C, max_iter=2000, solver="lbfgs", random_state=42,
         )
-        try:
-            lr_scores = cross_val_score(
-                self.lr, X_scaled, y_combined, cv=5, scoring="accuracy",
-                fit_params=cv_fit_params,
+        if len(y_cond) >= 30 and len(np.unique(y_cond)) >= 2:
+            try:
+                lr_scores = cross_val_score(
+                    self.lr, X_cond, y_cond, cv=5, scoring="accuracy",
+                    fit_params=cv_fit_params_cond,
+                )
+            except TypeError:
+                lr_scores = cross_val_score(self.lr, X_cond, y_cond, cv=5, scoring="accuracy")
+            self.lr_cv = float(lr_scores.mean())
+            self.lr.fit(
+                X_cond, y_cond,
+                **({"sample_weight": sw_cond} if sw_cond is not None else {}),
             )
-        except TypeError:
-            lr_scores = cross_val_score(self.lr, X_scaled, y_combined, cv=5, scoring="accuracy")
-        self.lr_cv = float(lr_scores.mean())
-        self.lr.fit(X_scaled, y_combined,
-                    **({"sample_weight": sample_weights} if sample_weights is not None else {}))
+            print(f"  Run line LR:  CONDITIONAL P(margin>=2 | home wins) on "
+                  f"{len(y_cond):,} rows  base={y_cond.mean():.1%}  CV={self.lr_cv:.1%}")
+        else:
+            # Degenerate fallback — mirror the XGB fallback above so the model
+            # still has a usable LR head when there are too few home-win rows.
+            self.lr.fit(
+                X_scaled, y_combined,
+                **({"sample_weight": sample_weights} if sample_weights is not None else {}),
+            )
+            self.lr_cv = None
+            print("  Run line LR:  fallback to marginal training (too few home-win rows)")
         self.lr_is_trained = True
 
-        self._train_nn(X_combined, y_combined, sample_weights)
+        # ── NN: train CONDITIONAL P(margin >= 2 | home wins) ────────────────
+        # Same hurdle reformulation as XGB and LR above.  Without this, the
+        # NN sub-component would still let the ensemble's P(home covers -1.5)
+        # exceed P(home wins) for the same game.  We pass the RAW (un-scaled)
+        # X_combined subset because _train_nn fits its own nn_scaler.
+        # predict() multiplies the NN output by the moneyline NN's
+        # home-win probability so the joint NN P(home covers) is bounded
+        # above by P(home wins) BY CONSTRUCTION.
+        X_combined_cond = X_combined[home_won_mask]
+        sw_combined_cond = (sample_weights[home_won_mask]
+                            if sample_weights is not None else None)
+        nn_target_kind = "conditional_cover_given_home_win"
+        if len(y_cond) >= 30 and len(np.unique(y_cond)) >= 2:
+            self._train_nn(X_combined_cond, y_cond, sw_combined_cond)
+            if self.nn_is_trained:
+                print(f"  Run line NN:  CONDITIONAL P(margin>=2 | home wins) on "
+                      f"{len(y_cond):,} rows  base={y_cond.mean():.1%}  "
+                      f"val={self.nn_val_accuracy:.1%}")
+        else:
+            # Degenerate fallback — mirror the XGB/LR fallbacks so the NN
+            # still has a usable head if there are too few home-win rows.
+            self._train_nn(X_combined, y_combined, sample_weights)
+            nn_target_kind = "marginal_cover_minus_1_5"
+            if self.nn_is_trained:
+                print("  Run line NN:  fallback to marginal training "
+                      "(too few home-win rows)")
 
         self.model_path.parent.mkdir(exist_ok=True)
         joblib.dump({
@@ -268,7 +397,20 @@ class RunLineModel:
             "scaler": self.scaler, "nn_scaler": self.nn_scaler,
             "xgb_cv": self.xgb_cv, "lr_cv": self.lr_cv,
             "nn_val_accuracy": self.nn_val_accuracy,
-            "target_type": "run_line",
+            "target_type":     "run_line",
+            # XGB now models the conditional P(margin >= 2 | home wins);
+            # predict() must multiply by the moneyline xgb_prob to recover
+            # the joint P(home covers -1.5).  Old caches without this flag
+            # are still marginal and will be detected as stale.
+            "xgb_target_kind": "conditional_cover_given_home_win",
+            # LR follows the same hurdle structure as XGB — see the
+            # LR_TARGET_KIND_CONDITIONAL constant. Old caches without this
+            # flag are invalidated by train_or_load().
+            "lr_target_kind":  LR_TARGET_KIND_CONDITIONAL,
+            # NN now follows the same hurdle structure — predict() multiplies
+            # its raw output by the moneyline NN's home-win probability so the
+            # final NN P(home covers -1.5) is bounded above by P(home wins).
+            "nn_target_kind":  nn_target_kind,
         }, self.model_path)
 
         nn_s = f"{self.nn_val_accuracy:.1%}" if self.nn_val_accuracy else "N/A"
@@ -281,8 +423,33 @@ class RunLineModel:
     # ------------------------------------------------------------------
 
     def predict(self, feature_vec: np.ndarray, game: dict,
-                weights: dict | None = None) -> Optional[dict]:
-        """Return run line prediction dict, or None if model not trained."""
+                weights:        dict  | None = None,
+                ml_prob_home:    float | None = None,
+                ml_lr_prob_home: float | None = None,
+                ml_nn_prob_home: float | None = None) -> Optional[dict]:
+        """
+        Return run line prediction dict, or None if model not trained.
+
+        ml_prob_home    : moneyline P(home wins) from the XGB head of the
+            BettingModel. Required to recover the joint P(home covers -1.5)
+            from the conditional XGB output.
+        ml_lr_prob_home : moneyline P(home wins) from the LR head of the
+            BettingModel. Used to recover the joint LR run-line probability
+            from the conditional LR output. Defaults to ml_prob_home when
+            absent so legacy callers still work, then to league-average 0.54
+            when both are absent.
+        ml_nn_prob_home : moneyline P(home wins) from the NN head of the
+            BettingModel. Used to recover the joint NN run-line probability
+            from the conditional NN output. Defaults to ml_lr_prob_home then
+            ml_prob_home when absent so legacy callers still work.
+
+        All three composed outputs satisfy x_rl <= x_ml for their respective
+        classifier (xgb / lr / nn) by construction, fixing the inconsistency
+        where independent classifiers could produce rl conf > ml conf for the
+        same picked team.  Since the ensemble is a weighted average of three
+        bounded values, the ensemble's combined P(cover) is also bounded
+        above by the moneyline ensemble's P(win).
+        """
         if not self.is_trained:
             return None
 
@@ -291,8 +458,22 @@ class RunLineModel:
         except Exception:
             return None
 
-        xgb_prob = float(self.xgb.predict_proba(X)[0, 1])
-        lr_prob  = float(self.lr.predict_proba(X)[0, 1]) if self.lr_is_trained else xgb_prob
+        # Both heads now model P(margin >= 2 | home wins) — conditional probs.
+        xgb_cond = float(self.xgb.predict_proba(X)[0, 1])
+        lr_cond  = (float(self.lr.predict_proba(X)[0, 1])
+                    if self.lr_is_trained else xgb_cond)
+
+        # Multiply each classifier's conditional output by THAT classifier's
+        # moneyline probability so the per-classifier constraint
+        # P_rl_x <= P_ml_x holds by construction (no clip).
+        ml_xgb_p = float(ml_prob_home)    if ml_prob_home    is not None else 0.54
+        ml_lr_p  = (float(ml_lr_prob_home) if ml_lr_prob_home is not None
+                    else ml_xgb_p)
+        ml_xgb_p = max(0.0, min(1.0, ml_xgb_p))
+        ml_lr_p  = max(0.0, min(1.0, ml_lr_p))
+
+        xgb_prob = ml_xgb_p * xgb_cond
+        lr_prob  = ml_lr_p  * lr_cond if self.lr_is_trained else xgb_prob
 
         # ── Silent LR-only pick recorder (does not affect ensemble output) ────
         if self.lr_is_trained:
@@ -311,6 +492,8 @@ class RunLineModel:
                 pass
 
         # ── Silent XGB-only pick recorder (does not affect ensemble output) ───
+        # We record the JOINT probability (ml_p * cond_prob) so the recorded
+        # value matches what the ensemble actually used.
         try:
             from .xgb_picks_tracker import record_classifier_pick
             record_classifier_pick(
@@ -322,13 +505,22 @@ class RunLineModel:
         except Exception:
             pass
 
+        # NN models P(margin >= 2 | home wins) — same hurdle reformulation
+        # as XGB/LR above. Compose with the moneyline NN's home-win prob to
+        # recover the joint P(home covers -1.5).  Product is bounded above
+        # by ml_nn_p, so the per-classifier inequality holds by construction.
+        ml_nn_p = (float(ml_nn_prob_home) if ml_nn_prob_home is not None
+                   else ml_lr_p)
+        ml_nn_p = max(0.0, min(1.0, ml_nn_p))
+
         nn_prob: Optional[float] = None
         if self.nn_is_trained and self.nn is not None:
             try:
                 # nn_scaler was fitted on RAW (unscaled) data during _train_nn();
                 # pass the original feature_vec, NOT the already-scaler-transformed X.
                 X_nn    = self.nn_scaler.transform(feature_vec.reshape(1, -1))
-                nn_prob = float(self.nn.predict_proba(X_nn)[0, 1])
+                nn_cond = float(self.nn.predict_proba(X_nn)[0, 1])
+                nn_prob = ml_nn_p * nn_cond
             except Exception:
                 nn_prob = None
 

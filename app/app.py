@@ -2013,10 +2013,18 @@ def analyze():
                 feature_vec, model=model.get_raw_model(),
                 scaler=model.get_scaler(), is_trained=model.is_trained,
             )
-            # Run line prediction (MLB only)
+            # Run line prediction (MLB only).
+            # The RL XGB models P(margin>=2 | home wins); we must pass the
+            # moneyline P(home wins) so it can recover the joint probability.
             rl_pred = None
             if rl_model and rl_model.is_trained:
-                rl_pred = rl_model.predict(feature_vec, game, weights=model_weights)
+                rl_pred = rl_model.predict(
+                    feature_vec, game,
+                    weights=model_weights,
+                    ml_prob_home    = prediction.get("xgb_prob"),
+                    ml_lr_prob_home = prediction.get("lr_prob"),
+                    ml_nn_prob_home = prediction.get("nn_prob"),
+                )
                 if rl_pred and rl_explainer:
                     rl_shap = rl_explainer.explain(
                         feature_vec, model=rl_model.get_raw_model(),
@@ -2182,7 +2190,16 @@ def refresh_models():
 
             rl_pred = None
             if rl_model and rl_model.is_trained:
-                rl_pred = rl_model.predict(feature_vec, game, weights=model_weights)
+                # RL XGB AND LR are both conditional P(margin>=2 | home wins);
+                # pass each one's moneyline counterpart so the joint
+                # probabilities respect P_rl <= P_ml per classifier.
+                rl_pred = rl_model.predict(
+                    feature_vec, game,
+                    weights=model_weights,
+                    ml_prob_home    = prediction.get("xgb_prob"),
+                    ml_lr_prob_home = prediction.get("lr_prob"),
+                    ml_nn_prob_home = prediction.get("nn_prob"),
+                )
                 if rl_pred and rl_explainer:
                     rl_shap = rl_explainer.explain(
                         feature_vec, model=rl_model.get_raw_model(),

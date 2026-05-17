@@ -1368,8 +1368,10 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
   letter-spacing: .6px; color: var(--dim);
 }
 .pc-pick { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.pc-probs { font-size: 11px; color: var(--dim); }
-.pc-edge-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.pc-probs    { display: flex; flex-direction: column; gap: 2px; margin: 3px 0 1px; }
+.pc-conf-pct { font-size: 15px; font-weight: 700; color: var(--fg); font-family: "SF Mono", Consolas, monospace; letter-spacing: -.3px; }
+.pc-edge-lbl { font-size: 11px; font-weight: 600; }
+.pc-edge-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 1px; }
 .pc-value-badge {
   display: inline-block; padding: 1px 6px; border-radius: 99px;
   font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
@@ -3996,14 +3998,14 @@ function buildMlCard(g) {
   const pickProb  = g.pick_team === g.home_team ? hwp : (1 - hwp);
   const conf      = _confLevel(g.confidence_tier ?? (conflict ? 'low' : 'strong'), g.pick_edge ?? 0);
   const probsHtml = `<div class="pc-probs">
-    <span class="prob-avg">Avg ${(pickProb*100).toFixed(0)}%</span>
+    <span class="pc-conf-pct">${(pickProb*100).toFixed(0)}% Confidence</span>
   </div>`;
   const edge    = g.pick_edge ?? 0;
   const edgeVal = (edge >= 0 ? '+' : '') + (edge * 100).toFixed(1) + '%';
   const edgeColor = edge > 0 ? 'var(--green)' : edge < 0 ? 'var(--red)' : 'var(--dim)';
   const isSplit      = g.confidence_tier === 'split';
   const valueBadge   = g.value_pick ? `<span class="pc-value-badge">Value</span>` : '';
-  const edgeDisplay  = `<span style="color:${edgeColor};font-weight:600;font-size:12px">${edgeVal}</span>`;
+  const edgeDisplay  = `<span class="pc-edge-lbl" style="color:${edgeColor}">${edgeVal} Edge</span>`;
   const conflictNote = isSplit ? `<div class="pc-conflict-note">⚡ Split signal</div>`
                      : conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
   // Correlation indicator: ML confidence was floored up to match RL
@@ -4065,7 +4067,7 @@ function buildRlCard(g) {
     : '';
   const rlEdgeVal   = (rl.edge >= 0 ? '+' : '') + (rl.edge * 100).toFixed(1) + '%';
   const rlEdgeColor = rl.edge > 0 ? 'var(--green)' : rl.edge < 0 ? 'var(--red)' : 'var(--dim)';
-  const edgeDisplay = `<span style="color:${rlEdgeColor};font-weight:600;font-size:12px">${rlEdgeVal}</span>`;
+  const edgeDisplay = `<span class="pc-edge-lbl" style="color:${rlEdgeColor}">${rlEdgeVal} Edge</span>`;
   const rlResult  = _getPickResult(g, 'run_line');
   const rlResCls  = rlResult === 'win' ? ' result-win' : rlResult === 'loss' ? ' result-loss' : '';
   return `<div id="pc-rl-${g.game_id}" class="prop-card ${conf.cls}${rlResCls}">
@@ -4078,7 +4080,7 @@ function buildRlCard(g) {
       ${oddsHtml(rlOdds)}
     </div>
     <div class="pc-probs">
-      <span class="prob-avg">Avg ${(pickCp*100).toFixed(0)}%</span>
+      <span class="pc-conf-pct">${(pickCp*100).toFixed(0)}% Confidence</span>
     </div>
     <div class="pc-edge-row">${valueBadge}${edgeDisplay}</div>
     ${conflictNote}${corrNote}${trackHtml}
@@ -4110,7 +4112,7 @@ function buildTotalsCard(g) {
     : '';
   const tEdgeVal    = (t.edge >= 0 ? '+' : '') + (t.edge * 100).toFixed(1) + '%';
   const tEdgeColor  = t.edge > 0 ? 'var(--green)' : t.edge < 0 ? 'var(--red)' : 'var(--dim)';
-  const edgeDisplay = `<span style="color:${tEdgeColor};font-weight:600;font-size:12px">${tEdgeVal}</span>`;
+  const edgeDisplay = `<span class="pc-edge-lbl" style="color:${tEdgeColor}">${tEdgeVal} Edge</span>`;
   const totResult = _getPickResult(g, 'totals');
   const totResCls = totResult === 'win' ? ' result-win' : totResult === 'loss' ? ' result-loss' : '';
   return `<div id="pc-tot-${g.game_id}" class="prop-card ${conf.cls}${totResCls}">
@@ -4123,7 +4125,7 @@ function buildTotalsCard(g) {
       ${oddsHtml(tOdds)}
     </div>
     <div class="pc-probs">
-      <span class="prob-avg">Avg ${((t.pick_prob ?? 0.5)*100).toFixed(0)}%</span>
+      <span class="pc-conf-pct">${((t.pick_prob ?? 0.5)*100).toFixed(0)}% Confidence</span>
     </div>
     <div class="pc-edge-row">${valueBadge}${edgeDisplay}</div>
     ${conflictNote}${trackHtml}
@@ -6782,8 +6784,8 @@ function _buildWnbaMlCard(g) {
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
     </div>
     <div class="pc-pick">${shortName(g.pick_team)} ${oddsHtml(g.pick_odds)}</div>
-    <div class="pc-probs"><span class="prob-avg">Avg ${((g.pick_prob??0.5)*100).toFixed(0)}%</span></div>
-    <div class="pc-edge-row">${valBadge}<span style="color:${edgeC};font-weight:600;font-size:12px">${edgeV}</span></div>
+    <div class="pc-probs"><span class="pc-conf-pct">${((g.pick_prob??0.5)*100).toFixed(0)}% Confidence</span></div>
+    <div class="pc-edge-row">${valBadge}<span class="pc-edge-lbl" style="color:${edgeC}">${edgeV} Edge</span></div>
     ${conflictNote}
     <button class="pc-explain-btn" id="exp-btn-${g.game_id}-ml"
       onclick="explainPick('${g.game_id}','ml')">✦ Explain This Pick</button>
@@ -6816,8 +6818,8 @@ function _buildWnbaSpreadCard(g) {
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
     </div>
     <div class="pc-pick">${shortName(sp.pick_team)} ${lineStr} ${oddsHtml(sp.pick_odds)}</div>
-    <div class="pc-probs"><span class="prob-avg">Avg ${((sp.pick_prob??0.5)*100).toFixed(0)}%</span></div>
-    <div class="pc-edge-row">${valBadge}<span style="color:${edgeC};font-weight:600;font-size:12px">${edgeV}</span></div>
+    <div class="pc-probs"><span class="pc-conf-pct">${((sp.pick_prob??0.5)*100).toFixed(0)}% Confidence</span></div>
+    <div class="pc-edge-row">${valBadge}<span class="pc-edge-lbl" style="color:${edgeC}">${edgeV} Edge</span></div>
     ${marginNote}${conflictNote}
     <button class="pc-explain-btn" id="exp-btn-${g.game_id}-spread"
       onclick="explainPick('${g.game_id}','spread')">✦ Explain This Pick</button>
@@ -6852,8 +6854,8 @@ function _buildWnbaTotalsCard(g) {
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
     </div>
     <div class="pc-pick"><span class="${dirCls}" style="font-weight:700">${dir.toUpperCase()}</span> ${t.total_line} ${oddsHtml(tOdds)}</div>
-    <div class="pc-probs"><span class="prob-avg">Avg ${((t.pick_prob??0.5)*100).toFixed(0)}%</span></div>
-    <div class="pc-edge-row">${valBadge}<span style="color:${edgeC};font-weight:600;font-size:12px">${edgeV}</span></div>
+    <div class="pc-probs"><span class="pc-conf-pct">${((t.pick_prob??0.5)*100).toFixed(0)}% Confidence</span></div>
+    <div class="pc-edge-row">${valBadge}<span class="pc-edge-lbl" style="color:${edgeC}">${edgeV} Edge</span></div>
     ${predNote}${conflictNote}
     <button class="pc-explain-btn" id="exp-btn-${g.game_id}-totals"
       onclick="explainPick('${g.game_id}','totals')">✦ Explain This Pick</button>
