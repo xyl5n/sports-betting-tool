@@ -1409,8 +1409,8 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .prop-card.conf-strong { border-top: 3px solid var(--green);  }
 .prop-card.conf-mod    { border-top: 3px solid var(--yellow); }
 .prop-card.conf-low    { border-top: 3px solid var(--red);    }
-.prop-card.result-win  { background: rgba(63,185,80,.10);  }
-.prop-card.result-loss { background: rgba(248,81,73,.10);  }
+.prop-card.result-win  { background: rgba(63,185,80,.10);  border-left: 3px solid rgba(63,185,80,.55);  }
+.prop-card.result-loss { background: rgba(248,81,73,.10);  border-left: 3px solid rgba(248,81,73,.55); }
 .pc-type-row { display: flex; align-items: center; justify-content: space-between; }
 .pc-conf-label {
   font-size: 10px; font-weight: 700; text-transform: uppercase;
@@ -1899,12 +1899,66 @@ let _ledgerHistory  = [];
 let _gamePkMap      = {};   // game_id → MLB gamePk
 let _completedGames = new Set(); // game_ids confirmed Final by live feed
 let _lastLiveMap    = {};   // last fetched MLB linescore map; reapplied on tab return
+let _finalScoreMap  = {};   // game_id → {awayR, homeR} for completed games
 let _chatHistory = [];   // [{role, content}] conversation history sent to the backend
 let _chatPending = false; // guard against concurrent requests
 let _chatInited  = false; // true once the welcome message has been shown
 
 function _pickResult(gameId, betType) {
   return _ledgerHistory.find(h => h.game_id === gameId && h.bet_type === betType)?.result ?? null;
+}
+
+// Compute win/loss/null for a completed game using final scores.
+function _computePickResult(g, awayR, homeR, betType) {
+  if (betType === 'single') {
+    if (awayR === homeR) return null; // tie / extra innings push
+    const pickedHome = g.pick_team === g.home_team;
+    return (pickedHome ? homeR > awayR : awayR > homeR) ? 'win' : 'loss';
+  }
+  if (betType === 'run_line') {
+    const rl = g.run_line;
+    if (!rl) return null;
+    const pt      = getRlPickPoint(rl);
+    const pickedR = rl.side === 'home' ? homeR : awayR;
+    const otherR  = rl.side === 'home' ? awayR : homeR;
+    const diff    = pickedR + pt - otherR;
+    if (diff > 0) return 'win';
+    if (diff < 0) return 'loss';
+    return null; // exact push
+  }
+  if (betType === 'totals') {
+    const t = g.totals;
+    if (!t || t.total_line == null) return null;
+    const combined = awayR + homeR;
+    if (combined === t.total_line) return null; // push
+    if (t.direction === 'over')  return combined > t.total_line ? 'win' : 'loss';
+    if (t.direction === 'under') return combined < t.total_line ? 'win' : 'loss';
+  }
+  return null;
+}
+
+// Preferred result lookup: live final score first, ledger fallback.
+function _getPickResult(g, betType) {
+  const fs = _finalScoreMap[g.game_id];
+  if (fs) return _computePickResult(g, fs.awayR, fs.homeR, betType);
+  return _pickResult(g.game_id, betType);
+}
+
+// Paint result-win / result-loss classes on the three prop cards for one game.
+function _applyPickResultHighlights(g, awayR, homeR) {
+  const targets = [
+    { id: `pc-ml-${g.game_id}`,  betType: 'single'   },
+    { id: `pc-rl-${g.game_id}`,  betType: 'run_line' },
+    { id: `pc-tot-${g.game_id}`, betType: 'totals'   },
+  ];
+  for (const { id, betType } of targets) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const result = _computePickResult(g, awayR, homeR, betType);
+    el.classList.remove('result-win', 'result-loss');
+    if (result === 'win')  el.classList.add('result-win');
+    else if (result === 'loss') el.classList.add('result-loss');
+  }
 }
 function _resultIcon(result) {
   if (result === 'win')  return `<span style="color:var(--green);font-weight:700;margin-left:4px">✓</span>`;
@@ -2702,6 +2756,8 @@ function _applyLiveMap(liveMap) {
       r.appendChild(aSpan); r.appendChild(sep); r.appendChild(hSpan);
       ctr.appendChild(r);
 
+      _finalScoreMap[g.game_id] = { awayR, homeR };
+      _applyPickResultHighlights(g, awayR, homeR);
       if (!_completedGames.has(g.game_id)) {
         _completedGames.add(g.game_id);
         anyNewlyComplete = true;
@@ -3965,9 +4021,9 @@ function buildMlCard(g) {
       </button>`;
     }
   }
-  const mlResult  = _pickResult(g.game_id, 'single');
+  const mlResult  = _getPickResult(g, 'single');
   const mlResCls  = mlResult === 'win' ? ' result-win' : mlResult === 'loss' ? ' result-loss' : '';
-  return `<div class="prop-card ${conf.cls}${mlResCls}">
+  return `<div id="pc-ml-${g.game_id}" class="prop-card ${conf.cls}${mlResCls}">
     <div class="pc-type-row">
       <div class="pc-type">Moneyline</div>
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
@@ -4010,9 +4066,9 @@ function buildRlCard(g) {
   const rlEdgeVal   = (rl.edge >= 0 ? '+' : '') + (rl.edge * 100).toFixed(1) + '%';
   const rlEdgeColor = rl.edge > 0 ? 'var(--green)' : rl.edge < 0 ? 'var(--red)' : 'var(--dim)';
   const edgeDisplay = `<span style="color:${rlEdgeColor};font-weight:600;font-size:12px">${rlEdgeVal}</span>`;
-  const rlResult  = _pickResult(g.game_id, 'run_line');
+  const rlResult  = _getPickResult(g, 'run_line');
   const rlResCls  = rlResult === 'win' ? ' result-win' : rlResult === 'loss' ? ' result-loss' : '';
-  return `<div class="prop-card ${conf.cls}${rlResCls}">
+  return `<div id="pc-rl-${g.game_id}" class="prop-card ${conf.cls}${rlResCls}">
     <div class="pc-type-row">
       <div class="pc-type">Run Line</div>
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
@@ -4055,9 +4111,9 @@ function buildTotalsCard(g) {
   const tEdgeVal    = (t.edge >= 0 ? '+' : '') + (t.edge * 100).toFixed(1) + '%';
   const tEdgeColor  = t.edge > 0 ? 'var(--green)' : t.edge < 0 ? 'var(--red)' : 'var(--dim)';
   const edgeDisplay = `<span style="color:${tEdgeColor};font-weight:600;font-size:12px">${tEdgeVal}</span>`;
-  const totResult = _pickResult(g.game_id, 'totals');
+  const totResult = _getPickResult(g, 'totals');
   const totResCls = totResult === 'win' ? ' result-win' : totResult === 'loss' ? ' result-loss' : '';
-  return `<div class="prop-card ${conf.cls}${totResCls}">
+  return `<div id="pc-tot-${g.game_id}" class="prop-card ${conf.cls}${totResCls}">
     <div class="pc-type-row">
       <div class="pc-type">Totals (O/U ${t.total_line})</div>
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
