@@ -26,6 +26,33 @@ from .sports_config import SportConfig
 
 _MLB_ODDS_KEY = "baseball_mlb"
 
+# ── Moneyline XGBoost hyperparameters ────────────────────────────────────────
+# Tuned independently from the run-line model (see run_line_model.py).
+# Lower min_child_weight / gamma vs. run-line because the moneyline signal is
+# weaker (~58% vs. ~65% CV) and was being over-regularized.
+# n_estimators=100, max_depth=3 chosen by 5-fold CV grid sweep on the enriched
+# historical dataset (8,934 rows) — see xgb_hp_search.py. The previous 200x4
+# config was overfitting: CV 58.65% -> 59.30% with the smaller forest.
+XGB_MONEYLINE_PARAMS = dict(
+    n_estimators=100,
+    max_depth=3,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    min_child_weight=2,
+    gamma=0.3,
+    reg_lambda=2.0,
+    eval_metric="logloss",
+    random_state=42,
+)
+
+# ── Moneyline Logistic Regression regularisation ─────────────────────────────
+# Independent of RunLineModel._LR_C — the two targets prefer different C.
+# Tuned via 5-fold CV sweep over {0.01, 0.1, 0.5, 1.0, 2.0, 5.0} on the
+# enriched historical dataset (see tune_lr.py). C=2.0 won; the gain over
+# the prior C=1.0 default is small but consistent (0.5957 vs 0.5955 CV).
+LR_MONEYLINE_C: float = 2.0
+
 
 class _StatsClient(Protocol):
     def get_completed_games(self, season: int) -> list[dict]: ...
@@ -214,13 +241,8 @@ class BettingModel:
 
         X_scaled = self.scaler.fit_transform(X_combined)
 
-        # ── XGBoost ──────────────────────────────────────────────────────────
-        self.xgb = xgb.XGBClassifier(
-            n_estimators=200, max_depth=4, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8,
-            min_child_weight=5, gamma=1.0, reg_lambda=2.0,
-            eval_metric="logloss", random_state=42,
-        )
+        # ── XGBoost (moneyline) ──────────────────────────────────────────────
+        self.xgb = xgb.XGBClassifier(**XGB_MONEYLINE_PARAMS)
         cv_fit_params = ({"sample_weight": sample_weights}
                          if sample_weights is not None else {})
         try:
@@ -234,10 +256,14 @@ class BettingModel:
         self.cv_accuracy = float(xgb_cv.mean())
         self.xgb.fit(X_scaled, y_combined,
                      **({"sample_weight": sample_weights} if sample_weights is not None else {}))
+        # Attach feature names so SHAP / get_score() show real names, not f0..f23.
+        self.xgb.get_booster().feature_names = list(self.sport.feature_names)
         self.is_trained = True
 
         # ── Logistic Regression ───────────────────────────────────────────────
-        self.lr = LogisticRegression(C=1.0, max_iter=2000, solver="lbfgs", random_state=42)
+        self.lr = LogisticRegression(
+            C=LR_MONEYLINE_C, max_iter=2000, solver="lbfgs", random_state=42,
+        )
         try:
             lr_cv = cross_val_score(
                 self.lr, X_scaled, y_combined, cv=5, scoring="accuracy",
@@ -291,9 +317,13 @@ class BettingModel:
         sample_weights: "np.ndarray | None" = None,
     ) -> str:
         """
-        Train a 3-layer MLP on pre-combined (historical + current-season) data.
-        Uses a separate StandardScaler so XGB/LR scaling is unaffected.
-        Returns a short status string; sets self.nn / nn_scaler / nn_val_accuracy.
+        Train a 2-layer MLP wrapped in isotonic probability calibration on
+        pre-combined (historical + current-season) data.  Uses a separate
+        StandardScaler so XGB/LR scaling is unaffected.
+
+        Keeps the best model from the 80/20 validation split — no full-data
+        refit.  The base MLP uses its own internal early-stopping split
+        inside each calibration fold.
 
         sample_weights: if provided, split alongside X/y and passed to fit().
         """
@@ -303,6 +333,7 @@ class BettingModel:
         self.nn_scaler = StandardScaler()
         X_all_scaled   = self.nn_scaler.fit_transform(X_combined.astype(np.float32))
 
+        from sklearn.calibration import CalibratedClassifierCV
         from sklearn.model_selection import train_test_split
 
         # 80/20 split for hold-out validation accuracy; propagate weights
@@ -318,29 +349,35 @@ class BettingModel:
             )
             sw_tr = None
 
-        self.nn = MLPClassifier(
-            hidden_layer_sizes=(128, 64, 32),
+        base_mlp = MLPClassifier(
+            hidden_layer_sizes=(64, 32),
             activation="relu",
-            alpha=0.001,          # L2 regularisation
+            alpha=0.01,
             batch_size=256,
             learning_rate="adaptive",
             max_iter=400,
-            early_stopping=False,  # we do our own hold-out
+            early_stopping=True,
+            validation_fraction=0.15,
+            n_iter_no_change=20,
             random_state=42,
         )
+        self.nn = CalibratedClassifierCV(
+            estimator=base_mlp,
+            method="isotonic",
+            cv=5,
+        )
 
-        print(f"  Training neural network on {len(y_combined):,} combined games…")
+        print(
+            f"  Training calibrated neural network "
+            f"(isotonic, 5-fold) on {len(y_tr):,} games | val on {len(y_val):,}…"
+        )
         fit_kw = {"sample_weight": sw_tr} if sw_tr is not None else {}
         self.nn.fit(X_tr, y_tr, **fit_kw)
 
         self.nn_val_accuracy = float(np.mean(self.nn.predict(X_val) == y_val))
         self.nn_is_trained   = True
 
-        # Final fit on all data after validation
-        all_kw = {"sample_weight": sample_weights} if sample_weights is not None else {}
-        self.nn.fit(X_all_scaled, y_combined, **all_kw)
-
-        return f"NN val: {self.nn_val_accuracy:.1%} ({len(y_combined):,} games)"
+        return f"NN val: {self.nn_val_accuracy:.1%} ({len(y_combined):,} games, calibrated)"
 
     # ------------------------------------------------------------------
     # Prediction
@@ -388,8 +425,11 @@ class BettingModel:
         nn_method  = "n/a"
         if self.nn_is_trained and self.nn is not None and self.nn_scaler is not None:
             try:
-                X_nn    = self.nn_scaler.transform(feature_vec.reshape(1, -1))
-                nn_prob = float(self.nn.predict_proba(X_nn)[0, 1])
+                X_nn      = self.nn_scaler.transform(feature_vec.reshape(1, -1))
+                raw_prob  = float(self.nn.predict_proba(X_nn)[0, 1])
+                # Hard clip prevents saturated NN outputs from blowing up the
+                # ensemble even when calibration leaves a tail near 0/1.
+                nn_prob   = float(np.clip(raw_prob, 0.05, 0.95))
                 nn_method = "neural_net"
             except Exception:
                 nn_prob = None

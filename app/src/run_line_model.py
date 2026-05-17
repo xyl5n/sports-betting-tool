@@ -17,6 +17,34 @@ from sklearn.preprocessing import StandardScaler
 
 _MODEL_PATH = Path(".cache/model_run_line_mlb.joblib")
 
+# ── Run-line XGBoost hyperparameters ─────────────────────────────────────────
+# Tuned independently from the moneyline model (see model.py).
+# Run-line has a stronger underlying signal (~65% CV); keeping the conservative
+# regularization (mcw=5, gamma=1.0) which still beat lower-reg variants here.
+# n_estimators=100, max_depth=3 chosen by 5-fold CV grid sweep on the enriched
+# historical dataset (8,934 rows) — see xgb_hp_search.py. The previous 200x4
+# config was overfitting: CV 65.28% -> 65.78% with the smaller forest.
+XGB_RUN_LINE_PARAMS = dict(
+    n_estimators=100,
+    max_depth=3,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    min_child_weight=5,
+    gamma=1.0,
+    reg_lambda=2.0,
+    eval_metric="logloss",
+    random_state=42,
+)
+
+# ── Run-line Logistic Regression regularisation ──────────────────────────────
+# Independent of BettingModel.LR_MONEYLINE_C — RL prefers strong regularisation.
+# Tuned via 5-fold CV sweep over {0.01, 0.1, 0.5, 1.0, 2.0, 5.0} on the
+# enriched historical dataset (see tune_lr.py). C=0.01 won decisively:
+# 0.6604 vs C=1.0 baseline 0.6577 (+0.27 pp). The RL label is class-imbalanced
+# (64/36 split), and heavy L2 prevents the LR from overfitting the majority class.
+LR_RUN_LINE_C: float = 0.01
+
 
 class RunLineModel:
     def __init__(self):
@@ -196,12 +224,7 @@ class RunLineModel:
         cv_fit_params = ({"sample_weight": sample_weights}
                          if sample_weights is not None else {})
 
-        self.xgb = xgb.XGBClassifier(
-            n_estimators=200, max_depth=4, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8,
-            min_child_weight=5, gamma=1.0, reg_lambda=2.0,
-            eval_metric="logloss", random_state=42,
-        )
+        self.xgb = xgb.XGBClassifier(**XGB_RUN_LINE_PARAMS)
         try:
             cv_scores = cross_val_score(
                 self.xgb, X_scaled, y_combined, cv=5, scoring="accuracy",
@@ -212,9 +235,17 @@ class RunLineModel:
         self.xgb_cv = float(cv_scores.mean())
         self.xgb.fit(X_scaled, y_combined,
                      **({"sample_weight": sample_weights} if sample_weights is not None else {}))
+        # Attach feature names so SHAP / get_score() show real names, not f0..f23.
+        try:
+            from .sports_config import MLB_FEATURES
+            self.xgb.get_booster().feature_names = list(MLB_FEATURES)
+        except Exception:
+            pass
         self.is_trained = True
 
-        self.lr = LogisticRegression(C=1.0, max_iter=2000, solver="lbfgs", random_state=42)
+        self.lr = LogisticRegression(
+            C=LR_RUN_LINE_C, max_iter=2000, solver="lbfgs", random_state=42,
+        )
         try:
             lr_scores = cross_val_score(
                 self.lr, X_scaled, y_combined, cv=5, scoring="accuracy",

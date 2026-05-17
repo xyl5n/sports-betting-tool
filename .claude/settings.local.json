@@ -27,7 +27,8 @@
       "Bash(start \"\" pythonw desktop.pyw)",
       "Bash(ls \"C:\\\\sports-betting-ai\\\\\" && echo \"---\" && ls \"C:\\\\sports-betting-ai\\\\app\\\\\")",
       "Bash(dir \"C:\\\\sports-betting-ai\" /b)",
-      "Bash(dir \"C:\\\\sports-betting-ai\\\\app\" /b)"
+      "Bash(dir \"C:\\\\sports-betting-ai\\\\app\" /b)",
+      "Bash(set PYTHONIOENCODING=utf-8)"
     ]
   }
 }
