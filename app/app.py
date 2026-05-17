@@ -2178,6 +2178,7 @@ def analyze():
             shap_result = explainer.explain(
                 feature_vec, model=model.get_raw_model(),
                 scaler=model.get_scaler(), is_trained=model.is_trained,
+                xgb_cols=model.get_xgb_cols(), xgb_names=model.get_xgb_names(),
             )
 
             # Run line prediction (MLB only).
@@ -2195,6 +2196,7 @@ def analyze():
                     rl_shap = rl_explainer.explain(
                         feature_vec, model=rl_model.get_raw_model(),
                         scaler=rl_model.get_scaler(), is_trained=rl_model.is_trained,
+                        xgb_cols=rl_model.get_xgb_cols(), xgb_names=rl_model.get_xgb_names(),
                     )
                     rl_pred["shap"] = rl_shap
 
@@ -2379,6 +2381,7 @@ def refresh_models():
             shap_result = explainer.explain(
                 feature_vec, model=model.get_raw_model(),
                 scaler=model.get_scaler(), is_trained=model.is_trained,
+                xgb_cols=model.get_xgb_cols(), xgb_names=model.get_xgb_names(),
             )
 
             rl_pred = None
@@ -2397,6 +2400,7 @@ def refresh_models():
                     rl_shap = rl_explainer.explain(
                         feature_vec, model=rl_model.get_raw_model(),
                         scaler=rl_model.get_scaler(), is_trained=rl_model.is_trained,
+                        xgb_cols=rl_model.get_xgb_cols(), xgb_names=rl_model.get_xgb_names(),
                     )
                     rl_pred["shap"] = rl_shap
 
