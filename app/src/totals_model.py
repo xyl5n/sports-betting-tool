@@ -308,8 +308,45 @@ class TotalsModel:
 
         w = weights or {}
         line = float(total_line)
+
+        # ── Silent XGB-only pick recorder (does not affect ensemble output) ───
+        try:
+            from .xgb_picks_tracker import record_totals_pick
+            record_totals_pick(
+                game            = game,
+                predicted_total = pred_xgb,
+                market_line     = line,
+                sport           = "MLB",   # TotalsModel is MLB-only
+            )
+        except Exception:
+            pass
+
         if nn_pred is not None:
             pred_nn = nn_pred * park_factor
+            # ── NN-only pick logging (silent side-channel) ────────────────
+            # Records the NN's standalone over/under direction independent
+            # of whatever the ensemble eventually returns.  Confidence is
+            # derived from _prob_over so it matches the model's own scale.
+            try:
+                from .nn_picks import record_nn_pick
+                _nn_dir       = "over" if pred_nn > line else "under"
+                _p_over       = _prob_over(pred_nn, line)
+                _nn_dir_prob  = _p_over if _nn_dir == "over" else (1.0 - _p_over)
+                _ct           = str(game.get("commence_time") or "")
+                _date         = _ct[:10] if len(_ct) >= 10 else ""
+                if _date:
+                    record_nn_pick(
+                        game_date = _date,
+                        matchup   = f"{game.get('away_team','?')} @ {game.get('home_team','?')}",
+                        sport     = "MLB",
+                        bet_type  = "totals",
+                        nn_prob   = _nn_dir_prob,
+                        nn_pick   = _nn_dir,
+                        extra     = {"nn_run_total": round(float(pred_nn), 3),
+                                     "line": line},
+                    )
+            except Exception:
+                pass
             w_xgb   = float(w.get("xgb", 1 / 3))
             w_lr    = float(w.get("lr",  1 / 3))
             w_nn    = float(w.get("nn",  1 / 3))

@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.cache import Cache
 from src.daily_picks import select_daily_picks, load_daily_picks
+import src.ensemble_store as ensemble_store
 from src.game_store import GameStore
 from src.kelly import size_bet, american_to_decimal, confidence_tier
 from src.ledger import Ledger
@@ -1619,13 +1620,18 @@ def init_analysis():
 
 def _run_daily_picks_selection() -> None:
     """
-    Run cross-sport daily picks selection using the latest cached results from
-    both MLB and WNBA analyses.  Called at the end of each /api/analyze and
-    /api/wnba/analyze route so picks always reflect the most-recent data from
-    whichever sport was last analyzed.
+    Run cross-sport daily picks selection.  Prefers today's ensemble picks
+    (ensemble_picks_today.json) as the authoritative source; falls back to
+    the in-memory analysis state only when the ensemble file has no data yet.
+
+    Called at the end of each /api/analyze and /api/wnba/analyze route so
+    picks always reflect the most-recent data from whichever sport was last
+    analyzed.
     """
-    mlb_results  = _analysis_state.get("results")  or []
-    wnba_results = _wnba_analysis_state.get("results") or []
+    # Use the ensemble store as the single source of truth when available
+    ensemble = ensemble_store.get_picks()
+    mlb_results  = ensemble.get("mlb")  or _analysis_state.get("results")  or []
+    wnba_results = ensemble.get("wnba") or _wnba_analysis_state.get("results") or []
     if not mlb_results and not wnba_results:
         return
     try:
@@ -1778,7 +1784,7 @@ def analyze():
             if built is None:
                 continue
             feature_vec, meta = built
-            prediction  = model.predict(feature_vec, weights=model_weights)
+            prediction  = model.predict(feature_vec, weights=model_weights, game_meta=game)
             shap_result = explainer.explain(
                 feature_vec, model=model.get_raw_model(),
                 scaler=model.get_scaler(), is_trained=model.is_trained,
@@ -1849,6 +1855,7 @@ def analyze():
         }
         _save_analysis_cache(serialized, parlays, sport, n_completed,
                              cv_acc, lr_cv_acc, nn_val_acc)
+        ensemble_store.save(serialized, "mlb")
         return jsonify({
             "success":         True,
             "cached":          False,
@@ -1940,7 +1947,7 @@ def refresh_models():
                 continue
             feature_vec, meta = built
 
-            prediction  = model.predict(feature_vec, weights=model_weights)
+            prediction  = model.predict(feature_vec, weights=model_weights, game_meta=game)
             shap_result = explainer.explain(
                 feature_vec, model=model.get_raw_model(),
                 scaler=model.get_scaler(), is_trained=model.is_trained,
@@ -2085,6 +2092,153 @@ def model_detail():
         "note":          "Raw individual model outputs — for debugging only, not shown in UI.",
         "games":         out,
     })
+
+
+@app.route("/api/ensemble_picks", methods=["GET"])
+def get_ensemble_picks():
+    """Return today's ensemble picks for all sports (single source of truth)."""
+    sport = request.args.get("sport")  # optional filter: "mlb" or "wnba"
+    try:
+        if sport:
+            picks = ensemble_store.get_picks(sport)
+            return jsonify({"sport": sport, "picks": picks, "count": len(picks)})
+        data = ensemble_store.load()
+        mlb_picks  = data["picks"].get("mlb",  [])
+        wnba_picks = data["picks"].get("wnba", [])
+        return jsonify({
+            "date":  data.get("date", ""),
+            "mlb":   {"picks": mlb_picks,  "count": len(mlb_picks)},
+            "wnba":  {"picks": wnba_picks, "count": len(wnba_picks)},
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/model_performance", methods=["GET"])
+def get_model_performance():
+    """
+    Return per-model accuracy stats for the Model Performance Comparison table.
+    Reads from the unified bet history (closed bets with xgb_prob/lr_prob/nn_prob)
+    and computes individual model correct-call rates for XGB, LR, and NN.
+    """
+    try:
+        from src.ledger import Ledger as _Ledger
+
+        # Gather closed bets from both sport ledgers
+        def _closed(path: str) -> list[dict]:
+            try:
+                return _Ledger(path=path, starting_bankroll=1000.0).data.get("history", [])
+            except Exception:
+                return []
+
+        history = _closed("data/ledger.json") + _closed("data/wnba_ledger.json")
+
+        # Also pull from the archive file if it exists
+        if _ARCHIVE_PATH.exists():
+            try:
+                arc = json.loads(_ARCHIVE_PATH.read_text(encoding="utf-8"))
+                history += arc if isinstance(arc, list) else []
+            except Exception:
+                pass
+
+        def _model_correct(model_prob: float | None, bet_side: str, result: str) -> bool | None:
+            """
+            Return True/False if the model correctly called the winner.
+            Returns None when model_prob is missing (skip from accuracy calc).
+            result is "win" or "loss" from the ledger entry's perspective
+            (i.e. relative to the *bet* side, not always the home team).
+            """
+            if model_prob is None:
+                return None
+            model_picks_home = model_prob >= 0.5
+            bet_on_home = bet_side == "home"
+            # bet won → the bet side won
+            if result == "win":
+                home_won = bet_on_home
+            elif result == "loss":
+                home_won = not bet_on_home
+            else:
+                return None
+            return model_picks_home == home_won
+
+        BET_TYPE_MAP = {
+            "moneyline":       "Moneyline",
+            "run_line_spread": "Run Line / Spread",
+            "totals":          "Totals",
+        }
+
+        stats: dict = {
+            model: {
+                "overall": {"correct": 0, "total": 0},
+                "by_type": {k: {"correct": 0, "total": 0} for k in BET_TYPE_MAP},
+            }
+            for model in ("xgb", "lr", "nn")
+        }
+
+        for bet in history:
+            result = bet.get("result", "")
+            if result not in ("win", "loss"):
+                continue
+            side     = bet.get("side", "home")
+            bet_type = bet.get("bet_type", "moneyline")
+            if bet_type not in BET_TYPE_MAP:
+                bet_type = "moneyline"
+
+            for model_key in ("xgb", "lr", "nn"):
+                prob_field = f"{model_key}_prob"
+                prob = bet.get(prob_field)
+                if prob is None:
+                    continue
+                correct = _model_correct(float(prob), side, result)
+                if correct is None:
+                    continue
+                stats[model_key]["overall"]["total"]   += 1
+                stats[model_key]["overall"]["correct"] += int(correct)
+                stats[model_key]["by_type"][bet_type]["total"]   += 1
+                stats[model_key]["by_type"][bet_type]["correct"] += int(correct)
+
+        def _pct(c: int, t: int) -> float | None:
+            return round(c / t * 100, 1) if t > 0 else None
+
+        result_out: dict = {}
+        for model_key, data in stats.items():
+            ov = data["overall"]
+            by_type: dict = {}
+            for bt, bt_data in data["by_type"].items():
+                by_type[bt] = {
+                    "correct":    bt_data["correct"],
+                    "total":      bt_data["total"],
+                    "win_pct":    _pct(bt_data["correct"], bt_data["total"]),
+                    "label":      BET_TYPE_MAP[bt],
+                }
+            result_out[model_key] = {
+                "label":    {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}[model_key],
+                "overall":  {
+                    "correct": ov["correct"],
+                    "total":   ov["total"],
+                    "win_pct": _pct(ov["correct"], ov["total"]),
+                },
+                "by_type":  by_type,
+            }
+
+        # Recommend the model with the highest overall win_pct (min 10 bets)
+        best_model = None
+        best_pct   = 0.0
+        for mk, md in result_out.items():
+            wp = md["overall"]["win_pct"]
+            total = md["overall"]["total"]
+            if wp is not None and total >= 10 and wp > best_pct:
+                best_pct   = wp
+                best_model = mk
+
+        return jsonify({
+            "models":     result_out,
+            "best_model": best_model,
+            "total_bets": len(history),
+        })
+
+    except Exception as exc:
+        return jsonify({"error": str(exc), "detail": traceback.format_exc()}), 500
 
 
 @app.route("/api/ledger", methods=["GET"])
@@ -3181,7 +3335,7 @@ def analyze_wnba():
                 continue
             feature_vec, meta = built
 
-            prediction   = ml_model.predict(feature_vec)
+            prediction   = ml_model.predict(feature_vec, game_meta=game)
             spread_pred  = spread_model.predict(feature_vec, game) if spread_model.is_trained else None
             totals_vec   = fb.build_totals_from_meta(meta)
             totals_pred  = None
@@ -3217,6 +3371,7 @@ def analyze_wnba():
             "lr_cv_accuracy": lr_cv_acc,
         }
         _save_wnba_analysis_cache(serialized, parlays, n_completed, cv_acc, lr_cv_acc)
+        ensemble_store.save(serialized, "wnba")
 
         return jsonify({
             "success":        True,

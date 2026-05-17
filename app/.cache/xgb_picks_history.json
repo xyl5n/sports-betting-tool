@@ -1,0 +1,28 @@
+{
+  "picks": [
+    {
+      "id": "test-1_moneyline",
+      "game_id": "test-1",
+      "sport": "mlb",
+      "bet_type": "moneyline",
+      "date": "2026-05-17",
+      "matchup": "New York Yankees @ Boston Red Sox",
+      "home_team": "Boston Red Sox",
+      "away_team": "New York Yankees",
+      "pick": "away",
+      "pick_label": "New York Yankees",
+      "xgb_prob": 0.4666043221950531,
+      "xgb_confidence": 0.0667913556098938,
+      "predicted_total": null,
+      "market_line": null,
+      "recorded_at": "2026-05-17T18:13:11Z",
+      "settled": false,
+      "actual_home": null,
+      "actual_away": null,
+      "actual_total": null,
+      "result": null,
+      "correct": null,
+      "settled_at": null
+    }
+  ]
+}

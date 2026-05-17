@@ -1128,6 +1128,7 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
   font-size: 12px;
 }
 .dp-pick-row:last-child { border-bottom: none; }
+.dp-slot-empty { opacity: .45; pointer-events: none; }
 .dp-rank {
   font-size: 11px; font-weight: 700; color: var(--dim);
   width: 16px; flex-shrink: 0; text-align: center;
@@ -1520,6 +1521,54 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .home-perf-type { font-weight: 600; }
 .home-perf-num  { text-align: right; font-family: "SF Mono", Consolas, monospace; font-size: 12px; }
 
+/* ── Model Performance Comparison ───────────────────────────────────── */
+.model-perf-section { margin-top: 32px; }
+.model-perf-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+}
+@media (max-width: 800px) { .model-perf-grid { grid-template-columns: 1fr; } }
+.model-perf-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden;
+}
+.model-perf-card.best-model { border-color: var(--green); box-shadow: 0 0 0 1px rgba(52,199,89,.25); }
+.model-perf-card-hdr {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--bg3);
+}
+.model-perf-card-hdr .model-name { font-size: 14px; font-weight: 700; }
+.model-perf-card-hdr .model-badge {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
+  padding: 2px 7px; border-radius: 4px;
+  background: rgba(52,199,89,.18); color: var(--green);
+}
+.model-perf-overall {
+  padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+.model-perf-overall .pct-big {
+  font-size: 28px; font-weight: 700; font-family: "SF Mono", Consolas, monospace;
+}
+.model-perf-overall .rec-sm { font-size: 12px; color: var(--text-dim); }
+.model-perf-breakdown { padding: 10px 16px 14px; }
+.model-perf-breakdown .bt-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.model-perf-breakdown .bt-row:last-child { border-bottom: none; }
+.model-perf-breakdown .bt-label { color: var(--text-dim); }
+.model-perf-breakdown .bt-val {
+  font-family: "SF Mono", Consolas, monospace; font-size: 11px;
+}
+.model-perf-no-data { padding: 20px 16px; text-align: center; color: var(--text-dim); font-size: 13px; }
+.model-perf-recommend {
+  margin-top: 16px; padding: 12px 16px;
+  background: rgba(52,199,89,.08); border: 1px solid rgba(52,199,89,.25); border-radius: var(--radius);
+  font-size: 13px; color: var(--green);
+}
+.model-perf-recommend strong { color: #fff; }
+
 /* ── Sport page sub-header (sticky below topnav) ─────────────────────── */
 .sport-page-header {
   position: sticky; top: var(--topnav-h); z-index: 90;
@@ -1734,6 +1783,22 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
       </div>
     </div>
     <div id="model-inner"><div class="empty"><div class="icon">🤖</div>Loading…</div></div>
+
+    <!-- Model Performance Comparison -->
+    <div class="model-perf-section" id="model-perf-section" style="display:none">
+      <div class="section-hdr" style="margin-top:32px">
+        <h2>Model Performance Comparison</h2>
+        <button onclick="loadModelPerformance()" class="btn-track"
+                style="font-size:12px;margin-left:auto">↻ Refresh</button>
+      </div>
+      <p style="color:var(--text-dim);font-size:13px;margin:0 0 16px">
+        Per-model accuracy computed from settled bets — only picks where the model's
+        individual probability is available are counted.
+      </p>
+      <div id="model-perf-inner">
+        <div class="empty"><div class="icon">📊</div>Loading performance data…</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1961,9 +2026,10 @@ function showPage(name) {
     if (btn) btn.classList.toggle('active', p === name);
   });
   // Side effects
-  if (name === 'mybets' || name === 'model') { loadLedger(); return; }
-  if (name === 'ai')   { initChatTab(); return; }
-  if (name === 'home') { buildHomePage(); return; }
+  if (name === 'mybets') { loadLedger(); return; }
+  if (name === 'model')  { loadLedger(); loadModelPerformance(); return; }
+  if (name === 'ai')     { initChatTab(); return; }
+  if (name === 'home')   { buildHomePage(); return; }
 }
 
 // ── Sport sub-tab switching ────────────────────────────────────────────────────
@@ -4889,6 +4955,92 @@ async function confirmSetModelBankroll() {
   }
 }
 
+// ── Model Performance Comparison ───────────────────────────────────────────────
+async function loadModelPerformance() {
+  const section = document.getElementById('model-perf-section');
+  const inner   = document.getElementById('model-perf-inner');
+  if (!section || !inner) return;
+  section.style.display = '';
+  inner.innerHTML = '<div class="empty"><div class="icon">📊</div>Loading performance data…</div>';
+
+  try {
+    const res  = await fetch('/api/model_performance');
+    const data = await res.json();
+    if (data.error) { inner.innerHTML = `<div class="empty">Error: ${data.error}</div>`; return; }
+
+    const models     = data.models || {};
+    const bestModel  = data.best_model;
+    const totalBets  = data.total_bets || 0;
+    const modelOrder = ['xgb', 'lr', 'nn'];
+
+    const pctColor = p => p == null ? 'var(--text-dim)' : p >= 55 ? 'var(--green)' : p >= 45 ? '#f5c842' : 'var(--red)';
+    const pctFmt   = p => p == null ? '—' : `${p.toFixed(1)}%`;
+    const recFmt   = (c, t) => t > 0 ? `${c}W-${t - c}L` : '—';
+
+    const cards = modelOrder.map(mk => {
+      const md = models[mk];
+      if (!md) return '';
+      const ov     = md.overall;
+      const isBest = mk === bestModel;
+      const byType = md.by_type || {};
+      const btRows = ['moneyline', 'run_line_spread', 'totals'].map(bt => {
+        const bt_data = byType[bt] || {};
+        const label   = bt_data.label || bt;
+        const wp      = bt_data.win_pct;
+        const total   = bt_data.total || 0;
+        return `<div class="bt-row">
+          <span class="bt-label">${label}</span>
+          <span class="bt-val" style="color:${pctColor(wp)}">${pctFmt(wp)} <span style="color:var(--text-dim)">(${total})</span></span>
+        </div>`;
+      }).join('');
+
+      const noData = ov.total === 0;
+      return `<div class="model-perf-card${isBest ? ' best-model' : ''}">
+        <div class="model-perf-card-hdr">
+          <span class="model-name">${md.label}</span>
+          ${isBest ? '<span class="model-badge">⭐ Most Reliable</span>' : ''}
+        </div>
+        ${noData ? `<div class="model-perf-no-data">No settled bets recorded for this model yet.</div>` : `
+        <div class="model-perf-overall">
+          <div>
+            <div class="pct-big" style="color:${pctColor(ov.win_pct)}">${pctFmt(ov.win_pct)}</div>
+            <div class="rec-sm">${recFmt(ov.correct, ov.total)} — ${ov.total} bets</div>
+          </div>
+        </div>
+        <div class="model-perf-breakdown">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);padding-bottom:6px">By Bet Type</div>
+          ${btRows}
+        </div>`}
+      </div>`;
+    }).join('');
+
+    let recommend = '';
+    if (bestModel && models[bestModel]) {
+      const md = models[bestModel];
+      const wp = md.overall.win_pct;
+      recommend = `<div class="model-perf-recommend">
+        <strong>${md.label}</strong> is the most reliable model this season at
+        <strong style="color:var(--green)">${pctFmt(wp)}</strong> overall accuracy
+        across ${md.overall.total} settled bets.
+      </div>`;
+    } else if (totalBets > 0) {
+      recommend = `<div class="model-perf-recommend" style="background:rgba(100,100,100,.1);border-color:rgba(100,100,100,.25);color:var(--text-dim)">
+        Need at least 10 settled bets per model to recommend a most reliable model.
+      </div>`;
+    }
+
+    inner.innerHTML = `
+      <div class="model-perf-grid">${cards}</div>
+      ${recommend}
+      <div style="font-size:11px;color:var(--text-dim);margin-top:10px;text-align:right">
+        Based on ${totalBets} total settled bets across both sports.
+      </div>`;
+
+  } catch (e) {
+    inner.innerHTML = `<div class="empty">Failed to load performance data.</div>`;
+  }
+}
+
 // ── Ledger ─────────────────────────────────────────────────────────────────────
 async function loadLedger() {
   const mbInner = document.getElementById('mybets-inner');
@@ -5330,70 +5482,121 @@ function buildMyBetsHtml(data) {
 }
 
 function _buildDailyPicksHtml(dp) {
-  /** Render the three-category daily picks grid inside the Model Bankroll tab. */
+  /** Render one 5-slot grid per category inside the Model Bankroll tab.
+   *  Every slot is always shown (1-5) — empty slots display a dim placeholder.
+   *  New categories added to CATEGORY_CONFIG on the server appear automatically
+   *  because we discover extra keys from dp.picks without any JS changes.
+   */
   if (!dp || !dp.picks) {
     return `<div class="dp-empty">Run analysis to generate today's model picks.</div>`;
   }
 
+  // Base category order — matches CATEGORY_CONFIG on the server.
   const catDefs = [
     { key: 'moneyline',       label: 'Moneyline' },
     { key: 'run_line_spread', label: 'Run Line / Spread' },
     { key: 'totals',          label: 'Totals' },
   ];
 
+  // Auto-discover any future categories the server added (NRFI, props, etc.)
+  const knownKeys = new Set(catDefs.map(c => c.key));
+  for (const key of Object.keys(dp.picks)) {
+    if (!knownKeys.has(key) && Array.isArray(dp.picks[key])) {
+      catDefs.push({
+        key,
+        label: key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+      });
+      knownKeys.add(key);
+    }
+  }
+
   const genDate = dp.generated_at
-    ? new Date(dp.generated_at).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })
+    ? new Date(dp.generated_at).toLocaleDateString('en-US',
+        { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '';
 
   let html = `<div class="dp-section">
     <div class="dp-section-hdr">
-      <div class="dp-section-title">Today's Model Picks</div>
+      <div class="dp-section-title">Today's Model Picks
+        <span style="font-size:11px;font-weight:400;color:var(--text-dim);margin-left:6px">${catDefs.length} categories · ${catDefs.length * 5} slots total</span>
+      </div>
       ${genDate ? `<div class="dp-section-date">Generated ${genDate}</div>` : ''}
     </div>`;
 
   const dpTargetDate = _viewDateET();
-  for (const { key, label } of catDefs) {
-    // Today-only rule: only display picks whose game is scheduled for the current view date
-    // Re-number sequentially after filtering so ranks are always 1-5 with no gaps
-    const picks = (dp.picks[key] || [])
-      .filter(p => !p.commence_time || _etDateStr(p.commence_time) === dpTargetDate)
-      .map((p, i) => ({ ...p, displayRank: i + 1 }));
-    html += `<div class="dp-category">
-      <div class="dp-cat-hdr">${label} <span style="color:var(--dim);font-weight:400">(${picks.length} of ${5})</span></div>`;
 
-    if (!picks.length) {
-      html += `<div class="dp-empty">No qualifying ${label.toLowerCase()} picks today.</div>`;
-    } else {
-      for (const p of picks) {
-        const sport    = (p.sport || 'mlb').toLowerCase();
-        const confStr  = `${(p.pick_prob * 100).toFixed(1)}%`;
-        const edgeStr  = p.edge >= 0 ? `+${(p.edge * 100).toFixed(1)}%` : `${(p.edge * 100).toFixed(1)}%`;
-        const oddsStr  = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
-        const lineStr  = p.prop_line != null ? ` (${p.prop_line > 0 ? '+' : ''}${p.prop_line})` : '';  // prop_line is signed for run_line/spread, plain for totals
-        const amtStr   = p.model_amount > 0 ? `$${p.model_amount.toFixed(2)}` : '—';
-        const confCls  = _dpConfClass(p.confidence_tier);
-        const matchup  = `${p.away_team} @ ${p.home_team}`;
-        const belowBadge = p.below_threshold
-          ? `<span style="background:#5c3a1e;color:#f5a623;font-size:9px;padding:1px 5px;border-radius:3px;margin-left:4px;font-weight:600">BELOW THRESHOLD</span>`
-          : '';
-        html += `<div class="dp-pick-row">
-          <div class="dp-rank">${p.displayRank}</div>
-          <span class="dp-sport-badge ${sport}">${p.sport_label || sport.toUpperCase()}</span>
-          <div class="dp-pick-info">
-            <div class="dp-team">${p.team}${lineStr}${belowBadge}</div>
-            <div class="dp-meta">${matchup} · ${confStr} · edge ${edgeStr}
-              <span class="pc-conf-label ${confCls}" style="font-size:9px;padding:1px 4px;margin-left:4px">${p.confidence_tier}</span>
-            </div>
-          </div>
-          <div class="dp-right">
-            <div class="dp-odds">${oddsStr}</div>
-            <div class="dp-amt">${amtStr}</div>
+  for (const { key, label } of catDefs) {
+    // Filter to the current view date; keep all 5 picks regardless of quality tier.
+    const picks = (dp.picks[key] || [])
+      .filter(p => !p.commence_time || _etDateStr(p.commence_time) === dpTargetDate);
+
+    const filled = picks.length;
+    const qualPicks = picks.filter(p => !p.below_threshold).length;
+
+    html += `<div class="dp-category">
+      <div class="dp-cat-hdr">
+        ${label}
+        <span style="color:var(--dim);font-weight:400;font-size:11px">
+          ${qualPicks}/${filled} quality · ${filled}/5 filled
+        </span>
+      </div>`;
+
+    // Always render exactly 5 numbered slots.
+    for (let slot = 0; slot < 5; slot++) {
+      const p = picks[slot] || null;
+      const rank = slot + 1;
+
+      if (!p) {
+        // Empty slot placeholder
+        html += `<div class="dp-pick-row dp-slot-empty">
+          <div class="dp-rank" style="color:var(--border)">${rank}</div>
+          <div class="dp-pick-info" style="color:var(--text-dim);font-size:12px;font-style:italic;padding:2px 0">
+            No qualifying picks
           </div>
         </div>`;
+        continue;
       }
+
+      const sport   = (p.sport || 'mlb').toLowerCase();
+      const confStr = `${(p.pick_prob * 100).toFixed(1)}%`;
+      const edgeStr = p.edge >= 0 ? `+${(p.edge * 100).toFixed(1)}%` : `${(p.edge * 100).toFixed(1)}%`;
+      const oddsStr = p.odds > 0 ? `+${p.odds}` : `${p.odds}`;
+      const lineStr = p.prop_line != null
+        ? ` (${p.prop_line > 0 ? '+' : ''}${p.prop_line})`
+        : '';
+      const amtStr  = p.model_amount > 0 ? `$${p.model_amount.toFixed(2)}` : '—';
+      const confCls = _dpConfClass(p.confidence_tier);
+      const matchup = `${p.away_team} @ ${p.home_team}`;
+
+      // Quality tier badges
+      let tierBadge = '';
+      if (p.below_threshold) {
+        tierBadge = `<span style="background:#3a2a10;color:#f5a623;font-size:9px;padding:1px 5px;border-radius:3px;margin-left:4px;font-weight:700;letter-spacing:.03em">BELOW THRESHOLD</span>`;
+      } else if (p.edge > 0 && p.edge < 0.03) {
+        tierBadge = `<span style="background:rgba(100,100,100,.2);color:var(--text-dim);font-size:9px;padding:1px 5px;border-radius:3px;margin-left:4px;font-weight:600">LOW EDGE</span>`;
+      } else if (p.confidence_tier === 'low') {
+        tierBadge = `<span style="background:rgba(100,100,100,.2);color:var(--text-dim);font-size:9px;padding:1px 5px;border-radius:3px;margin-left:4px;font-weight:600">LOW CONF</span>`;
+      }
+
+      html += `<div class="dp-pick-row">
+        <div class="dp-rank">${rank}</div>
+        <span class="dp-sport-badge ${sport}">${p.sport_label || sport.toUpperCase()}</span>
+        <div class="dp-pick-info">
+          <div class="dp-team">${p.team}${lineStr}${tierBadge}</div>
+          <div class="dp-meta">${matchup} · ${confStr} · edge ${edgeStr}
+            <span class="pc-conf-label ${confCls}" style="font-size:9px;padding:1px 4px;margin-left:4px">${p.confidence_tier}</span>
+          </div>
+        </div>
+        <div class="dp-right">
+          <div class="dp-odds">${oddsStr}</div>
+          <div class="dp-amt">${amtStr}</div>
+        </div>
+      </div>`;
     }
+
     html += `</div>`;
   }
+
   html += `</div>`;
   return html;
 }
@@ -5412,19 +5615,36 @@ function buildModelHtml(data) {
   const atRisk   = s.model_at_risk || 0;
   const avail    = s.model_bankroll || 0;
 
-  // Per-category W/L from combined MLB+WNBA type_records
+  // Per-category W/L — always shown even when counts are 0-0.
+  // Reads from combined MLB+WNBA type_records; every CATEGORY_CONFIG key
+  // gets its own row so new categories appear here automatically.
   const trM      = tr.model || {};
-  const mlRec    = trM.moneyline       || [0, 0];
-  const rlRec    = trM.run_line_spread || [0, 0];
-  const ouRec    = trM.totals          || [0, 0];
+  const catRows  = [
+    { key: 'moneyline',       label: 'Moneyline' },
+    { key: 'run_line_spread', label: 'Run Line / Spread' },
+    { key: 'totals',          label: 'Totals' },
+    // Future categories bubble up here automatically when returned by /api/ledger
+    ...Object.keys(trM)
+       .filter(k => !['moneyline','run_line_spread','totals'].includes(k))
+       .map(k => ({
+         key: k,
+         label: k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+       })),
+  ];
 
-  const _catRow = (label, [w, l], cls) => {
-    const tot = w + l;
-    return `<span style="color:var(--dim);font-size:10px">${label}:</span> `
-      + `<span style="color:var(--green);font-weight:700">${w}W</span>`
-      + `<span style="color:var(--dim)">–</span>`
-      + `<span style="color:var(--red);font-weight:700">${l}L</span>`
-      + (tot > 0 ? `<span style="color:var(--dim);font-size:10px"> (${(w/tot*100).toFixed(0)}%)</span>` : '');
+  const _catRow = (label, rec) => {
+    const [w, l] = Array.isArray(rec) ? rec : [0, 0];
+    const tot    = w + l;
+    const pctStr = tot > 0 ? ` (${(w / tot * 100).toFixed(0)}%)` : ' (0%)';
+    return `<div style="display:flex;align-items:center;justify-content:space-between">
+      <span style="color:var(--dim);font-size:11px">${label}</span>
+      <span style="font-size:11px;font-family:var(--mono,'SF Mono',Consolas,monospace)">
+        <span style="color:var(--green);font-weight:700">${w}W</span>
+        <span style="color:var(--text-dim)">–</span>
+        <span style="color:var(--red);font-weight:700">${l}L</span>
+        <span style="color:var(--text-dim)">${pctStr}</span>
+      </span>
+    </div>`;
   };
 
   const fmtBr = v => `$${(v||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
@@ -5441,12 +5661,10 @@ function buildModelHtml(data) {
       </div>
       <div class="br-card-sub" style="margin-top:6px">${mT > 0 ? `${mw}W–${ml}L across all picks (${(mw/mT*100).toFixed(0)}% W)` : 'No settled picks yet'}</div>
       <div class="br-card-pnl ${pnlClass(s.model_pnl||0)}">${(s.model_pnl||0) >= 0 ? '+' : ''}$${Math.abs(s.model_pnl||0).toFixed(2)} P&L</div>
-      ${mT > 0 ? `<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;font-size:12px;border-top:1px solid var(--border);padding-top:8px">
-        <div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">By Category</div>
-        <div>${_catRow('Moneyline', mlRec)}</div>
-        <div>${_catRow('Run Line / Spread', rlRec)}</div>
-        <div>${_catRow('Totals', ouRec)}</div>
-      </div>` : ''}
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:5px;border-top:1px solid var(--border);padding-top:8px">
+        <div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:1px">By Category</div>
+        ${catRows.map(r => _catRow(r.label, trM[r.key])).join('')}
+      </div>
       ${atRisk > 0 ? `<div style="margin-top:6px;font-size:12px;color:var(--yellow,#e3b341);font-weight:600">Amount at Risk: $${atRisk.toFixed(2)}</div>` : ''}
     </div>
   </div>`;

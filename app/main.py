@@ -150,7 +150,7 @@ def main() -> None:
             continue
 
         feature_vec, meta = built
-        prediction = model.predict(feature_vec)
+        prediction = model.predict(feature_vec, game_meta=game)
         shap_result = explainer.explain(
             feature_vec,
             model=model.get_raw_model(),

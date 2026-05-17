@@ -389,7 +389,12 @@ class BettingModel:
     # Prediction
     # ------------------------------------------------------------------
 
-    def predict(self, feature_vec: np.ndarray, weights: dict | None = None) -> dict:
+    def predict(
+        self,
+        feature_vec: np.ndarray,
+        weights:   dict | None = None,
+        game_meta: dict | None = None,
+    ) -> dict:
         """
         Returns:
           home_win_prob     — weighted ensemble probability (primary output)
@@ -403,6 +408,12 @@ class BettingModel:
 
         weights: dict with keys "xgb", "lr", "nn" (floats, need not sum to 1).
                  Defaults to equal weighting when None or when total_w == 0.
+        game_meta: optional dict with keys id/home_team/away_team/commence_time.
+                 When supplied, the LR's individual pick is silently appended
+                 to .cache/lr_picks_history.json. Has no effect on the return.
+                 The same dict also drives NN-only logging to
+                 data/nn_picks_history.json via src.nn_picks; that is a pure
+                 observability side-channel and does not alter ensemble output.
         """
         try:
             X = self.scaler.transform(feature_vec.reshape(1, -1))
@@ -445,6 +456,29 @@ class BettingModel:
             except Exception:
                 nn_prob = None
 
+        # ── NN-only pick logging (silent observability side-channel) ──────
+        # Records the NN's standalone opinion regardless of what the ensemble
+        # ultimately returns or whether the user places a bet.  Wrapped in a
+        # broad try/except so a logging failure can never affect a live pick.
+        if nn_prob is not None and game_meta:
+            try:
+                from .nn_picks import record_nn_pick
+                home = game_meta.get("home_team") or "?"
+                away = game_meta.get("away_team") or "?"
+                ct   = str(game_meta.get("commence_time") or "")
+                game_date = ct[:10] if len(ct) >= 10 else ""
+                if game_date:
+                    record_nn_pick(
+                        game_date = game_date,
+                        matchup   = f"{away} @ {home}",
+                        sport     = self.sport.name,
+                        bet_type  = "moneyline",
+                        nn_prob   = nn_prob,
+                        nn_pick   = "home" if nn_prob >= 0.5 else "away",
+                    )
+            except Exception:
+                pass
+
         # Weighted ensemble probability and consensus
         w = weights or {}
         if nn_prob is not None:
@@ -475,6 +509,35 @@ class BettingModel:
                 eff_w = {"xgb": 0.5, "lr": 0.5, "nn": 0.0}
             models_agree = (xgb_prob >= 0.5) == (lr_prob >= 0.5)
             method_str   = f"ensemble ({xgb_method}+{lr_method})"
+
+        # ── Silent LR-only pick recorder (does not affect return value) ──────
+        if game_meta is not None:
+            try:
+                from .lr_picks_tracker import record_lr_pick
+                record_lr_pick(
+                    sport        = self.sport.name,
+                    home_team    = game_meta.get("home_team", ""),
+                    away_team    = game_meta.get("away_team", ""),
+                    game_date    = (game_meta.get("commence_time") or "")[:10],
+                    bet_type     = "moneyline",
+                    lr_prob_home = lr_prob,
+                    game_id      = game_meta.get("id") or game_meta.get("game_id"),
+                )
+            except Exception:
+                pass
+
+        # ── Silent XGB-only pick recorder (does not affect return value) ─────
+        if game_meta is not None and xgb_method == "xgboost":
+            try:
+                from .xgb_picks_tracker import record_classifier_pick
+                record_classifier_pick(
+                    bet_type = "moneyline",
+                    game     = game_meta,
+                    xgb_prob = xgb_prob,
+                    sport    = self.sport.name,
+                )
+            except Exception:
+                pass
 
         return {
             "home_win_prob":      combined,

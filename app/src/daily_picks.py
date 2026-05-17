@@ -38,8 +38,42 @@ MIN_EDGE        = 0.03   # 3 % minimum edge to qualify
 MIN_PROB        = 0.52   # 52 % minimum model probability
 DIVERSITY_EDGE  = 0.03   # edge threshold for per-sport diversity enforcement
 DIVERSITY_CONF  = 0.55   # avg pick_prob threshold for diversity enforcement
-MAX_PER_CAT     = 5      # top picks per category
-CATEGORIES      = ("moneyline", "run_line_spread", "totals")
+MAX_PER_CAT     = 5      # top picks per category (always filled — never left empty)
+
+# ── Extensible category registry ─────────────────────────────────────────────
+# To add a new bet category (NRFI, player props, first inning, etc.) append
+# ONE entry here.  Everything downstream — selection, sizing, persistence,
+# and the frontend — picks it up automatically without any other code changes.
+#
+# Fields
+# ------
+# key        str   — storage/JSON key (snake_case, must be unique)
+# label      str   — human-readable display name
+# bet_types  tuple — which bet_type values in candidate dicts belong here
+CATEGORY_CONFIG: list[dict] = [
+    {
+        "key":       "moneyline",
+        "label":     "Moneyline",
+        "bet_types": ("single",),
+    },
+    {
+        "key":       "run_line_spread",
+        "label":     "Run Line / Spread",
+        "bet_types": ("run_line", "spread"),
+    },
+    {
+        "key":       "totals",
+        "label":     "Totals",
+        "bet_types": ("totals",),
+    },
+    # ── Future categories — add one dict here, no other changes needed ────────
+    # {"key": "nrfi",         "label": "NRFI",            "bet_types": ("nrfi",)},
+    # {"key": "first_inning", "label": "1st Inning",      "bet_types": ("first_inning",)},
+    # {"key": "player_props", "label": "Player Props",    "bet_types": ("player_prop",)},
+]
+
+# Derived tuple — used wherever the old CATEGORIES constant was referenced.
+CATEGORIES = tuple(c["key"] for c in CATEGORY_CONFIG)
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────

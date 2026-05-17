@@ -21,11 +21,52 @@ Daily exposure cap:
     no financial impact.
 """
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .kelly import american_to_decimal, size_bet
+
+_logger = logging.getLogger(__name__)
+
+# ── Per-model tracker settlers (imported lazily to avoid hard boot dependency) ─
+# Each tracker exposes settle_<model>_pick(game_id, home_score, away_score).
+# Missing trackers (e.g. nn not yet created) are silently skipped.
+try:
+    from .xgb_picks_tracker import settle_xgb_pick as _settle_xgb
+except Exception as _e:  # pragma: no cover
+    _logger.debug("xgb tracker unavailable: %s", _e)
+    _settle_xgb = None  # type: ignore[assignment]
+
+try:
+    from .lr_picks_tracker import settle_lr_pick as _settle_lr
+except Exception as _e:  # pragma: no cover
+    _logger.debug("lr tracker unavailable: %s", _e)
+    _settle_lr = None  # type: ignore[assignment]
+
+try:
+    from .nn_picks_tracker import settle_nn_pick as _settle_nn  # type: ignore[import]
+except Exception as _e:  # pragma: no cover
+    _logger.debug("nn tracker unavailable: %s", _e)
+    _settle_nn = None  # type: ignore[assignment]
+
+
+def _settle_model_trackers(game_id: str, home_score: int, away_score: int) -> None:
+    """
+    Propagate a finished game's scores to each individual-model tracker so
+    their history files stay in sync with the main ledger settlement.
+
+    Silently catches per-tracker failures — the main settlement flow must
+    never be interrupted by a tracker error.
+    """
+    for tag, fn in (("xgb", _settle_xgb), ("lr", _settle_lr), ("nn", _settle_nn)):
+        if fn is None:
+            continue
+        try:
+            fn(str(game_id), int(home_score), int(away_score))
+        except Exception as exc:
+            _logger.warning("model tracker settle failed [%s] game=%s: %s", tag, game_id, exc)
 
 DAILY_EXPOSURE_PCT = 0.50   # 50 % of starting bankroll per day (hard ceiling)
 
@@ -311,6 +352,9 @@ class Ledger:
             }
             self.data["history"].append(settled)
             newly_settled.append(settled)
+
+            # Propagate final scores to per-model history trackers
+            _settle_model_trackers(bet["game_id"], home_runs, away_runs)
 
         self.data["open_bets"] = remaining
         if newly_settled:

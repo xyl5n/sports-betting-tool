@@ -294,6 +294,34 @@ class RunLineModel:
         xgb_prob = float(self.xgb.predict_proba(X)[0, 1])
         lr_prob  = float(self.lr.predict_proba(X)[0, 1]) if self.lr_is_trained else xgb_prob
 
+        # ── Silent LR-only pick recorder (does not affect ensemble output) ────
+        if self.lr_is_trained:
+            try:
+                from .lr_picks_tracker import record_lr_pick
+                record_lr_pick(
+                    sport        = "MLB",   # RunLineModel is MLB-only
+                    home_team    = game.get("home_team", ""),
+                    away_team    = game.get("away_team", ""),
+                    game_date    = (game.get("commence_time") or "")[:10],
+                    bet_type     = "run_line",
+                    lr_prob_home = lr_prob,
+                    game_id      = game.get("id") or game.get("game_id"),
+                )
+            except Exception:
+                pass
+
+        # ── Silent XGB-only pick recorder (does not affect ensemble output) ───
+        try:
+            from .xgb_picks_tracker import record_classifier_pick
+            record_classifier_pick(
+                bet_type = "run_line",
+                game     = game,
+                xgb_prob = xgb_prob,
+                sport    = "MLB",   # RunLineModel is MLB-only
+            )
+        except Exception:
+            pass
+
         nn_prob: Optional[float] = None
         if self.nn_is_trained and self.nn is not None:
             try:
@@ -303,6 +331,26 @@ class RunLineModel:
                 nn_prob = float(self.nn.predict_proba(X_nn)[0, 1])
             except Exception:
                 nn_prob = None
+
+        # ── NN-only pick logging (silent side-channel) ──────────────────
+        # Mirrors the lr/xgb trackers above but writes to nn_picks_history;
+        # never influences ensemble math or the recommended pick.
+        if nn_prob is not None:
+            try:
+                from .nn_picks import record_nn_pick
+                _ct   = str(game.get("commence_time") or "")
+                _date = _ct[:10] if len(_ct) >= 10 else ""
+                if _date:
+                    record_nn_pick(
+                        game_date = _date,
+                        matchup   = f"{game.get('away_team','?')} @ {game.get('home_team','?')}",
+                        sport     = "MLB",
+                        bet_type  = "run_line",
+                        nn_prob   = nn_prob,
+                        nn_pick   = "home" if nn_prob >= 0.5 else "away",
+                    )
+            except Exception:
+                pass
 
         # ── Diagnostic: individual model probabilities ─────────────────────────
         matchup = f"{game.get('away_team','?')} @ {game.get('home_team','?')}"
