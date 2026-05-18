@@ -704,6 +704,185 @@ body {
 .more-row-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; font-weight: 400; }
 .more-row-chev { color: var(--text-dim2); }
 
+/* ── More-tab sub-page chrome (My Bets, Model Performance) ──────────── */
+.subpage-hdr {
+  display: flex; align-items: center; gap: 12px;
+  padding: 4px 0 16px;
+}
+.subpage-hdr h2 { font-size: 17px; font-weight: 700; }
+.subpage-spacer { flex: 1; }
+.back-btn {
+  width: 36px; height: 36px;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: 50%; color: var(--text);
+  font-size: 18px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: inherit;
+}
+.back-btn:hover { border-color: var(--border); }
+.sport-select {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill); color: var(--text);
+  padding: 7px 14px; font-size: 12.5px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+}
+
+/* ── Bankroll card ──────────────────────────────────────────────────── */
+.bankroll-card {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 16px;
+  margin-bottom: 22px;
+}
+.bk-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
+}
+.bk-cell { text-align: center; }
+.bk-lbl  { font-size: 10px; font-weight: 700; color: var(--text-dim2); letter-spacing: .5px; text-transform: uppercase; margin-bottom: 4px; }
+.bk-val  { font-size: 18px; font-weight: 800; color: var(--text); font-family: "SF Mono", Consolas, monospace; }
+.bk-val.pos { color: var(--green); }
+.bk-val.neg { color: var(--red); }
+
+/* ── Bets sections (open + history) ─────────────────────────────────── */
+.bets-section { margin-bottom: 22px; }
+.bets-section h3 {
+  font-size: 13px; font-weight: 800; letter-spacing: .8px;
+  margin-bottom: 12px; display: inline-flex; align-items: center; gap: 8px;
+}
+.bet-card {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.bet-card.result-win  { border-color: rgba(74, 222, 128, .35); }
+.bet-card.result-loss { border-color: rgba(248, 113, 113, .35); }
+.bet-card.result-push { border-color: rgba(251, 191, 36, .35); }
+.bet-card-top {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--text-dim);
+}
+.bet-sport-tag {
+  padding: 2px 7px; border-radius: 4px;
+  font-size: 9.5px; font-weight: 800; letter-spacing: .5px;
+  background: rgba(34, 211, 238, .12); color: var(--cyan);
+}
+.bet-type-tag {
+  padding: 2px 7px; border-radius: 4px;
+  font-size: 9.5px; font-weight: 800; letter-spacing: .5px;
+  background: var(--bg-elev-hi); color: var(--text-dim);
+}
+.bet-result-tag {
+  margin-left: auto;
+  padding: 2px 8px; border-radius: 4px;
+  font-size: 9.5px; font-weight: 800; letter-spacing: .5px;
+}
+.bet-result-tag.win  { background: rgba(74, 222, 128, .18); color: var(--green); }
+.bet-result-tag.loss { background: rgba(248, 113, 113, .18); color: var(--red); }
+.bet-result-tag.push { background: rgba(251, 191, 36, .18); color: var(--yellow); }
+.bet-card-pick {
+  font-size: 14px; font-weight: 700; color: var(--text);
+}
+.bet-card-meta {
+  display: flex; gap: 12px; font-size: 11px; color: var(--text-dim);
+  flex-wrap: wrap;
+}
+.bet-card-meta span { white-space: nowrap; }
+.bet-card-actions {
+  display: flex; gap: 6px; margin-top: 4px;
+  border-top: 1px solid var(--border-soft); padding-top: 8px;
+}
+.bet-action {
+  flex: 1; padding: 6px 10px;
+  background: var(--bg-elev-hi); border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm); color: var(--text-dim);
+  font-size: 11px; font-weight: 600; cursor: pointer;
+  font-family: inherit;
+}
+.bet-action:hover { color: var(--text); border-color: var(--border); }
+.bet-action.win  { color: var(--green); }
+.bet-action.loss { color: var(--red); }
+.bet-action.del  { color: var(--red); flex: 0 0 auto; }
+
+/* ── Track button (on EV cards and slate prop boxes) ────────────────── */
+.track-btn {
+  padding: 6px 12px;
+  background: rgba(34, 211, 238, .12);
+  color: var(--cyan); border: 1px solid var(--cyan);
+  border-radius: var(--r-pill);
+  font-size: 11px; font-weight: 800; letter-spacing: .5px;
+  cursor: pointer; transition: all .15s;
+  font-family: inherit;
+}
+.track-btn:hover:not(:disabled) {
+  background: rgba(34, 211, 238, .22);
+}
+.track-btn:active { transform: scale(.96); }
+.track-btn.tracked {
+  background: rgba(74, 222, 128, .15);
+  color: var(--green); border-color: var(--green);
+  cursor: default;
+}
+.track-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.slate-track-btn {
+  margin-top: 4px;
+  padding: 5px 8px;
+  background: rgba(34, 211, 238, .10);
+  color: var(--cyan); border: 1px solid rgba(34, 211, 238, .35);
+  border-radius: 4px;
+  font-size: 10px; font-weight: 800; letter-spacing: .4px;
+  cursor: pointer; transition: all .15s;
+  font-family: inherit; width: 100%;
+}
+.slate-track-btn:hover:not(:disabled) { background: rgba(34, 211, 238, .2); }
+.slate-track-btn.tracked {
+  background: rgba(74, 222, 128, .12);
+  color: var(--green); border-color: rgba(74, 222, 128, .4);
+  cursor: default;
+}
+
+/* ── Model performance grid ─────────────────────────────────────────── */
+.perf-grid {
+  display: grid; grid-template-columns: 1fr; gap: 14px;
+}
+@media (min-width: 768px) {
+  .perf-grid { grid-template-columns: 1fr 1fr 1fr; }
+}
+.perf-card {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 16px;
+}
+.perf-card.best { border-color: var(--green);
+                  box-shadow: 0 0 16px rgba(74, 222, 128, .12); }
+.perf-hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+.perf-name { font-size: 16px; font-weight: 800; }
+.perf-best-badge {
+  padding: 2px 8px; border-radius: 4px;
+  font-size: 9px; font-weight: 800; letter-spacing: .5px;
+  background: rgba(74, 222, 128, .15); color: var(--green);
+}
+.perf-overall {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 10px 0; border-bottom: 1px solid var(--border-soft);
+}
+.perf-pct {
+  font-size: 28px; font-weight: 800;
+  font-family: "SF Mono", Consolas, monospace; letter-spacing: -.4px;
+}
+.perf-rec { font-size: 12px; color: var(--text-dim); }
+.perf-rows {
+  display: flex; flex-direction: column; gap: 6px;
+  padding-top: 10px;
+}
+.perf-row {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px;
+}
+.perf-row-lbl { color: var(--text-dim); }
+.perf-row-val { font-family: "SF Mono", Consolas, monospace; }
+
 /* ── Bottom navigation ──────────────────────────────────────────────── */
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 90;
@@ -1037,37 +1216,90 @@ body {
 
     <!-- ─── MORE ─────────────────────────────────────────────────────── -->
     <section id="tab-more" class="tab">
-      <div class="section-hdr"><h2>MORE</h2></div>
-      <div class="more-list">
-        <button class="more-row" onclick="openLedger()">
-          <span class="more-row-icon">💰</span>
-          <span class="more-row-text">My Bets
-            <div class="more-row-sub" id="more-bankroll">Bankroll · loading…</div>
-          </span>
-          <span class="more-row-chev">›</span>
-        </button>
-        <button class="more-row" onclick="openModelPerf()">
-          <span class="more-row-icon">📈</span>
-          <span class="more-row-text">Model Performance
-            <div class="more-row-sub">XGB / LR / NN per-bet-type record</div>
-          </span>
-          <span class="more-row-chev">›</span>
-        </button>
-        <button class="more-row" onclick="forceRefresh()">
-          <span class="more-row-icon">↻</span>
-          <span class="more-row-text">Force-refresh today
-            <div class="more-row-sub">Wipe snapshot, re-pull odds, retrain</div>
-          </span>
-          <span class="more-row-chev">›</span>
-        </button>
-        <a class="more-row" href="https://github.com/anthropics/claude-code/issues" target="_blank" rel="noopener">
-          <span class="more-row-icon">ⓘ</span>
-          <span class="more-row-text">About AI
-            <div class="more-row-sub">Ensemble model details</div>
-          </span>
-          <span class="more-row-chev">›</span>
-        </a>
+
+      <!-- DEFAULT MORE LIST (visible by default) -->
+      <div id="more-list-view">
+        <div class="section-hdr"><h2>MORE</h2></div>
+        <div class="more-list">
+          <button class="more-row" onclick="openMyBets()">
+            <span class="more-row-icon">💰</span>
+            <span class="more-row-text">My Bets
+              <div class="more-row-sub" id="more-bankroll">Bankroll · loading…</div>
+            </span>
+            <span class="more-row-chev">›</span>
+          </button>
+          <button class="more-row" onclick="openModelPerf()">
+            <span class="more-row-icon">📈</span>
+            <span class="more-row-text">Model Performance
+              <div class="more-row-sub">XGB / LR / NN per-bet-type record</div>
+            </span>
+            <span class="more-row-chev">›</span>
+          </button>
+          <button class="more-row" onclick="forceRefresh()">
+            <span class="more-row-icon">↻</span>
+            <span class="more-row-text">Force-refresh today
+              <div class="more-row-sub">Wipe snapshot, re-pull odds, retrain</div>
+            </span>
+            <span class="more-row-chev">›</span>
+          </button>
+        </div>
       </div>
+
+      <!-- MY BETS SUB-PAGE (hidden until openMyBets() called) -->
+      <div id="more-bets-view" style="display:none">
+        <header class="subpage-hdr">
+          <button class="back-btn" onclick="closeSubPage()" aria-label="Back">‹</button>
+          <h2>My Bets</h2>
+          <div class="subpage-spacer"></div>
+          <select class="sport-select" id="bets-sport-select" onchange="renderMyBets()">
+            <option value="mlb">MLB</option>
+            <option value="wnba">WNBA</option>
+          </select>
+        </header>
+        <div class="bankroll-card">
+          <div class="bk-grid">
+            <div class="bk-cell">
+              <div class="bk-lbl">Current</div>
+              <div class="bk-val" id="bk-current">$—</div>
+            </div>
+            <div class="bk-cell">
+              <div class="bk-lbl">Starting</div>
+              <div class="bk-val" id="bk-start">$—</div>
+            </div>
+            <div class="bk-cell">
+              <div class="bk-lbl">P/L</div>
+              <div class="bk-val" id="bk-pl">$—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bets-section">
+          <h3>Open Bets <span class="count-badge" id="open-bets-count">0</span></h3>
+          <div id="open-bets-list">
+            <div class="empty-state"><span class="icon">🎯</span>No open bets.</div>
+          </div>
+        </div>
+
+        <div class="bets-section">
+          <h3>History <span class="count-badge" id="history-count">0</span></h3>
+          <div id="history-list">
+            <div class="empty-state"><span class="icon">📋</span>No settled bets yet.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODEL PERFORMANCE SUB-PAGE -->
+      <div id="more-modelperf-view" style="display:none">
+        <header class="subpage-hdr">
+          <button class="back-btn" onclick="closeSubPage()" aria-label="Back">‹</button>
+          <h2>Model Performance</h2>
+          <div class="subpage-spacer"></div>
+        </header>
+        <div id="model-perf-content">
+          <div class="empty-state"><span class="icon">📊</span>Loading model stats…</div>
+        </div>
+      </div>
+
     </section>
 
   </div><!-- /.content -->
@@ -1597,10 +1829,114 @@ function buildEVCard(b) {
     <p class="ev-blurb">${b.blurb}</p>
     <footer class="ev-card-ftr">
       <span class="sportsbook-tag">${book}</span>
-      <button class="analyze-btn" onclick="openAnalyze('${b.gameId}', '${b.kind}')">ANALYZE</button>
+      ${_trackButtonHtml(b.gameId, b.kind, b.sport, 'track-btn')}
     </footer>
   </article>`;
 }
+
+// Map UI bet-type tags (used on EV cards) → the backend bet_type values
+// the ledger endpoints expect.
+const _EV_KIND_TO_BACKEND = {
+  'ML':   'single',
+  'RL':   'run_line',
+  'SPRD': 'spread',     // WNBA spread — backend treats like run_line via spread_pick
+  'O/U':  'totals',
+};
+
+function _trackButtonHtml(gameId, kind, sport, baseCls) {
+  const backendType = _EV_KIND_TO_BACKEND[kind] || kind.toLowerCase();
+  const isTracked = isPickTracked(gameId, backendType);
+  const label = isTracked ? '✓ TRACKED' : 'TRACK';
+  const disabled = isTracked ? 'disabled' : '';
+  return `<button class="${baseCls}${isTracked ? ' tracked' : ''}" ${disabled}
+    onclick="event.stopPropagation();trackPick('${gameId}','${backendType}','${sport}',this)">${label}</button>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Tracking — open-bets cache + per-pick track flow
+// ═══════════════════════════════════════════════════════════════════════
+// _openBetKeys is the source of truth for "is this game+bet already in
+// the ledger".  It's populated from /api/ledger and /api/wnba/ledger and
+// refreshed after every successful track / settle / delete call.
+let _openBetKeys = new Set();  // entries: "gameId|bet_type"
+
+function _betKey(gameId, betType) { return `${gameId}|${betType}`; }
+
+function isPickTracked(gameId, betType) {
+  return _openBetKeys.has(_betKey(gameId, betType));
+}
+
+async function trackPick(gameId, betType, sport, btnEl) {
+  if (!gameId) return;
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '…'; }
+  try {
+    // Moneyline ('single') uses the /confirm/<game_id> endpoint; everything
+    // else uses /track_prop with bet_type in the body.  Both endpoints look
+    // up the game in the in-memory analysis state, so analysis must have
+    // run already for tracking to work.
+    let resp, data;
+    if (betType === 'single') {
+      resp = await fetch(`/api/ledger/confirm/${gameId}`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ bankroll: _bankroll }),
+      });
+    } else {
+      // WNBA spread also routes through track_prop; backend reads spread_pick
+      // when bet_type=='spread'.  Defensively pass both for forward-compat.
+      resp = await fetch('/api/ledger/track_prop', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ game_id: gameId, bet_type: betType, bankroll: _bankroll }),
+      });
+    }
+    data = await resp.json();
+    if (data.error) throw new Error(data.error);
+
+    _openBetKeys.add(_betKey(gameId, betType));
+    if (btnEl) {
+      btnEl.classList.add('tracked');
+      btnEl.textContent = '✓ TRACKED';
+      btnEl.disabled = true;
+    }
+    toast('Bet tracked', 'success');
+    // Refresh ledger so the bankroll subtext + MyBets view stays current
+    fetchLedgerSummary();
+  } catch (err) {
+    toast(`Track failed: ${err.message}`, 'error');
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = 'TRACK';
+    }
+  }
+}
+
+// Pull open-bet keys from both sports' ledgers so the per-pick TRACK
+// buttons know to render in the "tracked" state.  Best-effort.
+async function fetchLedgerSummary() {
+  _openBetKeys = new Set();
+  for (const sport of ['mlb', 'wnba']) {
+    try {
+      const url = sport === 'mlb'
+        ? `/api/ledger?bankroll=${_bankroll}&sport=mlb`
+        : `/api/wnba/ledger?bankroll=${_wnbaBankroll || _bankroll}`;
+      const r = await fetch(url);
+      const d = await r.json();
+      (d.open_bets || []).forEach(b => {
+        const k = _betKey(b.game_id, b.bet_type || 'single');
+        _openBetKeys.add(k);
+      });
+      if (sport === 'mlb') _ledger.mlb = d; else _ledger.wnba = d;
+    } catch {}
+  }
+  // Re-render any currently-visible card list so the button states refresh
+  if (_tab === 'home') {
+    if (_sport === 'all') {
+      renderEVScans();
+    } else {
+      renderFullSlate();
+    }
+  }
+}
+let _wnbaBankroll = 1000;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Rendering — Props
@@ -1707,6 +2043,14 @@ function _slateMetaHtml(prob, edge, odds) {
   </div>`;
 }
 
+function _slateTrackBtn(gameId, betType, sport) {
+  const tracked = isPickTracked(gameId, betType);
+  const label = tracked ? '✓ TRACKED' : 'TRACK';
+  const cls   = tracked ? 'slate-track-btn tracked' : 'slate-track-btn';
+  return `<button class="${cls}" ${tracked ? 'disabled' : ''}
+    onclick="event.stopPropagation();trackPick('${gameId}','${betType}','${sport}',this)">${label}</button>`;
+}
+
 function buildSlateMLBox(g) {
   if (!g.pick_team) {
     return `<div class="slate-prop no-data"><div class="slate-prop-label">Moneyline</div><div class="slate-prop-pick">—</div></div>`;
@@ -1718,6 +2062,7 @@ function buildSlateMLBox(g) {
     <div class="slate-prop-pick">${shortName(g.pick_team)}</div>
     ${_slateMetaHtml(g.pick_prob, g.pick_edge, g.pick_odds)}
     ${valueChip}
+    ${_slateTrackBtn(g.game_id, 'single', g._sport)}
   </div>`;
 }
 
@@ -1740,11 +2085,13 @@ function buildSlateRLBox(g, picked, isMLB) {
   }
   const valueChip   = picked.value_bet ? '<span class="slate-prop-value-badge">VALUE</span>' : '';
   const conflictCls = picked.conflict ? ' conflict' : '';
+  const betType     = isMLB ? 'run_line' : 'spread';
   return `<div class="slate-prop${conflictCls}">
     <div class="slate-prop-label">${label}</div>
     <div class="slate-prop-pick">${pickText}</div>
     ${_slateMetaHtml(picked.pick_prob, picked.edge, picked.pick_odds)}
     ${valueChip}
+    ${_slateTrackBtn(g.game_id, betType, g._sport)}
   </div>`;
 }
 
@@ -1763,6 +2110,7 @@ function buildSlateTotalsBox(g, t) {
     <div class="slate-prop-pick"><span class="${dirCls}">${dirUp}</span> ${t.total_line}</div>
     ${_slateMetaHtml(t.pick_prob, t.edge, odds)}
     ${valueChip}
+    ${_slateTrackBtn(g.game_id, 'totals', g._sport)}
   </div>`;
 }
 
@@ -1987,12 +2335,11 @@ async function init() {
     }
   } catch (_) {}
 
-  // Bankroll from ledger
-  try {
-    const lr = await fetch(`/api/ledger?bankroll=${_bankroll}&sport=mlb`).then(r => r.json());
-    if (lr.bankroll != null) _bankroll = lr.bankroll;
-    _ledger.mlb = lr;
-  } catch (_) {}
+  // Bankroll + open-bet keys from both ledgers (so the TRACK buttons
+  // know which picks are already in the ledger before first render).
+  await fetchLedgerSummary();
+  if (_ledger.mlb?.bankroll  != null) _bankroll     = _ledger.mlb.bankroll;
+  if (_ledger.wnba?.bankroll != null) _wnbaBankroll = _ledger.wnba.bankroll;
 
   renderAll();
 }
@@ -2085,18 +2432,191 @@ function openAnalyze(gameId, kind) {
   $('chat-input').value = `Explain the ${kind} pick on ${matchup}.`;
   showTab('ai');
 }
-async function openLedger() {
-  try {
-    const r = await fetch(`/api/ledger?bankroll=${_bankroll}&sport=mlb`);
-    const d = await r.json();
-    const open = (d.open_bets || []).length;
-    const hist = (d.history || []).length;
-    toast(`Bankroll $${(d.bankroll || _bankroll).toFixed(0)} · ${open} open · ${hist} settled`);
-  } catch (e) { toast('Ledger fetch failed'); }
+// ═══════════════════════════════════════════════════════════════════════
+//  More-tab sub-pages
+//  Each opener swaps the More tab's visible inner view; closeSubPage()
+//  returns to the More list.  Nothing else changes.
+// ═══════════════════════════════════════════════════════════════════════
+function _swapMoreView(target) {
+  ['more-list-view', 'more-bets-view', 'more-modelperf-view'].forEach(id => {
+    const el = $(id);
+    if (el) el.style.display = (id === target) ? '' : 'none';
+  });
 }
-function openModelPerf() {
-  $('chat-input').value = 'How are the XGB / LR / NN models doing on each bet type?';
-  showTab('ai');
+function closeSubPage() { _swapMoreView('more-list-view'); }
+
+async function openMyBets() {
+  _swapMoreView('more-bets-view');
+  await fetchLedgerSummary();
+  // Default the sport selector to whichever pill is active (fall back to MLB).
+  const sel = $('bets-sport-select');
+  if (sel) sel.value = _sport === 'wnba' ? 'wnba' : 'mlb';
+  renderMyBets();
+}
+
+function renderMyBets() {
+  const sport = $('bets-sport-select')?.value || 'mlb';
+  const d     = (sport === 'wnba' ? _ledger.wnba : _ledger.mlb) || {};
+  const cur   = d.bankroll ?? (sport === 'wnba' ? _wnbaBankroll : _bankroll);
+  const start = d.starting_bankroll ?? cur;
+  const pl    = cur - start;
+
+  $('bk-current').textContent = `$${(cur   || 0).toFixed(2)}`;
+  $('bk-start').textContent   = `$${(start || 0).toFixed(2)}`;
+  const plEl = $('bk-pl');
+  plEl.textContent = `${pl >= 0 ? '+' : ''}$${pl.toFixed(2)}`;
+  plEl.className = `bk-val ${pl > 0 ? 'pos' : pl < 0 ? 'neg' : ''}`;
+
+  const open = d.open_bets || [];
+  const hist = d.history   || [];
+  $('open-bets-count').textContent = open.length;
+  $('history-count').textContent   = hist.length;
+
+  $('open-bets-list').innerHTML = open.length
+    ? open.map(b => _renderBetCard(b, sport, false)).join('')
+    : `<div class="empty-state"><span class="icon">🎯</span>No open bets.</div>`;
+  $('history-list').innerHTML = hist.length
+    ? hist.slice(0, 50).map(b => _renderBetCard(b, sport, true)).join('')
+    : `<div class="empty-state"><span class="icon">📋</span>No settled bets yet.</div>`;
+}
+
+function _renderBetCard(b, sport, settled) {
+  const bet_type = b.bet_type || 'single';
+  const team     = b.bet_team || b.parlay_name || '—';
+  const odds     = fmtOdds(b.american_odds);
+  const amount   = (b.confirmed_amount || b.model_amount || 0).toFixed(2);
+  const result   = (b.result || '').toLowerCase();
+  const resCls   = result ? `result-${result}` : '';
+  const resTag   = result
+    ? `<span class="bet-result-tag ${result}">${result.toUpperCase()}</span>` : '';
+
+  // Pick label, with the run-line sign or the totals direction
+  let pickLabel = team;
+  if (bet_type === 'run_line' && b.prop_line != null) {
+    const sign = b.prop_line > 0 ? '+' : '';
+    pickLabel = `${shortName(team)} ${sign}${b.prop_line}`;
+  } else if (bet_type === 'totals') {
+    pickLabel = `${(b.bet_side || '').toUpperCase()} ${b.prop_line ?? ''}`.trim();
+  } else if (bet_type === 'spread' && b.prop_line != null) {
+    const sign = b.prop_line > 0 ? '+' : '';
+    pickLabel = `${shortName(team)} ${sign}${b.prop_line}`;
+  } else {
+    pickLabel = shortName(team);
+  }
+
+  const matchup = (b.away_team && b.home_team)
+    ? `${shortName(b.away_team)} @ ${shortName(b.home_team)}` : '';
+  const placed = b.placed_at ? new Date(b.placed_at).toLocaleDateString('en-US', {month:'short', day:'numeric'}) : '';
+
+  const actions = settled ? `
+    <div class="bet-card-actions">
+      <button class="bet-action del" onclick="deleteBet('${b.id}','${sport}')">Delete</button>
+    </div>` : `
+    <div class="bet-card-actions">
+      <button class="bet-action win"  onclick="settleBet('${b.id}','${sport}','win')">Settle: Win</button>
+      <button class="bet-action loss" onclick="settleBet('${b.id}','${sport}','loss')">Settle: Loss</button>
+      <button class="bet-action del"  onclick="deleteBet('${b.id}','${sport}')">✕</button>
+    </div>`;
+
+  return `<article class="bet-card ${resCls}">
+    <div class="bet-card-top">
+      <span class="bet-sport-tag">${sport.toUpperCase()}</span>
+      <span class="bet-type-tag">${bet_type.replace('_',' ').toUpperCase()}</span>
+      <span>${placed}</span>
+      ${resTag}
+    </div>
+    <div class="bet-card-pick">${pickLabel}</div>
+    <div class="bet-card-meta">
+      <span>${matchup}</span>
+      <span>${odds}</span>
+      <span>$${amount}</span>
+      ${b.edge != null ? `<span>edge ${((b.edge||0)*100).toFixed(1)}%</span>` : ''}
+    </div>
+    ${actions}
+  </article>`;
+}
+
+async function settleBet(betId, sport, result) {
+  try {
+    const url = sport === 'wnba'
+      ? `/api/wnba/ledger/settle_manual/${betId}`
+      : `/api/ledger/settle_manual/${betId}`;
+    const r = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ result }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    toast(`Settled: ${result.toUpperCase()}`, 'success');
+    await fetchLedgerSummary();
+    renderMyBets();
+  } catch (err) { toast(`Settle failed: ${err.message}`, 'error'); }
+}
+
+async function deleteBet(betId, sport) {
+  if (!confirm('Delete this bet permanently?')) return;
+  try {
+    const r = await fetch(`/api/ledger/bet/${betId}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    toast('Bet deleted', 'success');
+    await fetchLedgerSummary();
+    renderMyBets();
+  } catch (err) { toast(`Delete failed: ${err.message}`, 'error'); }
+}
+
+async function openModelPerf() {
+  _swapMoreView('more-modelperf-view');
+  const wrap = $('model-perf-content');
+  wrap.innerHTML = `<div class="empty-state"><span class="icon">📊</span>Loading…</div>`;
+  try {
+    const r = await fetch('/api/model_performance');
+    const d = await r.json();
+    wrap.innerHTML = _renderModelPerfHtml(d);
+  } catch (err) {
+    wrap.innerHTML = `<div class="empty-state"><span class="icon">⚠</span>${err.message}</div>`;
+  }
+}
+
+function _renderModelPerfHtml(d) {
+  const models = ['xgb', 'lr', 'nn'];
+  const stats = d.model_stats || d;     // backend's exact key may vary
+  if (!stats || typeof stats !== 'object') {
+    return `<div class="empty-state"><span class="icon">📊</span>No model history yet — settle some bets first.</div>`;
+  }
+  // Determine best model by overall win%
+  let best = null;
+  for (const m of models) {
+    const s = stats[m] || {};
+    const pct = s.overall?.pct ?? s.pct ?? 0;
+    if (best === null || pct > best.pct) best = { model: m, pct };
+  }
+  return `<div class="perf-grid">${models.map(m => {
+    const s   = stats[m] || {};
+    const ov  = s.overall || s;
+    const pct = ov.pct ?? 0;
+    const rec = `${ov.wins ?? 0}-${ov.losses ?? 0}`;
+    const isBest = best && best.model === m;
+    const rows = ['moneyline', 'run_line', 'totals', 'single', 'spread'].filter(k => s[k]).map(k => {
+      const r = s[k] || {};
+      const p = r.pct ?? 0;
+      return `<div class="perf-row">
+        <span class="perf-row-lbl">${k.replace('_',' ').toUpperCase()}</span>
+        <span class="perf-row-val">${r.wins ?? 0}-${r.losses ?? 0} (${(p*100).toFixed(1)}%)</span>
+      </div>`;
+    }).join('');
+    return `<article class="perf-card ${isBest ? 'best' : ''}">
+      <header class="perf-hdr">
+        <span class="perf-name">${m.toUpperCase()}</span>
+        ${isBest ? '<span class="perf-best-badge">BEST</span>' : ''}
+      </header>
+      <div class="perf-overall">
+        <span class="perf-pct">${(pct*100).toFixed(1)}%</span>
+        <span class="perf-rec">${rec}</span>
+      </div>
+      <div class="perf-rows">${rows || '<div class="perf-row"><span class="perf-row-lbl">No history yet</span></div>'}</div>
+    </article>`;
+  }).join('')}</div>`;
 }
 async function updateMoreSubtext() {
   const el = $('more-bankroll');
