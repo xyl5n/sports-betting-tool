@@ -201,6 +201,26 @@ _snapshot_lock = _threading.Lock()
 _SNAPSHOT_ENABLED = os.environ.get("SNAPSHOT_ENABLED", "1").strip() not in ("0", "false", "False", "FALSE")
 
 
+def _eprint(*args, **kwargs) -> None:
+    """Safe stderr print that never raises.
+
+    Encodes with UTF-8 + errors='replace' so box-drawing chars, emoji, and any
+    non-cp1252 characters can't crash the crash-handler on Windows terminals.
+    Falls back to a no-op if stderr itself is unavailable.
+    """
+    try:
+        msg = " ".join(str(a) for a in args) + kwargs.get("end", "\n")
+        buf = getattr(sys.stderr, "buffer", None)
+        if buf is not None:
+            buf.write(msg.encode("utf-8", errors="replace"))
+            buf.flush()
+        else:
+            sys.stderr.write(msg)
+            sys.stderr.flush()
+    except Exception:
+        pass  # last resort — never let logging kill the app
+
+
 def _read_analysis_timestamps() -> dict:
     """Read the timestamps file; return {} on any error."""
     try:
@@ -2166,54 +2186,71 @@ def analyze():
         rl_explainer = PredictionExplainer(sport_cfg) if rl_model else None
         results = []
         for _gi, game in enumerate(games):
-            _step(f"  game {_gi+1}/{len(games)}: {game.get('away_team','?')} @ {game.get('home_team','?')}")
-            built = fb.build_for_game(game)
-            if built is None:
-                _step(f"  game {_gi+1}: build_for_game returned None — skipping")
-                continue
-            feature_vec, meta = built
+            _matchup = f"{game.get('away_team','?')} @ {game.get('home_team','?')}"
+            _step(f"  game {_gi+1}/{len(games)}: {_matchup}")
+            try:
+                built = fb.build_for_game(game)
+                if built is None:
+                    _step(f"  game {_gi+1}: build_for_game returned None -- skipping")
+                    continue
+                feature_vec, meta = built
 
-            _step(f"  game {_gi+1}: moneyline predict")
-            prediction  = model.predict(feature_vec, weights=model_weights, game_meta=game)
-            shap_result = explainer.explain(
-                feature_vec, model=model.get_raw_model(),
-                scaler=model.get_scaler(), is_trained=model.is_trained,
-            )
-
-            # Run line prediction (MLB only).
-            rl_pred = None
-            if rl_model and rl_model.is_trained:
-                _step(f"  game {_gi+1}: run-line predict")
-                rl_pred = rl_model.predict(
-                    feature_vec, game,
-                    weights=model_weights,
-                    ml_prob_home    = prediction.get("xgb_prob"),
-                    ml_lr_prob_home = prediction.get("lr_prob"),
-                    ml_nn_prob_home = prediction.get("nn_prob"),
+                _step(f"  game {_gi+1}: moneyline predict")
+                prediction  = model.predict(feature_vec, weights=model_weights, game_meta=game)
+                shap_result = explainer.explain(
+                    feature_vec, model=model.get_raw_model(),
+                    scaler=model.get_scaler(), is_trained=model.is_trained,
                 )
-                if rl_pred and rl_explainer:
-                    rl_shap = rl_explainer.explain(
-                        feature_vec, model=rl_model.get_raw_model(),
-                        scaler=rl_model.get_scaler(), is_trained=rl_model.is_trained,
-                    )
-                    rl_pred["shap"] = rl_shap
 
-            # Totals prediction
-            totals_pred = None
-            if totals_model and totals_model.is_trained and game.get("total_line") is not None:
-                _step(f"  game {_gi+1}: totals predict")
-                totals_vec = fb.build_totals_from_meta(meta)
-                if totals_vec is not None:
-                    totals_pred = totals_model.predict(totals_vec, game, weights=model_weights)
+                # Run line prediction (MLB only).
+                rl_pred = None
+                if rl_model and rl_model.is_trained:
+                    _step(f"  game {_gi+1}: run-line predict")
+                    try:
+                        rl_pred = rl_model.predict(
+                            feature_vec, game,
+                            weights=model_weights,
+                            ml_prob_home    = prediction.get("xgb_prob"),
+                            ml_lr_prob_home = prediction.get("lr_prob"),
+                            ml_nn_prob_home = prediction.get("nn_prob"),
+                        )
+                        if rl_pred and rl_explainer:
+                            rl_shap = rl_explainer.explain(
+                                feature_vec, model=rl_model.get_raw_model(),
+                                scaler=rl_model.get_scaler(), is_trained=rl_model.is_trained,
+                            )
+                            rl_pred["shap"] = rl_shap
+                    except Exception as _rle:
+                        _eprint(f"ANALYZE [MLB] run_line.predict failed for {_matchup}: "
+                                f"{type(_rle).__name__}: {_rle}")
+                        rl_pred = None
 
-            results.append({
-                "game":        game,
-                "prediction":  prediction,
-                "shap":        shap_result,
-                "meta":        meta,
-                "rl_pred":     rl_pred,
-                "totals_pred": totals_pred,
-            })
+                # Totals prediction
+                totals_pred = None
+                if totals_model and totals_model.is_trained and game.get("total_line") is not None:
+                    _step(f"  game {_gi+1}: totals predict")
+                    try:
+                        totals_vec = fb.build_totals_from_meta(meta)
+                        if totals_vec is not None:
+                            totals_pred = totals_model.predict(totals_vec, game, weights=model_weights)
+                    except Exception as _te:
+                        _eprint(f"ANALYZE [MLB] totals.predict failed for {_matchup}: "
+                                f"{type(_te).__name__}: {_te}")
+                        totals_pred = None
+
+                results.append({
+                    "game":        game,
+                    "prediction":  prediction,
+                    "shap":        shap_result,
+                    "meta":        meta,
+                    "rl_pred":     rl_pred,
+                    "totals_pred": totals_pred,
+                })
+            except Exception as _ge:
+                _eprint(f"ANALYZE [MLB] prediction loop crashed on game {_gi+1} ({_matchup}): "
+                        f"{type(_ge).__name__}: {_ge}")
+                _eprint(traceback.format_exc())
+                # Skip this game but continue with the rest
 
         _step(f"Step 5 done: {len(results)} games predicted")
 
@@ -2246,8 +2283,25 @@ def analyze():
         _ledger_for_serial  = Ledger(path="data/ledger.json", starting_bankroll=bankroll)
         personal_starting   = _ledger_for_serial.data.get("personal_starting_bankroll", bankroll)
 
-        serialized = [_serialize(r, bankroll, sport, personal_starting) for r in results]
-        parlays    = _generate_parlays(serialized, bankroll)
+        # Wrap _serialize per-game so one bad game can't kill the whole batch.
+        # Each failure is logged and the game is skipped rather than crashing.
+        serialized = []
+        for _si, _r in enumerate(results):
+            try:
+                serialized.append(_serialize(_r, bankroll, sport, personal_starting))
+            except Exception as _se:
+                _eprint(f"ANALYZE [MLB] _serialize failed on game {_si}: "
+                        f"{type(_se).__name__}: {_se}")
+                _eprint(traceback.format_exc())
+
+        _step(f"Step 7 done: {len(serialized)}/{len(results)} games serialized")
+
+        try:
+            parlays = _generate_parlays(serialized, bankroll)
+        except Exception as _pe:
+            _eprint(f"ANALYZE [MLB] _generate_parlays failed: {type(_pe).__name__}: {_pe}")
+            parlays = {}
+
         _ts = datetime.now(timezone.utc)
         _analysis_state["parlays"]            = parlays
         _analysis_state["last_analyzed_at"]   = _ts
@@ -2272,7 +2326,10 @@ def analyze():
             "nn_val_accuracy": nn_val_acc,
             "model_status":    status,
         }, _ts)
-        ensemble_store.save(serialized, "mlb")
+        try:
+            ensemble_store.save(serialized, "mlb")
+        except Exception as _es:
+            _eprint(f"ANALYZE [MLB] ensemble_store.save failed: {type(_es).__name__}: {_es}")
         _step(f"DONE: {len(serialized)} games serialized and saved")
         return jsonify({
             "success":         True,
@@ -2291,16 +2348,25 @@ def analyze():
         })
 
     except Exception as exc:
-        _tb = traceback.format_exc()
-        print(
-            f"\nANALYZE [{sport.upper()}] CRASHED ──────────────────────────────────\n"
-            f"  type:    {type(exc).__name__}\n"
-            f"  message: {exc}\n"
-            f"  traceback:\n{_tb}"
-            f"────────────────────────────────────────────────────────────────\n",
-            flush=True, file=sys.stderr,
-        )
-        return jsonify({"error": str(exc), "detail": _tb}), 500
+        # Log type+message FIRST with _eprint so it survives even if traceback
+        # formatting or jsonify later fails (e.g. UnicodeEncodeError on Windows).
+        _exc_type = type(exc).__name__
+        _exc_msg  = str(exc)
+        _eprint(f"\nANALYZE [{sport.upper()}] CRASHED")
+        _eprint(f"  type:    {_exc_type}")
+        _eprint(f"  message: {_exc_msg}")
+        try:
+            _tb = traceback.format_exc()
+            _eprint(f"  traceback:\n{_tb}")
+        except Exception:
+            _tb = f"{_exc_type}: {_exc_msg}"
+        try:
+            return jsonify({"error": _exc_msg, "detail": _tb, "exc_type": _exc_type}), 500
+        except Exception as _je:
+            _eprint(f"  jsonify also failed: {_je}")
+            return (
+                f'{{"error": "{_exc_type}: {_exc_msg}"}}'
+            ), 500, {"Content-Type": "application/json"}
 
 
 @app.route("/api/refresh_models", methods=["POST"])
