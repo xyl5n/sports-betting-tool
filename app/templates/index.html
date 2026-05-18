@@ -184,39 +184,6 @@ body {
   box-shadow: 0 0 14px var(--cyan-glow);
 }
 
-/* ── Feature promo card ─────────────────────────────────────────────── */
-.promo-card {
-  position: relative;
-  background: linear-gradient(135deg, rgba(20, 184, 166, .08) 0%, rgba(20, 184, 166, .02) 100%);
-  border: 1px solid rgba(20, 184, 166, .35);
-  border-radius: var(--r-md);
-  padding: 18px 18px 16px;
-  margin-bottom: 22px;
-  box-shadow: 0 0 24px rgba(20, 184, 166, .08);
-}
-.promo-badge {
-  display: inline-block;
-  padding: 3px 9px;
-  background: var(--green-soft); color: var(--green);
-  border: 1px solid rgba(74, 222, 128, .35);
-  border-radius: var(--r-pill);
-  font-size: 10px; font-weight: 800; letter-spacing: .8px;
-  margin-bottom: 8px;
-}
-.promo-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
-.promo-desc  { font-size: 12.5px; color: var(--text-dim); margin-bottom: 12px; }
-.promo-cta {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 14px;
-  background: transparent; color: var(--cyan-soft);
-  border: 1px solid var(--cyan-soft); border-radius: var(--r-pill);
-  font-size: 11.5px; font-weight: 700; letter-spacing: .5px;
-  cursor: pointer; transition: all .15s;
-  font-family: inherit;
-}
-.promo-cta:hover { background: rgba(94, 234, 212, .1); }
-.promo-cta:active { transform: scale(.97); }
-
 /* ── Section header ─────────────────────────────────────────────────── */
 .section { margin-bottom: 24px; }
 .section-hdr {
@@ -347,6 +314,37 @@ body {
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 10px; font-weight: 800; color: #fff;
   flex-shrink: 0;
+}
+
+/* ── Real team-logo treatment (used by every card that shows a team) ──
+   The container is a sized rounded square that doubles as the fallback:
+   it carries the team-coloured background + initials.  When the actual
+   logo PNG loads it sits absolutely on top with a white background so
+   it covers the fallback cleanly.  If the PNG fails to load,
+   onerror=this.remove() drops the img, revealing the fallback again.   */
+.team-logo {
+  position: relative;
+  width: var(--logo-size, 48px); height: var(--logo-size, 48px);
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+  color: #fff;
+  font-size: var(--logo-fs, 14px); font-weight: 800;
+  background: var(--logo-bg, #555);
+  letter-spacing: -.2px;
+}
+.team-logo-init {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 0;
+}
+.team-logo-img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  background: #fff;             /* most ESPN logos are transparent; white reads cleanly */
+  z-index: 1;
 }
 .ev-team-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -659,15 +657,15 @@ body {
   border-radius: var(--r-md); padding: 12px;
 }
 .score-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 4px 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 0;
 }
 .score-row + .score-row {
   border-top: 1px solid var(--border-soft);
-  padding-top: 6px;
+  padding-top: 8px;
 }
-.score-team { flex: 1; font-size: 13px; font-weight: 600; }
-.score-val  { font-size: 16px; font-weight: 800; min-width: 30px; text-align: right; }
+.score-team { flex: 1; font-size: 14px; font-weight: 600; }
+.score-val  { font-size: 18px; font-weight: 800; min-width: 32px; text-align: right; }
 .score-meta {
   font-size: 11px; color: var(--text-dim);
   padding-top: 8px; border-top: 1px solid var(--border-soft); margin-top: 6px;
@@ -944,17 +942,9 @@ body {
       <!-- AI chat banner -->
       <button class="ai-banner" onclick="showTab('ai')" aria-label="Chat with AI">
         <span class="ai-banner-icon">🤖</span>
-        <span class="ai-banner-text">Create a free account to chat with <strong>AI</strong></span>
+        <span class="ai-banner-text">Chat with <strong>AI</strong></span>
         <span class="ai-banner-arrow">→</span>
       </button>
-
-      <!-- Feature promo card -->
-      <article class="promo-card">
-        <span class="promo-badge">● NOW LIVE</span>
-        <h3 class="promo-title">Build betting systems &amp; get picks</h3>
-        <p class="promo-desc">Design your own betting system, run it on today's slate, and surface high-edge picks across every sport — all in one place.</p>
-        <button class="promo-cta" onclick="showTab('ai')">TRY IT →</button>
-      </article>
 
       <!-- Full slate (shown when a specific sport pill is selected) -->
       <section class="section" id="section-slate" style="display:none">
@@ -1170,6 +1160,88 @@ function teamColor(team) {
   const c = `hsl(${h}, 55%, 30%)`;
   _TEAM_COLOR_CACHE[team] = c;
   return c;
+}
+
+// ─── Team-logo URLs ────────────────────────────────────────────────────
+// ESPN's CDN exposes 500×500 transparent PNGs at a stable URL pattern:
+//   https://a.espncdn.com/i/teamlogos/{league}/500/{abbr}.png
+// where {abbr} is the team's lowercase ESPN abbreviation.  We map full
+// team names (as the Odds API + analyze endpoints return them) to those
+// abbreviations and build the URL.  Missing entries fall back to the
+// initials-on-coloured-circle treatment via .team-logo's background.
+const MLB_LOGO_ABBR = {
+  'Arizona Diamondbacks':  'ari',
+  'Atlanta Braves':        'atl',
+  'Baltimore Orioles':     'bal',
+  'Boston Red Sox':        'bos',
+  'Chicago Cubs':          'chc',
+  'Chicago White Sox':     'chw',
+  'Cincinnati Reds':       'cin',
+  'Cleveland Guardians':   'cle',
+  'Colorado Rockies':      'col',
+  'Detroit Tigers':        'det',
+  'Houston Astros':        'hou',
+  'Kansas City Royals':    'kc',
+  'Los Angeles Angels':    'laa',
+  'Los Angeles Dodgers':   'lad',
+  'Miami Marlins':         'mia',
+  'Milwaukee Brewers':     'mil',
+  'Minnesota Twins':       'min',
+  'New York Mets':         'nym',
+  'New York Yankees':      'nyy',
+  'Athletics':             'oak',
+  'Oakland Athletics':     'oak',
+  'Philadelphia Phillies': 'phi',
+  'Pittsburgh Pirates':    'pit',
+  'San Diego Padres':      'sd',
+  'San Francisco Giants':  'sf',
+  'Seattle Mariners':      'sea',
+  'St. Louis Cardinals':   'stl',
+  'Tampa Bay Rays':        'tb',
+  'Texas Rangers':         'tex',
+  'Toronto Blue Jays':     'tor',
+  'Washington Nationals':  'wsh',
+};
+const WNBA_LOGO_ABBR = {
+  'Atlanta Dream':           'atl',
+  'Chicago Sky':             'chi',
+  'Connecticut Sun':         'conn',
+  'Dallas Wings':            'dal',
+  'Golden State Valkyries':  'gs',
+  'Indiana Fever':           'ind',
+  'Las Vegas Aces':          'lv',
+  'Los Angeles Sparks':      'la',
+  'Minnesota Lynx':          'min',
+  'New York Liberty':        'ny',
+  'Phoenix Mercury':         'phx',
+  'Seattle Storm':           'sea',
+  'Washington Mystics':      'wsh',
+};
+
+function teamLogoUrl(team, sport) {
+  if (!team) return null;
+  const map = (sport === 'wnba') ? WNBA_LOGO_ABBR : MLB_LOGO_ABBR;
+  const abbr = map[team] || map[team.trim()];
+  if (!abbr) return null;
+  const league = (sport === 'wnba') ? 'wnba' : 'mlb';
+  return `https://a.espncdn.com/i/teamlogos/${league}/500/${abbr}.png`;
+}
+
+// Builds the .team-logo span.  Always renders the fallback (initials on
+// a team-coloured circle); when a logo URL is available an <img> stacks
+// on top of the fallback with a white background.  If the PNG fails to
+// load, onerror removes the <img>, revealing the fallback underneath.
+function teamLogoHtml(team, sport, size) {
+  size = size || 48;
+  const init  = teamInitials(team);
+  const color = teamColor(team);
+  const url   = teamLogoUrl(team, sport);
+  const fs    = Math.max(10, Math.round(size * 0.30));
+  const style = `--logo-size:${size}px;--logo-fs:${fs}px;--logo-bg:${color}`;
+  const img   = url
+    ? `<img class="team-logo-img" src="${url}" alt="${(team||'').replace(/"/g, '&quot;')}" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+    : '';
+  return `<span class="team-logo" style="${style}"><span class="team-logo-init">${init}</span>${img}</span>`;
 }
 
 function fmtOdds(o) {
@@ -1491,7 +1563,6 @@ function renderEVScans() {
 }
 
 function buildEVCard(b) {
-  const aw = teamInitials(b.away), hm = teamInitials(b.home);
   const dirCls = b.kind === 'O/U' ? (b.direction === 'over' ? 'over' : 'under') : '';
   const pickHtml = b.kind === 'O/U' ? `<span class="${dirCls}">${b.pickLabel}</span>` : b.pickLabel;
   const book = (SPORTSBOOK_TAG[b.sport] || 'DK');
@@ -1502,12 +1573,12 @@ function buildEVCard(b) {
     </header>
     <div class="ev-matchup">
       <div class="ev-team">
-        <span class="ev-team-logo" style="background:${teamColor(b.away)}">${aw}</span>
+        ${teamLogoHtml(b.away, b.sport, 22)}
         <span class="ev-team-name">${shortName(b.away)}</span>
       </div>
       <span class="ev-vs">VS</span>
       <div class="ev-team">
-        <span class="ev-team-logo" style="background:${teamColor(b.home)}">${hm}</span>
+        ${teamLogoHtml(b.home, b.sport, 22)}
         <span class="ev-team-name">${shortName(b.home)}</span>
       </div>
       <span class="ev-time">${fmtTimeET(b.time)}</span>
@@ -1533,35 +1604,29 @@ function buildEVCard(b) {
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Rendering — Props
+//  Player props aren't wired up yet, so both the Home-tab row and the
+//  full Props tab render a "Coming soon" empty state regardless of
+//  data.  When player-prop data lands, restore the original rendering
+//  path that consumes collectProps().
 // ═══════════════════════════════════════════════════════════════════════
 function renderProps() {
-  const props = collectProps().slice(0, 10);  // top 10 for the horizontal row
-  const wrap  = $('props-cards');
-  if (!props.length) {
-    wrap.innerHTML = `<div class="empty-state" style="flex:1">
-      <span class="icon">◎</span>
-      Props appear here after analysis.
-    </div>`;
-    return;
-  }
-  wrap.innerHTML = props.map(buildPropCard).join('');
+  const wrap = $('props-cards');
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="empty-state" style="flex:1">
+    <span class="icon">◎</span>
+    Player props coming soon.
+  </div>`;
 }
 
 function renderPropsFull() {
-  const props = collectProps();
-  const wrap  = $('props-full');
-  $('props-count').textContent = props.length;
-  if (!props.length) {
-    wrap.innerHTML = `<div class="empty-state" style="flex:1;width:100%">
-      <span class="icon">◎</span>
-      No props yet — run analysis on Home.
-    </div>`;
-    return;
-  }
-  wrap.innerHTML = props.map(p => {
-    const card = buildPropCard(p);
-    return card.replace('class="prop-card"', 'class="prop-card" style="width:100%"');
-  }).join('');
+  const wrap = $('props-full');
+  const cnt  = $('props-count');
+  if (cnt)  cnt.textContent = '—';
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="empty-state" style="flex:1;width:100%">
+    <span class="icon">◎</span>
+    Player props coming soon. For now use EV SCANS for moneyline + run-line + totals picks.
+  </div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1609,7 +1674,7 @@ function buildSlateCard(g) {
     </div>
     <div class="slate-matchup">
       <div class="slate-team">
-        <span class="slate-logo-lg" style="background:${teamColor(g.away_team)}">${teamInitials(g.away_team)}</span>
+        ${teamLogoHtml(g.away_team, sport, 48)}
         <span class="slate-team-name">${shortName(g.away_team)}</span>
         <span class="slate-team-odds">${fmtOdds(g.away_odds)}</span>
       </div>
@@ -1617,7 +1682,7 @@ function buildSlateCard(g) {
         <span class="slate-vs">VS</span>
       </div>
       <div class="slate-team">
-        <span class="slate-logo-lg" style="background:${teamColor(g.home_team)}">${teamInitials(g.home_team)}</span>
+        ${teamLogoHtml(g.home_team, sport, 48)}
         <span class="slate-team-name">${shortName(g.home_team)}</span>
         <span class="slate-team-odds">${fmtOdds(g.home_odds)}</span>
       </div>
@@ -1702,14 +1767,16 @@ function buildSlateTotalsBox(g, t) {
 }
 
 function buildPropCard(p) {
-  const initials = (p.team || '').split(' ').slice(-1)[0].slice(0, 3).toUpperCase() || '?';
   const edgePct = `${(p.edge || 0) >= 0 ? '+' : ''}${((p.edge || 0) * 100).toFixed(1)}%`;
   const edgeColor = (p.edge || 0) > 0 ? 'var(--green)' : 'var(--text-dim)';
+  // For run-line / spread props p.team is a single team and resolves to a
+  // real logo; for totals it's a matchup string ("Away @ Home") that won't
+  // match the logo map -- teamLogoHtml falls back to initials in that case.
   return `<article class="prop-card">
     <span class="prop-sport">${p.sport.toUpperCase()} · ${p.statType}</span>
     <div class="prop-stat">${p.line}</div>
     <div class="prop-team">
-      <span class="ev-team-logo" style="width:18px;height:18px;font-size:9px;background:${teamColor(p.team || '?')}">${initials}</span>
+      ${teamLogoHtml(p.team, p.sport, 18)}
       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.team || '—'}</span>
     </div>
     <div class="prop-edge" style="color:${edgeColor}">${edgePct} edge · ${fmtOdds(p.odds)}</div>
@@ -1729,10 +1796,12 @@ function renderScores() {
   wrap.innerHTML = games.map(g => `
     <article class="score-card" data-game-id="${g.game_id}">
       <div class="score-row">
+        ${teamLogoHtml(g.away_team, g._sport, 28)}
         <span class="score-team">${shortName(g.away_team)}</span>
         <span class="score-val" id="score-away-${g.game_id}">—</span>
       </div>
       <div class="score-row">
+        ${teamLogoHtml(g.home_team, g._sport, 28)}
         <span class="score-team">${shortName(g.home_team)}</span>
         <span class="score-val" id="score-home-${g.game_id}">—</span>
       </div>
@@ -1986,7 +2055,7 @@ function updateSearchResults(q) {
   );
   $('search-results').innerHTML = matches.length
     ? matches.map(g => `<button class="more-row" onclick="closeSearch();openAnalyze('${g.game_id}', 'ML')">
-        <span class="more-row-icon">${g._sport === 'mlb' ? '⚾' : '🏀'}</span>
+        ${teamLogoHtml(g.away_team, g._sport, 32)}
         <span class="more-row-text">${shortName(g.away_team)} @ ${shortName(g.home_team)}
           <div class="more-row-sub">${fmtTimeET(g.commence_time)} · pick ${shortName(g.pick_team)} ${fmtPct(g.pick_prob || 0)}</div>
         </span>
