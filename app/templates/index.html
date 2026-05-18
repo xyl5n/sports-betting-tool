@@ -1604,35 +1604,29 @@ function buildEVCard(b) {
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Rendering — Props
+//  Player props aren't wired up yet, so both the Home-tab row and the
+//  full Props tab render a "Coming soon" empty state regardless of
+//  data.  When player-prop data lands, restore the original rendering
+//  path that consumes collectProps().
 // ═══════════════════════════════════════════════════════════════════════
 function renderProps() {
-  const props = collectProps().slice(0, 10);  // top 10 for the horizontal row
-  const wrap  = $('props-cards');
-  if (!props.length) {
-    wrap.innerHTML = `<div class="empty-state" style="flex:1">
-      <span class="icon">◎</span>
-      Props appear here after analysis.
-    </div>`;
-    return;
-  }
-  wrap.innerHTML = props.map(buildPropCard).join('');
+  const wrap = $('props-cards');
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="empty-state" style="flex:1">
+    <span class="icon">◎</span>
+    Player props coming soon.
+  </div>`;
 }
 
 function renderPropsFull() {
-  const props = collectProps();
-  const wrap  = $('props-full');
-  $('props-count').textContent = props.length;
-  if (!props.length) {
-    wrap.innerHTML = `<div class="empty-state" style="flex:1;width:100%">
-      <span class="icon">◎</span>
-      No props yet — run analysis on Home.
-    </div>`;
-    return;
-  }
-  wrap.innerHTML = props.map(p => {
-    const card = buildPropCard(p);
-    return card.replace('class="prop-card"', 'class="prop-card" style="width:100%"');
-  }).join('');
+  const wrap = $('props-full');
+  const cnt  = $('props-count');
+  if (cnt)  cnt.textContent = '—';
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="empty-state" style="flex:1;width:100%">
+    <span class="icon">◎</span>
+    Player props coming soon. For now use EV SCANS for moneyline + run-line + totals picks.
+  </div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
