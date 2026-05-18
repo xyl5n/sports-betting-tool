@@ -106,6 +106,80 @@ MLB_XGB_CONFIDENCE_FEATURE_NAMES: tuple[str, ...] = tuple(
     name for name in MLB_FEATURES if name not in MLB_XGB_ODDS_FEATURE_NAMES
 )
 
+# ── Feature-vector flip rules ────────────────────────────────────────────────
+# Used by RunLineModel.predict() to compute P(away wins by 2+) by re-running
+# the model on a feature vector that represents the same matchup with home and
+# away swapped.  This is needed when the home team is the underdog at +1.5,
+# because the model natively only computes P(home margin >= 2) and that's not
+# what "home covers +1.5" actually means in that case.  See the audit comment
+# at the top of RunLineModel.predict for the full math.
+#
+# Op meanings:
+#   "negate"             → x → -x  (home-minus-away diffs)
+#   "one_minus"          → x → 1-x (home-centric probabilities)
+#   "keep"               → x → x   (venue-symmetric features; the game is
+#                                   still at the same physical park)
+#   "swap_home_away_sp_rest" → handled separately (pair-swap home_sp_rest
+#                                   with away_sp_rest)
+MLB_FEATURE_FLIP_OPS: dict = {
+    "net_run_diff":           "negate",
+    "rpg_diff":               "negate",
+    "rapg_diff":              "negate",
+    "win_pct_diff":           "negate",
+    "home_away_split_diff":   "negate",
+    "last10_diff":            "negate",
+    "hits_diff":              "negate",
+    "errors_diff":            "negate",
+    "home_implied_prob":      "one_minus",
+    "run_line":               "negate",
+    "sp_era_diff":            "negate",
+    "sp_whip_diff":           "negate",
+    "sp_k_rate_diff":         "negate",
+    "home_sp_rest":           "swap_home_away_sp_rest",
+    "away_sp_rest":           "swap_home_away_sp_rest",
+    "sp_hand_adv":            "negate",
+    "park_run_factor":        "keep",
+    "wind_speed":             "keep",
+    "wind_direction":         "keep",
+    "bullpen_era_diff":       "negate",
+    "bullpen_fatigue_diff":   "negate",
+    "lineup_confirmed":       "keep",
+    "line_movement":          "negate",
+    "trend_diff":             "negate",
+    "bb9_diff":               "negate",
+    "sp_split_era_diff":      "negate",
+    "sp_recent_form_diff":    "negate",
+    "pitcher_dominance_diff": "negate",
+    "lineup_vuln_diff":       "negate",
+    "blowout_prob":           "one_minus",
+}
+
+
+def flip_mlb_features(feature_vec):
+    """Return a feature vector representing the same game with home/away swapped.
+
+    The output is fed back through the same scaler + model so the model's
+    output P(home_margin >= 2) on the flipped vector equals P(away_margin >= 2)
+    on the original — i.e. P(away wins by 2+) = P(home loses by 2+).
+
+    Used by RunLineModel.predict when run_line_point > 0 (home is the
+    underdog at +1.5), where the native model output is for the wrong side
+    of the cover relation.
+    """
+    out = feature_vec.copy().astype(float)
+    # Pair-swap the SP rest columns explicitly before the per-column loop runs.
+    h_idx = MLB_FEATURES.index("home_sp_rest")
+    a_idx = MLB_FEATURES.index("away_sp_rest")
+    out[h_idx], out[a_idx] = float(feature_vec[a_idx]), float(feature_vec[h_idx])
+    for i, name in enumerate(MLB_FEATURES):
+        op = MLB_FEATURE_FLIP_OPS.get(name, "negate")  # default conservative
+        if op == "negate":
+            out[i] = -float(feature_vec[i])
+        elif op == "one_minus":
+            out[i] = 1.0 - float(feature_vec[i])
+        # "keep" and "swap_home_away_sp_rest" already handled above.
+    return out
+
 MLB = SportConfig(
     name="MLB",
     odds_key="baseball_mlb",

@@ -489,10 +489,28 @@ class RunLineModel:
         except Exception:
             return None
 
-        # Both heads now model P(margin >= 2 | home wins) — conditional probs.
-        # Both XGB and LR run on the pure-confidence feature subset (no market
-        # columns) because the LR was also trained on that same subset
-        # (X_cond = X_scaled[:, self._xgb_cols][home_won_mask] in _train).
+        # ── Cover-side orientation ───────────────────────────────────────────
+        # The model natively predicts P(home margin >= 2), which is the
+        # "favorite covers -1.5" probability ONLY when home is the favorite.
+        # When run_line_point > 0 the home team is the UNDERDOG at +1.5, and
+        # "home covers +1.5" actually means margin >= -1, which the native
+        # output does not represent.  In that case we re-run the model on a
+        # flipped feature vector (home/away swapped) to obtain P(away wins by
+        # 2+) = P(home loses by 2+), then derive
+        #     P(home covers +1.5) = 1 - P(home loses by 2+).
+        # The same flip is applied per-classifier (XGB / LR / NN) so the
+        # per-classifier inequality
+        #     RL(fav covers -1.5) <= ML(fav wins)
+        # holds by construction regardless of who is favored.
+        rl_point = game.get("run_line_point", -1.5)
+        try:
+            home_is_underdog = float(rl_point) > 0
+        except (TypeError, ValueError):
+            home_is_underdog = False
+
+        # Both heads natively model P(margin >= 2 | home wins) — conditional
+        # probs.  Both XGB and LR run on the pure-confidence feature subset
+        # (no market columns).
         X_xgb = X[:, self._xgb_cols] if self._xgb_cols is not None else X
         xgb_cond = float(self.xgb.predict_proba(X_xgb)[0, 1])
         lr_cond  = (float(self.lr.predict_proba(X_xgb)[0, 1])
@@ -507,8 +525,36 @@ class RunLineModel:
         ml_xgb_p = max(0.0, min(1.0, ml_xgb_p))
         ml_lr_p  = max(0.0, min(1.0, ml_lr_p))
 
-        xgb_prob = ml_xgb_p * xgb_cond
-        lr_prob  = ml_lr_p  * lr_cond if self.lr_is_trained else xgb_prob
+        if home_is_underdog:
+            # Flip features and re-predict to get P(away margin >= 2 | away
+            # wins) on each classifier; compose with (1 - ml_p) for the
+            # marginal P(away wins by 2+).  Home cover at +1.5 is then
+            # 1 - P(away wins by 2+).
+            from .sports_config import flip_mlb_features
+            flipped_vec = flip_mlb_features(feature_vec)
+            try:
+                X_flip = self.scaler.transform(flipped_vec.reshape(1, -1))
+            except Exception:
+                # If the flip prediction fails (e.g. scaler dim mismatch),
+                # fall back to the native output.  Constraint may still break
+                # for this game but the route doesn't crash.
+                X_flip = X
+            X_xgb_flip = X_flip[:, self._xgb_cols] if self._xgb_cols is not None else X_flip
+            xgb_cond_a = float(self.xgb.predict_proba(X_xgb_flip)[0, 1])
+            lr_cond_a  = (float(self.lr.predict_proba(X_xgb_flip)[0, 1])
+                          if self.lr_is_trained else xgb_cond_a)
+
+            p_away_by2_xgb = (1.0 - ml_xgb_p) * xgb_cond_a
+            p_away_by2_lr  = (1.0 - ml_lr_p)  * lr_cond_a if self.lr_is_trained else p_away_by2_xgb
+
+            # home cover at +1.5 per classifier
+            xgb_prob = max(0.0, min(1.0, 1.0 - p_away_by2_xgb))
+            lr_prob  = max(0.0, min(1.0, 1.0 - p_away_by2_lr))
+        else:
+            # Home favored at -1.5 (or pickem) — native semantics already
+            # match "home covers -1.5".
+            xgb_prob = ml_xgb_p * xgb_cond
+            lr_prob  = ml_lr_p  * lr_cond if self.lr_is_trained else xgb_prob
 
         # ── Silent LR-only pick recorder (does not affect ensemble output) ────
         if self.lr_is_trained:
@@ -553,9 +599,19 @@ class RunLineModel:
             try:
                 # nn_scaler was fitted on RAW (unscaled) data during _train_nn();
                 # pass the original feature_vec, NOT the already-scaler-transformed X.
-                X_nn    = self.nn_scaler.transform(feature_vec.reshape(1, -1))
-                nn_cond = float(self.nn.predict_proba(X_nn)[0, 1])
-                nn_prob = ml_nn_p * nn_cond
+                if home_is_underdog:
+                    # Same flip rationale as the XGB/LR block above — predict
+                    # P(away wins by 2+) and derive home_cover = 1 - that.
+                    from .sports_config import flip_mlb_features
+                    flipped_vec = flip_mlb_features(feature_vec)
+                    X_nn = self.nn_scaler.transform(flipped_vec.reshape(1, -1))
+                    nn_cond_a = float(self.nn.predict_proba(X_nn)[0, 1])
+                    p_away_by2_nn = (1.0 - ml_nn_p) * nn_cond_a
+                    nn_prob = max(0.0, min(1.0, 1.0 - p_away_by2_nn))
+                else:
+                    X_nn    = self.nn_scaler.transform(feature_vec.reshape(1, -1))
+                    nn_cond = float(self.nn.predict_proba(X_nn)[0, 1])
+                    nn_prob = ml_nn_p * nn_cond
             except Exception:
                 nn_prob = None
 
@@ -651,6 +707,35 @@ class RunLineModel:
         # quantity. `confidence_tier` is a function of pick_prob ONLY.
         from .kelly import confidence_tier_from_prob
         conf_tier = confidence_tier_from_prob(pick_prob)
+
+        # ── Constraint self-check (logs only; never raises) ───────────────────
+        # Enforced invariants:
+        #   1) For the favored team:   RL(fav covers -1.5) <= ML(fav wins)
+        #   2) For the underdog team:  RL(dog covers +1.5) >= ML(dog wins)
+        # Both reduce to home_cover_prob <= ml_prob_home_xgb (when home is
+        # favored) or 1 - home_cover_prob <= 1 - ml_prob_home_xgb (when home
+        # is the underdog).  We surface a one-line warning to stderr if a
+        # violation slips through — useful for catching regressions in the
+        # feature-flip transform.
+        try:
+            _ml_home_ref = ml_xgb_p   # XGB head's P(home wins); other heads
+                                       # would give the same inequality by
+                                       # construction.
+            _hc = combined             # ensemble P(home covers run_line_point)
+            if home_is_underdog:
+                # home covers +1.5 must be >= P(home wins).
+                if _hc + 1e-6 < _ml_home_ref:
+                    print(f"  [RL constraint WARN] {matchup}: "
+                          f"home_cover_+1.5 ({_hc:.3f}) < ml_home ({_ml_home_ref:.3f})",
+                          flush=True)
+            else:
+                # home covers -1.5 must be <= P(home wins).
+                if _hc - 1e-6 > _ml_home_ref:
+                    print(f"  [RL constraint WARN] {matchup}: "
+                          f"home_cover_-1.5 ({_hc:.3f}) > ml_home ({_ml_home_ref:.3f})",
+                          flush=True)
+        except Exception:
+            pass
 
         return {
             "home_cover_prob":   combined,
