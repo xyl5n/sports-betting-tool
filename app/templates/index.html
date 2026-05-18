@@ -184,39 +184,6 @@ body {
   box-shadow: 0 0 14px var(--cyan-glow);
 }
 
-/* ── Feature promo card ─────────────────────────────────────────────── */
-.promo-card {
-  position: relative;
-  background: linear-gradient(135deg, rgba(20, 184, 166, .08) 0%, rgba(20, 184, 166, .02) 100%);
-  border: 1px solid rgba(20, 184, 166, .35);
-  border-radius: var(--r-md);
-  padding: 18px 18px 16px;
-  margin-bottom: 22px;
-  box-shadow: 0 0 24px rgba(20, 184, 166, .08);
-}
-.promo-badge {
-  display: inline-block;
-  padding: 3px 9px;
-  background: var(--green-soft); color: var(--green);
-  border: 1px solid rgba(74, 222, 128, .35);
-  border-radius: var(--r-pill);
-  font-size: 10px; font-weight: 800; letter-spacing: .8px;
-  margin-bottom: 8px;
-}
-.promo-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
-.promo-desc  { font-size: 12.5px; color: var(--text-dim); margin-bottom: 12px; }
-.promo-cta {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 14px;
-  background: transparent; color: var(--cyan-soft);
-  border: 1px solid var(--cyan-soft); border-radius: var(--r-pill);
-  font-size: 11.5px; font-weight: 700; letter-spacing: .5px;
-  cursor: pointer; transition: all .15s;
-  font-family: inherit;
-}
-.promo-cta:hover { background: rgba(94, 234, 212, .1); }
-.promo-cta:active { transform: scale(.97); }
-
 /* ── Section header ─────────────────────────────────────────────────── */
 .section { margin-bottom: 24px; }
 .section-hdr {
@@ -978,14 +945,6 @@ body {
         <span class="ai-banner-text">Chat with <strong>AI</strong></span>
         <span class="ai-banner-arrow">→</span>
       </button>
-
-      <!-- Feature promo card -->
-      <article class="promo-card">
-        <span class="promo-badge">● NOW LIVE</span>
-        <h3 class="promo-title">Build betting systems &amp; get picks</h3>
-        <p class="promo-desc">Design your own betting system, run it on today's slate, and surface high-edge picks across every sport — all in one place.</p>
-        <button class="promo-cta" onclick="showTab('ai')">TRY IT →</button>
-      </article>
 
       <!-- Full slate (shown when a specific sport pill is selected) -->
       <section class="section" id="section-slate" style="display:none">
