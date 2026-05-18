@@ -679,15 +679,102 @@ body {
   display: flex; flex-direction: column; gap: 8px;
 }
 
-/* ── Wider screens — keep the phone shape, add side gutters ─────────── */
-@media (min-width: 640px) {
-  body { background: #08090c; }
+/* ── Desktop / tablet (>=768px) — expand the app, move bottom nav up ──
+   Mobile layout is unchanged below this breakpoint.  On wider screens
+   the 430-px phone strip would leave huge empty gutters; we instead
+   expand to a 1180-px column, reorder the nav so the five tabs sit
+   below the sport-pill row as a horizontal strip (bottom nav on
+   desktop reads as "out of place"), and grow a few elements that
+   benefit from the extra width.                                       */
+@media (min-width: 768px) {
+  :root {
+    --app-w:        1180px;
+    --pad:          28px;
+    --bottom-nav-h: 0px;        /* nav is no longer fixed-at-bottom on desktop */
+  }
+  body {
+    background: #08090c;
+    padding-bottom: 32px;
+  }
   .app {
+    display: flex; flex-direction: column;
     border-left:  1px solid var(--border-soft);
     border-right: 1px solid var(--border-soft);
     box-shadow: 0 0 60px rgba(0,0,0,.6);
+    padding-bottom: 40px;
   }
-  .bottom-nav { border-left: 1px solid var(--border-soft); border-right: 1px solid var(--border-soft); }
+  /* Reorder children so the tab strip appears under the sport pills,
+     not at the bottom of the page.  Children of .app are flex items
+     thanks to display:flex on the parent above.                       */
+  .topnav      { order: 1; }
+  .sport-pills { order: 2; }
+  .bottom-nav  { order: 3; }
+  .content     { order: 4; }
+
+  /* Brand: a touch bigger for visual hierarchy */
+  .topnav { padding: 18px var(--pad) 12px; }
+  .brand  { font-size: 20px; }
+  .brand .brand-icon { width: 32px; height: 32px; font-size: 18px; }
+
+  /* Bottom nav becomes a styled horizontal tab strip below the sport pills.
+     Drop the fixed-position + backdrop-blur treatment, replace the row
+     with a single pill-shaped bar.                                    */
+  .bottom-nav {
+    position: static;
+    height: auto;
+    background: var(--bg-elev);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-pill);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    margin: 0 var(--pad) 20px;
+    padding-bottom: 0;
+    overflow: hidden;
+  }
+  .bottom-nav-inner {
+    max-width: 100%;
+    grid-template-columns: none;
+    display: flex; justify-content: space-around;
+  }
+  .bottom-tab {
+    flex-direction: row;
+    gap: 10px;
+    padding: 12px 22px;
+    font-size: 13px;
+    flex: 0 1 auto;
+  }
+  .bottom-tab-icon {
+    width: 26px; height: 26px;
+    font-size: 13px;
+  }
+
+  /* Slightly larger EV cards so a few are visible side-by-side */
+  .ev-card { width: 340px; }
+  .ev-card-hdr { gap: 10px; }
+  .ev-pick { font-size: 22px; }
+
+  /* Prop cards a touch wider too */
+  .prop-card { width: 210px; }
+
+  /* AI chat: cap reading width so messages don't span the whole canvas */
+  .chat-wrap  { max-width: 760px; margin: 0 auto; height: calc(100vh - 320px); }
+  .chat-input { font-size: 14px; }   /* no longer need the iOS-zoom workaround */
+
+  /* Search overlay content cap */
+  .search-overlay-bar,
+  .search-results { max-width: 760px; margin: 0 auto; width: 100%; }
+
+  /* Toast doesn't need to clear a fixed bottom nav anymore */
+  .toast { bottom: 24px; }
+
+  /* Empty-state and more-list rows breathe a bit more */
+  .empty-state { padding: 48px 24px; }
+  .more-row    { padding: 18px 20px; }
+}
+
+/* ── Very wide (>=1280px) — tiny upgrades for big monitors ─────────── */
+@media (min-width: 1280px) {
+  .ev-card { width: 360px; }
 }
 </style>
 </head>
