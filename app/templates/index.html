@@ -5002,7 +5002,9 @@ function validateRlPoint(g) {
   return g;
 }
 
-function buildGameCard(g) {
+// MLB-specific card builder.  Named _buildMlbGameCard to avoid being
+// shadowed by the universal buildGameCard(g, sport) defined further below.
+function _buildMlbGameCard(g) {
   g = validateRlPoint(g);
   const _split   = splitPredictedRuns(g);
   const _awayPH  = _split.away != null
@@ -5109,6 +5111,8 @@ async function setSlateDay(day) {
 }
 
 function renderSlate(results) {
+  console.log('[renderSlate] called with', results?.length, 'games; first game:', results?.[0]);
+
   const targetDate = _slateDay === 'tomorrow' ? _tomorrowET() : _todayET();
   const filtered   = results.filter(g => _etDateStr(g.commence_time) === targetDate);
 
@@ -5138,14 +5142,20 @@ function renderSlate(results) {
   document.getElementById('slate-sub').textContent =
     `${remaining} game${remaining !== 1 ? 's' : ''} remaining · ${totalCompleted} completed`;
 
-  let html = active.length
-    ? active.map(buildGameCard).join('')
-    : `<div style="color:var(--dim);padding:24px 0;text-align:center;font-size:13px">No games remaining for ${targetDate === _todayET() ? 'today' : 'tomorrow'}.</div>`;
+  let html;
+  try {
+    html = active.length
+      ? active.map(_buildMlbGameCard).join('')
+      : `<div style="color:var(--dim);padding:24px 0;text-align:center;font-size:13px">No games remaining for ${targetDate === _todayET() ? 'today' : 'tomorrow'}.</div>`;
 
-  if (totalCompleted > 0) {
-    html += `<div class="completed-divider">Completed Games &nbsp;(${totalCompleted})</div>`;
-    html += completed.map(buildGameCard).join('');
-    html += scheduleOnly.map(buildScheduleCard).join('');
+    if (totalCompleted > 0) {
+      html += `<div class="completed-divider">Completed Games &nbsp;(${totalCompleted})</div>`;
+      html += completed.map(_buildMlbGameCard).join('');
+      html += scheduleOnly.map(buildScheduleCard).join('');
+    }
+  } catch (err) {
+    console.error('[renderSlate] card render error:', err);
+    html = `<div class="error-box">Card render error: ${err.message}</div>`;
   }
 
   document.getElementById('slate-cards').innerHTML = html;
