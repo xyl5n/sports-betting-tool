@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>AI — Sports Betting</title>
+<title>Sports Analysis</title>
 
 <!-- ── PWA metadata (preserved from prior PR) ──────────────────────────── -->
 <link rel="manifest" href="/static/manifest.json">
 <meta name="apple-mobile-web-app-capable"          content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title"            content="AI">
+<meta name="apple-mobile-web-app-title"            content="Sports Analysis">
 <meta name="mobile-web-app-capable"                content="yes">
 <meta name="theme-color"                           content="#0d1117">
 
@@ -931,6 +931,14 @@ body {
   line-height: 1.7;
   font-family: "SF Mono", Consolas, monospace;
 }
+.admin-reset-pin {
+  height: 36px; padding: 0 12px;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill); color: var(--text-dim);
+  font-size: 11px; font-weight: 700; letter-spacing: .4px;
+  cursor: pointer; font-family: inherit;
+}
+.admin-reset-pin:hover { border-color: var(--border); color: var(--text); }
 
 /* ── Bottom navigation ──────────────────────────────────────────────── */
 .bottom-nav {
@@ -951,7 +959,7 @@ body {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 3px;
   background: none; border: none;
-  color: var(--text-dim2); font-size: 10.5px; font-weight: 600;
+  color: var(--text-dim2); font-size: 13px; font-weight: 600; letter-spacing: .2px;
   cursor: pointer; padding: 6px 0;
   font-family: inherit;
   transition: color .15s;
@@ -1141,8 +1149,7 @@ body {
   <!-- ─── Top nav ─────────────────────────────────────────────────────── -->
   <header class="topnav">
     <div class="brand">
-      <span class="brand-icon">⚛</span>
-      <span><span class="brand-text-one">A</span><span class="brand-text-two">I</span></span>
+      <span><span class="brand-text-one">Sports </span><span class="brand-text-two">Analysis</span></span>
     </div>
     <button class="search-btn" id="search-btn" aria-label="Search" onclick="openSearch()">⌕</button>
   </header>
@@ -1150,11 +1157,11 @@ body {
   <!-- ─── Sport filter pills ──────────────────────────────────────────── -->
   <nav class="sport-pills" id="sport-pills">
     <button class="pill active" data-sport="all"  onclick="setSport('all')">ALL</button>
-    <button class="pill"        data-sport="mlb"  onclick="setSport('mlb')"><span class="sport-glyph">⚾</span>MLB</button>
-    <button class="pill"        data-sport="wnba" onclick="setSport('wnba')"><span class="sport-glyph">🏀</span>WNBA</button>
-    <button class="pill disabled" data-sport="nba"  title="Coming soon"><span class="sport-glyph">🏀</span>NBA</button>
-    <button class="pill disabled" data-sport="nhl"  title="Coming soon"><span class="sport-glyph">🏒</span>NHL</button>
-    <button class="pill disabled" data-sport="nfl"  title="Coming soon"><span class="sport-glyph">🏈</span>NFL</button>
+    <button class="pill"        data-sport="mlb"  onclick="setSport('mlb')">MLB</button>
+    <button class="pill"        data-sport="wnba" onclick="setSport('wnba')">WNBA</button>
+    <button class="pill disabled" data-sport="nba"  title="Coming soon">NBA</button>
+    <button class="pill disabled" data-sport="nhl"  title="Coming soon">NHL</button>
+    <button class="pill disabled" data-sport="nfl"  title="Coming soon">NFL</button>
   </nav>
 
   <div class="content">
@@ -1167,7 +1174,6 @@ body {
 
       <!-- AI chat banner -->
       <button class="ai-banner" onclick="showTab('ai')" aria-label="Chat with AI">
-        <span class="ai-banner-icon">🤖</span>
         <span class="ai-banner-text">Chat with <strong>AI</strong></span>
         <span class="ai-banner-arrow">→</span>
       </button>
@@ -1230,7 +1236,7 @@ body {
         </div>
       </div>
       <div class="scores-list" id="scores-list">
-        <div class="empty-state"><span class="icon">📊</span>Run analysis to load games.</div>
+        <div class="empty-state">Run analysis to load games.</div>
       </div>
     </section>
 
@@ -1269,21 +1275,18 @@ body {
         <div class="section-hdr"><h2>MORE</h2></div>
         <div class="more-list">
           <button class="more-row" onclick="openMyBets()">
-            <span class="more-row-icon">💰</span>
             <span class="more-row-text">My Bets
               <div class="more-row-sub" id="more-bankroll">Bankroll · loading…</div>
             </span>
             <span class="more-row-chev">›</span>
           </button>
           <button class="more-row" onclick="openModelPerf()">
-            <span class="more-row-icon">📈</span>
             <span class="more-row-text">Model Performance
               <div class="more-row-sub">XGB / LR / NN per-bet-type record</div>
             </span>
             <span class="more-row-chev">›</span>
           </button>
           <button class="more-row" onclick="openAdmin()">
-            <span class="more-row-icon">⚙</span>
             <span class="more-row-text">Admin
               <div class="more-row-sub">Run analysis, wipe bets, retrain models</div>
             </span>
@@ -1323,14 +1326,14 @@ body {
         <div class="bets-section">
           <h3>Open Bets <span class="count-badge" id="open-bets-count">0</span></h3>
           <div id="open-bets-list">
-            <div class="empty-state"><span class="icon">🎯</span>No open bets.</div>
+            <div class="empty-state">No open bets.</div>
           </div>
         </div>
 
         <div class="bets-section">
           <h3>History <span class="count-badge" id="history-count">0</span></h3>
           <div id="history-list">
-            <div class="empty-state"><span class="icon">📋</span>No settled bets yet.</div>
+            <div class="empty-state">No settled bets yet.</div>
           </div>
         </div>
       </div>
@@ -1343,7 +1346,7 @@ body {
           <div class="subpage-spacer"></div>
         </header>
         <div id="model-perf-content">
-          <div class="empty-state"><span class="icon">📊</span>Loading model stats…</div>
+          <div class="empty-state">Loading model stats…</div>
         </div>
       </div>
 
@@ -1354,14 +1357,14 @@ body {
           <button class="back-btn" onclick="closeSubPage()" aria-label="Back">‹</button>
           <h2>Admin</h2>
           <div class="subpage-spacer"></div>
-          <button class="back-btn" onclick="adminResetPin()" title="Reset PIN" aria-label="Reset PIN">⌬</button>
+          <button class="admin-reset-pin" onclick="adminResetPin()" title="Reset PIN" aria-label="Reset PIN">Reset PIN</button>
         </header>
 
         <section class="admin-section">
           <h3>ANALYSIS</h3>
-          <button class="admin-btn primary" onclick="adminRunAnalysis('mlb')"  id="admin-run-mlb">▶ Run MLB Analysis</button>
-          <button class="admin-btn primary" onclick="adminRunAnalysis('wnba')" id="admin-run-wnba">▶ Run WNBA Analysis</button>
-          <button class="admin-btn primary" onclick="adminRunAnalysis('both')" id="admin-run-both">▶ Run Both</button>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('mlb')"  id="admin-run-mlb">Run MLB Analysis</button>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('wnba')" id="admin-run-wnba">Run WNBA Analysis</button>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('both')" id="admin-run-both">Run Both</button>
           <div class="admin-meta">
             Last MLB:&nbsp; <span id="admin-last-mlb">—</span><br>
             Last WNBA: <span id="admin-last-wnba">—</span>
@@ -1370,16 +1373,16 @@ body {
 
         <section class="admin-section">
           <h3>MODELS</h3>
-          <button class="admin-btn" onclick="adminRefreshModels()" id="admin-refresh-models">⟳ Refresh Models (cached odds)</button>
-          <button class="admin-btn warn" onclick="adminClearSnapshot('mlb')">↻ Clear Today's MLB Snapshot</button>
-          <button class="admin-btn warn" onclick="adminClearSnapshot('wnba')">↻ Clear Today's WNBA Snapshot</button>
+          <button class="admin-btn" onclick="adminRefreshModels()" id="admin-refresh-models">Refresh Models (cached odds)</button>
+          <button class="admin-btn warn" onclick="adminClearSnapshot('mlb')">Clear Today's MLB Snapshot</button>
+          <button class="admin-btn warn" onclick="adminClearSnapshot('wnba')">Clear Today's WNBA Snapshot</button>
         </section>
 
         <section class="admin-section">
           <h3>BETS / BANKROLL</h3>
-          <button class="admin-btn warn"   onclick="adminWipe('mlb')">🗑 Wipe MLB Bets</button>
-          <button class="admin-btn warn"   onclick="adminWipe('wnba')">🗑 Wipe WNBA Bets</button>
-          <button class="admin-btn danger" onclick="adminWipe('both')">🗑 Wipe Both Sports</button>
+          <button class="admin-btn warn"   onclick="adminWipe('mlb')">Wipe MLB Bets</button>
+          <button class="admin-btn warn"   onclick="adminWipe('wnba')">Wipe WNBA Bets</button>
+          <button class="admin-btn danger" onclick="adminWipe('both')">Wipe Both Sports</button>
           <button class="admin-btn"        onclick="adminSetBankroll('mlb')">Set MLB Bankroll…</button>
           <button class="admin-btn"        onclick="adminSetBankroll('wnba')">Set WNBA Bankroll…</button>
         </section>
@@ -1401,19 +1404,19 @@ body {
   <nav class="bottom-nav">
     <div class="bottom-nav-inner">
       <button class="bottom-tab active" data-tab="home"   onclick="showTab('home')">
-        <span class="bottom-tab-icon">⌂</span><span>Home</span>
+        <span>Home</span>
       </button>
       <button class="bottom-tab"        data-tab="scores" onclick="showTab('scores')">
-        <span class="bottom-tab-icon">▢</span><span>Scores</span>
+        <span>Scores</span>
       </button>
       <button class="bottom-tab"        data-tab="props"  onclick="showTab('props')">
-        <span class="bottom-tab-icon">◎</span><span>Props</span>
+        <span>Props</span>
       </button>
       <button class="bottom-tab"        data-tab="ai"     onclick="showTab('ai')">
-        <span class="bottom-tab-icon">⚛</span><span>AI</span>
+        <span>AI</span>
       </button>
       <button class="bottom-tab"        data-tab="more"   onclick="showTab('more')">
-        <span class="bottom-tab-icon">⋯</span><span>More</span>
+        <span>More</span>
       </button>
     </div>
   </nav>
@@ -1872,7 +1875,6 @@ function renderEVScans() {
 
   if (!bets.length) {
     wrap.innerHTML = `<div class="empty-state" style="flex:1">
-      <span class="icon">⚡</span>
       No value picks yet. Run analysis to scan today's slate.
     </div>`;
     statsEl.textContent = 'Edge ≥ 5% required for a pick to show here.';
@@ -2042,7 +2044,6 @@ function renderProps() {
   const wrap = $('props-cards');
   if (!wrap) return;
   wrap.innerHTML = `<div class="empty-state" style="flex:1">
-    <span class="icon">◎</span>
     Player props coming soon.
   </div>`;
 }
@@ -2053,7 +2054,6 @@ function renderPropsFull() {
   if (cnt)  cnt.textContent = '—';
   if (!wrap) return;
   wrap.innerHTML = `<div class="empty-state" style="flex:1;width:100%">
-    <span class="icon">◎</span>
     Player props coming soon. For now use EV SCANS for moneyline + run-line + totals picks.
   </div>`;
 }
@@ -2074,8 +2074,7 @@ function renderFullSlate() {
   $('slate-count').textContent = games.length;
   if (!games.length) {
     wrap.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
-      <span class="icon">📋</span>
-      No ${_sport.toUpperCase()} games yet. Tap <strong>RUN ANALYSIS</strong> at the top of Home.
+      No ${_sport.toUpperCase()} games yet. Open <strong>More → Admin</strong> to run analysis.
     </div>`;
     return;
   }
@@ -2231,7 +2230,7 @@ function renderScores() {
   const games = gamesForActiveSport();
   const wrap  = $('scores-list');
   if (!games.length) {
-    wrap.innerHTML = `<div class="empty-state"><span class="icon">📊</span>Run analysis on Home to load today's games.</div>`;
+    wrap.innerHTML = `<div class="empty-state">Open More → Admin to run analysis and load today's games.</div>`;
     return;
   }
   wrap.innerHTML = games.map(g => `
@@ -2509,7 +2508,7 @@ function updateSearchResults(q) {
         </span>
         <span class="more-row-chev">›</span>
       </button>`).join('')
-    : `<div class="empty-state"><span class="icon">⌕</span>No matches.</div>`;
+    : `<div class="empty-state">No matches.</div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2575,10 +2574,10 @@ function renderMyBets() {
 
   $('open-bets-list').innerHTML = open.length
     ? open.map(b => _renderBetCard(b, sport, false)).join('')
-    : `<div class="empty-state"><span class="icon">🎯</span>No open bets.</div>`;
+    : `<div class="empty-state">No open bets.</div>`;
   $('history-list').innerHTML = hist.length
     ? hist.slice(0, 50).map(b => _renderBetCard(b, sport, true)).join('')
-    : `<div class="empty-state"><span class="icon">📋</span>No settled bets yet.</div>`;
+    : `<div class="empty-state">No settled bets yet.</div>`;
 }
 
 function _renderBetCard(b, sport, settled) {
@@ -2669,13 +2668,13 @@ async function deleteBet(betId, sport) {
 async function openModelPerf() {
   _swapMoreView('more-modelperf-view');
   const wrap = $('model-perf-content');
-  wrap.innerHTML = `<div class="empty-state"><span class="icon">📊</span>Loading…</div>`;
+  wrap.innerHTML = `<div class="empty-state">Loading…</div>`;
   try {
     const r = await fetch('/api/model_performance');
     const d = await r.json();
     wrap.innerHTML = _renderModelPerfHtml(d);
   } catch (err) {
-    wrap.innerHTML = `<div class="empty-state"><span class="icon">⚠</span>${err.message}</div>`;
+    wrap.innerHTML = `<div class="empty-state">${err.message}</div>`;
   }
 }
 
@@ -2683,7 +2682,7 @@ function _renderModelPerfHtml(d) {
   const models = ['xgb', 'lr', 'nn'];
   const stats = d.model_stats || d;     // backend's exact key may vary
   if (!stats || typeof stats !== 'object') {
-    return `<div class="empty-state"><span class="icon">📊</span>No model history yet — settle some bets first.</div>`;
+    return `<div class="empty-state">No model history yet — settle some bets first.</div>`;
   }
   // Determine best model by overall win%
   let best = null;
