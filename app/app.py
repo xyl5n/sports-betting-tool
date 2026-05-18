@@ -4128,15 +4128,26 @@ def analyze_wnba():
     except Exception:
         pass
 
+    # ── Per-step checkpoint helper (mirrors MLB analyze)
+    # Prints to stderr so each step shows up in Railway's deploy log
+    # even before any exception fires.  Makes a 500 immediately
+    # bisectable to a step.
+    def _step(label: str) -> None:
+        print(f"ANALYZE [WNBA] {label}", flush=True, file=sys.stderr)
+
     try:
+        _step("importing model modules + config")
         from src.sports_config import WNBA
         wnba_cfg = WNBA
 
         # Step 1 — load WNBA season data from ESPN free API
+        _step("Step 1: loading WNBA season stats")
         wnba_client = WNBAStatsClient(api_key=sports_key, cache=_cache)
         n_completed = wnba_client.load(season)
+        _step(f"Step 1 done: {n_completed} completed games loaded")
 
         # Step 2 — feature builder
+        _step("Step 2: building WNBAFeatureBuilder")
         fb = WNBAFeatureBuilder(wnba_client)
 
         # Step 2b — college-performance adjustments for rookies / 2nd-year players
@@ -4157,6 +4168,7 @@ def analyze_wnba():
             _logger.warning("college adjustment skipped: %s", _college_err)
 
         # Step 3 — models
+        _step("Step 3: training / loading moneyline model")
         ml_model = BettingModel(wnba_cfg)
         status   = ml_model.train_or_load(
             stats_client=wnba_client, feature_builder=fb,
@@ -4164,22 +4176,32 @@ def analyze_wnba():
         )
         cv_acc    = float(ml_model.cv_accuracy)     if ml_model.cv_accuracy    else None
         lr_cv_acc = float(ml_model.lr_cv_accuracy)  if ml_model.lr_cv_accuracy else None
+        _step(f"Step 3 moneyline done: status={status!r}")
 
+        _step("Step 3b: training / loading spread model")
         spread_model = WNBASpreadModel()
         sp_status = spread_model.train_or_load(wnba_client, fb, season)
         _logger.info("wnba spread model: %s", sp_status)
+        _step(f"Step 3b done: spread status={sp_status!r}")
 
+        _step("Step 3c: training / loading totals model")
         totals_model = WNBATotalsModel()
         tot_status = totals_model.train_or_load(wnba_client, fb, season)
         _logger.info("wnba totals model: %s", tot_status)
+        _step(f"Step 3c done: totals status={tot_status!r}")
 
         # Step 4 — odds from The Odds API
+        _step("Step 4: fetching odds from Odds API")
         odds_client = OddsClient(odds_key, _cache)
         games       = odds_client.get_odds(sport_key="basketball_wnba")
+        _step(f"Step 4 done: {len(games)} games with odds")
         games       = _filter_stale_games(games)   # drop yesterday's games before any processing
+        _step(f"Step 4b: after stale-game filter: {len(games)} games")
         games       = _lock_in_pre_game_odds(games)
+        _step("Step 4c: pre-game odds locked")
 
         if not games:
+            _step("Step 4: no games found — returning empty result")
             return jsonify({
                 "success": True, "no_games": True, "results": [],
                 "model_status": status, "cv_accuracy": cv_acc,
@@ -4187,41 +4209,87 @@ def analyze_wnba():
                 "sport": "wnba", "bankroll": bankroll,
             })
 
-        # Step 5 — predict
+        # Step 5 — predict per-game with isolation
+        _step(f"Step 5: running predictions on {len(games)} games")
         results = []
-        for game in games:
-            built = fb.build_for_game(game)
-            if built is None:
-                continue
-            feature_vec, meta = built
+        for _gi, game in enumerate(games):
+            _matchup = f"{game.get('away_team','?')} @ {game.get('home_team','?')}"
+            _step(f"  game {_gi+1}/{len(games)}: {_matchup}")
+            try:
+                built = fb.build_for_game(game)
+                if built is None:
+                    _step(f"  game {_gi+1}: build_for_game returned None -- skipping")
+                    continue
+                feature_vec, meta = built
 
-            prediction   = ml_model.predict(feature_vec, game_meta=game)
-            spread_pred  = spread_model.predict(feature_vec, game) if spread_model.is_trained else None
-            totals_vec   = fb.build_totals_from_meta(meta)
-            totals_pred  = None
-            if totals_model.is_trained and game.get("total_line") is not None and totals_vec is not None:
-                totals_pred = totals_model.predict(totals_vec, game)
+                _step(f"  game {_gi+1}: moneyline predict")
+                prediction = ml_model.predict(feature_vec, game_meta=game)
 
-            results.append({
-                "game":        game,
-                "prediction":  prediction,
-                "meta":        meta,
-                "spread_pred": spread_pred,
-                "totals_pred": totals_pred,
-            })
+                spread_pred = None
+                if spread_model.is_trained:
+                    _step(f"  game {_gi+1}: spread predict")
+                    try:
+                        spread_pred = spread_model.predict(feature_vec, game)
+                    except Exception as _sp_err:
+                        _eprint(f"ANALYZE [WNBA] spread.predict failed for {_matchup}: "
+                                f"{type(_sp_err).__name__}: {_sp_err}")
+                        spread_pred = None
+
+                totals_pred = None
+                totals_vec  = fb.build_totals_from_meta(meta)
+                if totals_model.is_trained and game.get("total_line") is not None and totals_vec is not None:
+                    _step(f"  game {_gi+1}: totals predict")
+                    try:
+                        totals_pred = totals_model.predict(totals_vec, game)
+                    except Exception as _t_err:
+                        _eprint(f"ANALYZE [WNBA] totals.predict failed for {_matchup}: "
+                                f"{type(_t_err).__name__}: {_t_err}")
+                        totals_pred = None
+
+                results.append({
+                    "game":        game,
+                    "prediction":  prediction,
+                    "meta":        meta,
+                    "spread_pred": spread_pred,
+                    "totals_pred": totals_pred,
+                })
+            except Exception as _g_err:
+                _eprint(f"ANALYZE [WNBA] prediction loop crashed on game {_gi+1} ({_matchup}): "
+                        f"{type(_g_err).__name__}: {_g_err}")
+                _eprint(traceback.format_exc())
+                # Skip this game but continue with the rest
+
+        _step(f"Step 5 done: {len(results)} games predicted")
 
         _wnba_analysis_state["results"]  = results
         _wnba_analysis_state["bankroll"] = bankroll
 
         # Step 6 — cross-sport daily picks selection (top-5 per category, Half Kelly)
+        _step("Step 6: daily picks selection")
         _run_daily_picks_selection()
 
         # Reload wnba ledger to get current personal_starting_bankroll for serialization
+        _step("Step 7: serializing results")
         _wledger_serial = Ledger(path="data/wnba_ledger.json", starting_bankroll=bankroll)
         s_br            = _wledger_serial.data.get("personal_starting_bankroll", bankroll)
 
-        serialized = [_serialize_wnba(r, bankroll, s_br) for r in results]
-        parlays    = _generate_parlays(serialized, bankroll)
+        # Wrap _serialize_wnba per-game so one bad game can't kill the batch.
+        serialized = []
+        for _si, _r in enumerate(results):
+            try:
+                serialized.append(_serialize_wnba(_r, bankroll, s_br))
+            except Exception as _se:
+                _eprint(f"ANALYZE [WNBA] _serialize_wnba failed on game {_si}: "
+                        f"{type(_se).__name__}: {_se}")
+                _eprint(traceback.format_exc())
+        _step(f"Step 7 done: {len(serialized)}/{len(results)} games serialized")
+
+        try:
+            parlays = _generate_parlays(serialized, bankroll)
+        except Exception as _pe:
+            _eprint(f"ANALYZE [WNBA] _generate_parlays failed: {type(_pe).__name__}: {_pe}")
+            parlays = {}
+
         _ts = datetime.now(timezone.utc)
         _wnba_analysis_state["parlays"]            = parlays
         _wnba_analysis_state["last_analyzed_at"]   = _ts
@@ -4231,6 +4299,7 @@ def analyze_wnba():
             "cv_accuracy":   cv_acc,
             "lr_cv_accuracy": lr_cv_acc,
         }
+        _step("Step 8: saving cache and snapshot")
         _save_wnba_analysis_cache(serialized, parlays, n_completed, cv_acc, lr_cv_acc,
                                   analyzed_at=_ts)
         _write_analysis_timestamp("wnba", _ts)
@@ -4242,7 +4311,11 @@ def analyze_wnba():
             "lr_cv_accuracy": lr_cv_acc,
             "model_status":   status,
         }, _ts)
-        ensemble_store.save(serialized, "wnba")
+        try:
+            ensemble_store.save(serialized, "wnba")
+        except Exception as _es:
+            _eprint(f"ANALYZE [WNBA] ensemble_store.save failed: {type(_es).__name__}: {_es}")
+        _step(f"DONE: {len(serialized)} games serialized and saved")
 
         return jsonify({
             "success":        True,
@@ -4260,7 +4333,27 @@ def analyze_wnba():
         })
 
     except Exception as exc:
-        return jsonify({"error": str(exc), "detail": traceback.format_exc()}), 500
+        # Mirror the MLB crash handler -- log type + message FIRST via _eprint
+        # so it survives even if traceback formatting or jsonify later fails
+        # (e.g. UnicodeEncodeError on Windows).  This is the change that makes
+        # the trace visible in Railway logs, not just in the JSON response.
+        _exc_type = type(exc).__name__
+        _exc_msg  = str(exc)
+        _eprint(f"\nANALYZE [WNBA] CRASHED")
+        _eprint(f"  type:    {_exc_type}")
+        _eprint(f"  message: {_exc_msg}")
+        try:
+            _tb = traceback.format_exc()
+            _eprint(f"  traceback:\n{_tb}")
+        except Exception:
+            _tb = f"{_exc_type}: {_exc_msg}"
+        try:
+            return jsonify({"error": _exc_msg, "detail": _tb, "exc_type": _exc_type}), 500
+        except Exception as _je:
+            _eprint(f"  jsonify also failed: {_je}")
+            return (
+                f'{{"error": "{_exc_type}: {_exc_msg}"}}'
+            ), 500, {"Content-Type": "application/json"}
 
 
 @app.route("/api/wnba/init", methods=["GET"])
