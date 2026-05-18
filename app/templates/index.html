@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sports Betting Analysis</title>
+
+<!-- ── Progressive Web App metadata ─────────────────────────────────────────
+     When installed to the iOS or Android home screen the app launches in
+     standalone mode (no browser chrome).  iOS reads the apple-* meta tags
+     directly; Android / Chrome reads manifest.json.  background_color and
+     theme_color match the dark UI so the splash + status bar blend in. -->
+<link rel="manifest" href="/static/manifest.json">
+<meta name="apple-mobile-web-app-capable"           content="yes">
+<meta name="apple-mobile-web-app-status-bar-style"  content="black-translucent">
+<meta name="apple-mobile-web-app-title"             content="Betting Analysis">
+<meta name="mobile-web-app-capable"                 content="yes">
+<meta name="theme-color"                            content="#000000">
 <style>
 :root {
   --bg:       #000000;
@@ -1651,6 +1663,209 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .subtab-btn:hover { color: var(--text); }
 .subtab-btn.active { color: var(--text); border-bottom-color: var(--blue); font-weight: 500; }
 .sport-page-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Mobile responsive
+   ── 768px ── tablet / small laptop in portrait
+   ── 480px ── phone
+   On mobile the centre-tab list in the topnav collapses into a hamburger
+   menu that opens a vertical dropdown.  Sidebar moves below main content.
+   Game-card bet-type tiles stack vertically.  All tap targets ≥ 44px.
+═══════════════════════════════════════════════════════════════════════════ */
+
+/* Hamburger button — hidden on desktop, shown ≤768px via media query below */
+.topnav-hamburger {
+  display: none;
+  width: 44px; height: 44px;
+  background: none; border: 1px solid var(--border);
+  border-radius: var(--radius); cursor: pointer;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; flex-shrink: 0; padding: 0;
+}
+.topnav-hamburger span {
+  display: block; width: 20px; height: 2px; background: var(--text);
+  border-radius: 1px; transition: transform .2s, opacity .2s;
+}
+.topnav.menu-open .topnav-hamburger span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+.topnav.menu-open .topnav-hamburger span:nth-child(2) { opacity: 0; }
+.topnav.menu-open .topnav-hamburger span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+html { -webkit-text-size-adjust: 100%; }
+
+@media (max-width: 768px) {
+  /* ── Topnav: hamburger replaces tab row, tabs become dropdown ─────── */
+  .topnav { padding: 0 12px; gap: 8px; }
+  .topnav-logo { font-size: 13px; flex: 1; }
+  .topnav-hamburger { display: flex; }
+  .topnav-tabs {
+    display: none;
+    position: absolute; top: var(--topnav-h); left: 0; right: 0;
+    flex-direction: column; align-items: stretch; justify-content: flex-start;
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    padding: 8px 10px; gap: 4px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.55);
+    max-height: calc(100vh - var(--topnav-h)); overflow-y: auto;
+  }
+  .topnav.menu-open .topnav-tabs { display: flex; }
+  .topnav-tab {
+    width: 100%; text-align: left;
+    min-height: 44px; padding: 10px 14px; font-size: 14px;
+  }
+  .topnav-sports-wrap { width: 100%; }
+  .topnav-sports-wrap #tnav-sport { width: 100%; text-align: left; }
+  .topnav-sports-menu {
+    position: static; transform: none; display: none;
+    width: 100%; margin-top: 4px; box-shadow: none;
+  }
+  .topnav-sports-wrap.open .topnav-sports-menu { display: block; }
+  .topnav-sports-item { min-height: 44px; display: flex; align-items: center; }
+  .topnav-right { gap: 6px; }
+  .topnav-right .status-pill { display: none; }
+  #debug-live-btn { display: none !important; }
+  #reload-app-btn { min-height: 36px; min-width: 36px; }
+
+  /* ── Sport page header: stack actions below sub-tabs ───────────────── */
+  .sport-page-header {
+    position: static;
+    flex-direction: column; align-items: stretch;
+    height: auto; padding: 8px 12px; gap: 8px;
+  }
+  .sport-subtabs {
+    width: 100%; overflow-x: auto; gap: 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .sport-subtabs::-webkit-scrollbar { display: none; }
+  .subtab-btn {
+    min-height: 44px; padding: 8px 14px; font-size: 13px;
+    flex-shrink: 0;
+  }
+  .sport-page-actions {
+    width: 100%; flex-wrap: wrap; gap: 6px; margin-left: 0;
+  }
+  .sport-page-actions .analysis-timer,
+  .sport-page-actions .snapshot-badge { flex: 1 1 auto; min-width: 0; }
+  #refresh-boards-btn,
+  #run-all-btn { min-height: 44px; flex: 1 1 auto; }
+  .run-all-wrap { flex: 1 1 auto; display: flex; }
+  .run-all-wrap #run-all-btn { width: 100%; }
+  .prog-steps { flex-basis: 100%; flex-wrap: wrap; }
+
+  /* ── Layout: single column, sidebar below main ─────────────────────── */
+  .layout-wrapper {
+    flex-direction: column;
+    padding: 12px;
+    gap: 14px;
+    max-width: 100%;
+  }
+  .picks-sidebar {
+    order: 2;
+    width: 100%;
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+    padding: 12px;
+  }
+  main { width: 100%; min-width: 0; order: 1; }
+
+  /* ── Game cards: stack the 3 bet tiles vertically ──────────────────── */
+  .game-card-props { grid-template-columns: 1fr; }
+  .prop-card {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .prop-card:last-child { border-bottom: none; }
+  .game-card-hdr { flex-wrap: wrap; gap: 6px; }
+
+  /* ── Home page: single column, smaller hero ────────────────────────── */
+  .home-wrap { padding: 18px 12px; }
+  .home-hero h1 { font-size: 18px; }
+  .home-grid { grid-template-columns: 1fr; gap: 12px; }
+  .home-card { padding: 14px 16px; }
+  .home-card-team { font-size: 18px; }
+  .home-card-action { min-height: 44px; }
+  .home-run-banner {
+    flex-direction: column; align-items: stretch;
+    padding: 14px 16px; gap: 10px;
+  }
+  .home-perf-cols, .home-perf-row {
+    grid-template-columns: 1fr 60px 60px 60px;
+    padding: 8px 12px; font-size: 11px;
+  }
+  .model-perf-grid { grid-template-columns: 1fr; }
+
+  /* ── AI Breakdown: full-width chat ─────────────────────────────────── */
+  #page-ai > div { max-width: 100% !important; padding: 12px !important; }
+  .chat-outer { max-width: 100%; height: calc(100vh - var(--topnav-h) - 24px) !important; }
+  .chat-msg { max-width: 92%; }
+  .chat-input { font-size: 16px; }  /* iOS: ≥16px prevents focus-zoom */
+  .chat-send-btn { min-height: 44px; }
+  .chat-suggestions { gap: 6px; padding: 10px 0; }
+
+  /* ── My Bets / Model pages: tighten gutters ────────────────────────── */
+  #page-mybets > div,
+  #page-model  > div { max-width: 100% !important; padding: 12px !important; }
+
+  /* ── Inputs: ≥16px prevents iOS zoom-on-focus; full-width feels right ─ */
+  input[type="number"],
+  input[type="text"],
+  input[type="email"],
+  textarea, select { font-size: 16px; }
+
+  /* ── Modals: shrink padding so they fit small screens ─────────────── */
+  .rmc-box { padding: 18px 18px; }
+  .rmc-actions { flex-direction: column; align-items: stretch; }
+  .rmc-btn { min-height: 44px; }
+
+  /* ── Section header: allow wrap ────────────────────────────────────── */
+  .section-hdr { flex-wrap: wrap; }
+
+  /* ── Page-container offset shrinks when sport-page-header de-stickies ─ */
+  body { font-size: 12.5px; }
+}
+
+@media (max-width: 480px) {
+  :root { --topnav-h: 50px; }
+  body { font-size: 12px; }
+
+  .topnav { padding: 0 10px; }
+  .topnav-logo { font-size: 12px; letter-spacing: 0; }
+  .topnav-logo .logo-accent { display: none; }   /* "📊 Analysis" only */
+
+  /* Sub-tabs: ensure entire row scrolls without breaking */
+  .subtab-btn { padding: 8px 12px; font-size: 12px; }
+
+  /* Game cards: tighter padding so content fits */
+  .game-card-hdr { padding: 10px 12px; }
+  .prop-card { padding: 10px 12px; }
+  .pc-conf-pct { font-size: 14px; }
+
+  /* Home cards: more compact */
+  .home-hero h1 { font-size: 16px; }
+  .home-hero p  { font-size: 12px; }
+  .home-card { padding: 12px 14px; }
+  .home-card-team { font-size: 16px; }
+  .home-perf-cols, .home-perf-row {
+    grid-template-columns: 1fr 50px 50px 50px;
+    padding: 6px 10px; font-size: 10.5px;
+  }
+
+  /* Chat: a hair smaller */
+  .chat-msg { max-width: 96%; }
+  .chat-bubble { font-size: 12.5px; padding: 9px 12px; }
+  .chat-chip { padding: 6px 10px; font-size: 11.5px; min-height: 32px; }
+
+  /* Sidebar tighter */
+  .picks-sidebar { padding: 10px; }
+  .sb-pick { padding: 9px 0; }
+
+  /* Toast: clamp to viewport — drop the desktop translateX so it spans full width */
+  .toast {
+    left: 12px; right: 12px; transform: none;
+    white-space: normal; max-width: calc(100% - 24px);
+    animation: none;
+  }
+}
 </style>
 </head>
 <body>
@@ -1659,11 +1874,16 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 <header class="topnav" id="topnav">
   <div class="topnav-logo">📊 <span class="logo-accent">Betting</span> Analysis</div>
 
+  <button class="topnav-hamburger" id="topnav-hamburger" aria-label="Open menu"
+          aria-expanded="false" onclick="toggleMobileMenu()">
+    <span></span><span></span><span></span>
+  </button>
+
   <nav class="topnav-tabs" id="topnav-tabs">
     <button class="topnav-tab active" id="tnav-home"   onclick="showPage('home')">Home</button>
     <div class="topnav-sports-wrap" id="topnav-sports-wrap">
       <button class="topnav-tab" id="tnav-sport" onclick="toggleSportsMenu()">
-        <span id="tnav-sport-lbl">MLB</span> ▾
+        <span id="tnav-sport-lbl">Sports</span> ▾
       </button>
       <div class="topnav-sports-menu" id="topnav-sports-menu"></div>
     </div>
@@ -1900,7 +2120,21 @@ const _FEATURE_LABELS_JS = {
 };
 
 // ── State ──────────────────────────────────────────────────────────────────────
+// _sport — active sport for data loading. Defaults to 'mlb' as a backend
+// fallback so any code that fires before the user picks (eg. /api/init) still
+// has a target, but _sportSelected starts false so the dropdown label reads
+// "Sports" until the user actually picks one.  Session-scoped: if the user
+// picked MLB or WNBA earlier in this browser session, both _sport and
+// _sportSelected are restored from sessionStorage on load.
 let _sport          = 'mlb';
+let _sportSelected  = false;
+try {
+  const _saved = sessionStorage.getItem('selectedSport');
+  if (_saved === 'mlb' || _saved === 'wnba') {
+    _sport         = _saved;
+    _sportSelected = true;
+  }
+} catch (_) { /* sessionStorage blocked (private mode) — fall back to defaults */ }
 let _results        = [];
 let _ledgerHistory  = [];
 let _gamePkMap      = {};   // game_id → MLB gamePk
@@ -2081,12 +2315,12 @@ const _ALL_SPORTS = [
 function _rebuildSportMenu() {
   const menu = document.getElementById('topnav-sports-menu');
   if (!menu) return;
-  menu.innerHTML = _ALL_SPORTS.map(s => {
-    if (s.available) {
-      const isCur = s.key === _sport;
-      return `<button class="topnav-sports-item${isCur ? ' cur' : ''}" onclick="setSport('${s.key}')">${s.label}${isCur ? ' ✓' : ''}</button>`;
-    }
-    return `<button class="topnav-sports-item unavailable" disabled>${s.label} (coming soon)</button>`;
+  // Only available sports render — NBA/NHL placeholders are hidden until they ship.
+  // The checkmark / .cur highlight is suppressed until the user has actually
+  // picked a sport (otherwise the default 'mlb' would render as pre-selected).
+  menu.innerHTML = _ALL_SPORTS.filter(s => s.available).map(s => {
+    const isCur = _sportSelected && s.key === _sport;
+    return `<button class="topnav-sports-item${isCur ? ' cur' : ''}" onclick="setSport('${s.key}')">${s.label}${isCur ? ' ✓' : ''}</button>`;
   }).join('');
 }
 
@@ -2094,6 +2328,9 @@ function toggleSportsMenu() {
   document.getElementById('topnav-sports-wrap').classList.toggle('open');
 }
 
+// Tap / click outside the Sports dropdown closes it. Inside the dropdown
+// or on the trigger button leaves it alone (the trigger's own click handler
+// performs the toggle).
 document.addEventListener('click', function(e) {
   const wrap = document.getElementById('topnav-sports-wrap');
   if (wrap && !wrap.contains(e.target)) wrap.classList.remove('open');
@@ -2109,11 +2346,15 @@ function _updateRefreshBtn() {
 }
 
 // ── Helper: update the topnav sport label ─────────────────────────────────────
+// Until the user has actually picked a sport, the trigger reads "Sports" so
+// it's clear this is a selection menu, not a static badge.  After selection
+// it reads "MLB" or "WNBA".
 function _updateMetaGames() {
-  const entry = _ALL_SPORTS.find(x => x.key === _sport);
-  const lbl   = entry ? entry.label : _sport.toUpperCase();
   const sportLblEl = document.getElementById('tnav-sport-lbl');
-  if (sportLblEl) sportLblEl.textContent = lbl;
+  if (!sportLblEl) return;
+  if (!_sportSelected) { sportLblEl.textContent = 'Sports'; return; }
+  const entry = _ALL_SPORTS.find(x => x.key === _sport);
+  sportLblEl.textContent = entry ? entry.label : _sport.toUpperCase();
 }
 
 function setSport(s) {
@@ -2121,13 +2362,12 @@ function setSport(s) {
   const curActive = TAB_NAMES.find(t => document.getElementById(`tab-${t}`)?.classList.contains('active'));
   if (curActive) _sportLastTab[_sport] = curActive;
 
-  _sport = s;
-  const entry = _ALL_SPORTS.find(x => x.key === s);
-  const lbl   = entry ? entry.label : s.toUpperCase();
+  _sport         = s;
+  _sportSelected = true;
+  try { sessionStorage.setItem('selectedSport', s); } catch (_) { /* private mode */ }
 
-  // Update topnav sport label and close the dropdown
-  const sportLbl = document.getElementById('tnav-sport-lbl');
-  if (sportLbl) sportLbl.textContent = lbl;
+  // Close both dropdowns: the Sports submenu, and the parent hamburger panel
+  // gets closed indirectly when showPage('sport') below calls closeMobileMenu().
   document.getElementById('topnav-sports-wrap').classList.remove('open');
 
   _rebuildSportMenu();
@@ -2146,11 +2386,29 @@ function setSport(s) {
   showTab(restore);
 }
 
+// Initial paint: render the dropdown options and sync the trigger label
+// ("Sports" if nothing picked yet, or the persisted sport from sessionStorage).
 _rebuildSportMenu();
+_updateMetaGames();
 
 // ── Page routing (top-level) ──────────────────────────────────────────────────
 let _page = 'home';
 const _PAGE_NAMES = ['home', 'sport', 'ai', 'mybets', 'model'];
+
+function toggleMobileMenu() {
+  const nav = document.getElementById('topnav');
+  const btn = document.getElementById('topnav-hamburger');
+  if (!nav) return;
+  const open = !nav.classList.contains('menu-open');
+  nav.classList.toggle('menu-open', open);
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+function closeMobileMenu() {
+  const nav = document.getElementById('topnav');
+  const btn = document.getElementById('topnav-hamburger');
+  if (nav) nav.classList.remove('menu-open');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
 
 function showPage(name) {
   _page = name;
@@ -2163,6 +2421,7 @@ function showPage(name) {
     const btn = document.getElementById(`tnav-${p}`);
     if (btn) btn.classList.toggle('active', p === name);
   });
+  closeMobileMenu();
   // Side effects
   if (name === 'mybets') { loadLedger(); return; }
   if (name === 'model')  { loadLedger(); loadModelPerformance(); loadRetrainStatus(); return; }
@@ -2196,7 +2455,17 @@ function showTab(name) {
 
   // Dispatch rendering to the active sport
   if (_sport === 'wnba') {
-    if (name === 'slate')     _renderWnbaSlate();
+    if (name === 'slate') {
+      _renderWnbaSlate();
+      // Re-paint cached live data instantly so a tab return doesn't wait for
+      // the next 60-s poll; an empty cache simply paints nothing.
+      if (Object.keys(_lastWnbaLiveMap).length) _applyWnbaLiveMap(_lastWnbaLiveMap);
+      // Also kick a fresh fetch so newly-tipped games get a live state right away.
+      updateWnbaLiveScores();
+      // Pull today's full ESPN schedule so completed games stay on the slate
+      // even if the Odds API has dropped them.
+      loadTodayWnbaSchedule();
+    }
     if (name === 'value')     _renderWnbaValue();
     if (name === 'breakdown') _renderWnbaBreakdown();
   } else {
@@ -2606,7 +2875,10 @@ function updateTimerDisplay() {
 }
 
 setInterval(updateTimerDisplay, 30000); // tick every 30 s
-setInterval(updateLiveScores,  60000); // live score poll every 60 s
+// Live-score poller: hits both sports every 60 s.  Each updater bails early
+// when its own results array is empty, so there's no wasted network traffic
+// when only one sport is loaded.
+setInterval(() => { updateLiveScores(); updateWnbaLiveScores(); }, 60000);
 
 /**
  * Renders a compact snapshot-lock badge next to the analysis timer.
@@ -2853,6 +3125,97 @@ window.testLiveCard = function(gameId) {
 
 // forceLiveCheck() → run updateLiveScores immediately from the console
 window.forceLiveCheck = function() { updateLiveScores(); };
+
+// ── WNBA live-score system ────────────────────────────────────────────────────
+// Parallels the MLB block above.  Source: ESPN's public WNBA scoreboard via the
+// /api/wnba/schedule proxy.  The proxy re-shapes ESPN's payload into the MLB
+// envelope ({dates:[{games:[{gamePk, teams, status, linescore}]}]}) so most
+// helpers can be shared with the MLB system; only the period-label and
+// pick-result rules differ.
+
+let _lastWnbaLiveMap   = {};   // last fetched WNBA linescore map
+let _wnbaGameIdMap     = {};   // game_id → ESPN gamePk
+let _wnbaFinalScoreMap = {};   // game_id → {awayR, homeR} for completed WNBA games
+
+async function fetchWnbaLiveScores(date) {
+  try {
+    const resp = await fetch(`/api/wnba/schedule?date=${date}&hydrate=linescore`);
+    const data = await resp.json();
+    const map  = {};
+    for (const d of (data.dates || []))
+      for (const g of (d.games || []))
+        map[g.gamePk] = g;
+    return map;
+  } catch { return {}; }
+}
+
+function _findWnbaLiveByTeamName(liveMap, awayTeam, homeTeam) {
+  if (!awayTeam || !homeTeam) return null;
+  const a = awayTeam.trim().toLowerCase();
+  const h = homeTeam.trim().toLowerCase();
+  for (const pk of Object.keys(liveMap)) {
+    const g  = liveMap[pk];
+    const ax = (g.teams?.away?.team?.name || '').trim().toLowerCase();
+    const hx = (g.teams?.home?.team?.name || '').trim().toLowerCase();
+    if (ax === a && hx === h) return g;
+    // Last-token match handles "Liberty" vs "New York Liberty"
+    const aTail = a.split(' ').slice(-1)[0];
+    const hTail = h.split(' ').slice(-1)[0];
+    if (ax.endsWith(aTail) && hx.endsWith(hTail) && aTail.length > 2 && hTail.length > 2)
+      return g;
+  }
+  return null;
+}
+
+// WNBA pick-result rules.  Moneyline → higher score wins (NBA-rules: no tie).
+// Spread → pick_team covers if their score + spread_line > opponent's score
+// (the backend stores spread_line from the pick_team's perspective, so we
+// apply it directly to the picked side).  Totals → combined score vs line.
+// WNBA-specific helpers, now thin wrappers over the universal pipeline.
+// Each one delegates to the universal function with sport='wnba'.  The
+// implementations live in computePickResult / propResultCls /
+// applyPickResultHighlights / updateLiveScore above and are driven by the
+// _SPORT_ADAPTERS.wnba descriptor.
+function _computeWnbaPickResult(g, awayR, homeR, betType) {
+  return computePickResult(g, 'wnba', awayR, homeR, betType);
+}
+function _wnbaPropResultCls(g, betType) {
+  return propResultCls(g, 'wnba', betType);
+}
+function _applyWnbaPickResultHighlights(g, awayR, homeR) {
+  applyPickResultHighlights(g, 'wnba', awayR, homeR);
+}
+
+function _applyWnbaLiveMap(liveMap) {
+  if (!_wnbaResults.length) return;
+  if (!Object.keys(liveMap).length) return;
+  let anyNewlyComplete = false;
+  for (const g of _wnbaResults) {
+    const pk = g.gamePk || _wnbaGameIdMap[g.game_id];
+    let live = (pk != null) ? liveMap[pk] : null;
+    if (!live) {
+      live = _findWnbaLiveByTeamName(liveMap, g.away_team, g.home_team);
+      if (live) {
+        _wnbaGameIdMap[g.game_id] = live.gamePk;
+        g.gamePk = live.gamePk;
+      }
+    }
+    if (!live) continue;
+    if (updateLiveScore(g, 'wnba', live)) anyNewlyComplete = true;
+    // Mirror the WNBA-only final-score map for any code that still reads it.
+    const fs = _finalScoreMap[g.game_id];
+    if (fs) _wnbaFinalScoreMap[g.game_id] = fs;
+  }
+  if (anyNewlyComplete) loadLedger();
+}
+
+async function updateWnbaLiveScores() {
+  if (!_wnbaResults.length) return;
+  const liveMap = await fetchWnbaLiveScores(_todayET());
+  _lastWnbaLiveMap = liveMap;
+  _applyWnbaLiveMap(liveMap);
+}
+window.forceWnbaLiveCheck = function() { updateWnbaLiveScores(); };
 
 // dumpGameIds() → print all ctr- IDs in DOM + all game_ids in _results + _gamePkMap
 window.dumpGameIds = function() {
@@ -3404,6 +3767,12 @@ async function runAllAnalysis() {
         _renderWnbaBreakdown();
         _updateMetaGames();
       }
+      // Kick off a live-score fetch now so any in-progress or finished games
+      // get scores + result-highlights without waiting for the 60-s tick.
+      updateWnbaLiveScores();
+      // Pull today's full ESPN schedule so the slate keeps completed games
+      // visible even if the Odds API has dropped them.
+      loadTodayWnbaSchedule();
 
       loadWnbaLedger();
       stepWnba.className   = 'prog-step done';
@@ -6175,11 +6544,453 @@ function _wnbaColorCircle(teamName, size = 52) {
   return el;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  UNIVERSAL SPORT PAGE TEMPLATE
+//  ───────────────────────────────────────────────────────────────────────────
+//  Single rendering pipeline shared by every sport.  A "sport adapter" object
+//  (registered in _SPORT_ADAPTERS below) declares what's sport-specific —
+//  team logos, per-team extras, live-score labels, bet types, and pick-result
+//  rules — and the universal functions (buildGameCard / buildBetBox /
+//  applyLiveScoreToCard / computePickResult / propResultCls) handle all
+//  rendering and DOM updates.
+//
+//  ── Adapter contract ─────────────────────────────────────────────────────
+//   sportKey       : string — matches the dispatch key ('mlb', 'wnba', ...).
+//   sportLabel     : string — shown in headerBadges / page titles.
+//   logoHtml       : (teamName, size) → HTML string for the team logo.
+//   teamExtras     : (game, side) → HTML string rendered under the team
+//                    name in the matchup row.  side ∈ {'home','away'}.
+//                    Used for MLB's starting pitcher line, WNBA's
+//                    back-to-back chip + star player, etc.  Return '' for
+//                    none.
+//   headerBadges   : (game) → HTML string of badges in gc-meta-left (after
+//                    time + venue).  Used for the small sport tag.
+//   headerSubRow   : (game) → HTML string for an optional row between the
+//                    matchup row and the bet-type tiles (MLB's "Pred X" /
+//                    "O/U Y" row).  Return '' for none.
+//   liveStatusLabel: (linescore) → string — e.g. MLB "▲ 5th", WNBA "3rd".
+//   liveDetailLabel: (linescore) → string — e.g. MLB "B1 S2 O0",
+//                    WNBA "2:34".  Return '' to omit.
+//   betTypes       : array of bet-type descriptors, in display order.  See
+//                    "Bet-type descriptor" below.
+//   showTrack      : (game, betType) → bool — gate the Track button per
+//                    sport.  WNBA returns false until trackProp supports it.
+//   scheduleUrl    : (date) → string — proxy URL for the day's full
+//                    schedule (used by the slate to surface completed games).
+//
+//  ── Bet-type descriptor ──────────────────────────────────────────────────
+//   type           : string — matches existing ledger semantics
+//                    ('single' / 'run_line' / 'spread' / 'totals').
+//   label          : (pickOrGame) → string — header text (e.g. "Moneyline",
+//                    "Totals (O/U 8.5)").
+//   idSuffix       : string — prop-card DOM id is `pc-${idSuffix}-${gameId}`.
+//   explainArg     : string — second arg to explainPick(gameId, X).
+//   extract        : (game) → pick descriptor OR null when this bet type
+//                    isn't available.  Pick descriptor shape:
+//                    { team, line?, odds, prob, edge, conflict, tier,
+//                      valueBet, betDollars, extras? }.
+//   formatPick     : (pick, game) → HTML string for the pc-pick line.
+//   extraRow       : (pick, game) → HTML string under the edge row
+//                    (e.g. predicted margin / total).  Optional.
+//   computeResult  : (game, awayScore, homeScore) → 'win' | 'loss' | null
+//                    Determines green / red highlighting once a game ends.
+//   noDataMsg      : string — shown when extract() returns null.
+//
+//  ── Adding a new sport (NFL, MLS, …) ─────────────────────────────────────
+//  1. Register the analysis route + schedule proxy on the backend so
+//     /api/<sport>/schedule returns the MLB-Stats-API-shaped envelope
+//     ({dates:[{games:[{gamePk, teams, status.abstractGameState,
+//     linescore.teams.{home,away}.runs, linescore.currentInningOrdinal,
+//     linescore.displayClock}]}]}).  See app/app.py
+//     _normalize_espn_wnba_scoreboard for the WNBA example.
+//  2. Add the sport to _ALL_SPORTS with available:true so it appears in
+//     the topnav.
+//  3. Add a new entry to _SPORT_ADAPTERS below filling out the contract
+//     above.  No UI / CSS / template HTML changes needed — the universal
+//     pipeline already produces the card, live score, result-highlighting
+//     and bet boxes.
+//  ═══════════════════════════════════════════════════════════════════════
+const _SPORT_ADAPTERS = {};
+
+function buildGameCard(g, sport) {
+  const A = _SPORT_ADAPTERS[sport];
+  if (!A) return '';
+  const timeStr = toTimeET(g.commence_time);
+  const awayLogo = A.logoHtml(g.away_team, 80);
+  const homeLogo = A.logoHtml(g.home_team, 80);
+
+  return `<div class="game-card" data-game-id="${g.game_id}" data-sport="${sport}">
+    <div class="game-card-hdr">
+      <div class="gc-meta-row">
+        <div class="gc-meta-left">
+          <span class="gc-time" id="gtime-${g.game_id}">${timeStr}</span>
+          ${g.venue ? `<span class="gc-venue">${g.venue}</span>` : ''}
+          ${A.headerBadges(g)}
+        </div>
+        <div class="gc-meta-right">
+          ${universalStrongPickBadge(g, sport)}
+          ${chaosBadge(g)}
+        </div>
+      </div>
+      <div class="gc-matchup-row">
+        <div class="gc-team-col">
+          ${awayLogo}
+          <div class="gc-team-name">${shortName(g.away_team)}</div>
+          ${g.away_odds != null ? `<div class="gc-ml-odds">${mlOddsHtml(g.away_odds)}</div>` : ''}
+          ${A.teamExtras(g, 'away')}
+        </div>
+        <div class="gc-vs-col">
+          <div class="gc-center-score" id="ctr-${g.game_id}">
+            <span class="gc-vs-text">vs</span>
+          </div>
+        </div>
+        <div class="gc-team-col">
+          ${homeLogo}
+          <div class="gc-team-name">${shortName(g.home_team)}</div>
+          ${g.home_odds != null ? `<div class="gc-ml-odds">${mlOddsHtml(g.home_odds)}</div>` : ''}
+          ${A.teamExtras(g, 'home')}
+        </div>
+      </div>
+      ${A.headerSubRow(g)}
+    </div>
+    <div class="game-card-props">
+      ${A.betTypes.map(bt => buildBetBox(g, sport, bt.type)).join('')}
+    </div>
+  </div>`;
+}
+
+function buildBetBox(g, sport, betType) {
+  const A  = _SPORT_ADAPTERS[sport];
+  if (!A) return '';
+  const bt = A.betTypes.find(b => b.type === betType);
+  if (!bt) return '';
+  const pick = bt.extract(g);
+  if (!pick) return `<div class="prop-card conf-low">
+    <div class="pc-type-row"><div class="pc-type">${typeof bt.label === 'function' ? bt.label(g) : bt.label}</div><div class="pc-conf-label conf-low">No Data</div></div>
+    <div class="pc-no-data">${bt.noDataMsg || 'No data'}</div></div>`;
+
+  const tier      = pick.tier ?? (pick.conflict ? 'low' : 'strong');
+  const conf      = _confLevel(tier, pick.edge ?? 0);
+  const edge      = pick.edge ?? 0;
+  const edgeV     = (edge >= 0 ? '+' : '') + (edge * 100).toFixed(1) + '%';
+  const edgeC     = edge > 0 ? 'var(--green)' : edge < 0 ? 'var(--red)' : 'var(--dim)';
+  const valBadge  = pick.valueBet ? '<span class="pc-value-badge">Value</span>' : '';
+  const isSplit   = tier === 'split';
+  const confNote  = isSplit       ? '<div class="pc-conflict-note">⚡ Split signal</div>'
+                  : pick.conflict ? '<div class="pc-conflict-note">⚠ Models conflict</div>' : '';
+  const resCls    = propResultCls(g, sport, betType);
+  const pickHtml  = bt.formatPick(pick, g);
+  const extraRow  = bt.extraRow ? bt.extraRow(pick, g) : '';
+  const headerLbl = typeof bt.label === 'function' ? bt.label(g, pick) : bt.label;
+  const trackHtml = (A.showTrack && A.showTrack(g, bt) && isUpcoming(g))
+    ? `<button class="pc-track-btn ${pick.conflict ? 'conflict' : ''}"
+         id="${bt.idSuffix}-trk-${g.game_id}"
+         onclick="trackProp('${g.game_id}','${bt.explainArg}')">
+         ${pick.conflict ? '⚠ Track (conflict)' : 'Track'}
+       </button>`
+    : '';
+
+  return `<div id="pc-${bt.idSuffix}-${g.game_id}" class="prop-card ${conf.cls}${resCls}">
+    <div class="pc-type-row">
+      <div class="pc-type">${headerLbl}</div>
+      <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
+    </div>
+    <div class="pc-pick">${pickHtml}</div>
+    <div class="pc-probs"><span class="pc-conf-pct">${((pick.prob ?? 0.5) * 100).toFixed(0)}% Confidence</span></div>
+    <div class="pc-edge-row">${valBadge}<span class="pc-edge-lbl" style="color:${edgeC}">${edgeV} Edge</span></div>
+    ${extraRow}${confNote}${trackHtml}
+    <button class="pc-explain-btn" id="exp-btn-${g.game_id}-${bt.explainArg}"
+      onclick="explainPick('${g.game_id}','${bt.explainArg}')">✦ Explain This Pick</button>
+    <div class="pc-explain-panel" id="explain-${g.game_id}-${bt.explainArg}" style="display:none"></div>
+  </div>`;
+}
+
+// Compute pick result for a single bet type once final scores are in.
+function computePickResult(g, sport, awayR, homeR, betType) {
+  const A  = _SPORT_ADAPTERS[sport];
+  if (!A) return null;
+  const bt = A.betTypes.find(b => b.type === betType);
+  if (!bt || typeof bt.computeResult !== 'function') return null;
+  return bt.computeResult(g, awayR, homeR);
+}
+
+// Result-class suffix used at build time so a navigate-away/back doesn't
+// strip highlighting.  Reads from the shared _finalScoreMap which is
+// populated for any completed game (MLB or WNBA).
+function propResultCls(g, sport, betType) {
+  const fs = _finalScoreMap[g.game_id];
+  if (!fs) return '';
+  const r = computePickResult(g, sport, fs.awayR, fs.homeR, betType);
+  if (r === 'win')  return ' result-win';
+  if (r === 'loss') return ' result-loss';
+  return '';
+}
+
+// Apply result highlighting to all bet boxes of a game (post-final paint).
+function applyPickResultHighlights(g, sport, awayR, homeR) {
+  const A = _SPORT_ADAPTERS[sport];
+  if (!A) return;
+  for (const bt of A.betTypes) {
+    const el = document.getElementById(`pc-${bt.idSuffix}-${g.game_id}`);
+    if (!el) continue;
+    const r = computePickResult(g, sport, awayR, homeR, bt.type);
+    el.classList.remove('result-win', 'result-loss');
+    if (r === 'win')  el.classList.add('result-win');
+    else if (r === 'loss') el.classList.add('result-loss');
+  }
+}
+
+// Paint live state into one card's centre column + time badge.  Handles the
+// "Live" and "Final" states.  Returns true iff a fresh "Final" was painted
+// (so callers can refresh the ledger).
+function updateLiveScore(g, sport, live) {
+  const A = _SPORT_ADAPTERS[sport];
+  if (!A || !live) return false;
+  const state = live.status?.abstractGameState;
+  const ls    = live.linescore;
+  if (!ls) return false;
+  const awayR = ls.teams?.away?.runs ?? 0;
+  const homeR = ls.teams?.home?.runs ?? 0;
+
+  // Time badge: pulsing dot during live play, "Final" once done.
+  const timeEl = document.getElementById('gtime-' + g.game_id);
+  if (timeEl) {
+    if (state === 'Live') {
+      if (!timeEl.querySelector('.live-dot')) {
+        timeEl.textContent = '';
+        const dot = document.createElement('span'); dot.className = 'live-dot';
+        timeEl.appendChild(dot);
+        timeEl.appendChild(document.createTextNode(' ' + toTimeET(g.commence_time)));
+      }
+    } else if (state === 'Final') {
+      if (!timeEl._markedFinal) {
+        timeEl._markedFinal = true;
+        timeEl.textContent = '';
+        const s = document.createElement('span');
+        s.style.cssText = 'font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.6px';
+        s.textContent = 'Final';
+        timeEl.appendChild(s);
+      }
+    }
+  }
+
+  const ctr = document.getElementById('ctr-' + g.game_id);
+  if (!ctr) return false;
+  let newlyComplete = false;
+
+  if (state === 'Live') {
+    const statusLbl = A.liveStatusLabel(ls);
+    const detailLbl = A.liveDetailLabel(ls);
+    ctr.textContent = '';
+
+    const r1 = document.createElement('div');
+    r1.className = 'gc-live-status';
+    const dot = document.createElement('span'); dot.className = 'live-dot';
+    r1.appendChild(dot);
+    r1.appendChild(document.createTextNode(' ' + (statusLbl || '—')));
+    ctr.appendChild(r1);
+
+    const r2 = document.createElement('div');
+    r2.className = 'gc-live-runs';
+    const aSpan = document.createElement('span'); aSpan.textContent = String(awayR);
+    const sep   = document.createElement('span'); sep.className = 'gc-live-sep'; sep.textContent = '–';
+    const hSpan = document.createElement('span'); hSpan.textContent = String(homeR);
+    r2.appendChild(aSpan); r2.appendChild(sep); r2.appendChild(hSpan);
+    ctr.appendChild(r2);
+
+    if (detailLbl) {
+      const r3 = document.createElement('div');
+      r3.className = 'gc-live-bso';
+      r3.textContent = detailLbl;
+      ctr.appendChild(r3);
+    }
+  } else if (state === 'Final') {
+    ctr.textContent = '';
+    const lbl = document.createElement('div');
+    lbl.className = 'gc-final-label';
+    lbl.textContent = 'Final';
+    ctr.appendChild(lbl);
+
+    const r = document.createElement('div');
+    r.className = 'gc-live-runs';
+    const aSpan = document.createElement('span'); aSpan.textContent = String(awayR);
+    const sep   = document.createElement('span'); sep.className = 'gc-live-sep'; sep.textContent = '–';
+    const hSpan = document.createElement('span'); hSpan.textContent = String(homeR);
+    r.appendChild(aSpan); r.appendChild(sep); r.appendChild(hSpan);
+    ctr.appendChild(r);
+
+    _finalScoreMap[g.game_id] = { awayR, homeR };
+    applyPickResultHighlights(g, sport, awayR, homeR);
+    if (!_completedGames.has(g.game_id)) {
+      _completedGames.add(g.game_id);
+      newlyComplete = true;
+    }
+  }
+  return newlyComplete;
+}
+
+// Sport-agnostic Strong-pick counter badge (currently still routes through
+// the existing per-sport implementations because they read different fields
+// for the spread/run-line slot — see strongPickBadge (MLB) and
+// _wnbaStrongPickBadge (WNBA)).  Once MLB migrates we can collapse these.
+function universalStrongPickBadge(g, sport) {
+  if (sport === 'wnba') return _wnbaStrongPickBadge(g);
+  return strongPickBadge(g);
+}
+
+// ── WNBA adapter — declares everything sport-specific so the universal
+//    template above can render WNBA games without any sport-aware branching
+//    elsewhere in the code.  Replaces the four old _buildWnbaXxxCard
+//    functions, _computeWnbaPickResult, _wnbaPropResultCls,
+//    _applyWnbaPickResultHighlights, and the WNBA half of the live-paint
+//    pipeline.  See the contract comment above _SPORT_ADAPTERS for what each
+//    field does and how to add a new sport.
+_SPORT_ADAPTERS.wnba = {
+  sportKey:    'wnba',
+  sportLabel:  'WNBA',
+  logoHtml:    (team, size = 80) => _wnbaLogoHtml(team, size),
+  headerBadges: (g) =>
+    `<span style="font-size:10px;color:var(--purple);font-weight:700;letter-spacing:.4px">WNBA</span>`,
+  teamExtras: (g, side) => {
+    const player = side === 'home' ? g.home_player : g.away_player;
+    const b2b    = side === 'home' ? g.home_b2b    : g.away_b2b;
+    const b2bChip = b2b
+      ? ' <span title="Back-to-back" style="font-size:10px;color:var(--yellow);font-weight:700">B2B</span>'
+      : '';
+    const starLine = player
+      ? `<div class="gc-pitcher">⭐ ${player.name} ${player.pts_pg.toFixed(1)} PPG</div>`
+      : '';
+    return b2bChip + starLine;
+  },
+  headerSubRow:    (_g) => '',
+  liveStatusLabel: (ls) => ls.currentInningOrdinal || '',
+  liveDetailLabel: (ls) => ls.displayClock || '',
+  showTrack:       (_g, _bt) => false,   // PR 2 will wire trackProp for WNBA
+  scheduleUrl:     (d) => `/api/wnba/schedule?date=${d}`,
+  betTypes: [
+    {
+      type:        'single',
+      label:       'Moneyline',
+      idSuffix:    'ml',
+      explainArg:  'ml',
+      noDataMsg:   'No moneyline pick available',
+      extract: (g) => g.pick_team ? {
+        team:       g.pick_team,
+        odds:       g.pick_odds,
+        prob:       g.pick_prob ?? 0.5,
+        edge:       g.pick_edge ?? 0,
+        conflict:   g.conflict === true,
+        tier:       g.confidence_tier ?? (g.conflict ? 'low' : 'strong'),
+        valueBet:   g.value_pick === true,
+        betDollars: g.bet_dollars || 0,
+      } : null,
+      formatPick: (pick) => `${shortName(pick.team)} ${oddsHtml(pick.odds)}`,
+      computeResult: (g, awayR, homeR) => {
+        if (awayR === homeR) return null;
+        const pickedHome = g.pick_team === g.home_team;
+        return (pickedHome ? homeR > awayR : awayR > homeR) ? 'win' : 'loss';
+      },
+    },
+    {
+      type:        'spread',
+      label:       'Spread',
+      idSuffix:    'spread',
+      explainArg:  'spread',
+      noDataMsg:   'Model not trained yet',
+      extract: (g) => {
+        const sp = g.spread_pick;
+        if (!sp) return null;
+        return {
+          team:        sp.pick_team,
+          line:        sp.spread_line,
+          side:        sp.side,
+          odds:        sp.pick_odds,
+          prob:        sp.pick_prob ?? 0.5,
+          edge:        sp.edge ?? 0,
+          conflict:    sp.conflict === true,
+          tier:        sp.confidence_tier ?? (sp.conflict ? 'low' : 'strong'),
+          valueBet:    sp.value_bet === true,
+          betDollars:  sp.bet_dollars || 0,
+          predMargin:  sp.predicted_margin,
+        };
+      },
+      formatPick: (pick) => {
+        const ls = pick.line != null
+          ? (pick.line > 0 ? `+${pick.line}` : `${pick.line}`)
+          : '';
+        return `${shortName(pick.team)} ${ls} ${oddsHtml(pick.odds)}`;
+      },
+      extraRow: (pick) => pick.predMargin !== undefined
+        ? `<div style="font-size:11px;color:var(--dim);margin-top:4px">Pred margin: ${pick.predMargin > 0 ? '+' : ''}${pick.predMargin} pts</div>`
+        : '',
+      computeResult: (g, awayR, homeR) => {
+        const sp = g.spread_pick;
+        if (!sp || sp.spread_line == null) return null;
+        // spread_line is the HOME team's handicap; flip for an away pick.
+        const homePt   = sp.spread_line;
+        const pickLine = sp.side === 'home' ? homePt : -homePt;
+        const pickedR  = sp.side === 'home' ? homeR : awayR;
+        const otherR   = sp.side === 'home' ? awayR : homeR;
+        const diff     = pickedR + pickLine - otherR;
+        if (diff > 0) return 'win';
+        if (diff < 0) return 'loss';
+        return null;
+      },
+    },
+    {
+      type:        'totals',
+      label:       (g) => g.totals ? `Totals (O/U ${g.totals.total_line})` : 'Totals',
+      idSuffix:    'tot',
+      explainArg:  'totals',
+      noDataMsg:   'No O/U line available',
+      extract: (g) => {
+        const t = g.totals;
+        if (!t) return null;
+        const dir = t.direction ?? 'over';
+        return {
+          direction:  dir,
+          line:       t.total_line,
+          odds:       dir === 'over' ? t.over_odds : t.under_odds,
+          prob:       t.pick_prob ?? 0.5,
+          edge:       t.edge ?? 0,
+          conflict:   t.conflict === true,
+          tier:       t.confidence_tier ?? (t.conflict ? 'low' : 'strong'),
+          valueBet:   t.value_bet === true,
+          betDollars: t.bet_dollars || 0,
+          predTotal:  t.predicted_total,
+        };
+      },
+      formatPick: (pick) => {
+        const dirCls = pick.direction === 'over' ? 'prop-dir-over' : 'prop-dir-under';
+        return `<span class="${dirCls}" style="font-weight:700">${pick.direction.toUpperCase()}</span> ${pick.line} ${oddsHtml(pick.odds)}`;
+      },
+      extraRow: (pick) => pick.predTotal
+        ? `<div style="font-size:11px;color:var(--dim);margin-top:4px">Pred total: <strong>${pick.predTotal}</strong> pts (line: ${pick.line})</div>`
+        : '',
+      computeResult: (g, awayR, homeR) => {
+        const t = g.totals;
+        if (!t || t.total_line == null) return null;
+        const combined = awayR + homeR;
+        if (combined === t.total_line) return null;
+        if (t.direction === 'over')  return combined > t.total_line ? 'win' : 'loss';
+        if (t.direction === 'under') return combined < t.total_line ? 'win' : 'loss';
+        return null;
+      },
+    },
+  ],
+};
+
 // ── WNBA state ────────────────────────────────────────────────────────────────
 let _wnbaResults  = [];
 let _wnbaParlays  = {};
 let _wnbaBankroll = 1000;
 let _wnbaAnalyzed = false;
+// Full WNBA schedule for today from ESPN (all games, all statuses).  Mirrors
+// MLB's _todaySchedule.  Used by _renderWnbaSlate to add schedule-only stubs
+// for games that the Odds API doesn't return (typically because they've
+// already completed by the time analysis ran, or because they fell off the
+// pre-game market once they started).
+let _todayWnbaSchedule = [];
 
 // ── Cross-sport daily picks ───────────────────────────────────────────────────
 let _dailyPicks = null;  // populated by loadDailyPicks()
@@ -6631,6 +7442,11 @@ async function runWnbaAnalysis(forceRefresh = false) {
       _renderWnbaBreakdown();
       _updateMetaGames();
     }
+    // First live-score pull right after analysis so live + final games light up
+    // without waiting for the 60-s tick.
+    updateWnbaLiveScores();
+    // Pull today's full ESPN schedule so completed games stay on the slate.
+    loadTodayWnbaSchedule();
 
     loadWnbaLedger();
     buildHomePage();
@@ -6648,6 +7464,104 @@ async function runWnbaAnalysis(forceRefresh = false) {
 
 // ── WNBA tab renderers (render into shared MLB tab containers) ────────────────
 
+// Fetches today's full WNBA schedule from ESPN via the /api/wnba/schedule
+// proxy.  Returns an array of normalised game objects (same shape as the MLB
+// linescore envelope: {gamePk, teams.{home,away}.team.name, status, linescore}).
+// Cached for 1 h server-side; 24 h frontend cache by date.
+const _wnbaScheduleCache = {};
+async function fetchWnbaScheduleAll(dateStr) {
+  if (_wnbaScheduleCache[dateStr]) return _wnbaScheduleCache[dateStr];
+  try {
+    const resp  = await fetch(`/api/wnba/schedule?date=${dateStr}`);
+    const data  = await resp.json();
+    const games = (data.dates || []).flatMap(d => d.games || []);
+    _wnbaScheduleCache[dateStr] = games;
+    return games;
+  } catch { return []; }
+}
+
+// Loads today's WNBA schedule into _todayWnbaSchedule and re-renders the slate
+// if it's the active view.  Safe to call repeatedly; the cache short-circuits.
+async function loadTodayWnbaSchedule() {
+  _todayWnbaSchedule = await fetchWnbaScheduleAll(_todayET());
+  if (_sport === 'wnba' && _page === 'sport') _renderWnbaSlate();
+}
+
+// Loose team-name match — handles "Liberty" vs "New York Liberty" by comparing
+// trailing tokens (last word) for either side.
+function _wnbaNameLooseMatch(a, b) {
+  const na = (a || '').trim().toLowerCase();
+  const nb = (b || '').trim().toLowerCase();
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const ta = na.split(' ').slice(-1)[0];
+  const tb = nb.split(' ').slice(-1)[0];
+  return ta.length > 2 && tb.length > 2 && (na.endsWith(tb) || nb.endsWith(ta));
+}
+
+// Minimal "schedule-only" WNBA card for a game that the Odds API didn't
+// surface (analysis never had a chance to make picks).  Mirrors MLB's
+// buildScheduleCard pattern but inlines the live/final score from the ESPN
+// linescore payload since ESPN gives us the data inline.
+function _buildWnbaScheduleCard(sg) {
+  const away    = sg.teams?.away?.team?.name || '';
+  const home    = sg.teams?.home?.team?.name || '';
+  const time    = toTimeET(sg.gameDate);
+  const state   = sg.status?.abstractGameState || '';
+  const ls      = sg.linescore || {};
+  const awayR   = ls.teams?.away?.runs;
+  const homeR   = ls.teams?.home?.runs;
+  const isLive  = state === 'Live';
+  const isFinal = state === 'Final';
+
+  // Centre column: live score + period, or "Final" + final score, or "vs"
+  let centerHtml;
+  if (isLive && awayR != null) {
+    const ord = ls.currentInningOrdinal || '—';
+    const clk = ls.displayClock || '';
+    centerHtml = `<div class="gc-live-status"><span class="live-dot"></span> ${ord}</div>
+                  <div class="gc-live-runs"><span>${awayR}</span><span class="gc-live-sep">–</span><span>${homeR}</span></div>
+                  ${clk ? `<div class="gc-live-bso">${clk}</div>` : ''}`;
+  } else if (isFinal && awayR != null) {
+    centerHtml = `<div class="gc-final-label">Final</div>
+                  <div class="gc-live-runs"><span>${awayR}</span><span class="gc-live-sep">–</span><span>${homeR}</span></div>`;
+  } else {
+    centerHtml = `<span class="gc-vs-text">vs</span>`;
+  }
+
+  // Time badge: green dot when live, "Final" once done, tip-off time otherwise
+  const timeBadge = isFinal
+    ? `<span class="gc-time" style="font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.6px">Final</span>`
+    : isLive
+      ? `<span class="gc-time"><span class="live-dot"></span> ${time}</span>`
+      : `<span class="gc-time">${time}</span>`;
+
+  return `<div class="game-card" data-sport="wnba">
+    <div class="game-card-hdr">
+      <div class="gc-meta-row">
+        <div class="gc-meta-left">
+          ${timeBadge}
+          <span style="font-size:10px;color:var(--purple);font-weight:700;letter-spacing:.4px">WNBA</span>
+          <span style="font-size:10px;color:var(--dim2);font-style:italic">No pre-game analysis</span>
+        </div>
+      </div>
+      <div class="gc-matchup-row">
+        <div class="gc-team-col">
+          ${_wnbaLogoHtml(away, 80)}
+          <div class="gc-team-name">${shortName(away)}</div>
+        </div>
+        <div class="gc-vs-col">
+          <div class="gc-center-score">${centerHtml}</div>
+        </div>
+        <div class="gc-team-col">
+          ${_wnbaLogoHtml(home, 80)}
+          <div class="gc-team-name">${shortName(home)}</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function _renderWnbaSlate() {
   // Hide MLB-only day selector
   ['slate-day-today', 'slate-day-tomorrow'].forEach(id => {
@@ -6655,7 +7569,21 @@ function _renderWnbaSlate() {
     if (el) el.style.display = 'none';
   });
 
-  if (!_wnbaResults.length) {
+  // Find schedule games not already represented in _wnbaResults.  Match by
+  // exact name first, then fall back to last-token suffix match so the Odds
+  // API's short names ("Liberty") still de-dupe against ESPN's full names
+  // ("New York Liberty").
+  const scheduleOnly = (_todayWnbaSchedule || []).filter(sg => {
+    const ax = (sg.teams?.away?.team?.name || '').trim().toLowerCase();
+    const hx = (sg.teams?.home?.team?.name || '').trim().toLowerCase();
+    for (const r of _wnbaResults) {
+      if (_wnbaNameLooseMatch(r.away_team, ax) && _wnbaNameLooseMatch(r.home_team, hx))
+        return false;
+    }
+    return true;
+  });
+
+  if (!_wnbaResults.length && !scheduleOnly.length) {
     const emptyEl   = document.getElementById('slate-empty');
     const contentEl = document.getElementById('slate-content');
     const msg = _wnbaAnalyzed
@@ -6667,10 +7595,49 @@ function _renderWnbaSlate() {
   }
 
   showSection('slate');
+
+  // Split analyzed results into active (still upcoming / live) and completed.
+  // A game is "completed" once _completedGames has it OR the ESPN schedule
+  // says its abstractGameState is Final — the second check covers the case
+  // where the user just loaded the page and the live-poll hasn't run yet.
+  const finalGameKeys = new Set(
+    (_todayWnbaSchedule || [])
+      .filter(sg => sg.status?.abstractGameState === 'Final')
+      .map(sg => `${(sg.teams?.away?.team?.name||'').toLowerCase()}|${(sg.teams?.home?.team?.name||'').toLowerCase()}`)
+  );
+  const isCompletedAnalysed = (g) => {
+    if (_completedGames.has(g.game_id)) return true;
+    for (const sg of (_todayWnbaSchedule || [])) {
+      if (sg.status?.abstractGameState !== 'Final') continue;
+      if (_wnbaNameLooseMatch(g.away_team, sg.teams?.away?.team?.name) &&
+          _wnbaNameLooseMatch(g.home_team, sg.teams?.home?.team?.name)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const active    = _wnbaResults.filter(g => !isCompletedAnalysed(g));
+  const completed = _wnbaResults.filter(g =>  isCompletedAnalysed(g));
+  const totalCompleted = completed.length + scheduleOnly.length;
+
   const sub = document.getElementById('slate-sub');
-  if (sub) sub.textContent = `${_wnbaResults.length} game${_wnbaResults.length !== 1 ? 's' : ''}`;
-  document.getElementById('slate-cards').innerHTML =
-    _wnbaResults.map(g => _buildWnbaGameCard(g)).join('');
+  if (sub) {
+    sub.textContent = totalCompleted > 0
+      ? `${active.length} game${active.length !== 1 ? 's' : ''} remaining · ${totalCompleted} completed`
+      : `${active.length} game${active.length !== 1 ? 's' : ''}`;
+  }
+
+  let html = active.length
+    ? active.map(g => _buildWnbaGameCard(g)).join('')
+    : `<div style="color:var(--dim);padding:24px 0;text-align:center;font-size:13px">No games remaining for today.</div>`;
+
+  if (totalCompleted > 0) {
+    html += `<div class="completed-divider">Completed Games &nbsp;(${totalCompleted})</div>`;
+    html += completed.map(g => _buildWnbaGameCard(g)).join('');
+    html += scheduleOnly.map(sg => _buildWnbaScheduleCard(sg)).join('');
+  }
+
+  document.getElementById('slate-cards').innerHTML = html;
   _renderWnbaSidebar();
 }
 
@@ -6772,155 +7739,14 @@ function _wnbaStrongPickBadge(g) {
   return `<span class="strong-pick-badge ${cls}">${n}/3 Strong</span>`;
 }
 
-function _buildWnbaGameCard(g) {
-  const timeStr = toTimeET(g.commence_time);
-
-  // B2B indicators (shown as small badge next to team name)
-  const b2bHome = g.home_b2b ? ' <span title="Back-to-back" style="font-size:10px;color:var(--yellow);font-weight:700">B2B</span>' : '';
-  const b2bAway = g.away_b2b ? ' <span title="Back-to-back" style="font-size:10px;color:var(--yellow);font-weight:700">B2B</span>' : '';
-
-  // Star player subtext
-  const homeStarHtml = g.home_player
-    ? `<div class="gc-pitcher">⭐ ${g.home_player.name} ${g.home_player.pts_pg.toFixed(1)} PPG</div>` : '';
-  const awayStarHtml = g.away_player
-    ? `<div class="gc-pitcher">⭐ ${g.away_player.name} ${g.away_player.pts_pg.toFixed(1)} PPG</div>` : '';
-
-  const mlCard     = _buildWnbaMlCard(g);
-  const spreadCard = _buildWnbaSpreadCard(g);
-  const totalsCard = _buildWnbaTotalsCard(g);
-
-  return `<div class="game-card" data-game-id="${g.game_id}" data-sport="wnba">
-    <div class="game-card-hdr">
-      <div class="gc-meta-row">
-        <div class="gc-meta-left">
-          <span class="gc-time">${timeStr}</span>
-          ${g.venue ? `<span class="gc-venue">${g.venue}</span>` : ''}
-          <span style="font-size:10px;color:var(--purple);font-weight:700;letter-spacing:.4px">WNBA</span>
-        </div>
-        <div class="gc-meta-right">
-          ${_wnbaStrongPickBadge(g)}
-          ${chaosBadge(g)}
-        </div>
-      </div>
-      <div class="gc-matchup-row">
-        <div class="gc-team-col">
-          ${_wnbaLogoHtml(g.away_team, 80)}
-          <div class="gc-team-name">${shortName(g.away_team)}${b2bAway}</div>
-          ${g.away_odds != null ? `<div class="gc-ml-odds">${mlOddsHtml(g.away_odds)}</div>` : ''}
-          ${awayStarHtml}
-        </div>
-        <div class="gc-vs-col">
-          <span class="gc-vs-text">vs</span>
-        </div>
-        <div class="gc-team-col">
-          ${_wnbaLogoHtml(g.home_team, 80)}
-          <div class="gc-team-name">${shortName(g.home_team)}${b2bHome}</div>
-          ${g.home_odds != null ? `<div class="gc-ml-odds">${mlOddsHtml(g.home_odds)}</div>` : ''}
-          ${homeStarHtml}
-        </div>
-      </div>
-    </div>
-    <div class="game-card-props">
-      ${mlCard}${spreadCard}${totalsCard}
-    </div>
-  </div>`;
-}
-
-function _buildWnbaMlCard(g) {
-  const tier     = g.confidence_tier ?? (g.conflict ? 'low' : 'strong');
-  const conf     = _confLevel(tier, g.pick_edge ?? 0);
-  const edge     = g.pick_edge ?? 0;
-  const edgeV    = (edge >= 0 ? '+' : '') + (edge * 100).toFixed(1) + '%';
-  const edgeC    = edge > 0 ? 'var(--green)' : edge < 0 ? 'var(--red)' : 'var(--dim)';
-  const valBadge = g.value_pick ? '<span class="pc-value-badge">Value</span>' : '';
-  const conflict = g.conflict === true;
-  const isSplit  = tier === 'split';
-  const conflictNote = isSplit  ? `<div class="pc-conflict-note">⚡ Split signal</div>`
-                     : conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
-  return `<div class="prop-card ${conf.cls}">
-    <div class="pc-type-row">
-      <div class="pc-type">Moneyline</div>
-      <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
-    </div>
-    <div class="pc-pick">${shortName(g.pick_team)} ${oddsHtml(g.pick_odds)}</div>
-    <div class="pc-probs"><span class="pc-conf-pct">${((g.pick_prob??0.5)*100).toFixed(0)}% Confidence</span></div>
-    <div class="pc-edge-row">${valBadge}<span class="pc-edge-lbl" style="color:${edgeC}">${edgeV} Edge</span></div>
-    ${conflictNote}
-    <button class="pc-explain-btn" id="exp-btn-${g.game_id}-ml"
-      onclick="explainPick('${g.game_id}','ml')">✦ Explain This Pick</button>
-    <div class="pc-explain-panel" id="explain-${g.game_id}-ml" style="display:none"></div>
-  </div>`;
-}
-
-function _buildWnbaSpreadCard(g) {
-  const sp = g.spread_pick;
-  if (!sp) return `<div class="prop-card conf-low">
-    <div class="pc-type-row"><div class="pc-type">Spread</div><div class="pc-conf-label conf-low">No Data</div></div>
-    <div class="pc-no-data">Model not trained yet</div></div>`;
-
-  const tier     = sp.confidence_tier ?? (sp.conflict ? 'low' : 'strong');
-  const conf     = _confLevel(tier, sp.edge ?? 0);
-  const edge     = sp.edge ?? 0;
-  const edgeV    = (edge >= 0 ? '+' : '') + (edge * 100).toFixed(1) + '%';
-  const edgeC    = edge > 0 ? 'var(--green)' : edge < 0 ? 'var(--red)' : 'var(--dim)';
-  const lineStr  = sp.spread_line !== undefined ? (sp.spread_line > 0 ? `+${sp.spread_line}` : `${sp.spread_line}`) : '';
-  const valBadge = sp.value_bet ? '<span class="pc-value-badge">Value</span>' : '';
-  const isSplit  = tier === 'split';
-  const conflictNote = isSplit    ? `<div class="pc-conflict-note">⚡ Split signal</div>`
-                     : sp.conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
-  const marginNote = sp.predicted_margin !== undefined
-    ? `<div style="font-size:11px;color:var(--dim);margin-top:4px">Pred margin: ${sp.predicted_margin > 0 ? '+' : ''}${sp.predicted_margin} pts</div>`
-    : '';
-  return `<div class="prop-card ${conf.cls}">
-    <div class="pc-type-row">
-      <div class="pc-type">Spread</div>
-      <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
-    </div>
-    <div class="pc-pick">${shortName(sp.pick_team)} ${lineStr} ${oddsHtml(sp.pick_odds)}</div>
-    <div class="pc-probs"><span class="pc-conf-pct">${((sp.pick_prob??0.5)*100).toFixed(0)}% Confidence</span></div>
-    <div class="pc-edge-row">${valBadge}<span class="pc-edge-lbl" style="color:${edgeC}">${edgeV} Edge</span></div>
-    ${marginNote}${conflictNote}
-    <button class="pc-explain-btn" id="exp-btn-${g.game_id}-spread"
-      onclick="explainPick('${g.game_id}','spread')">✦ Explain This Pick</button>
-    <div class="pc-explain-panel" id="explain-${g.game_id}-spread" style="display:none"></div>
-  </div>`;
-}
-
-function _buildWnbaTotalsCard(g) {
-  const t = g.totals;
-  if (!t) return `<div class="prop-card conf-low">
-    <div class="pc-type-row"><div class="pc-type">Totals</div><div class="pc-conf-label conf-low">No Data</div></div>
-    <div class="pc-no-data">No O/U line available</div></div>`;
-
-  const tier     = t.confidence_tier ?? (t.conflict ? 'low' : 'strong');
-  const conf     = _confLevel(tier, t.edge ?? 0);
-  const edge     = t.edge ?? 0;
-  const edgeV    = (edge >= 0 ? '+' : '') + (edge * 100).toFixed(1) + '%';
-  const edgeC    = edge > 0 ? 'var(--green)' : edge < 0 ? 'var(--red)' : 'var(--dim)';
-  const dir      = t.direction ?? 'over';
-  const dirCls   = dir === 'over' ? 'prop-dir-over' : 'prop-dir-under';
-  const tOdds    = dir === 'over' ? t.over_odds : t.under_odds;
-  const valBadge = t.value_bet ? '<span class="pc-value-badge">Value</span>' : '';
-  const isSplit  = tier === 'split';
-  const conflictNote = isSplit   ? `<div class="pc-conflict-note">⚡ Split signal</div>`
-                     : t.conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
-  const predNote = t.predicted_total
-    ? `<div style="font-size:11px;color:var(--dim);margin-top:4px">Pred total: <strong>${t.predicted_total}</strong> pts (line: ${t.total_line})</div>`
-    : '';
-  return `<div class="prop-card ${conf.cls}">
-    <div class="pc-type-row">
-      <div class="pc-type">Totals (O/U ${t.total_line})</div>
-      <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
-    </div>
-    <div class="pc-pick"><span class="${dirCls}" style="font-weight:700">${dir.toUpperCase()}</span> ${t.total_line} ${oddsHtml(tOdds)}</div>
-    <div class="pc-probs"><span class="pc-conf-pct">${((t.pick_prob??0.5)*100).toFixed(0)}% Confidence</span></div>
-    <div class="pc-edge-row">${valBadge}<span class="pc-edge-lbl" style="color:${edgeC}">${edgeV} Edge</span></div>
-    ${predNote}${conflictNote}
-    <button class="pc-explain-btn" id="exp-btn-${g.game_id}-totals"
-      onclick="explainPick('${g.game_id}','totals')">✦ Explain This Pick</button>
-    <div class="pc-explain-panel" id="explain-${g.game_id}-totals" style="display:none"></div>
-  </div>`;
-}
+// ── WNBA card builders — now thin wrappers over the universal pipeline.
+// The actual rendering logic lives in buildGameCard / buildBetBox via the
+// wnba entry in _SPORT_ADAPTERS, so MLB and WNBA produce identical card
+// markup with sport-specific bits injected by the adapter.
+function _buildWnbaGameCard(g) { return buildGameCard(g, 'wnba'); }
+function _buildWnbaMlCard(g)     { return buildBetBox(g, 'wnba', 'single'); }
+function _buildWnbaSpreadCard(g) { return buildBetBox(g, 'wnba', 'spread'); }
+function _buildWnbaTotalsCard(g) { return buildBetBox(g, 'wnba', 'totals'); }
 
 function _renderWnbaSidebar() {
   // Prefer cross-sport daily picks if available
@@ -7188,6 +8014,11 @@ async function initWnba() {
       }
       // Update home page cards with WNBA data
       if (_page === 'home') buildHomePage();
+      // Live-score pull on cold start so games already in progress (or already
+      // finished) light up without the user needing to interact.
+      updateWnbaLiveScores();
+      // Pull today's full ESPN schedule so completed games stay on the slate.
+      loadTodayWnbaSchedule();
     }
     loadWnbaLedger();
   } catch (_) {}

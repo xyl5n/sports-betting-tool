@@ -619,6 +619,12 @@ class BettingModel:
     def get_scaler(self):
         return self.scaler
 
+    def get_xgb_cols(self) -> Optional[list[int]]:
+        return self._xgb_cols
+
+    def get_xgb_names(self) -> Optional[list[str]]:
+        return self._xgb_names
+
 
 # ------------------------------------------------------------------
 # Heuristic fallback

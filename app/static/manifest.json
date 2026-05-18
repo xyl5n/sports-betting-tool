@@ -1,0 +1,11 @@
+{
+  "name": "Betting Analysis",
+  "short_name": "Betting",
+  "description": "MLB and WNBA betting analysis with XGBoost, Logistic Regression, and Neural Network ensemble predictions",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#000000"
+}
