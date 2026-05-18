@@ -255,6 +255,22 @@ def _today_et() -> str:
         return datetime.now(timezone(timedelta(hours=-4))).date().isoformat()
 
 
+def _game_et_date(commence_time: str) -> str:
+    """Return YYYY-MM-DD in ET for a game's commence_time ISO string."""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return ""
+
+
+def _filter_stale_games(games: list) -> list:
+    """Drop games whose ET date is strictly before today (yesterday's leftovers)."""
+    today = _today_et()
+    return [g for g in games if _game_et_date(g.get("commence_time", "")) >= today]
+
+
 def _read_daily_snapshot() -> dict:
     """Read daily snapshot file; return {} on any error.  Thread-safe."""
     if not _SNAPSHOT_ENABLED:
@@ -1139,7 +1155,7 @@ def _save_wnba_analysis_cache(serialized, parlays, games_loaded, cv_acc, lr_cv_a
         _ts = analyzed_at or datetime.now(timezone.utc)
         Path("data").mkdir(exist_ok=True)
         payload = {
-            "date":          _ts.date().isoformat(),
+            "date":          _today_et(),  # ET date — correct even when analysis runs after 8 PM ET
             "analyzed_at":   _ts.isoformat(),
             "sport":         "wnba",
             "games_loaded":  games_loaded,
@@ -1547,7 +1563,7 @@ def _save_analysis_cache(serialized: list, parlays: dict, sport: str,
         _ts = analyzed_at or datetime.now(timezone.utc)
         Path("data").mkdir(exist_ok=True)
         payload = {
-            "date":            _ts.date().isoformat(),
+            "date":            _today_et(),  # ET date — correct even when analysis runs after 8 PM ET
             "analyzed_at":     _ts.isoformat(),
             "sport":           sport,
             "games_loaded":    games_loaded,
@@ -2128,15 +2144,16 @@ def init_analysis():
             except Exception:
                 pass
 
+        _results = _filter_stale_games(payload.get("results", []))
         return jsonify({
-            "has_predictions": True,
+            "has_predictions": bool(_results),
             "analyzed_at":     _at,
             "sport":           payload.get("sport", "mlb"),
             "games_loaded":    payload.get("games_loaded", 0),
             "cv_accuracy":     payload.get("cv_accuracy"),
             "lr_cv_accuracy":  payload.get("lr_cv_accuracy"),
             "nn_val_accuracy": payload.get("nn_val_accuracy"),
-            "results":         payload.get("results", []),
+            "results":         _results,
             "parlays":         payload.get("parlays", {}),
         })
     except Exception:
@@ -2344,6 +2361,7 @@ def analyze():
         _step("Step 4: fetching odds from Odds API")
         odds_client = OddsClient(odds_key, _cache)
         games = odds_client.get_odds(sport_key=sport_cfg.odds_key)
+        games = _filter_stale_games(games)  # drop yesterday's games before any processing
         _step(f"Step 4 done: {len(games)} games with odds")
 
         # Freeze pre-game odds: for started games, restore market odds from before first pitch
@@ -4158,6 +4176,7 @@ def analyze_wnba():
         # Step 4 — odds from The Odds API
         odds_client = OddsClient(odds_key, _cache)
         games       = odds_client.get_odds(sport_key="basketball_wnba")
+        games       = _filter_stale_games(games)   # drop yesterday's games before any processing
         games       = _lock_in_pre_game_odds(games)
 
         if not games:
@@ -4270,7 +4289,7 @@ def init_wnba():
                 "parlays":         _wsp.get("parlays", {}),
             })
 
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = _today_et()  # ET date — was incorrectly comparing against UTC date
 
         _ts_store   = _read_analysis_timestamps()
         _wnba_stamp = _ts_store.get("wnba", {})
@@ -4295,14 +4314,15 @@ def init_wnba():
             except Exception:
                 pass
 
+        _wresults = _filter_stale_games(payload.get("results", []))
         return jsonify({
-            "has_predictions": True,
+            "has_predictions": bool(_wresults),
             "analyzed_at":     _at,
             "sport":           "wnba",
             "games_loaded":    payload.get("games_loaded", 0),
             "cv_accuracy":     payload.get("cv_accuracy"),
             "lr_cv_accuracy":  payload.get("lr_cv_accuracy"),
-            "results":         payload.get("results", []),
+            "results":         _wresults,
             "parlays":         payload.get("parlays", {}),
         })
     except Exception:
@@ -4512,6 +4532,56 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
 
     if not overall_ok and not is_retry:
         _schedule_auto_retry(label)
+
+
+def _run_midnight_reset() -> None:
+    """
+    Midnight ET reset — clear all game data so the new day starts clean.
+    Deletes analysis caches, snapshot, timestamps, and odds API cache files.
+    In-memory state is also zeroed so the UI shows "Never run" until analysis
+    is triggered manually or by the 8 AM auto-analysis job.
+    """
+    _eprint("MIDNIGHT-RESET: clearing all game data for new day")
+    try:
+        # Delete disk analysis caches
+        for _path in (_ANALYSIS_CACHE_FILE, _WNBA_ANALYSIS_CACHE_FILE):
+            try:
+                _path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Clear daily snapshot (both sports at once)
+        with _snapshot_lock:
+            try:
+                _DAILY_SNAPSHOT_FILE.unlink(missing_ok=True)
+                _DAILY_SNAPSHOT_TMP.unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Clear analysis timestamps file
+        try:
+            _ANALYSIS_TIMESTAMPS_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # Zero in-memory analysis states
+        _analysis_state["results"]          = []
+        _analysis_state["parlays"]          = {}
+        _analysis_state["last_analyzed_at"] = None
+        _analysis_state["last_analysis_meta"] = {}
+        _wnba_analysis_state["results"]          = []
+        _wnba_analysis_state["parlays"]          = {}
+        _wnba_analysis_state["last_analyzed_at"] = None
+        _wnba_analysis_state["last_analysis_meta"] = {}
+        # Evict odds API cache so fresh data is fetched on the next run
+        for _odds_key in (
+            "odds_baseball_mlb_h2h,spreads,totals_us",
+            "odds_basketball_wnba_h2h,spreads,totals_us",
+        ):
+            try:
+                _cache.invalidate(_odds_key)
+            except Exception:
+                pass
+        _eprint("MIDNIGHT-RESET: complete — new day ready")
+    except Exception as _mre:
+        _eprint(f"MIDNIGHT-RESET: unexpected error: {_mre}")
 
 
 def _schedule_auto_retry(label: str) -> None:
@@ -4762,8 +4832,17 @@ if not _in_debug_mode or _werkzeug_main:
                     misfire_grace_time=1800,
                     max_instances=1,
                 )
+                _sched.add_job(
+                    _run_midnight_reset,
+                    _CronTrigger(hour=0, minute=0, timezone=_ET),
+                    id="midnight_reset",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
+                )
                 print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET", flush=True, file=sys.stderr)
                 print("STARTUP: auto-settlement job scheduled — every 30 min (game hours 11 AM–2 AM ET)", flush=True, file=sys.stderr)
+                print("STARTUP: midnight reset job scheduled — 12:00 AM ET", flush=True, file=sys.stderr)
             except Exception as _ae:
                 print(f"STARTUP WARNING: could not add auto-analysis jobs: {_ae}", flush=True, file=sys.stderr)
             print("STARTUP: nightly retrain scheduler running — fires 2 AM ET", flush=True, file=sys.stderr)

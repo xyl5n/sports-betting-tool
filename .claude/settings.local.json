@@ -37,7 +37,10 @@
       "Bash(git pull *)",
       "Bash(echo \"EXIT:$?\")",
       "Bash(findstr RULES)",
-      "Bash(echo \"COMPILE_EXIT:$?\")"
+      "Bash(echo \"COMPILE_EXIT:$?\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('/c/sports-betting-ai/app/data/wnba_analysis_cache.json'\\)\\); print\\('date:', d.get\\('date'\\)\\); print\\('analyzed_at:', d.get\\('analyzed_at'\\)\\); games = d.get\\('results',[]\\); print\\('num games:', len\\(games\\)\\); [print\\('  game:', g.get\\('home_team','?'\\),'vs',g.get\\('away_team','?'\\), 'commence_time:', g.get\\('commence_time','?'\\)\\) for g in games[:5]]\")",
+      "Bash(del \"C:\\\\sports-betting-ai\\\\app\\\\data\\\\wnba_analysis_cache.json\")",
+      "PowerShell(\\(Get-Content \"C:\\\\sports-betting-ai\\\\app\\\\data\\\\daily_snapshot.json\" | ConvertFrom-Json\\).date)"
     ]
   }
 }
