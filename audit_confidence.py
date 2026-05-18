@@ -96,6 +96,19 @@ def _audit_game(idx: int, g: dict) -> dict:
           f"{'OK' if c1 else '✗ VIOLATED'}")
     print(f"     Constraint 2  ML({dog}) {ml_dog:.3f}  <=  RL({dog} +1.5) {rl_dog_plus_1_5:.3f}   "
           f"{'OK' if c2 else '✗ VIOLATED'}")
+
+    # Also surface what the UI tile would display, post-fix.  These use the
+    # upset-adjusted pick_prob (the field totals already used) so ML / RL
+    # tiles are on the same scale.  Note: run_line_point is the HOME team's
+    # line; flip the sign so the displayed line matches the picker's side.
+    ml_tile = ml_pick_prob
+    rl_tile = rl.get("pick_prob")
+    if rl_tile is not None:
+        home_pt = rl.get("run_line_point")
+        pick_pt = home_pt if rl.get("side") == "home" else -home_pt if home_pt is not None else None
+        pick_pt_str = f"{pick_pt:+.1f}" if pick_pt is not None else "?"
+        print(f"     UI tiles      ML pick {g.get('pick_team')} = {ml_tile:.3f}   "
+              f"RL pick {rl.get('pick_team')} {pick_pt_str} = {rl_tile:.3f}")
     print()
     return {
         "violation":  (not c1) or (not c2),
