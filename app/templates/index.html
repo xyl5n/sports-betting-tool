@@ -2824,9 +2824,18 @@ function _loadResultsCache() {
 }
 
 // New API results take priority for matching game_ids; completed games preserved from cache.
+// On the very first analysis of the day the cache is empty — we still need to seed it
+// with the fresh results so a later re-run can preserve any games that have since
+// completed and dropped off the Odds API.  Without the seed the cache stays empty
+// for the rest of the day, the preservation branch never fires, and re-running
+// analysis after games complete makes those games fall back to TBD schedule-only
+// cards (since the Odds API no longer returns them).
 function _mergeWithCache(newResults) {
   const cached = _loadResultsCache();
-  if (!cached.length) return newResults;
+  if (!cached.length) {
+    _saveResultsCache(newResults);
+    return newResults;
+  }
   const newIds = new Set(newResults.map(g => g.game_id));
   const preserved = cached.filter(g => !newIds.has(g.game_id));
   const merged = [...newResults, ...preserved];
