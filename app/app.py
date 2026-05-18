@@ -3264,6 +3264,71 @@ def reset_all():
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
+@app.route("/api/admin/wipe_ledger", methods=["POST"])
+def admin_wipe_ledger():
+    """
+    Per-sport ledger wipe used by the Admin sub-page.
+    Body: {"sport": "mlb" | "wnba" | "both"}.
+    Clears open_bets + history for the chosen sport(s) and resets both
+    bankrolls to their starting values.  Model files / analysis caches /
+    API settings are untouched.  Returns {"success": true, "wiped": [...]}.
+    """
+    try:
+        sport = (request.json or {}).get("sport", "").strip().lower()
+        if sport not in ("mlb", "wnba", "both"):
+            return jsonify({"success": False, "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
+
+        sports = ["mlb", "wnba"] if sport == "both" else [sport]
+        paths  = {
+            "mlb":  Path("data/ledger.json"),
+            "wnba": Path("data/wnba_ledger.json"),
+        }
+        wiped = []
+        for s in sports:
+            path = paths[s]
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            except Exception:
+                data = {}
+            model_start    = float(data.get("model_starting_bankroll",    1000.0))
+            personal_start = float(data.get("personal_starting_bankroll", 1000.0))
+            clean = {
+                "model_starting_bankroll":    model_start,
+                "model_bankroll":             model_start,
+                "personal_starting_bankroll": personal_start,
+                "personal_bankroll":          personal_start,
+                "open_bets":                  [],
+                "history":                    [],
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(clean, indent=2), encoding="utf-8")
+            wiped.append(s)
+        return jsonify({"success": True, "wiped": wiped})
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/status", methods=["GET"])
+def admin_status():
+    """Single endpoint the Admin sub-page polls for header status fields."""
+    try:
+        ts = _read_analysis_timestamps()
+        mlb_ts  = (ts.get("mlb")  or {}).get("analyzed_at")
+        wnba_ts = (ts.get("wnba") or {}).get("analyzed_at")
+        try:
+            from src import db as _db
+            db_status = _db.status()
+        except Exception:
+            db_status = {"mode": "json"}
+        return jsonify({
+            "mlb_analyzed_at":  mlb_ts,
+            "wnba_analyzed_at": wnba_ts,
+            "db":               db_status,
+        })
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @app.route("/api/reset-sport", methods=["POST"])
 def reset_sport():
     """

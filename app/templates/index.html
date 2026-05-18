@@ -883,6 +883,55 @@ body {
 .perf-row-lbl { color: var(--text-dim); }
 .perf-row-val { font-family: "SF Mono", Consolas, monospace; }
 
+/* ── Admin sub-page ─────────────────────────────────────────────────── */
+.admin-section {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 14px;
+  margin-bottom: 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.admin-section h3 {
+  font-size: 11px; font-weight: 800; letter-spacing: .8px;
+  color: var(--text-dim2);
+  margin-bottom: 6px;
+}
+.admin-btn {
+  display: block; width: 100%;
+  padding: 11px 14px;
+  background: var(--bg-elev-hi); border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm); color: var(--text);
+  font-size: 13px; font-weight: 600; letter-spacing: .2px;
+  cursor: pointer; transition: all .15s;
+  text-align: left; font-family: inherit;
+}
+.admin-btn:hover:not(:disabled) { border-color: var(--border); }
+.admin-btn:active { transform: scale(.98); }
+.admin-btn:disabled { opacity: .4; cursor: not-allowed; }
+.admin-btn.primary {
+  background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
+  color: #0d1117; border-color: transparent;
+  font-weight: 800; letter-spacing: .4px;
+  box-shadow: 0 0 12px var(--cyan-glow);
+}
+.admin-btn.primary:hover { opacity: .92; }
+.admin-btn.warn {
+  color: var(--yellow);
+  border-color: rgba(251, 191, 36, .35);
+  background: rgba(251, 191, 36, .06);
+}
+.admin-btn.danger {
+  color: var(--red);
+  border-color: rgba(248, 113, 113, .4);
+  background: rgba(248, 113, 113, .07);
+  font-weight: 800;
+}
+.admin-meta {
+  font-size: 12px; color: var(--text-dim);
+  padding: 8px 0 2px;
+  line-height: 1.7;
+  font-family: "SF Mono", Consolas, monospace;
+}
+
 /* ── Bottom navigation ──────────────────────────────────────────────── */
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 90;
@@ -1113,10 +1162,8 @@ body {
     <!-- ─── HOME ─────────────────────────────────────────────────────── -->
     <section id="tab-home" class="tab active">
 
-      <div class="run-row">
-        <button class="run-btn" id="run-btn" onclick="runAnalysis()">▶ RUN ANALYSIS</button>
-        <span class="last-run" id="last-run">Never run</span>
-      </div>
+      <!-- The RUN ANALYSIS button has moved to More → Admin so the main
+           page stays focused on viewing picks, not running the pipeline. -->
 
       <!-- AI chat banner -->
       <button class="ai-banner" onclick="showTab('ai')" aria-label="Chat with AI">
@@ -1235,10 +1282,10 @@ body {
             </span>
             <span class="more-row-chev">›</span>
           </button>
-          <button class="more-row" onclick="forceRefresh()">
-            <span class="more-row-icon">↻</span>
-            <span class="more-row-text">Force-refresh today
-              <div class="more-row-sub">Wipe snapshot, re-pull odds, retrain</div>
+          <button class="more-row" onclick="openAdmin()">
+            <span class="more-row-icon">⚙</span>
+            <span class="more-row-text">Admin
+              <div class="more-row-sub">Run analysis, wipe bets, retrain models</div>
             </span>
             <span class="more-row-chev">›</span>
           </button>
@@ -1298,6 +1345,52 @@ body {
         <div id="model-perf-content">
           <div class="empty-state"><span class="icon">📊</span>Loading model stats…</div>
         </div>
+      </div>
+
+      <!-- ADMIN SUB-PAGE — gated behind a 4-digit PIN.  All operational
+           controls (run analysis, wipe bets, retrain, etc.) live here. -->
+      <div id="more-admin-view" style="display:none">
+        <header class="subpage-hdr">
+          <button class="back-btn" onclick="closeSubPage()" aria-label="Back">‹</button>
+          <h2>Admin</h2>
+          <div class="subpage-spacer"></div>
+          <button class="back-btn" onclick="adminResetPin()" title="Reset PIN" aria-label="Reset PIN">⌬</button>
+        </header>
+
+        <section class="admin-section">
+          <h3>ANALYSIS</h3>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('mlb')"  id="admin-run-mlb">▶ Run MLB Analysis</button>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('wnba')" id="admin-run-wnba">▶ Run WNBA Analysis</button>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('both')" id="admin-run-both">▶ Run Both</button>
+          <div class="admin-meta">
+            Last MLB:&nbsp; <span id="admin-last-mlb">—</span><br>
+            Last WNBA: <span id="admin-last-wnba">—</span>
+          </div>
+        </section>
+
+        <section class="admin-section">
+          <h3>MODELS</h3>
+          <button class="admin-btn" onclick="adminRefreshModels()" id="admin-refresh-models">⟳ Refresh Models (cached odds)</button>
+          <button class="admin-btn warn" onclick="adminClearSnapshot('mlb')">↻ Clear Today's MLB Snapshot</button>
+          <button class="admin-btn warn" onclick="adminClearSnapshot('wnba')">↻ Clear Today's WNBA Snapshot</button>
+        </section>
+
+        <section class="admin-section">
+          <h3>BETS / BANKROLL</h3>
+          <button class="admin-btn warn"   onclick="adminWipe('mlb')">🗑 Wipe MLB Bets</button>
+          <button class="admin-btn warn"   onclick="adminWipe('wnba')">🗑 Wipe WNBA Bets</button>
+          <button class="admin-btn danger" onclick="adminWipe('both')">🗑 Wipe Both Sports</button>
+          <button class="admin-btn"        onclick="adminSetBankroll('mlb')">Set MLB Bankroll…</button>
+          <button class="admin-btn"        onclick="adminSetBankroll('wnba')">Set WNBA Bankroll…</button>
+        </section>
+
+        <section class="admin-section">
+          <h3>SYSTEM</h3>
+          <div class="admin-meta">
+            Supabase: <span id="admin-supabase">—</span><br>
+            DB mode:&nbsp; <span id="admin-db-mode">—</span>
+          </div>
+        </section>
       </div>
 
     </section>
@@ -2285,9 +2378,16 @@ function renderAll() {
 function setLastRun(d) {
   _lastRun = d;
   try { localStorage.setItem(LS_LAST_RUN, d.toISOString()); } catch (_) {}
-  $('last-run').textContent = fmtLastRun(d);
+  // #last-run lives only on the (now-removed) Home run-row, so this
+  // is defensive: the badge may be absent depending on which page
+  // surface is rendered.
+  const el = $('last-run');
+  if (el) el.textContent = fmtLastRun(d);
 }
-setInterval(() => $('last-run').textContent = fmtLastRun(_lastRun), 30000);
+setInterval(() => {
+  const el = $('last-run');
+  if (el) el.textContent = fmtLastRun(_lastRun);
+}, 30000);
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Initial load — restore cached snapshot
@@ -2313,7 +2413,8 @@ async function init() {
       const d = new Date(raw);
       if (!isNaN(d) && d.toLocaleDateString('en-CA') === new Date().toLocaleDateString('en-CA')) {
         _lastRun = d;
-        $('last-run').textContent = fmtLastRun(d);
+        const el = $('last-run');
+        if (el) el.textContent = fmtLastRun(d);
       }
     }
   } catch (_) {}
@@ -2618,6 +2719,186 @@ function _renderModelPerfHtml(d) {
     </article>`;
   }).join('')}</div>`;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Admin sub-page
+//  Gated behind a 4-digit PIN stored as a non-cryptographic hash in
+//  localStorage.  This is a UX friction layer to prevent accidental
+//  destructive taps (wipe / reset) -- it's NOT a real security boundary
+//  since anyone with the app's URL can hit the underlying endpoints
+//  directly.  Treat it as "are-you-sure-you're-the-owner" only.
+// ═══════════════════════════════════════════════════════════════════════
+const _ADMIN_PIN_KEY = 'admin_pin_hash_v1';
+function _hashPin(pin) {
+  // djb2 hash -- fast, deterministic, fine for an accidental-tap gate
+  let h = 5381;
+  for (const c of String(pin)) h = (((h << 5) + h) + c.charCodeAt(0)) | 0;
+  return String(h);
+}
+function openAdmin() {
+  let stored;
+  try { stored = localStorage.getItem(_ADMIN_PIN_KEY); } catch { stored = null; }
+  if (!stored) {
+    const a = prompt('Admin is destructive (wipe / reset).  Set a 4-digit PIN to protect it:');
+    if (!a) return;
+    if (a.length < 4) { toast('PIN must be 4+ characters', 'error'); return; }
+    const b = prompt('Confirm the PIN:');
+    if (a !== b) { toast('PINs did not match', 'error'); return; }
+    try { localStorage.setItem(_ADMIN_PIN_KEY, _hashPin(a)); } catch {}
+    _swapMoreView('more-admin-view');
+    loadAdminStatus();
+    return;
+  }
+  const entered = prompt('Enter admin PIN:');
+  if (entered == null) return;
+  if (_hashPin(entered) !== stored) { toast('Wrong PIN', 'error'); return; }
+  _swapMoreView('more-admin-view');
+  loadAdminStatus();
+}
+function adminResetPin() {
+  if (!confirm('Forget the saved admin PIN?  You\'ll set a new one next time you open Admin.')) return;
+  try { localStorage.removeItem(_ADMIN_PIN_KEY); } catch {}
+  toast('PIN forgotten', 'success');
+  closeSubPage();
+}
+
+async function loadAdminStatus() {
+  try {
+    const r = await fetch('/api/admin/status');
+    const d = await r.json();
+    const fmt = (iso) => {
+      if (!iso) return 'never';
+      try { return new Date(iso).toLocaleString(); } catch { return iso; }
+    };
+    $('admin-last-mlb').textContent  = fmt(d.mlb_analyzed_at);
+    $('admin-last-wnba').textContent = fmt(d.wnba_analyzed_at);
+    const db = d.db || {};
+    $('admin-supabase').textContent = db.supabase ? 'connected' : 'JSON-only';
+    $('admin-db-mode').textContent  = db.mode || '—';
+  } catch (err) {
+    toast(`Status fetch failed: ${err.message}`, 'error');
+  }
+}
+
+// ── Admin action handlers ────────────────────────────────────────────
+async function adminRunAnalysis(which) {
+  const btnIds = { mlb: 'admin-run-mlb', wnba: 'admin-run-wnba', both: 'admin-run-both' };
+  const btn = $(btnIds[which]);
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'ANALYZING…'; }
+  try {
+    const calls = [];
+    if (which === 'mlb'  || which === 'both') calls.push(fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport: 'mlb', bankroll: _bankroll, force_refresh: true }),
+    }).then(r => r.json()));
+    if (which === 'wnba' || which === 'both') calls.push(fetch('/api/wnba/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ bankroll: _wnbaBankroll || 1000, force_refresh: true }),
+    }).then(r => r.json()));
+    const res = await Promise.all(calls);
+    const errs = res.filter(x => x.error);
+    if (errs.length) toast(`Errors: ${errs.map(e => e.error).join(' | ')}`, 'error');
+    else toast(`Analysis complete (${which})`, 'success');
+    // Refresh init data so Home picks up the new results next time it renders
+    try {
+      const [mInit, wInit] = await Promise.all([
+        fetch('/api/init').then(r=>r.json()).catch(()=>({})),
+        fetch('/api/wnba/init').then(r=>r.json()).catch(()=>({})),
+      ]);
+      if (mInit.has_predictions && mInit.results)  _mlb  = mInit.results;
+      if (wInit.has_predictions && wInit.results)  _wnba = wInit.results;
+      renderAll();
+    } catch {}
+    loadAdminStatus();
+  } catch (err) {
+    toast(`Run failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+async function adminRefreshModels() {
+  const btn = $('admin-refresh-models');
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Retraining…'; }
+  try {
+    // Run for both sports — backend is per-sport via the request body.
+    const calls = ['mlb', 'wnba'].map(s => fetch('/api/refresh_models', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport: s, bankroll: s === 'wnba' ? _wnbaBankroll : _bankroll }),
+    }).then(r => r.json()));
+    const res = await Promise.all(calls);
+    const errs = res.filter(x => x.error);
+    if (errs.length) toast(`Some models failed: ${errs.length}`, 'error');
+    else toast('Models retrained on cached data', 'success');
+  } catch (err) {
+    toast(`Refresh failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+async function adminClearSnapshot(sport) {
+  if (!confirm(`Clear today's ${sport.toUpperCase()} snapshot?  The next analysis run can overwrite it.`)) return;
+  try {
+    const r = await fetch('/api/reset-sport', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (d.success === false || d.error) throw new Error(d.error || 'unknown');
+    toast(`${sport.toUpperCase()} snapshot cleared`, 'success');
+    loadAdminStatus();
+  } catch (err) {
+    toast(`Clear failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminWipe(sport) {
+  const label = sport === 'both' ? 'BOTH sports' : sport.toUpperCase();
+  if (!confirm(`Wipe all ${label} bets + reset bankroll?  This cannot be undone.`)) return;
+  if (sport === 'both' && !confirm(`Really wipe MLB AND WNBA?  Type-confirm by tapping OK once more.`)) return;
+  try {
+    const r = await fetch('/api/admin/wipe_ledger', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'unknown');
+    toast(`Wiped: ${(d.wiped || []).join(', ').toUpperCase()}`, 'success');
+    // Refresh ledger caches + render so My Bets / sidebars reflect 0 bets
+    _openBetKeys = new Set();
+    await fetchLedgerSummary();
+    if (_tab === 'home') renderAll();
+  } catch (err) {
+    toast(`Wipe failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminSetBankroll(sport) {
+  const cur = sport === 'wnba' ? (_wnbaBankroll || 1000) : _bankroll;
+  const v = prompt(`Set ${sport.toUpperCase()} starting bankroll (current: $${cur}):`, String(cur));
+  if (v == null) return;
+  const n = parseFloat(v);
+  if (!isFinite(n) || n <= 0) { toast('Invalid amount', 'error'); return; }
+  try {
+    const url = sport === 'wnba' ? '/api/wnba/ledger/set_bankroll' : '/api/ledger/set_bankroll';
+    const r = await fetch(url, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ bankroll: n }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    if (sport === 'wnba') _wnbaBankroll = n; else _bankroll = n;
+    toast(`${sport.toUpperCase()} bankroll set to $${n.toFixed(2)}`, 'success');
+    await fetchLedgerSummary();
+    if (_tab === 'home') renderAll();
+  } catch (err) {
+    toast(`Set failed: ${err.message}`, 'error');
+  }
+}
+
 async function updateMoreSubtext() {
   const el = $('more-bankroll');
   if (!el) return;
