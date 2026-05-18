@@ -2462,6 +2462,9 @@ function showTab(name) {
       if (Object.keys(_lastWnbaLiveMap).length) _applyWnbaLiveMap(_lastWnbaLiveMap);
       // Also kick a fresh fetch so newly-tipped games get a live state right away.
       updateWnbaLiveScores();
+      // Pull today's full ESPN schedule so completed games stay on the slate
+      // even if the Odds API has dropped them.
+      loadTodayWnbaSchedule();
     }
     if (name === 'value')     _renderWnbaValue();
     if (name === 'breakdown') _renderWnbaBreakdown();
@@ -3894,6 +3897,9 @@ async function runAllAnalysis() {
       // Kick off a live-score fetch now so any in-progress or finished games
       // get scores + result-highlights without waiting for the 60-s tick.
       updateWnbaLiveScores();
+      // Pull today's full ESPN schedule so the slate keeps completed games
+      // visible even if the Odds API has dropped them.
+      loadTodayWnbaSchedule();
 
       loadWnbaLedger();
       stepWnba.className   = 'prog-step done';
@@ -6670,6 +6676,12 @@ let _wnbaResults  = [];
 let _wnbaParlays  = {};
 let _wnbaBankroll = 1000;
 let _wnbaAnalyzed = false;
+// Full WNBA schedule for today from ESPN (all games, all statuses).  Mirrors
+// MLB's _todaySchedule.  Used by _renderWnbaSlate to add schedule-only stubs
+// for games that the Odds API doesn't return (typically because they've
+// already completed by the time analysis ran, or because they fell off the
+// pre-game market once they started).
+let _todayWnbaSchedule = [];
 
 // ── Cross-sport daily picks ───────────────────────────────────────────────────
 let _dailyPicks = null;  // populated by loadDailyPicks()
@@ -7124,6 +7136,8 @@ async function runWnbaAnalysis(forceRefresh = false) {
     // First live-score pull right after analysis so live + final games light up
     // without waiting for the 60-s tick.
     updateWnbaLiveScores();
+    // Pull today's full ESPN schedule so completed games stay on the slate.
+    loadTodayWnbaSchedule();
 
     loadWnbaLedger();
     buildHomePage();
@@ -7141,6 +7155,104 @@ async function runWnbaAnalysis(forceRefresh = false) {
 
 // ── WNBA tab renderers (render into shared MLB tab containers) ────────────────
 
+// Fetches today's full WNBA schedule from ESPN via the /api/wnba/schedule
+// proxy.  Returns an array of normalised game objects (same shape as the MLB
+// linescore envelope: {gamePk, teams.{home,away}.team.name, status, linescore}).
+// Cached for 1 h server-side; 24 h frontend cache by date.
+const _wnbaScheduleCache = {};
+async function fetchWnbaScheduleAll(dateStr) {
+  if (_wnbaScheduleCache[dateStr]) return _wnbaScheduleCache[dateStr];
+  try {
+    const resp  = await fetch(`/api/wnba/schedule?date=${dateStr}`);
+    const data  = await resp.json();
+    const games = (data.dates || []).flatMap(d => d.games || []);
+    _wnbaScheduleCache[dateStr] = games;
+    return games;
+  } catch { return []; }
+}
+
+// Loads today's WNBA schedule into _todayWnbaSchedule and re-renders the slate
+// if it's the active view.  Safe to call repeatedly; the cache short-circuits.
+async function loadTodayWnbaSchedule() {
+  _todayWnbaSchedule = await fetchWnbaScheduleAll(_todayET());
+  if (_sport === 'wnba' && _page === 'sport') _renderWnbaSlate();
+}
+
+// Loose team-name match — handles "Liberty" vs "New York Liberty" by comparing
+// trailing tokens (last word) for either side.
+function _wnbaNameLooseMatch(a, b) {
+  const na = (a || '').trim().toLowerCase();
+  const nb = (b || '').trim().toLowerCase();
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const ta = na.split(' ').slice(-1)[0];
+  const tb = nb.split(' ').slice(-1)[0];
+  return ta.length > 2 && tb.length > 2 && (na.endsWith(tb) || nb.endsWith(ta));
+}
+
+// Minimal "schedule-only" WNBA card for a game that the Odds API didn't
+// surface (analysis never had a chance to make picks).  Mirrors MLB's
+// buildScheduleCard pattern but inlines the live/final score from the ESPN
+// linescore payload since ESPN gives us the data inline.
+function _buildWnbaScheduleCard(sg) {
+  const away    = sg.teams?.away?.team?.name || '';
+  const home    = sg.teams?.home?.team?.name || '';
+  const time    = toTimeET(sg.gameDate);
+  const state   = sg.status?.abstractGameState || '';
+  const ls      = sg.linescore || {};
+  const awayR   = ls.teams?.away?.runs;
+  const homeR   = ls.teams?.home?.runs;
+  const isLive  = state === 'Live';
+  const isFinal = state === 'Final';
+
+  // Centre column: live score + period, or "Final" + final score, or "vs"
+  let centerHtml;
+  if (isLive && awayR != null) {
+    const ord = ls.currentInningOrdinal || '—';
+    const clk = ls.displayClock || '';
+    centerHtml = `<div class="gc-live-status"><span class="live-dot"></span> ${ord}</div>
+                  <div class="gc-live-runs"><span>${awayR}</span><span class="gc-live-sep">–</span><span>${homeR}</span></div>
+                  ${clk ? `<div class="gc-live-bso">${clk}</div>` : ''}`;
+  } else if (isFinal && awayR != null) {
+    centerHtml = `<div class="gc-final-label">Final</div>
+                  <div class="gc-live-runs"><span>${awayR}</span><span class="gc-live-sep">–</span><span>${homeR}</span></div>`;
+  } else {
+    centerHtml = `<span class="gc-vs-text">vs</span>`;
+  }
+
+  // Time badge: green dot when live, "Final" once done, tip-off time otherwise
+  const timeBadge = isFinal
+    ? `<span class="gc-time" style="font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.6px">Final</span>`
+    : isLive
+      ? `<span class="gc-time"><span class="live-dot"></span> ${time}</span>`
+      : `<span class="gc-time">${time}</span>`;
+
+  return `<div class="game-card" data-sport="wnba">
+    <div class="game-card-hdr">
+      <div class="gc-meta-row">
+        <div class="gc-meta-left">
+          ${timeBadge}
+          <span style="font-size:10px;color:var(--purple);font-weight:700;letter-spacing:.4px">WNBA</span>
+          <span style="font-size:10px;color:var(--dim2);font-style:italic">No pre-game analysis</span>
+        </div>
+      </div>
+      <div class="gc-matchup-row">
+        <div class="gc-team-col">
+          ${_wnbaLogoHtml(away, 80)}
+          <div class="gc-team-name">${shortName(away)}</div>
+        </div>
+        <div class="gc-vs-col">
+          <div class="gc-center-score">${centerHtml}</div>
+        </div>
+        <div class="gc-team-col">
+          ${_wnbaLogoHtml(home, 80)}
+          <div class="gc-team-name">${shortName(home)}</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function _renderWnbaSlate() {
   // Hide MLB-only day selector
   ['slate-day-today', 'slate-day-tomorrow'].forEach(id => {
@@ -7148,7 +7260,21 @@ function _renderWnbaSlate() {
     if (el) el.style.display = 'none';
   });
 
-  if (!_wnbaResults.length) {
+  // Find schedule games not already represented in _wnbaResults.  Match by
+  // exact name first, then fall back to last-token suffix match so the Odds
+  // API's short names ("Liberty") still de-dupe against ESPN's full names
+  // ("New York Liberty").
+  const scheduleOnly = (_todayWnbaSchedule || []).filter(sg => {
+    const ax = (sg.teams?.away?.team?.name || '').trim().toLowerCase();
+    const hx = (sg.teams?.home?.team?.name || '').trim().toLowerCase();
+    for (const r of _wnbaResults) {
+      if (_wnbaNameLooseMatch(r.away_team, ax) && _wnbaNameLooseMatch(r.home_team, hx))
+        return false;
+    }
+    return true;
+  });
+
+  if (!_wnbaResults.length && !scheduleOnly.length) {
     const emptyEl   = document.getElementById('slate-empty');
     const contentEl = document.getElementById('slate-content');
     const msg = _wnbaAnalyzed
@@ -7160,10 +7286,49 @@ function _renderWnbaSlate() {
   }
 
   showSection('slate');
+
+  // Split analyzed results into active (still upcoming / live) and completed.
+  // A game is "completed" once _completedGames has it OR the ESPN schedule
+  // says its abstractGameState is Final — the second check covers the case
+  // where the user just loaded the page and the live-poll hasn't run yet.
+  const finalGameKeys = new Set(
+    (_todayWnbaSchedule || [])
+      .filter(sg => sg.status?.abstractGameState === 'Final')
+      .map(sg => `${(sg.teams?.away?.team?.name||'').toLowerCase()}|${(sg.teams?.home?.team?.name||'').toLowerCase()}`)
+  );
+  const isCompletedAnalysed = (g) => {
+    if (_completedGames.has(g.game_id)) return true;
+    for (const sg of (_todayWnbaSchedule || [])) {
+      if (sg.status?.abstractGameState !== 'Final') continue;
+      if (_wnbaNameLooseMatch(g.away_team, sg.teams?.away?.team?.name) &&
+          _wnbaNameLooseMatch(g.home_team, sg.teams?.home?.team?.name)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const active    = _wnbaResults.filter(g => !isCompletedAnalysed(g));
+  const completed = _wnbaResults.filter(g =>  isCompletedAnalysed(g));
+  const totalCompleted = completed.length + scheduleOnly.length;
+
   const sub = document.getElementById('slate-sub');
-  if (sub) sub.textContent = `${_wnbaResults.length} game${_wnbaResults.length !== 1 ? 's' : ''}`;
-  document.getElementById('slate-cards').innerHTML =
-    _wnbaResults.map(g => _buildWnbaGameCard(g)).join('');
+  if (sub) {
+    sub.textContent = totalCompleted > 0
+      ? `${active.length} game${active.length !== 1 ? 's' : ''} remaining · ${totalCompleted} completed`
+      : `${active.length} game${active.length !== 1 ? 's' : ''}`;
+  }
+
+  let html = active.length
+    ? active.map(g => _buildWnbaGameCard(g)).join('')
+    : `<div style="color:var(--dim);padding:24px 0;text-align:center;font-size:13px">No games remaining for today.</div>`;
+
+  if (totalCompleted > 0) {
+    html += `<div class="completed-divider">Completed Games &nbsp;(${totalCompleted})</div>`;
+    html += completed.map(g => _buildWnbaGameCard(g)).join('');
+    html += scheduleOnly.map(sg => _buildWnbaScheduleCard(sg)).join('');
+  }
+
+  document.getElementById('slate-cards').innerHTML = html;
   _renderWnbaSidebar();
 }
 
@@ -7689,6 +7854,8 @@ async function initWnba() {
       // Live-score pull on cold start so games already in progress (or already
       // finished) light up without the user needing to interact.
       updateWnbaLiveScores();
+      // Pull today's full ESPN schedule so completed games stay on the slate.
+      loadTodayWnbaSchedule();
     }
     loadWnbaLedger();
   } catch (_) {}
