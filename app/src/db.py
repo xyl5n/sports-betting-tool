@@ -49,6 +49,28 @@ def _is_placeholder(value: str) -> bool:
     )
 
 
+def _sanitize_url(raw: str) -> str:
+    """Normalize SUPABASE_URL to a bare https://<project>.supabase.co.
+
+    supabase-py builds REST paths by string-concatenating `/rest/v1` onto
+    the URL we pass in.  A trailing slash (or any path component) creates
+    a double slash like `https://x.supabase.co//rest/v1/bets`, which
+    PostgREST rejects with PGRST125 "Invalid path specified in request
+    URL".  Strip any path/query/fragment back to scheme + host so the
+    catenation always yields a clean URL.
+    """
+    from urllib.parse import urlparse
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    if "://" not in raw:                  # tolerate "abc.supabase.co" without scheme
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return raw.rstrip("/")
+
+
 def _init() -> None:
     """One-shot connection attempt.  Idempotent."""
     global _client, _mode, _init_done
@@ -56,7 +78,7 @@ def _init() -> None:
         return
     _init_done = True
 
-    url = os.getenv("SUPABASE_URL", "").strip()
+    url = _sanitize_url(os.getenv("SUPABASE_URL", ""))
     key = os.getenv("SUPABASE_KEY", "").strip()
     if _is_placeholder(url) or _is_placeholder(key):
         _logger.info("Supabase not configured (env vars missing/placeholder); JSON-only mode")
@@ -77,12 +99,13 @@ def _init() -> None:
         client.table("bets").select("id").limit(1).execute()
         globals()["_client"] = client
         globals()["_mode"] = "supabase"
-        _logger.info("Supabase connected; dual-write enabled")
+        _logger.info("Supabase connected; dual-write enabled (url=%s)", url)
     except Exception as exc:                # noqa: BLE001
         _logger.warning(
             "Supabase unreachable (%s); JSON-only mode. "
-            "If tables don't exist yet, run app/db/schema.sql in the SQL editor.",
-            exc,
+            "If tables don't exist yet, run app/db/schema.sql in the SQL editor. "
+            "If PGRST125, the URL was malformed -- the value we tried was %r.",
+            exc, url,
         )
 
 
