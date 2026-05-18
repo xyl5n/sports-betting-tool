@@ -29,6 +29,10 @@ urllib3==2.7.0
 # Environment / config
 python-dotenv==1.2.2
 
+# Persistent data layer (optional — falls back to JSON when SUPABASE_URL
+# is missing or unreachable; see app/src/db.py)
+supabase>=2.0.0
+
 # AI analyst (Anthropic)
 anthropic==0.102.0
 distro==1.9.0

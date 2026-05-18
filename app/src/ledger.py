@@ -145,8 +145,77 @@ class Ledger:
         }
 
     def save(self) -> None:
+        # JSON write is the source of truth in-process; Supabase is a hot
+        # backup when configured.  Both writes are best-effort: a Supabase
+        # failure logs a warning and is swallowed so the app keeps running.
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(self.data, f, indent=2)
+        try:
+            self._sync_to_supabase()
+        except Exception as exc:                                              # noqa: BLE001
+            _logger = logging.getLogger(__name__)
+            _logger.warning("Ledger Supabase sync failed (JSON ok): %s", exc)
+
+    def _sync_to_supabase(self) -> None:
+        """Push the current ledger state to Supabase if connected.
+
+        Idempotent — every save() pushes a full snapshot of open_bets +
+        history + bankroll + records, so individual failures self-heal on
+        the next save().  No-op when Supabase isn't configured.
+        """
+        try:
+            from . import db
+        except Exception:
+            return
+        if not db.is_supabase():
+            return
+
+        # Infer sport from the ledger file path (data/ledger.json → mlb,
+        # data/wnba_ledger.json → wnba).  Per-sport ledger == per-sport
+        # bankroll/records rows on the Supabase side.
+        name = self.path.name.lower()
+        sport = "wnba" if "wnba" in name else "mlb"
+
+        # 1) Bets — both open and settled, stamped with the inferred sport
+        bets_to_push = []
+        for b in (self.data.get("open_bets") or []):
+            bets_to_push.append({**b, "sport": b.get("sport") or sport})
+        for b in (self.data.get("history") or []):
+            bets_to_push.append({**b, "sport": b.get("sport") or sport})
+        if bets_to_push:
+            db.upsert_bets_bulk(bets_to_push)
+
+        # 2) Bankroll — one row per sport, both model + personal sides
+        db.upsert_bankroll(sport, {
+            "current_balance":   self.data.get("personal_bankroll"),
+            "starting_balance":  self.data.get("personal_starting_bankroll"),
+            "model_current":     self.data.get("model_bankroll"),
+            "model_starting":    self.data.get("model_starting_bankroll"),
+            "personal_current":  self.data.get("personal_bankroll"),
+            "personal_starting": self.data.get("personal_starting_bankroll"),
+        })
+
+        # 3) Records — aggregate W/L/Push per (sport, bet_type) from history
+        records: dict[tuple[str, str], dict] = {}
+        for b in (self.data.get("history") or []):
+            bt = b.get("bet_type", "single")
+            sp = (b.get("sport") or sport).lower()
+            key = (sp, bt)
+            rec = records.setdefault(key, {
+                "sport":     sp,
+                "bet_type":  bt,
+                "wins":      0,
+                "losses":    0,
+                "pushes":    0,
+                "units_won": 0.0,
+            })
+            result = (b.get("result") or "").lower()
+            if   result == "win":  rec["wins"]   += 1
+            elif result == "loss": rec["losses"] += 1
+            elif result == "push": rec["pushes"] += 1
+            rec["units_won"] += float(b.get("units_won") or 0.0)
+        if records:
+            db.upsert_records_bulk(list(records.values()))
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
