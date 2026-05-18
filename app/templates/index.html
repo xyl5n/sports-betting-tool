@@ -2455,7 +2455,14 @@ function showTab(name) {
 
   // Dispatch rendering to the active sport
   if (_sport === 'wnba') {
-    if (name === 'slate')     _renderWnbaSlate();
+    if (name === 'slate') {
+      _renderWnbaSlate();
+      // Re-paint cached live data instantly so a tab return doesn't wait for
+      // the next 60-s poll; an empty cache simply paints nothing.
+      if (Object.keys(_lastWnbaLiveMap).length) _applyWnbaLiveMap(_lastWnbaLiveMap);
+      // Also kick a fresh fetch so newly-tipped games get a live state right away.
+      updateWnbaLiveScores();
+    }
     if (name === 'value')     _renderWnbaValue();
     if (name === 'breakdown') _renderWnbaBreakdown();
   } else {
@@ -2865,7 +2872,10 @@ function updateTimerDisplay() {
 }
 
 setInterval(updateTimerDisplay, 30000); // tick every 30 s
-setInterval(updateLiveScores,  60000); // live score poll every 60 s
+// Live-score poller: hits both sports every 60 s.  Each updater bails early
+// when its own results array is empty, so there's no wasted network traffic
+// when only one sport is loaded.
+setInterval(() => { updateLiveScores(); updateWnbaLiveScores(); }, 60000);
 
 /**
  * Renders a compact snapshot-lock badge next to the analysis timer.
@@ -3112,6 +3122,224 @@ window.testLiveCard = function(gameId) {
 
 // forceLiveCheck() → run updateLiveScores immediately from the console
 window.forceLiveCheck = function() { updateLiveScores(); };
+
+// ── WNBA live-score system ────────────────────────────────────────────────────
+// Parallels the MLB block above.  Source: ESPN's public WNBA scoreboard via the
+// /api/wnba/schedule proxy.  The proxy re-shapes ESPN's payload into the MLB
+// envelope ({dates:[{games:[{gamePk, teams, status, linescore}]}]}) so most
+// helpers can be shared with the MLB system; only the period-label and
+// pick-result rules differ.
+
+let _lastWnbaLiveMap   = {};   // last fetched WNBA linescore map
+let _wnbaGameIdMap     = {};   // game_id → ESPN gamePk
+let _wnbaFinalScoreMap = {};   // game_id → {awayR, homeR} for completed WNBA games
+
+async function fetchWnbaLiveScores(date) {
+  try {
+    const resp = await fetch(`/api/wnba/schedule?date=${date}&hydrate=linescore`);
+    const data = await resp.json();
+    const map  = {};
+    for (const d of (data.dates || []))
+      for (const g of (d.games || []))
+        map[g.gamePk] = g;
+    return map;
+  } catch { return {}; }
+}
+
+function _findWnbaLiveByTeamName(liveMap, awayTeam, homeTeam) {
+  if (!awayTeam || !homeTeam) return null;
+  const a = awayTeam.trim().toLowerCase();
+  const h = homeTeam.trim().toLowerCase();
+  for (const pk of Object.keys(liveMap)) {
+    const g  = liveMap[pk];
+    const ax = (g.teams?.away?.team?.name || '').trim().toLowerCase();
+    const hx = (g.teams?.home?.team?.name || '').trim().toLowerCase();
+    if (ax === a && hx === h) return g;
+    // Last-token match handles "Liberty" vs "New York Liberty"
+    const aTail = a.split(' ').slice(-1)[0];
+    const hTail = h.split(' ').slice(-1)[0];
+    if (ax.endsWith(aTail) && hx.endsWith(hTail) && aTail.length > 2 && hTail.length > 2)
+      return g;
+  }
+  return null;
+}
+
+// WNBA pick-result rules.  Moneyline → higher score wins (NBA-rules: no tie).
+// Spread → pick_team covers if their score + spread_line > opponent's score
+// (the backend stores spread_line from the pick_team's perspective, so we
+// apply it directly to the picked side).  Totals → combined score vs line.
+function _computeWnbaPickResult(g, awayR, homeR, betType) {
+  if (betType === 'single') {
+    if (awayR === homeR) return null;
+    const pickedHome = g.pick_team === g.home_team;
+    return (pickedHome ? homeR > awayR : awayR > homeR) ? 'win' : 'loss';
+  }
+  if (betType === 'spread') {
+    const sp = g.spread_pick;
+    if (!sp || sp.spread_line == null) return null;
+    // spread_line is the HOME team's handicap; flip for an away pick.
+    const homePt   = sp.spread_line;
+    const pickLine = sp.side === 'home' ? homePt : -homePt;
+    const pickedR  = sp.side === 'home' ? homeR : awayR;
+    const otherR   = sp.side === 'home' ? awayR : homeR;
+    const diff     = pickedR + pickLine - otherR;
+    if (diff > 0) return 'win';
+    if (diff < 0) return 'loss';
+    return null;
+  }
+  if (betType === 'totals') {
+    const t = g.totals;
+    if (!t || t.total_line == null) return null;
+    const combined = awayR + homeR;
+    if (combined === t.total_line) return null;
+    if (t.direction === 'over')  return combined > t.total_line ? 'win' : 'loss';
+    if (t.direction === 'under') return combined < t.total_line ? 'win' : 'loss';
+  }
+  return null;
+}
+
+// Returns the " result-win" / " result-loss" suffix for a WNBA prop card so
+// completed games render highlighted even before the live-poll runs.
+function _wnbaPropResultCls(g, betType) {
+  const fs = _wnbaFinalScoreMap[g.game_id];
+  if (!fs) return '';
+  const r = _computeWnbaPickResult(g, fs.awayR, fs.homeR, betType);
+  if (r === 'win')  return ' result-win';
+  if (r === 'loss') return ' result-loss';
+  return '';
+}
+
+function _applyWnbaPickResultHighlights(g, awayR, homeR) {
+  const targets = [
+    { id: `pc-ml-${g.game_id}`,     betType: 'single'  },
+    { id: `pc-spread-${g.game_id}`, betType: 'spread'  },
+    { id: `pc-tot-${g.game_id}`,    betType: 'totals'  },
+  ];
+  for (const { id, betType } of targets) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const r = _computeWnbaPickResult(g, awayR, homeR, betType);
+    el.classList.remove('result-win', 'result-loss');
+    if (r === 'win')  el.classList.add('result-win');
+    else if (r === 'loss') el.classList.add('result-loss');
+  }
+}
+
+function _applyWnbaLiveMap(liveMap) {
+  if (!_wnbaResults.length) return;
+  if (!Object.keys(liveMap).length) return;
+
+  let anyNewlyComplete = false;
+  for (const g of _wnbaResults) {
+    const pk = g.gamePk || _wnbaGameIdMap[g.game_id];
+    let live = (pk != null) ? liveMap[pk] : null;
+    if (!live) {
+      live = _findWnbaLiveByTeamName(liveMap, g.away_team, g.home_team);
+      if (live) {
+        _wnbaGameIdMap[g.game_id] = live.gamePk;
+        g.gamePk = live.gamePk;
+      }
+    }
+    if (!live) continue;
+
+    const state = live.status?.abstractGameState;
+    const ls    = live.linescore;
+    if (!ls) continue;
+
+    // Time badge — pulsing dot during live play, "Final" once done.
+    const timeEl = document.getElementById('gtime-' + g.game_id);
+    if (timeEl) {
+      if (state === 'Live') {
+        if (!timeEl.querySelector('.live-dot')) {
+          timeEl.textContent = '';
+          const dot = document.createElement('span');
+          dot.className = 'live-dot';
+          timeEl.appendChild(dot);
+          timeEl.appendChild(document.createTextNode(' ' + toTimeET(g.commence_time)));
+        }
+      } else if (state === 'Final') {
+        if (!timeEl._markedFinal) {
+          timeEl._markedFinal = true;
+          timeEl.textContent = '';
+          const s = document.createElement('span');
+          s.style.cssText = 'font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.6px';
+          s.textContent = 'Final';
+          timeEl.appendChild(s);
+        }
+      }
+    }
+
+    const ctr = document.getElementById('ctr-' + g.game_id);
+    if (!ctr) continue;
+
+    if (state === 'Live') {
+      const awayR = ls.teams?.away?.runs ?? 0;
+      const homeR = ls.teams?.home?.runs ?? 0;
+      const ord   = ls.currentInningOrdinal || '';
+      const clock = ls.displayClock || '';
+
+      ctr.textContent = '';
+      const r1 = document.createElement('div');
+      r1.className = 'gc-live-status';
+      const dot = document.createElement('span'); dot.className = 'live-dot';
+      r1.appendChild(dot);
+      r1.appendChild(document.createTextNode(' ' + (ord || '—')));
+      ctr.appendChild(r1);
+
+      const r2 = document.createElement('div');
+      r2.className = 'gc-live-runs';
+      const aSpan = document.createElement('span'); aSpan.textContent = String(awayR);
+      const sep   = document.createElement('span'); sep.className = 'gc-live-sep'; sep.textContent = '–';
+      const hSpan = document.createElement('span'); hSpan.textContent = String(homeR);
+      r2.appendChild(aSpan); r2.appendChild(sep); r2.appendChild(hSpan);
+      ctr.appendChild(r2);
+
+      if (clock) {
+        const r3 = document.createElement('div');
+        r3.className = 'gc-live-bso';
+        r3.textContent = clock;
+        ctr.appendChild(r3);
+      }
+    } else if (state === 'Final') {
+      const awayR = ls.teams?.away?.runs ?? 0;
+      const homeR = ls.teams?.home?.runs ?? 0;
+
+      ctr.textContent = '';
+      const lbl = document.createElement('div');
+      lbl.className = 'gc-final-label';
+      lbl.textContent = 'Final';
+      ctr.appendChild(lbl);
+
+      const r = document.createElement('div');
+      r.className = 'gc-live-runs';
+      const aSpan = document.createElement('span'); aSpan.textContent = String(awayR);
+      const sep   = document.createElement('span'); sep.className = 'gc-live-sep'; sep.textContent = '–';
+      const hSpan = document.createElement('span'); hSpan.textContent = String(homeR);
+      r.appendChild(aSpan); r.appendChild(sep); r.appendChild(hSpan);
+      ctr.appendChild(r);
+
+      _wnbaFinalScoreMap[g.game_id] = { awayR, homeR };
+      // Mirror final scores into the shared map so generic helpers (sidebar
+      // win/loss icons, breakdown rows) that key off _finalScoreMap also light up.
+      _finalScoreMap[g.game_id] = { awayR, homeR };
+      _applyWnbaPickResultHighlights(g, awayR, homeR);
+      if (!_completedGames.has(g.game_id)) {
+        _completedGames.add(g.game_id);
+        anyNewlyComplete = true;
+      }
+    }
+  }
+
+  if (anyNewlyComplete) loadLedger();
+}
+
+async function updateWnbaLiveScores() {
+  if (!_wnbaResults.length) return;
+  const liveMap = await fetchWnbaLiveScores(_todayET());
+  _lastWnbaLiveMap = liveMap;
+  _applyWnbaLiveMap(liveMap);
+}
+window.forceWnbaLiveCheck = function() { updateWnbaLiveScores(); };
 
 // dumpGameIds() → print all ctr- IDs in DOM + all game_ids in _results + _gamePkMap
 window.dumpGameIds = function() {
@@ -3663,6 +3891,9 @@ async function runAllAnalysis() {
         _renderWnbaBreakdown();
         _updateMetaGames();
       }
+      // Kick off a live-score fetch now so any in-progress or finished games
+      // get scores + result-highlights without waiting for the 60-s tick.
+      updateWnbaLiveScores();
 
       loadWnbaLedger();
       stepWnba.className   = 'prog-step done';
@@ -6890,6 +7121,9 @@ async function runWnbaAnalysis(forceRefresh = false) {
       _renderWnbaBreakdown();
       _updateMetaGames();
     }
+    // First live-score pull right after analysis so live + final games light up
+    // without waiting for the 60-s tick.
+    updateWnbaLiveScores();
 
     loadWnbaLedger();
     buildHomePage();
@@ -7052,7 +7286,7 @@ function _buildWnbaGameCard(g) {
     <div class="game-card-hdr">
       <div class="gc-meta-row">
         <div class="gc-meta-left">
-          <span class="gc-time">${timeStr}</span>
+          <span class="gc-time" id="gtime-${g.game_id}">${timeStr}</span>
           ${g.venue ? `<span class="gc-venue">${g.venue}</span>` : ''}
           <span style="font-size:10px;color:var(--purple);font-weight:700;letter-spacing:.4px">WNBA</span>
         </div>
@@ -7069,7 +7303,9 @@ function _buildWnbaGameCard(g) {
           ${awayStarHtml}
         </div>
         <div class="gc-vs-col">
-          <span class="gc-vs-text">vs</span>
+          <div class="gc-center-score" id="ctr-${g.game_id}">
+            <span class="gc-vs-text">vs</span>
+          </div>
         </div>
         <div class="gc-team-col">
           ${_wnbaLogoHtml(g.home_team, 80)}
@@ -7096,7 +7332,8 @@ function _buildWnbaMlCard(g) {
   const isSplit  = tier === 'split';
   const conflictNote = isSplit  ? `<div class="pc-conflict-note">⚡ Split signal</div>`
                      : conflict ? `<div class="pc-conflict-note">⚠ Models conflict</div>` : '';
-  return `<div class="prop-card ${conf.cls}">
+  const resCls = _wnbaPropResultCls(g, 'single');
+  return `<div id="pc-ml-${g.game_id}" class="prop-card ${conf.cls}${resCls}">
     <div class="pc-type-row">
       <div class="pc-type">Moneyline</div>
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
@@ -7130,7 +7367,8 @@ function _buildWnbaSpreadCard(g) {
   const marginNote = sp.predicted_margin !== undefined
     ? `<div style="font-size:11px;color:var(--dim);margin-top:4px">Pred margin: ${sp.predicted_margin > 0 ? '+' : ''}${sp.predicted_margin} pts</div>`
     : '';
-  return `<div class="prop-card ${conf.cls}">
+  const resCls = _wnbaPropResultCls(g, 'spread');
+  return `<div id="pc-spread-${g.game_id}" class="prop-card ${conf.cls}${resCls}">
     <div class="pc-type-row">
       <div class="pc-type">Spread</div>
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
@@ -7166,7 +7404,8 @@ function _buildWnbaTotalsCard(g) {
   const predNote = t.predicted_total
     ? `<div style="font-size:11px;color:var(--dim);margin-top:4px">Pred total: <strong>${t.predicted_total}</strong> pts (line: ${t.total_line})</div>`
     : '';
-  return `<div class="prop-card ${conf.cls}">
+  const resCls = _wnbaPropResultCls(g, 'totals');
+  return `<div id="pc-tot-${g.game_id}" class="prop-card ${conf.cls}${resCls}">
     <div class="pc-type-row">
       <div class="pc-type">Totals (O/U ${t.total_line})</div>
       <div class="pc-conf-label ${conf.cls}">${conf.label}</div>
@@ -7447,6 +7686,9 @@ async function initWnba() {
       }
       // Update home page cards with WNBA data
       if (_page === 'home') buildHomePage();
+      // Live-score pull on cold start so games already in progress (or already
+      // finished) light up without the user needing to interact.
+      updateWnbaLiveScores();
     }
     loadWnbaLedger();
   } catch (_) {}
