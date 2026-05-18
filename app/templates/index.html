@@ -1883,7 +1883,7 @@ html { -webkit-text-size-adjust: 100%; }
     <button class="topnav-tab active" id="tnav-home"   onclick="showPage('home')">Home</button>
     <div class="topnav-sports-wrap" id="topnav-sports-wrap">
       <button class="topnav-tab" id="tnav-sport" onclick="toggleSportsMenu()">
-        <span id="tnav-sport-lbl">MLB</span> ▾
+        <span id="tnav-sport-lbl">Sports</span> ▾
       </button>
       <div class="topnav-sports-menu" id="topnav-sports-menu"></div>
     </div>
@@ -2120,7 +2120,21 @@ const _FEATURE_LABELS_JS = {
 };
 
 // ── State ──────────────────────────────────────────────────────────────────────
+// _sport — active sport for data loading. Defaults to 'mlb' as a backend
+// fallback so any code that fires before the user picks (eg. /api/init) still
+// has a target, but _sportSelected starts false so the dropdown label reads
+// "Sports" until the user actually picks one.  Session-scoped: if the user
+// picked MLB or WNBA earlier in this browser session, both _sport and
+// _sportSelected are restored from sessionStorage on load.
 let _sport          = 'mlb';
+let _sportSelected  = false;
+try {
+  const _saved = sessionStorage.getItem('selectedSport');
+  if (_saved === 'mlb' || _saved === 'wnba') {
+    _sport         = _saved;
+    _sportSelected = true;
+  }
+} catch (_) { /* sessionStorage blocked (private mode) — fall back to defaults */ }
 let _results        = [];
 let _ledgerHistory  = [];
 let _gamePkMap      = {};   // game_id → MLB gamePk
@@ -2301,12 +2315,12 @@ const _ALL_SPORTS = [
 function _rebuildSportMenu() {
   const menu = document.getElementById('topnav-sports-menu');
   if (!menu) return;
-  menu.innerHTML = _ALL_SPORTS.map(s => {
-    if (s.available) {
-      const isCur = s.key === _sport;
-      return `<button class="topnav-sports-item${isCur ? ' cur' : ''}" onclick="setSport('${s.key}')">${s.label}${isCur ? ' ✓' : ''}</button>`;
-    }
-    return `<button class="topnav-sports-item unavailable" disabled>${s.label} (coming soon)</button>`;
+  // Only available sports render — NBA/NHL placeholders are hidden until they ship.
+  // The checkmark / .cur highlight is suppressed until the user has actually
+  // picked a sport (otherwise the default 'mlb' would render as pre-selected).
+  menu.innerHTML = _ALL_SPORTS.filter(s => s.available).map(s => {
+    const isCur = _sportSelected && s.key === _sport;
+    return `<button class="topnav-sports-item${isCur ? ' cur' : ''}" onclick="setSport('${s.key}')">${s.label}${isCur ? ' ✓' : ''}</button>`;
   }).join('');
 }
 
@@ -2314,6 +2328,9 @@ function toggleSportsMenu() {
   document.getElementById('topnav-sports-wrap').classList.toggle('open');
 }
 
+// Tap / click outside the Sports dropdown closes it. Inside the dropdown
+// or on the trigger button leaves it alone (the trigger's own click handler
+// performs the toggle).
 document.addEventListener('click', function(e) {
   const wrap = document.getElementById('topnav-sports-wrap');
   if (wrap && !wrap.contains(e.target)) wrap.classList.remove('open');
@@ -2329,11 +2346,15 @@ function _updateRefreshBtn() {
 }
 
 // ── Helper: update the topnav sport label ─────────────────────────────────────
+// Until the user has actually picked a sport, the trigger reads "Sports" so
+// it's clear this is a selection menu, not a static badge.  After selection
+// it reads "MLB" or "WNBA".
 function _updateMetaGames() {
-  const entry = _ALL_SPORTS.find(x => x.key === _sport);
-  const lbl   = entry ? entry.label : _sport.toUpperCase();
   const sportLblEl = document.getElementById('tnav-sport-lbl');
-  if (sportLblEl) sportLblEl.textContent = lbl;
+  if (!sportLblEl) return;
+  if (!_sportSelected) { sportLblEl.textContent = 'Sports'; return; }
+  const entry = _ALL_SPORTS.find(x => x.key === _sport);
+  sportLblEl.textContent = entry ? entry.label : _sport.toUpperCase();
 }
 
 function setSport(s) {
@@ -2341,13 +2362,12 @@ function setSport(s) {
   const curActive = TAB_NAMES.find(t => document.getElementById(`tab-${t}`)?.classList.contains('active'));
   if (curActive) _sportLastTab[_sport] = curActive;
 
-  _sport = s;
-  const entry = _ALL_SPORTS.find(x => x.key === s);
-  const lbl   = entry ? entry.label : s.toUpperCase();
+  _sport         = s;
+  _sportSelected = true;
+  try { sessionStorage.setItem('selectedSport', s); } catch (_) { /* private mode */ }
 
-  // Update topnav sport label and close the dropdown
-  const sportLbl = document.getElementById('tnav-sport-lbl');
-  if (sportLbl) sportLbl.textContent = lbl;
+  // Close both dropdowns: the Sports submenu, and the parent hamburger panel
+  // gets closed indirectly when showPage('sport') below calls closeMobileMenu().
   document.getElementById('topnav-sports-wrap').classList.remove('open');
 
   _rebuildSportMenu();
@@ -2366,7 +2386,10 @@ function setSport(s) {
   showTab(restore);
 }
 
+// Initial paint: render the dropdown options and sync the trigger label
+// ("Sports" if nothing picked yet, or the persisted sport from sessionStorage).
 _rebuildSportMenu();
+_updateMetaGames();
 
 // ── Page routing (top-level) ──────────────────────────────────────────────────
 let _page = 'home';
