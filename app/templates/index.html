@@ -4835,8 +4835,13 @@ function splitPredictedRuns(g) {
 // ── Game card builders (Full Slate) ───────────────────────────────────────────
 function buildMlCard(g) {
   const conflict  = g.conflict === true;
+  // Use the upset-adjusted pick_prob the server returns (same field totals
+  // and WNBA use).  Falling back to the raw home_win_prob derivation only
+  // when the server hasn't supplied pick_prob — keeps the ML, RL and totals
+  // tiles consistent so a comparison between them is apples-to-apples.
   const hwp       = g.home_win_prob ?? 0.5;
-  const pickProb  = g.pick_team === g.home_team ? hwp : (1 - hwp);
+  const fallback  = g.pick_team === g.home_team ? hwp : (1 - hwp);
+  const pickProb  = g.pick_prob ?? fallback;
   const conf      = _confLevel(g.confidence_tier ?? (conflict ? 'low' : 'strong'), g.pick_edge ?? 0);
   const probsHtml = `<div class="pc-probs">
     <span class="pc-conf-pct">${(pickProb*100).toFixed(0)}% Confidence</span>
@@ -4885,8 +4890,15 @@ function buildRlCard(g) {
   const ptStr    = pt > 0 ? `+${pt}` : `${pt}`;
   const rlOdds   = rl.side === 'home' ? rl.run_line_home_odds : rl.run_line_away_odds;
   const conflict = rl.conflict === true;
+  // Use the upset-adjusted rl.pick_prob the server returns so the displayed
+  // RL confidence is on the SAME scale as the ML and totals confidences.
+  // Previously this tile fell back to raw home_cover_prob, which made the
+  // RL number look inflated relative to ML (which used home_win_prob raw)
+  // or relative to ML's pick_prob (post-upset).  Fall back to the
+  // home_cover_prob derivation only if pick_prob is missing.
   const hcp      = rl.home_cover_prob ?? 0.5;
-  const pickCp   = rl.side === 'home' ? hcp : (1 - hcp);
+  const fallback = rl.side === 'home' ? hcp : (1 - hcp);
+  const pickCp   = rl.pick_prob ?? fallback;
   const conf     = _confLevel(rl.confidence_tier ?? (conflict ? 'low' : 'strong'), rl.edge ?? 0);
   const isSplit      = rl.confidence_tier === 'split';
   const valueBadge   = rl.value_bet ? `<span class="pc-value-badge">Value</span>` : '';
