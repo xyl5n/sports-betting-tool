@@ -32,7 +32,12 @@
       "Bash(xargs cat)",
       "Bash(pip freeze *)",
       "Bash(dir \"C:\\\\sports-betting-ai\\\\app\\\\.cache\")",
-      "Bash(findstr /i \"run_line\\\\|rl_model\\\\|model_rl\")"
+      "Bash(findstr /i \"run_line\\\\|rl_model\\\\|model_rl\")",
+      "Bash(git stash *)",
+      "Bash(git pull *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(findstr RULES)",
+      "Bash(echo \"COMPILE_EXIT:$?\")"
     ]
   }
 }

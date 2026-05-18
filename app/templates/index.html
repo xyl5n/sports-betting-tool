@@ -1443,12 +1443,97 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; 
 .analysis-timer.timer-fresh { color: var(--green);  border-color: rgba(63,185,80,.35);  background: rgba(63,185,80,.07);  }
 .analysis-timer.timer-mod   { color: var(--dim);    border-color: var(--border); }
 .analysis-timer.timer-stale { color: var(--red);    border-color: rgba(248,81,73,.3);   background: rgba(248,81,73,.05);  }
+/* ── Auto-schedule next-run pill ─────────────────────────────────────── */
+.auto-sched-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 500; padding: 3px 8px;
+  border-radius: 6px; border: 1px solid rgba(99,179,237,.3);
+  background: rgba(99,179,237,.07); color: #63b3ed;
+  white-space: nowrap; cursor: default;
+}
+.auto-sched-pill .sched-icon { font-size: 12px; }
+
+/* ── Settlement status chip ───────────────────────────────────────────── */
+.settle-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 500; padding: 3px 8px;
+  border-radius: 6px; border: 1px solid rgba(52,199,89,.3);
+  background: rgba(52,199,89,.07); color: var(--green);
+  white-space: nowrap;
+}
+
 .snapshot-badge {
   font-size: 11px; font-weight: 600; white-space: nowrap;
   padding: 4px 10px; border-radius: var(--radius); flex-shrink: 0;
   color: var(--blue); border: 1px solid rgba(88,166,255,.35);
   background: rgba(88,166,255,.07); letter-spacing: .2px;
 }
+
+/* ── Tools / Settings gear menu ──────────────────────────────────────── */
+.tools-wrap { position: relative; flex-shrink: 0; }
+.tools-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;
+  background: none; border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--dim);
+  cursor: pointer; font-size: 16px; line-height: 1;
+  transition: color .15s, border-color .15s, background .15s;
+  flex-shrink: 0;
+}
+.tools-btn:hover { color: var(--text); border-color: var(--dim); background: var(--hover); }
+.tools-btn.open  { color: var(--text); border-color: rgba(96,165,250,.5); background: rgba(96,165,250,.07); }
+.tools-menu {
+  display: none; position: absolute; top: calc(100% + 6px); right: 0;
+  width: 240px; z-index: 9999;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0,0,0,.55);
+}
+.tools-wrap.open .tools-menu { display: block; }
+
+.tools-section {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.tools-section:last-child { border-bottom: none; }
+
+.tools-section-hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 14px 2px;
+}
+.tools-section-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .7px; color: var(--dim2);
+}
+.tools-section-ts {
+  font-size: 10px; color: var(--dim2); white-space: nowrap;
+}
+.tools-section-ts.fresh { color: var(--green); }
+.tools-section-ts.stale { color: var(--dim); }
+
+.tools-item {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; padding: 9px 14px;
+  background: none; border: none; text-align: left;
+  color: var(--text); cursor: pointer; font-size: 13px;
+  transition: background .1s; white-space: nowrap;
+  min-height: 44px;
+}
+.tools-item:hover { background: var(--hover); }
+.tools-item:disabled { opacity: .45; cursor: default; pointer-events: none; }
+.tools-item .ti-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; }
+.tools-item .ti-lbl  { flex: 1; }
+.tools-item.danger   { color: var(--red); }
+.tools-item.danger:hover { background: rgba(248,81,73,.08); }
+.tools-item.primary  { color: var(--green); }
+.tools-item.primary:hover { background: rgba(74,222,128,.07); }
+
+/* Progress steps in topnav (relocated from sport header) */
+.topnav-prog {
+  display: none; align-items: center; gap: 5px;
+  font-size: 11px; white-space: nowrap;
+}
+.topnav-prog.visible { display: flex; }
 
 /* ── Top Nav (replaces fixed header + tabs bar) ───────────────────────── */
 :root { --topnav-h: 54px; }
@@ -1722,7 +1807,10 @@ html { -webkit-text-size-adjust: 100%; }
   .topnav-right { gap: 6px; }
   .topnav-right .status-pill { display: none; }
   #debug-live-btn { display: none !important; }
-  #reload-app-btn { min-height: 36px; min-width: 36px; }
+  #reload-app-btn { display: none !important; }
+  .tools-btn { min-height: 40px; min-width: 40px; width: 40px; height: 40px; }
+  /* On mobile the tools menu opens to the right edge — keep it in viewport */
+  .tools-menu { right: 0; width: 220px; }
 
   /* ── Sport page header: stack actions below sub-tabs ───────────────── */
   .sport-page-header {
@@ -1745,11 +1833,6 @@ html { -webkit-text-size-adjust: 100%; }
   }
   .sport-page-actions .analysis-timer,
   .sport-page-actions .snapshot-badge { flex: 1 1 auto; min-width: 0; }
-  #refresh-boards-btn,
-  #run-all-btn { min-height: 44px; flex: 1 1 auto; }
-  .run-all-wrap { flex: 1 1 auto; display: flex; }
-  .run-all-wrap #run-all-btn { width: 100%; }
-  .prog-steps { flex-basis: 100%; flex-wrap: wrap; }
 
   /* ── Layout: single column, sidebar below main ─────────────────────── */
   .layout-wrapper {
@@ -1897,8 +1980,73 @@ html { -webkit-text-size-adjust: 100%; }
       <div class="spinner" id="spinner"></div>
       <span id="status-text"></span>
     </div>
-    <button id="debug-live-btn" onclick="runLiveDebug()" title="Live score diagnostics">🔍 Debug</button>
-    <button id="reload-app-btn" onclick="window.location.reload()" title="Reload app">↻</button>
+    <!-- Progress steps — shown during Run All Analysis (relocated from sport header) -->
+    <div class="topnav-prog" id="topnav-prog">
+      <div class="prog-steps" id="run-all-progress">
+        <span class="prog-step" id="prog-mlb">MLB</span>
+        <span class="prog-sep">›</span>
+        <span class="prog-step" id="prog-wnba">WNBA</span>
+      </div>
+    </div>
+
+    <!-- ⚙ Tools gear menu -->
+    <div class="tools-wrap" id="tools-wrap">
+      <button class="tools-btn" id="tools-btn" onclick="toggleToolsMenu()" title="Tools & analysis" aria-haspopup="true" aria-expanded="false">⚙</button>
+      <div class="tools-menu" id="tools-menu" role="menu">
+
+        <!-- General -->
+        <div class="tools-section">
+          <div class="tools-section-hdr">
+            <span class="tools-section-label">General</span>
+          </div>
+          <button class="tools-item primary" onclick="toolsRunAll()">
+            <span class="ti-icon">▶</span><span class="ti-lbl">Run All Analysis</span>
+          </button>
+          <button class="tools-item" onclick="toolsDebug()">
+            <span class="ti-icon">🔍</span><span class="ti-lbl">Debug Live Scores</span>
+          </button>
+        </div>
+
+        <!-- MLB -->
+        <div class="tools-section">
+          <div class="tools-section-hdr">
+            <span class="tools-section-label">MLB</span>
+            <span class="tools-section-ts" id="tools-mlb-ts">Last: —</span>
+          </div>
+          <button class="tools-item" onclick="toolsRunMlb()">
+            <span class="ti-icon">▶</span><span class="ti-lbl">Run MLB Analysis</span>
+          </button>
+          <button class="tools-item" id="tools-refresh-mlb" onclick="toolsRefreshMlb()" disabled>
+            <span class="ti-icon">⟳</span><span class="ti-lbl">Refresh MLB Models</span>
+          </button>
+          <button class="tools-item danger" onclick="toolsResetSport('mlb')">
+            <span class="ti-icon">🗑</span><span class="ti-lbl">Reset MLB Data</span>
+          </button>
+        </div>
+
+        <!-- WNBA -->
+        <div class="tools-section">
+          <div class="tools-section-hdr">
+            <span class="tools-section-label">WNBA</span>
+            <span class="tools-section-ts" id="tools-wnba-ts">Last: —</span>
+          </div>
+          <button class="tools-item" onclick="toolsRunWnba()">
+            <span class="ti-icon">▶</span><span class="ti-lbl">Run WNBA Analysis</span>
+          </button>
+          <button class="tools-item" id="tools-refresh-wnba" onclick="toolsRefreshWnba()" disabled>
+            <span class="ti-icon">⟳</span><span class="ti-lbl">Refresh WNBA Models</span>
+          </button>
+          <button class="tools-item danger" onclick="toolsResetSport('wnba')">
+            <span class="ti-icon">🗑</span><span class="ti-lbl">Reset WNBA Data</span>
+          </button>
+        </div>
+
+      </div><!-- /.tools-menu -->
+    </div><!-- /.tools-wrap -->
+
+    <!-- Hidden legacy buttons — keep in DOM so existing JS getElementById calls don't break -->
+    <button id="debug-live-btn" onclick="runLiveDebug()" style="display:none"></button>
+    <button id="reload-app-btn" onclick="window.location.reload()" style="display:none">↻</button>
   </div>
 </header>
 
@@ -1922,6 +2070,12 @@ html { -webkit-text-size-adjust: 100%; }
         <h1>Sports Betting Analysis</h1>
         <p>Go to <strong>Sports</strong> and run analysis to see today's best picks</p>
       </div>
+      <div id="settlement-status-bar" style="display:none; margin: 12px 0 0; text-align:center">
+        <span class="settle-chip" id="settle-chip">
+          ✓ Last settled: <span id="settle-last-time">—</span>
+          (<span id="settle-last-summary">—</span>)
+        </span>
+      </div>
     </div>
   </div>
 </div>
@@ -1940,16 +2094,13 @@ html { -webkit-text-size-adjust: 100%; }
     <div class="sport-page-actions">
       <span class="analysis-timer timer-new" id="analysis-timer">Never run</span>
       <span class="snapshot-badge" id="snapshot-badge" style="display:none"></span>
-      <button id="refresh-boards-btn" onclick="refreshModels()"
-              title="Reruns models on cached data — no API calls" disabled>⟳ Refresh Models</button>
-      <div class="run-all-wrap">
-        <div class="prog-steps" id="run-all-progress" style="display:none">
-          <span class="prog-step" id="prog-mlb">MLB</span>
-          <span class="prog-sep">›</span>
-          <span class="prog-step" id="prog-wnba">WNBA</span>
-        </div>
-        <button id="run-all-btn" onclick="runAllAnalysis()">▶ Run Analysis</button>
-      </div>
+      <span class="auto-sched-pill" id="auto-sched-pill" style="display:none">
+        <span class="sched-icon">🕗</span>
+        <span id="auto-sched-text">Next: —</span>
+      </span>
+      <!-- Hidden legacy buttons — keep in DOM so existing JS getElementById calls work -->
+      <button id="refresh-boards-btn" style="display:none" disabled></button>
+      <button id="run-all-btn" style="display:none"></button>
     </div>
   </div>
 
@@ -1966,7 +2117,7 @@ html { -webkit-text-size-adjust: 100%; }
       <div id="tab-slate" class="tab-pane active">
         <div class="empty" id="slate-empty">
           <div class="icon">📋</div>
-          Click <strong>▶ Run Analysis</strong> to load today's games
+          Open <strong>⚙ Tools</strong> and tap <strong>Run Analysis</strong> to load today's games
         </div>
         <div id="slate-content" style="display:none">
           <div class="section-hdr">
@@ -1985,7 +2136,7 @@ html { -webkit-text-size-adjust: 100%; }
       <div id="tab-value" class="tab-pane">
         <div class="empty" id="value-empty">
           <div class="icon">💎</div>
-          Click <strong>▶ Run Analysis</strong> to find value picks
+          Open <strong>⚙ Tools</strong> and tap <strong>Run Analysis</strong> to find value picks
         </div>
         <div id="value-content" style="display:none">
           <div class="section-hdr">
@@ -2003,13 +2154,13 @@ html { -webkit-text-size-adjust: 100%; }
 
       <!-- Model Breakdown -->
       <div id="tab-breakdown" class="tab-pane">
-        <div class="empty"><div class="icon">🔬</div>Click <strong>▶ Run Analysis</strong> to see model breakdowns</div>
+        <div class="empty"><div class="icon">🔬</div>Open <strong>⚙ Tools</strong> and tap <strong>Run Analysis</strong> to see model breakdowns</div>
       </div>
 
       <!-- Export / Copy Picks -->
       <div id="tab-export" class="tab-pane">
         <div class="section-hdr"><h2>Export Picks</h2></div>
-        <div id="export-inner"><div class="exp-empty">Run analysis to generate picks.</div></div>
+        <div id="export-inner"><div class="exp-empty">Open ⚙ Tools → Run Analysis to generate picks.</div></div>
       </div>
     </main>
   </div>
@@ -2084,6 +2235,22 @@ html { -webkit-text-size-adjust: 100%; }
       </p>
       <div id="model-perf-inner">
         <div class="empty"><div class="icon">📊</div>Loading performance data…</div>
+      </div>
+    </div>
+
+    <!-- Auto-Analysis Schedule -->
+    <div class="retrain-section" id="auto-analysis-section">
+      <div class="section-hdr" style="margin-top:0">
+        <h2>Auto-Analysis Schedule</h2>
+        <button onclick="loadAutoAnalysisStatus()" class="btn-track"
+                style="font-size:12px;margin-left:auto">↻ Refresh</button>
+      </div>
+      <p style="color:var(--text-dim);font-size:13px;margin:0 0 16px">
+        Full MLB + WNBA analysis runs automatically every morning at <strong>8:00 AM ET</strong>
+        and again at <strong>12:00 PM ET</strong> to capture line movements and updated pitching info.
+      </p>
+      <div id="auto-analysis-inner">
+        <div class="empty"><div class="icon">🕗</div>Loading schedule…</div>
       </div>
     </div>
 
@@ -2424,7 +2591,7 @@ function showPage(name) {
   closeMobileMenu();
   // Side effects
   if (name === 'mybets') { loadLedger(); return; }
-  if (name === 'model')  { loadLedger(); loadModelPerformance(); loadRetrainStatus(); return; }
+  if (name === 'model')  { loadLedger(); loadModelPerformance(); loadRetrainStatus(); loadAutoAnalysisStatus(); return; }
   if (name === 'ai')     { initChatTab(); return; }
   if (name === 'home')   { buildHomePage(); return; }
 }
@@ -2856,6 +3023,9 @@ function setAnalyzedNow(ts) {
   _lastAnalyzedAt = (ts instanceof Date) ? ts : new Date();
   try { localStorage.setItem(_LS_KEY, _lastAnalyzedAt.toISOString()); } catch {}
   updateTimerDisplay();
+  // Keep per-sport tracker in sync so the tools menu timestamps are accurate
+  if (_sport === 'mlb')  _mlbLastAnalyzedAt  = _lastAnalyzedAt;
+  if (_sport === 'wnba') _wnbaLastAnalyzedAt = _lastAnalyzedAt;
 }
 
 function updateTimerDisplay() {
@@ -3499,6 +3669,8 @@ async function initApp() {
   _loadTimerFromStorage();
   updateTimerDisplay();
   loadLedger();
+  loadAutoAnalysisStatus();
+  loadAutoSettlementStatus();
 
   // Start on Home page
   showPage('home');
@@ -3522,10 +3694,15 @@ async function initApp() {
     _results = _mergeWithCache(data.results || []);
     _parlays = data.parlays || {};
     _confirmed.clear();
-    _lastAnalyzedAt = new Date(data.analyzed_at);
+    _lastAnalyzedAt    = new Date(data.analyzed_at);
+    _mlbLastAnalyzedAt = _lastAnalyzedAt;
     if (data.snapshot && data.analyzed_at) _snapshotLockedAt = new Date(data.analyzed_at);
     updateTimerDisplay();
-    if (_results.length) document.getElementById('refresh-boards-btn').disabled = false;
+    if (_results.length) {
+      document.getElementById('refresh-boards-btn').disabled = false;
+      const _mt = document.getElementById('tools-refresh-mlb');
+      if (_mt) _mt.disabled = false;
+    }
 
     // Pre-populate confirmed set; also load cross-sport daily picks
     try {
@@ -3648,7 +3825,12 @@ async function _doAnalysis(opts) {
 
     if (data.snapshot && data.analyzed_at) _snapshotLockedAt = new Date(data.analyzed_at);
     _renderSnapshotBadge();
-    if (!data.cached) setAnalyzedNow(data.analyzed_at ? new Date(data.analyzed_at) : new Date());
+    const _doAt = data.analyzed_at ? new Date(data.analyzed_at) : new Date();
+    _mlbLastAnalyzedAt = _doAt;
+    if (!data.cached) setAnalyzedNow(_doAt);
+    // Enable MLB refresh button in tools menu
+    const _mt = document.getElementById('tools-refresh-mlb');
+    if (_mt) _mt.disabled = !_results.length;
     updateLiveScores();
     setStatus(data.snapshot
       ? `✓ ${_results.length} MLB games · snapshot locked`
@@ -3677,6 +3859,7 @@ async function runAllAnalysis() {
   // Show progress strip, disable button
   btn.disabled   = true;
   progEl.style.display = '';
+  _showTopnavProg();
   stepMlb.className  = 'prog-step';
   stepWnba.className = 'prog-step';
   stepMlb.textContent  = 'MLB';
@@ -3731,7 +3914,9 @@ async function runAllAnalysis() {
 
       if (data.snapshot && data.analyzed_at) _snapshotLockedAt = new Date(data.analyzed_at);
       _renderSnapshotBadge();
-      if (!data.cached) setAnalyzedNow(data.analyzed_at ? new Date(data.analyzed_at) : new Date());
+      const _mlbAt = data.analyzed_at ? new Date(data.analyzed_at) : new Date();
+      _mlbLastAnalyzedAt = _mlbAt;
+      if (!data.cached) setAnalyzedNow(_mlbAt);
       stepMlb.className   = 'prog-step done';
       stepMlb.textContent = data.snapshot ? `MLB (📌 locked)` : `MLB (${_results.length})`;
       updateLiveScores();
@@ -3784,6 +3969,7 @@ async function runAllAnalysis() {
       loadTodayWnbaSchedule();
 
       loadWnbaLedger();
+      _wnbaLastAnalyzedAt  = new Date();
       stepWnba.className   = 'prog-step done';
       stepWnba.textContent = `WNBA (${_wnbaResults.length})`;
     }
@@ -3803,7 +3989,7 @@ async function runAllAnalysis() {
   setStatus(total > 0
     ? `✓ ${total} games analysed across all sports`
     : 'Analysis complete — no games found today');
-  setTimeout(() => { progEl.style.display = 'none'; }, 6000);
+  setTimeout(() => { progEl.style.display = 'none'; _hideTopnavProg(); }, 6000);
 
   // Update home page cards + export tab if open
   buildHomePage();
@@ -3930,6 +4116,254 @@ async function runLiveDebug() {
 
 function closeDebug() {
   document.getElementById('debug-overlay').classList.remove('open');
+}
+
+// ── Tools / Settings gear menu ────────────────────────────────────────────────
+// Per-sport last-analyzed timestamps (Date | null).  Set when analysis completes.
+let _mlbLastAnalyzedAt  = null;
+let _wnbaLastAnalyzedAt = null;
+
+function toggleToolsMenu() {
+  const wrap = document.getElementById('tools-wrap');
+  const btn  = document.getElementById('tools-btn');
+  const open = wrap.classList.toggle('open');
+  btn.classList.toggle('open', open);
+  btn.setAttribute('aria-expanded', open);
+  if (open) _syncToolsMenu();
+}
+
+function closeToolsMenu() {
+  const wrap = document.getElementById('tools-wrap');
+  const btn  = document.getElementById('tools-btn');
+  wrap.classList.remove('open');
+  btn.classList.remove('open');
+  btn.setAttribute('aria-expanded', 'false');
+}
+
+// Close when clicking outside
+document.addEventListener('click', function(e) {
+  const wrap = document.getElementById('tools-wrap');
+  if (wrap && !wrap.contains(e.target)) closeToolsMenu();
+});
+
+// Sync enable/disable state + timestamps each time menu opens
+function _syncToolsMenu() {
+  // Refresh-MLB enabled only when MLB results exist
+  const mlbBtn = document.getElementById('tools-refresh-mlb');
+  if (mlbBtn) mlbBtn.disabled = !(_results && _results.length > 0);
+  // Refresh-WNBA enabled only when WNBA results exist
+  const wnbaBtn = document.getElementById('tools-refresh-wnba');
+  if (wnbaBtn) wnbaBtn.disabled = !(_wnbaResults && _wnbaResults.length > 0);
+  // Update timestamps
+  _updateToolsTimestamps();
+}
+
+function _fmtToolsTs(dt) {
+  if (!dt) return 'Last: —';
+  const mins = Math.floor((Date.now() - dt.getTime()) / 60000);
+  if (mins < 1)  return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem > 0 ? `${hrs}h ${rem}m ago` : `${hrs}h ago`;
+}
+
+function _updateToolsTimestamps() {
+  const mlbEl  = document.getElementById('tools-mlb-ts');
+  const wnbaEl = document.getElementById('tools-wnba-ts');
+  if (mlbEl) {
+    mlbEl.textContent = _fmtToolsTs(_mlbLastAnalyzedAt);
+    mlbEl.className = 'tools-section-ts' +
+      (_mlbLastAnalyzedAt && (Date.now() - _mlbLastAnalyzedAt.getTime()) < 60 * 60 * 1000 ? ' fresh' : ' stale');
+  }
+  if (wnbaEl) {
+    wnbaEl.textContent = _fmtToolsTs(_wnbaLastAnalyzedAt);
+    wnbaEl.className = 'tools-section-ts' +
+      (_wnbaLastAnalyzedAt && (Date.now() - _wnbaLastAnalyzedAt.getTime()) < 60 * 60 * 1000 ? ' fresh' : ' stale');
+  }
+}
+
+// Show/hide topnav progress strip
+function _showTopnavProg() {
+  const el = document.getElementById('topnav-prog');
+  if (el) el.classList.add('visible');
+}
+function _hideTopnavProg() {
+  const el = document.getElementById('topnav-prog');
+  if (el) el.classList.remove('visible');
+}
+
+// ── Tools menu action handlers ─────────────────────────────────────────────────
+function toolsRunAll() {
+  closeToolsMenu();
+  // Show sport page if not already on it
+  if (_page !== 'sport') showPage('sport');
+  _showTopnavProg();
+  runAllAnalysis();
+}
+
+async function toolsRunMlb() {
+  closeToolsMenu();
+  // Switch to MLB + navigate to sport page
+  if (_sport !== 'mlb') setSport('mlb');
+  else if (_page !== 'sport') showPage('sport');
+  _showTopnavProg();
+  document.getElementById('spinner').style.display = 'block';
+  setStatus('Analyzing MLB…');
+  const stepMlb  = document.getElementById('prog-mlb');
+  const stepWnba = document.getElementById('prog-wnba');
+  stepMlb.className  = 'prog-step active';
+  stepMlb.textContent = 'MLB';
+  stepWnba.className = 'prog-step';
+  stepWnba.textContent = 'WNBA';
+  try {
+    const resp = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sport: 'mlb', bankroll: _bankroll, season: 2024, force_refresh: true }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      stepMlb.className   = 'prog-step skipped';
+      stepMlb.textContent = 'MLB Error';
+      setStatus('');
+      renderError(data.error + (data.detail ? '\n\n' + data.detail : ''));
+    } else if (!data.results || data.results.length === 0) {
+      stepMlb.className   = 'prog-step skipped';
+      stepMlb.textContent = 'No MLB games today';
+      setStatus('No MLB games today');
+    } else {
+      _results = _mergeWithCache(data.results);
+      _parlays = data.parlays || {};
+      _confirmed.clear();
+      document.getElementById('refresh-boards-btn').disabled = false;
+      document.getElementById('tools-refresh-mlb').disabled = false;
+      try {
+        const lr = await fetch(`/api/ledger?bankroll=${_bankroll}&sport=mlb`);
+        const ld = await lr.json();
+        (ld.open_bets || []).forEach(b => { if (b.confirmed) _confirmed.add(b.game_id); });
+        if (ld.daily_picks) _dailyPicks = ld.daily_picks;
+      } catch {}
+      await enrichResultsFromSchedule(_results);
+      await _loadExplainCache();
+      if (_sport === 'mlb') {
+        renderSlate(_results);
+        renderValue(_results);
+        renderSidebar(_results);
+        renderBreakdown(_results);
+        _updateMetaGames();
+      }
+      if (data.snapshot && data.analyzed_at) _snapshotLockedAt = new Date(data.analyzed_at);
+      _renderSnapshotBadge();
+      const mlbAt = data.analyzed_at ? new Date(data.analyzed_at) : new Date();
+      _mlbLastAnalyzedAt = mlbAt;
+      if (!data.cached) setAnalyzedNow(mlbAt);
+      stepMlb.className   = 'prog-step done';
+      stepMlb.textContent = data.snapshot ? 'MLB (📌 locked)' : `MLB (${_results.length})`;
+      setStatus(`✓ ${_results.length} MLB games analysed`);
+      updateLiveScores();
+    }
+  } catch (err) {
+    stepMlb.className   = 'prog-step skipped';
+    stepMlb.textContent = 'MLB failed';
+    setStatus('MLB analysis failed');
+  } finally {
+    document.getElementById('spinner').style.display = 'none';
+    setTimeout(() => _hideTopnavProg(), 6000);
+    buildHomePage();
+  }
+}
+
+async function toolsRunWnba() {
+  closeToolsMenu();
+  if (_sport !== 'wnba') setSport('wnba');
+  else if (_page !== 'sport') showPage('sport');
+  _showTopnavProg();
+  const stepMlb  = document.getElementById('prog-mlb');
+  const stepWnba = document.getElementById('prog-wnba');
+  stepMlb.className  = 'prog-step';
+  stepMlb.textContent = 'MLB';
+  stepWnba.className = 'prog-step active';
+  stepWnba.textContent = 'WNBA';
+  await runWnbaAnalysis(true);
+  _wnbaLastAnalyzedAt = new Date();
+  document.getElementById('tools-refresh-wnba').disabled = !(_wnbaResults && _wnbaResults.length > 0);
+  stepWnba.className   = 'prog-step done';
+  stepWnba.textContent = `WNBA (${_wnbaResults.length})`;
+  setTimeout(() => _hideTopnavProg(), 6000);
+}
+
+async function toolsRefreshMlb() {
+  closeToolsMenu();
+  if (_sport !== 'mlb') setSport('mlb');
+  else if (_page !== 'sport') showPage('sport');
+  await refreshModels();
+}
+
+async function toolsRefreshWnba() {
+  closeToolsMenu();
+  if (_sport !== 'wnba') setSport('wnba');
+  else if (_page !== 'sport') showPage('sport');
+  await refreshModels();
+}
+
+async function toolsDebug() {
+  closeToolsMenu();
+  await runLiveDebug();
+}
+
+async function toolsResetSport(sport) {
+  closeToolsMenu();
+  const label = sport === 'mlb' ? 'MLB' : 'WNBA';
+  const ok = confirm(
+    `⚠️ Reset ${label} Analysis Data\n\n` +
+    `This will clear today's ${label} snapshot so you can re-run a fresh analysis.\n\n` +
+    `Your bet history and bankroll are NOT affected.\n\n` +
+    `Continue?`
+  );
+  if (!ok) return;
+
+  try {
+    const resp = await fetch('/api/reset-sport', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sport }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      if (sport === 'mlb') {
+        _mlbLastAnalyzedAt = null;
+        _results = [];
+        _snapshotLockedAt  = null;
+        _lastAnalyzedAt    = null;
+        document.getElementById('refresh-boards-btn').disabled = true;
+        document.getElementById('tools-refresh-mlb').disabled  = true;
+        if (_sport === 'mlb') {
+          renderSlate([]);
+          renderValue([]);
+          renderSidebar([]);
+          renderBreakdown([]);
+          updateTimerDisplay();
+          _renderSnapshotBadge();
+        }
+      } else {
+        _wnbaLastAnalyzedAt = null;
+        _wnbaResults  = [];
+        _wnbaAnalyzed = false;
+        document.getElementById('tools-refresh-wnba').disabled = true;
+        if (_sport === 'wnba') {
+          _renderWnbaSlate();
+          _renderWnbaValue();
+          _renderWnbaBreakdown();
+        }
+      }
+      showToast(`✓ ${label} data cleared — ready for fresh analysis`);
+    } else {
+      alert(`Reset failed: ${data.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    alert('Request failed: ' + err.message);
+  }
 }
 
 function renderError(msg) {
@@ -5729,6 +6163,145 @@ async function loadRetrainStatus() {
   }
 }
 
+async function loadAutoAnalysisStatus() {
+  const inner = document.getElementById('auto-analysis-inner');
+  const pill  = document.getElementById('auto-sched-pill');
+  const pillTxt = document.getElementById('auto-sched-text');
+  try {
+    const resp = await fetch('/api/auto_analysis_status');
+    const data = await resp.json();
+    if (data.error) {
+      if (inner) inner.innerHTML = `<div class="empty">Error: ${data.error}</div>`;
+      return;
+    }
+
+    // Helper to format ISO → short local time
+    function _fmtTs(iso) {
+      if (!iso) return '<span class="dim">—</span>';
+      try {
+        return new Date(iso).toLocaleString('en-US', {
+          month: 'short', day: 'numeric',
+          hour: 'numeric', minute: '2-digit', hour12: true,
+        });
+      } catch { return iso; }
+    }
+    function _countdown(iso) {
+      if (!iso) return null;
+      const diff = new Date(iso) - Date.now();
+      if (diff <= 0) return 'imminent';
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+    }
+
+    // Update the header pill on the sport page
+    const nextRun = data.next_run;
+    if (pill && pillTxt) {
+      if (nextRun) {
+        const cd = _countdown(nextRun);
+        const isMorning = data.next_morning_run && nextRun === data.next_morning_run;
+        pillTxt.textContent = `Next auto: ${isMorning ? '8 AM' : '12 PM'} ET (${cd})`;
+        pill.style.display = '';
+      } else {
+        pill.style.display = 'none';
+      }
+    }
+
+    if (!inner) return;
+
+    // Status badge
+    const statusMap = { success: ['✓ Success', 'success'], partial: ['⚠ Partial', 'partial'], error: ['✗ Error', 'error'] };
+    const [statusLabel, statusCls] = statusMap[data.last_status] || ['—', 'pending'];
+
+    // Build meta grid
+    const metaHtml = `
+      <div class="retrain-meta">
+        <div class="retrain-meta-cell">
+          <div class="retrain-meta-label">Next morning run (8 AM ET)</div>
+          <div class="retrain-meta-value">${_fmtTs(data.next_morning_run)}
+            <br><span style="font-size:11px;color:var(--text-dim);font-weight:400">${_countdown(data.next_morning_run) || '—'}</span>
+          </div>
+        </div>
+        <div class="retrain-meta-cell">
+          <div class="retrain-meta-label">Next noon run (12 PM ET)</div>
+          <div class="retrain-meta-value">${_fmtTs(data.next_noon_run)}
+            <br><span style="font-size:11px;color:var(--text-dim);font-weight:400">${_countdown(data.next_noon_run) || '—'}</span>
+          </div>
+        </div>
+        <div class="retrain-meta-cell">
+          <div class="retrain-meta-label">Last run</div>
+          <div class="retrain-meta-value ${data.last_started ? '' : 'dim'}">
+            ${data.last_started ? _fmtTs(data.last_started) + `<br><span style="font-size:11px;color:var(--text-dim);font-weight:400">${data.last_label || ''}</span>` : 'Never'}
+          </div>
+        </div>
+        <div class="retrain-meta-cell">
+          <div class="retrain-meta-label">Last result</div>
+          <div class="retrain-meta-value">
+            ${data.last_status ? `<span class="retrain-badge ${statusCls}">${statusLabel}</span>` : '<span class="dim">—</span>'}
+            ${data.last_results && data.last_results.MLB ? `<br><span style="font-size:11px;color:var(--text-dim)">MLB: ${data.last_results.MLB.games ?? '?'} games / ${data.last_results.MLB.picks ?? '?'} picks</span>` : ''}
+            ${data.last_results && data.last_results.WNBA ? `<br><span style="font-size:11px;color:var(--text-dim)">WNBA: ${data.last_results.WNBA.games ?? '?'} games / ${data.last_results.WNBA.picks ?? '?'} picks</span>` : ''}
+          </div>
+        </div>
+      </div>`;
+
+    let settleSummaryHtml = '';
+    try {
+      const sr = await fetch('/api/auto_settlement_status');
+      const sd = await sr.json();
+      if (!sd.error) {
+        function _fmtTs2(iso) {
+          if (!iso) return '—';
+          try { return new Date(iso).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}); }
+          catch { return iso; }
+        }
+        settleSummaryHtml = `
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-bottom:6px">Auto-Settlement (every 30 min, 11 AM–2 AM ET)</div>
+            <div style="font-size:13px;color:var(--text)">
+              Last ran: <strong>${_fmtTs2(sd.last_ran_at) || 'Never'}</strong>
+              &nbsp;·&nbsp; Settled: <strong>${sd.last_settled || 0}</strong>
+              (${sd.last_wins || 0}W/${sd.last_losses || 0}L)
+              &nbsp;·&nbsp; Voided: <strong>${sd.last_voided || 0}</strong>
+            </div>
+          </div>`;
+      }
+    } catch(_e) {}
+    inner.innerHTML = metaHtml + settleSummaryHtml;
+  } catch (err) {
+    if (inner) inner.innerHTML = `<div class="empty">Failed to load schedule: ${err.message}</div>`;
+  }
+}
+
+async function loadAutoSettlementStatus() {
+  try {
+    const resp = await fetch('/api/auto_settlement_status');
+    const data = await resp.json();
+    if (data.error) return;
+
+    const bar  = document.getElementById('settlement-status-bar');
+    const time = document.getElementById('settle-last-time');
+    const summ = document.getElementById('settle-last-summary');
+    if (!bar || !time || !summ) return;
+
+    if (data.last_ran_at) {
+      try {
+        const d = new Date(data.last_ran_at);
+        time.textContent = d.toLocaleString('en-US', {
+          month: 'short', day: 'numeric',
+          hour: 'numeric', minute: '2-digit', hour12: true,
+        });
+      } catch { time.textContent = data.last_ran_at; }
+
+      const parts = [];
+      if ((data.last_settled || 0) > 0) parts.push(`${data.last_settled} settled: ${data.last_wins}W/${data.last_losses}L`);
+      else parts.push('0 settled');
+      if ((data.last_voided || 0) > 0) parts.push(`${data.last_voided} voided`);
+      summ.textContent = parts.join(', ');
+      bar.style.display = '';
+    }
+  } catch (_e) { /* silent */ }
+}
+
 async function _triggerRetrainNow(btn) {
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
@@ -7459,6 +8032,9 @@ async function runWnbaAnalysis(forceRefresh = false) {
 
     loadWnbaLedger();
     buildHomePage();
+    _wnbaLastAnalyzedAt = new Date();
+    const _wt = document.getElementById('tools-refresh-wnba');
+    if (_wt) _wt.disabled = !_wnbaResults.length;
     setStatus(data.cached
       ? `✓ ${_wnbaResults.length} WNBA games · cached`
       : `✓ ${_wnbaResults.length} WNBA games analysed`);

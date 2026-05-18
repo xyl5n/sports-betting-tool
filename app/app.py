@@ -528,6 +528,31 @@ _wnba_analysis_state: dict = {
     "last_analysis_meta": {},
 }
 
+# ── Auto-analysis scheduler state ─────────────────────────────────────────────
+_auto_analysis_lock  = threading.Lock()
+_auto_analysis_state: dict = {
+    "last_label":    None,
+    "last_started":  None,
+    "last_finished": None,
+    "last_duration": None,
+    "last_status":   None,   # "success" | "partial" | "error" | None
+    "last_results":  {},     # {"MLB": {...}, "WNBA": {...}}
+}
+_AUTO_ANALYSIS_LOG_FILE = Path("data/auto_analysis_log.json")
+
+# ── Auto-settlement scheduler state ───────────────────────────────────────────
+_auto_settlement_lock  = threading.Lock()
+_auto_settlement_state: dict = {
+    "last_ran_at":  None,   # ISO UTC
+    "last_settled": 0,
+    "last_wins":    0,
+    "last_losses":  0,
+    "last_voided":  0,
+}
+
+# Module-level scheduler reference (set at startup)
+_sched = None
+
 _FEATURE_LABELS = {
     # NFL
     "net_scoring_diff":     "Net scoring margin",
@@ -2923,6 +2948,52 @@ def get_retrain_status():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/auto_analysis_status", methods=["GET"])
+def get_auto_analysis_status():
+    """Next scheduled auto-analysis times + last run summary."""
+    try:
+        next_morning = next_noon = None
+        if _sched is not None and _sched.running:
+            for job_id in ("auto_analysis_morning", "auto_analysis_noon"):
+                job = _sched.get_job(job_id)
+                if job and job.next_run_time:
+                    iso = job.next_run_time.isoformat()
+                    if job_id == "auto_analysis_morning":
+                        next_morning = iso
+                    else:
+                        next_noon = iso
+        # Pick whichever fires soonest as "next_run"
+        candidates = [t for t in [next_morning, next_noon] if t]
+        next_run = min(candidates) if candidates else None
+        with _auto_analysis_lock:
+            state = dict(_auto_analysis_state)
+        return jsonify({
+            "scheduler_running": _sched is not None and _sched.running,
+            "next_morning_run":  next_morning,
+            "next_noon_run":     next_noon,
+            "next_run":          next_run,
+            **state,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/auto_settlement_status", methods=["GET"])
+def get_auto_settlement_status():
+    """Last settlement run metadata + next scheduled fire time."""
+    try:
+        next_run = None
+        if _sched is not None and _sched.running:
+            job = _sched.get_job("auto_settlement")
+            if job and job.next_run_time:
+                next_run = job.next_run_time.isoformat()
+        with _auto_settlement_lock:
+            state = dict(_auto_settlement_state)
+        return jsonify({"next_run": next_run, "scheduler_running": _sched is not None and _sched.running, **state})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/retrain_now", methods=["POST"])
 def trigger_retrain_now():
     """
@@ -3171,6 +3242,47 @@ def reset_all():
         picks_path.write_text(json.dumps(empty_picks, indent=2), encoding="utf-8")
 
         return jsonify({"success": True, "message": "All bet history cleared and records reset to 0-0."})
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/reset-sport", methods=["POST"])
+def reset_sport():
+    """
+    Clear today's analysis snapshot and timestamp for a single sport so a
+    fresh analysis run can overwrite it.  Does NOT touch bet history or bankrolls.
+
+    Body JSON: { "sport": "mlb" | "wnba" }
+    """
+    try:
+        sport = (request.json or {}).get("sport", "").strip().lower()
+        if sport not in ("mlb", "wnba"):
+            return jsonify({"success": False, "error": "sport must be 'mlb' or 'wnba'"}), 400
+
+        # 1. Clear snapshot entry so _write_daily_snapshot write-once guard is lifted
+        _clear_snapshot_sport(sport)
+
+        # 2. Clear analysis timestamp for this sport
+        try:
+            ts_data = _read_analysis_timestamps()
+            if sport in ts_data:
+                del ts_data[sport]
+                Path("data").mkdir(exist_ok=True)
+                _ANALYSIS_TIMESTAMPS_FILE.write_text(
+                    json.dumps(ts_data, indent=2), encoding="utf-8"
+                )
+        except Exception:
+            pass
+
+        # 3. Clear in-memory analysis state so auto-status endpoints reflect the reset
+        if sport == "mlb":
+            _analysis_state["last_analyzed_at"] = None
+        else:
+            _wnba_analysis_state["last_analyzed_at"] = None
+
+        _eprint(f"RESET-SPORT: {sport.upper()} snapshot + timestamp cleared by user")
+        return jsonify({"success": True, "sport": sport,
+                        "message": f"{sport.upper()} analysis data cleared."})
     except Exception as exc:
         return jsonify({"success": False, "error": str(exc)}), 500
 
@@ -4271,6 +4383,340 @@ def settle_wnba_manual(bet_id: str):
     return jsonify({"success": True, "settled": _py(settled)})
 
 
+# ── Auto-analysis helpers ─────────────────────────────────────────────────────
+
+def _write_auto_analysis_log(entry: dict) -> None:
+    """Append a run entry to data/auto_analysis_log.json (newest-first, cap 60). Never raises."""
+    try:
+        _AUTO_ANALYSIS_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            raw = json.loads(_AUTO_ANALYSIS_LOG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            raw = {"runs": [], "last_success": None}
+        runs = raw.get("runs", [])
+        runs.insert(0, entry)
+        runs = runs[:60]
+        if entry.get("status") == "success":
+            raw["last_success"] = entry.get("started_at")
+        raw["runs"] = runs
+        tmp = _AUTO_ANALYSIS_LOG_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(raw, default=str), encoding="utf-8")
+        tmp.replace(_AUTO_ANALYSIS_LOG_FILE)
+    except Exception as _exc:
+        _eprint(f"AUTO-ANALYSIS: _write_auto_analysis_log error: {_exc}")
+
+
+def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
+    """Run MLB + WNBA analysis via the Flask test client. Called by APScheduler."""
+    _eprint(f"AUTO-ANALYSIS [{label}]: starting (is_retry={is_retry})")
+    started_at = datetime.now(timezone.utc)
+
+    # Read bankrolls
+    try:
+        mlb_bankroll = Ledger(path="data/ledger.json", starting_bankroll=250).data.get("bankroll", 250)
+    except Exception:
+        mlb_bankroll = 250
+
+    try:
+        wnba_bankroll = Ledger(path="data/wnba_ledger.json", starting_bankroll=250).data.get("bankroll", 250)
+    except Exception:
+        wnba_bankroll = 250
+
+    season = int(os.getenv("SEASON", 2025))
+
+    results: dict = {}
+
+    # ── MLB ───────────────────────────────────────────────────────────────────
+    mlb_games = mlb_picks = 0
+    mlb_error: str | None = None
+    try:
+        with app.test_client() as _client:
+            resp = _client.post(
+                "/api/analyze",
+                json={"sport": "mlb", "bankroll": mlb_bankroll, "season": season, "force_refresh": True},
+                content_type="application/json",
+            )
+        if resp.status_code == 200:
+            data = resp.get_json() or {}
+            mlb_games = len(data.get("results", []))
+            mlb_picks = sum(1 for r in data.get("results", []) if r.get("value_pick"))
+        else:
+            mlb_error = f"HTTP {resp.status_code}"
+    except Exception as _exc:
+        mlb_error = str(_exc)
+        _eprint(f"AUTO-ANALYSIS [{label}]: MLB error: {traceback.format_exc()}")
+
+    results["MLB"] = {"games": mlb_games, "picks": mlb_picks, "error": mlb_error}
+
+    # ── WNBA ──────────────────────────────────────────────────────────────────
+    wnba_games = wnba_picks = 0
+    wnba_error: str | None = None
+    try:
+        with app.test_client() as _client:
+            resp = _client.post(
+                "/api/wnba/analyze",
+                json={"bankroll": wnba_bankroll, "season": season, "force_refresh": True},
+                content_type="application/json",
+            )
+        if resp.status_code == 200:
+            data = resp.get_json() or {}
+            wnba_games = len(data.get("results", []))
+            wnba_picks = sum(1 for r in data.get("results", []) if r.get("value_pick"))
+        else:
+            wnba_error = f"HTTP {resp.status_code}"
+    except Exception as _exc:
+        wnba_error = str(_exc)
+        _eprint(f"AUTO-ANALYSIS [{label}]: WNBA error: {traceback.format_exc()}")
+
+    results["WNBA"] = {"games": wnba_games, "picks": wnba_picks, "error": wnba_error}
+
+    # ── Summarise ─────────────────────────────────────────────────────────────
+    finished_at = datetime.now(timezone.utc)
+    duration_s  = round((finished_at - started_at).total_seconds(), 1)
+    mlb_ok  = mlb_error is None
+    wnba_ok = wnba_error is None
+    overall_ok = mlb_ok and wnba_ok
+    if overall_ok:
+        status = "success"
+    elif mlb_ok or wnba_ok:
+        status = "partial"
+    else:
+        status = "error"
+
+    _eprint(
+        f"AUTO-ANALYSIS [{label}] DONE in {duration_s}s"
+        f" | MLB: {mlb_games} games / {mlb_picks} picks"
+        f" | WNBA: {wnba_games} games / {wnba_picks} picks"
+        f" | {status.upper()}"
+    )
+
+    with _auto_analysis_lock:
+        _auto_analysis_state.update({
+            "last_label":    label,
+            "last_started":  started_at.isoformat(),
+            "last_finished": finished_at.isoformat(),
+            "last_duration": duration_s,
+            "last_status":   status,
+            "last_results":  results,
+        })
+
+    _write_auto_analysis_log({
+        "label":       label,
+        "is_retry":    is_retry,
+        "started_at":  started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_s":  duration_s,
+        "status":      status,
+        "results":     results,
+    })
+
+    if not overall_ok and not is_retry:
+        _schedule_auto_retry(label)
+
+
+def _schedule_auto_retry(label: str) -> None:
+    """Schedule a 15-minute retry of the auto-analysis job after a partial/error."""
+    global _sched
+    try:
+        if _sched is None or not _sched.running:
+            _eprint(f"AUTO-ANALYSIS [{label}]: cannot schedule retry — scheduler not running")
+            return
+        retry_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+        _sched.add_job(
+            _run_auto_analysis_job,
+            "date",
+            run_date=retry_time,
+            id=f"auto_analysis_retry_{label}_{int(retry_time.timestamp())}",
+            kwargs={"label": label, "is_retry": True},
+            replace_existing=True,
+            misfire_grace_time=900,
+        )
+        _eprint(f"AUTO-ANALYSIS [{label}]: retry scheduled for {retry_time.isoformat()}")
+    except Exception as _exc:
+        _eprint(f"AUTO-ANALYSIS [{label}]: _schedule_auto_retry error: {_exc}")
+
+
+# ── Auto-settlement helpers ───────────────────────────────────────────────────
+_MLB_TEAM_NORM = {
+    "Oakland Athletics": "Athletics",
+    "Arizona Diamondbacks": "Diamondbacks",
+    "Tampa Bay Rays": "Rays",
+}
+
+def _norm_team_name(name: str) -> str:
+    return _MLB_TEAM_NORM.get(name, name).strip().lower()
+
+
+def _void_postponed_mlb_bets() -> list:
+    """
+    Check MLB Stats API for postponed games today. For each open MLB bet
+    matching a postponed game, void it (return stake, result='void').
+    Returns list of voided bet entries.
+    """
+    voided: list = []
+    try:
+        date_str = _today_et_str()
+        live_map = _fetch_mlb_linescore_raw(date_str)
+    except Exception as _e:
+        _eprint(f"AUTO-SETTLE: could not fetch MLB linescore for postponed check: {_e}")
+        return voided
+
+    # Collect postponed matchups as normalised (away, home) tuples
+    postponed: list = []
+    for _pk, _g in live_map.items():
+        try:
+            detail = _g.get("status", {}).get("detailedState", "")
+            if detail == "Postponed":
+                away = _g["teams"]["away"]["team"]["name"]
+                home = _g["teams"]["home"]["team"]["name"]
+                postponed.append((_norm_team_name(away), _norm_team_name(home)))
+        except Exception:
+            continue
+
+    if not postponed:
+        return voided
+
+    # Load MLB ledger and void matching open bets
+    try:
+        _ldr = Ledger(path="data/ledger.json", starting_bankroll=250)
+    except Exception as _e:
+        _eprint(f"AUTO-SETTLE: could not load MLB ledger for void: {_e}")
+        return voided
+
+    remaining: list = []
+    changed = False
+    for bet in _ldr.data.get("open_bets", []):
+        b_away = _norm_team_name(bet.get("away_team", ""))
+        b_home = _norm_team_name(bet.get("home_team", ""))
+        is_postponed = any(
+            (b_away in pa or pa in b_away) and (b_home in ph or ph in b_home)
+            for pa, ph in postponed
+        )
+        if is_postponed:
+            # Return stake to both bankrolls
+            model_amt = bet.get("model_amount", 0.0)
+            conf_amt  = bet.get("confirmed_amount", 0.0)
+            limit_hit = bet.get("limit_reached", False)
+            if not limit_hit:
+                if model_amt > 0:
+                    _ldr.data["model_bankroll"] = round(
+                        _ldr.data["model_bankroll"] + model_amt, 2)
+                if bet.get("confirmed") and conf_amt > 0:
+                    _ldr.data["personal_bankroll"] = round(
+                        _ldr.data["personal_bankroll"] + conf_amt, 2)
+            voided_entry = {
+                **bet,
+                "result":        "void",
+                "model_pnl":     0.0,
+                "confirmed_pnl": 0.0,
+                "settled_at":    datetime.now(timezone.utc).isoformat(),
+                "void_reason":   "postponed",
+            }
+            _ldr.data.setdefault("history", []).append(voided_entry)
+            voided.append(voided_entry)
+            changed = True
+        else:
+            remaining.append(bet)
+
+    if changed:
+        _ldr.data["open_bets"] = remaining
+        _ldr.save()
+    return voided
+
+
+def _run_auto_settlement_job() -> None:
+    """
+    APScheduler callback: every 30 min.
+    Gated to 11 AM–2 AM ET (game hours). Settles completed bets via Odds API
+    scores; voids postponed MLB games via MLB Stats API. Logs summary to stderr.
+    """
+    # ── Gate: only run during game hours (11 AM through 2 AM ET) ────────────
+    try:
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        _et = _ZoneInfo("America/New_York")
+    except Exception:
+        from datetime import timezone as _dtz, timedelta as _dtd
+        _et = _dtz(timedelta(hours=-5))
+    now_et   = datetime.now(_et)
+    et_hour  = now_et.hour
+    # Allow 11:00–23:59 and 00:00–02:59
+    in_window = (et_hour >= 11) or (et_hour <= 2)
+    if not in_window:
+        return
+
+    odds_key = os.getenv("ODDS_API_KEY", "")
+    if not odds_key or odds_key == "your_odds_api_key_here":
+        return
+
+    _eprint(f"AUTO-SETTLE: checking at {now_et.strftime('%H:%M ET')}")
+    oc = OddsClient(odds_key, _cache)
+
+    settled: list = []
+
+    # ── MLB ───────────────────────────────────────────────────────────────────
+    try:
+        _mlb_ldr = Ledger(path="data/ledger.json", starting_bankroll=250)
+        if _mlb_ldr.data.get("open_bets"):
+            # Invalidate stale scores cache so we always see fresh completions
+            _cache.invalidate("scores_baseball_mlb_3")
+            _new = _mlb_ldr.settle(oc, "baseball_mlb")
+            settled.extend(_new)
+    except Exception as _exc:
+        _eprint(f"AUTO-SETTLE: MLB error: {type(_exc).__name__}: {_exc}")
+
+    # ── WNBA ──────────────────────────────────────────────────────────────────
+    try:
+        _wnba_ldr = Ledger(path="data/wnba_ledger.json", starting_bankroll=250)
+        if _wnba_ldr.data.get("open_bets"):
+            _cache.invalidate("scores_basketball_wnba_3")
+            _new = _wnba_ldr.settle(oc, "basketball_wnba")
+            settled.extend(_new)
+    except Exception as _exc:
+        _eprint(f"AUTO-SETTLE: WNBA error: {type(_exc).__name__}: {_exc}")
+
+    # ── Postponed games (MLB Stats API) ───────────────────────────────────────
+    voided: list = []
+    try:
+        voided = _void_postponed_mlb_bets()
+    except Exception as _exc:
+        _eprint(f"AUTO-SETTLE: postponed check error: {type(_exc).__name__}: {_exc}")
+
+    # ── Terminal summary ──────────────────────────────────────────────────────
+    wins   = sum(1 for s in settled if s.get("result") == "win")
+    losses = sum(1 for s in settled if s.get("result") == "loss")
+
+    if settled:
+        _eprint(
+            f"AUTO-SETTLE: settled {len(settled)} bet(s) — "
+            f"{wins}W / {losses}L"
+        )
+        _BET_TYPE_SHORT = {"single": "ML", "run_line": "RL", "spread": "SPR", "totals": "TOT"}
+        for s in settled:
+            bts    = _BET_TYPE_SHORT.get(s.get("bet_type", "single"), "ML")
+            result = s.get("result", "?").upper()
+            team   = s.get("bet_team", "?")
+            away   = s.get("away_team", "?")
+            home   = s.get("home_team", "?")
+            pnl    = s.get("model_pnl", 0.0)
+            _eprint(f"  {away} @ {home} | {bts} {team} → {result} | model P&L: ${pnl:+.2f}")
+    if voided:
+        _eprint(f"AUTO-SETTLE: voided {len(voided)} postponed bet(s) (stakes returned)")
+        for v in voided:
+            _eprint(f"  {v.get('away_team','?')} @ {v.get('home_team','?')} — POSTPONED, stake returned")
+    if not settled and not voided:
+        _eprint("AUTO-SETTLE: no newly settled bets")
+
+    # ── Update state ──────────────────────────────────────────────────────────
+    with _auto_settlement_lock:
+        _auto_settlement_state.update({
+            "last_ran_at":  datetime.now(timezone.utc).isoformat(),
+            "last_settled": len(settled),
+            "last_wins":    wins,
+            "last_losses":  losses,
+            "last_voided":  len(voided),
+        })
+
+
 # ── Nightly retrain scheduler ─────────────────────────────────────────────────
 print("STARTUP: all routes registered — starting scheduler...", flush=True, file=sys.stderr)
 
@@ -4284,11 +4730,43 @@ if not _in_debug_mode or _werkzeug_main:
     try:
         _sched = nightly_retrain.start()
         if _sched is None:
-            print("STARTUP: nightly retrain scheduler not started (APScheduler unavailable or disabled)",
-                  flush=True, file=sys.stderr)
+            print("STARTUP: scheduler not started (APScheduler unavailable or disabled)", flush=True, file=sys.stderr)
         else:
-            print("STARTUP: nightly retrain scheduler running — fires 2 AM ET",
-                  flush=True, file=sys.stderr)
+            # Add 8 AM and 12 PM ET auto-analysis jobs to the existing scheduler
+            try:
+                from apscheduler.triggers.cron import CronTrigger as _CronTrigger
+                _ET = "America/New_York"
+                _sched.add_job(
+                    _run_auto_analysis_job,
+                    _CronTrigger(hour=8,  minute=0, timezone=_ET),
+                    id="auto_analysis_morning",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
+                    kwargs={"label": "morning"},
+                )
+                _sched.add_job(
+                    _run_auto_analysis_job,
+                    _CronTrigger(hour=12, minute=0, timezone=_ET),
+                    id="auto_analysis_noon",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
+                    kwargs={"label": "noon"},
+                )
+                _sched.add_job(
+                    _run_auto_settlement_job,
+                    _CronTrigger(minute="0,30", timezone=_ET),
+                    id="auto_settlement",
+                    replace_existing=True,
+                    misfire_grace_time=1800,
+                    max_instances=1,
+                )
+                print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET", flush=True, file=sys.stderr)
+                print("STARTUP: auto-settlement job scheduled — every 30 min (game hours 11 AM–2 AM ET)", flush=True, file=sys.stderr)
+            except Exception as _ae:
+                print(f"STARTUP WARNING: could not add auto-analysis jobs: {_ae}", flush=True, file=sys.stderr)
+            print("STARTUP: nightly retrain scheduler running — fires 2 AM ET", flush=True, file=sys.stderr)
     except Exception as _sched_err:
         print(f"STARTUP WARNING: nightly retrain scheduler failed: {_sched_err}",
               flush=True, file=sys.stderr)
