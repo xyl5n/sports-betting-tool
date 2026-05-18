@@ -1606,6 +1606,166 @@ def mlb_schedule_proxy():
     return jsonify(data)
 
 
+# ── WNBA schedule + live scores proxy ──────────────────────────────────────────
+# Mirrors the MLB endpoint above but talks to ESPN's public scoreboard
+#   https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard
+# which exposes live state (status.type.state ∈ {pre, in, post}), the current
+# period (1-4 for regulation, 5+ for overtime), a displayClock string, and
+# per-team scores.  stats.wnba.com would work too but is bot-protected and
+# rate-limits aggressively — ESPN is reliable and unauthenticated.
+#
+# The response is reshaped to mirror the MLB Stats API structure
+#   { dates: [{ games: [{ gamePk, teams.{home,away}.team.name,
+#                         status.abstractGameState, linescore.* }] }] }
+# so the frontend can reuse the same _applyLiveMap / _findLiveByTeamName logic
+# (with a thin WNBA-flavoured wrapper for the period / quarter labelling).
+
+_ESPN_WNBA_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba"
+_wnba_linescore_mem: dict[str, tuple[float, dict]] = {}
+
+_QUARTER_ORDINAL = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
+
+
+def _espn_state_to_mlb_state(state: str, completed: bool) -> str:
+    """Map ESPN status.type.state → MLB abstractGameState vocabulary."""
+    if completed or state == "post":
+        return "Final"
+    if state == "in":
+        return "Live"
+    return "Preview"
+
+
+def _wnba_period_ordinal(period: int) -> str:
+    """1..4 → '1st'..'4th'; 5+ → 'OT', 'OT2', etc.  Matches MLB's currentInningOrdinal role."""
+    if not period:
+        return ""
+    if period in _QUARTER_ORDINAL:
+        return _QUARTER_ORDINAL[period]
+    return "OT" if period == 5 else f"OT{period - 4}"
+
+
+def _normalize_espn_wnba_scoreboard(raw: dict) -> dict:
+    """ESPN scoreboard payload → MLB-shaped {dates:[{games:[...]}]} envelope."""
+    games: list[dict] = []
+    for ev in (raw.get("events") or []):
+        comps = ev.get("competitions") or []
+        if not comps:
+            continue
+        comp = comps[0]
+        status = (comp.get("status") or {})
+        st_type = (status.get("type") or {})
+        state    = st_type.get("state", "pre")
+        complete = bool(st_type.get("completed", False))
+        period   = int(status.get("period") or 0)
+        clock    = status.get("displayClock", "")
+        detail   = st_type.get("shortDetail") or st_type.get("description") or ""
+
+        home_team = away_team = None
+        home_score = away_score = None
+        for c in (comp.get("competitors") or []):
+            team_name = ((c.get("team") or {}).get("displayName")
+                         or (c.get("team") or {}).get("name") or "")
+            try:
+                score_val = int(c.get("score")) if c.get("score") not in (None, "") else None
+            except (TypeError, ValueError):
+                score_val = None
+            if c.get("homeAway") == "home":
+                home_team, home_score = team_name, score_val
+            elif c.get("homeAway") == "away":
+                away_team, away_score = team_name, score_val
+        if not home_team or not away_team:
+            continue
+
+        try:
+            game_pk = int(ev.get("id"))
+        except (TypeError, ValueError):
+            game_pk = 0
+
+        abstract = _espn_state_to_mlb_state(state, complete)
+        ordinal  = _wnba_period_ordinal(period) if abstract == "Live" else ""
+
+        games.append({
+            "gamePk":   game_pk,
+            "gameDate": ev.get("date"),
+            "teams": {
+                "home": {"team": {"name": home_team}},
+                "away": {"team": {"name": away_team}},
+            },
+            "status": {
+                "abstractGameState": abstract,
+                "detailedState":     detail or abstract,
+                "codedGameState":    state,
+            },
+            "linescore": {
+                "currentInning":         period,
+                "currentInningOrdinal":  ordinal,
+                "displayClock":          clock,
+                "isLive":                abstract == "Live",
+                "teams": {
+                    "home": {"runs": home_score if home_score is not None else 0},
+                    "away": {"runs": away_score if away_score is not None else 0},
+                },
+            },
+        })
+    return {"dates": [{"games": games}]} if games else {"dates": []}
+
+
+@app.route("/api/wnba/schedule", methods=["GET"])
+def wnba_schedule_proxy():
+    """
+    Server-side proxy for ESPN's WNBA scoreboard.  Same contract as the MLB
+    proxy: date=YYYY-MM-DD (required), hydrate=linescore (optional → 30 s TTL).
+    The frontend reads it through the same JSON envelope shape as MLB.
+    """
+    import time as _time
+    import urllib.request as _urlreq
+    import urllib.error  as _urlerr
+
+    date_str = request.args.get("date", "").strip()
+    hydrate  = request.args.get("hydrate", "").strip()
+
+    if not date_str:
+        return jsonify({"dates": [], "error": "date param required"}), 400
+
+    # ESPN expects YYYYMMDD without dashes
+    espn_date = date_str.replace("-", "")
+    is_linescore = hydrate == "linescore"
+    cache_key    = f"wnba_schedule_{date_str}_{hydrate}"
+
+    if is_linescore:
+        entry = _wnba_linescore_mem.get(cache_key)
+        if entry and (_time.time() - entry[0]) < _LINESCORE_TTL:
+            return jsonify(entry[1])
+    else:
+        cached = _cache.get(cache_key, ttl=3600)
+        if cached is not None:
+            return jsonify(cached)
+
+    url = f"{_ESPN_WNBA_BASE}/scoreboard?dates={espn_date}"
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "SportsBettingApp/1.0"})
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except _urlerr.URLError as exc:
+        _logger.warning("wnba proxy URLError: %s", exc)
+        return jsonify({"dates": []}), 200
+    except Exception as exc:
+        _logger.warning("wnba proxy error: %s", exc)
+        return jsonify({"dates": []}), 200
+
+    data = _normalize_espn_wnba_scoreboard(raw)
+
+    if is_linescore:
+        _wnba_linescore_mem[cache_key] = (_time.time(), data)
+    else:
+        try:
+            _cache.set(cache_key, data)
+        except Exception:
+            pass
+
+    return jsonify(data)
+
+
 # ── Live-score debug system ────────────────────────────────────────────────────
 # Writes to stdout AND data/debug_live.log so output is readable whether
 # the user runs via 'python desktop.pyw' (terminal) or via launch.bat (log file).
