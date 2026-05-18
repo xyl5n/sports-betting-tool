@@ -1,0 +1,299 @@
+"""
+Supabase data-access layer with JSON-file fallback.
+
+Connection lifecycle
+--------------------
+At import time we read SUPABASE_URL + SUPABASE_KEY from the
+environment.  If either is missing, contains the .env.example
+placeholder text, OR the connection / health-check fails: we fall
+back to JSON-only mode for the rest of the process lifetime and
+no Supabase calls are made.
+
+Read / write semantics ("dual-write")
+-------------------------------------
+- READS:   prefer Supabase; on any error return None / empty list
+           and the caller falls back to its local JSON file.
+- WRITES:  attempt Supabase; ALWAYS still write to the JSON file
+           as a hot backup.  If Supabase fails the write is logged
+           and silently swallowed -- the app never crashes from a
+           failed Supabase op.
+
+Every public function is best-effort and never raises.  Callers can
+assume "data already wrote to JSON; Supabase is bonus."
+
+The actual JSON-file writes happen in the caller (Ledger / etc.) --
+this module only handles the Supabase side.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from typing import Optional, Any
+
+_logger = logging.getLogger(__name__)
+
+# ── Connection state (set once at import time, never mutated again) ──
+_client: Optional[Any] = None
+_mode: str = "json"         # "supabase" once a healthy connection is established
+_init_done: bool = False
+
+
+def _is_placeholder(value: str) -> bool:
+    """Treat the .env.example sentinel strings as 'not configured'."""
+    v = (value or "").strip().lower()
+    return (
+        not v
+        or v.startswith("your_")
+        or v == "supabase_url"
+        or v == "supabase_key"
+    )
+
+
+def _init() -> None:
+    """One-shot connection attempt.  Idempotent."""
+    global _client, _mode, _init_done
+    if _init_done:
+        return
+    _init_done = True
+
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_KEY", "").strip()
+    if _is_placeholder(url) or _is_placeholder(key):
+        _logger.info("Supabase not configured (env vars missing/placeholder); JSON-only mode")
+        return
+
+    try:
+        from supabase import create_client  # type: ignore[import-not-found]
+    except Exception as exc:                # noqa: BLE001 — broad on purpose
+        # The `supabase` pip package isn't installed.  Stay in JSON mode silently
+        # so dev environments without it boot fine.
+        _logger.info("supabase package not importable (%s); JSON-only mode", exc)
+        return
+
+    try:
+        client = create_client(url, key)
+        # Health-check.  If the bets table doesn't exist yet, this still
+        # surfaces a known error message that helps the user.
+        client.table("bets").select("id").limit(1).execute()
+        globals()["_client"] = client
+        globals()["_mode"] = "supabase"
+        _logger.info("Supabase connected; dual-write enabled")
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning(
+            "Supabase unreachable (%s); JSON-only mode. "
+            "If tables don't exist yet, run app/db/schema.sql in the SQL editor.",
+            exc,
+        )
+
+
+_init()
+
+
+def is_supabase() -> bool:
+    """True iff a healthy Supabase connection is in use."""
+    return _mode == "supabase"
+
+
+def status() -> dict:
+    """Diagnostic summary — surfaced on /api/health and at startup."""
+    return {
+        "mode":      _mode,
+        "supabase":  _mode == "supabase",
+        "url_set":   bool(os.getenv("SUPABASE_URL") and not _is_placeholder(os.getenv("SUPABASE_URL", ""))),
+        "key_set":   bool(os.getenv("SUPABASE_KEY") and not _is_placeholder(os.getenv("SUPABASE_KEY", ""))),
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+#  bets
+# ════════════════════════════════════════════════════════════════
+
+def upsert_bet(bet: dict) -> bool:
+    """Upsert one bet row.  Returns True on success.  Never raises."""
+    if not is_supabase():
+        return False
+    try:
+        _client.table("bets").upsert(_serialize_bet(bet), on_conflict="id").execute()
+        return True
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase upsert_bet(%s) failed: %s", bet.get("id"), exc)
+        return False
+
+
+def upsert_bets_bulk(bets: list[dict]) -> int:
+    """Upsert many bets in one round-trip.  Returns count written.  Never raises."""
+    if not is_supabase() or not bets:
+        return 0
+    try:
+        rows = [_serialize_bet(b) for b in bets]
+        _client.table("bets").upsert(rows, on_conflict="id").execute()
+        return len(rows)
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase upsert_bets_bulk(%d) failed: %s", len(bets), exc)
+        return 0
+
+
+def delete_bet(bet_id: str) -> bool:
+    if not is_supabase():
+        return False
+    try:
+        _client.table("bets").delete().eq("id", bet_id).execute()
+        return True
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase delete_bet(%s) failed: %s", bet_id, exc)
+        return False
+
+
+def list_bets(
+    sport: Optional[str] = None,
+    settled: Optional[bool] = None,
+    limit: int = 1000,
+) -> list[dict]:
+    """Read bets from Supabase.  Returns [] on any error (caller falls back to JSON)."""
+    if not is_supabase():
+        return []
+    try:
+        q = _client.table("bets").select("*")
+        if sport is not None:
+            q = q.eq("sport", sport.lower())
+        if settled is not None:
+            q = q.eq("settled", bool(settled))
+        return q.order("placed_at", desc=True).limit(limit).execute().data or []
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase list_bets failed: %s", exc)
+        return []
+
+
+# ════════════════════════════════════════════════════════════════
+#  bankroll
+# ════════════════════════════════════════════════════════════════
+
+def upsert_bankroll(sport: str, row: dict) -> bool:
+    if not is_supabase():
+        return False
+    try:
+        row = {**row, "sport": (sport or "").lower()}
+        _client.table("bankroll").upsert(row, on_conflict="sport").execute()
+        return True
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase upsert_bankroll(%s) failed: %s", sport, exc)
+        return False
+
+
+def get_bankroll(sport: str) -> Optional[dict]:
+    if not is_supabase():
+        return None
+    try:
+        r = (
+            _client.table("bankroll")
+            .select("*")
+            .eq("sport", (sport or "").lower())
+            .limit(1)
+            .execute()
+        )
+        return (r.data or [None])[0]
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase get_bankroll(%s) failed: %s", sport, exc)
+        return None
+
+
+# ════════════════════════════════════════════════════════════════
+#  records
+# ════════════════════════════════════════════════════════════════
+
+def upsert_records_bulk(rows: list[dict]) -> int:
+    """Each row needs sport, bet_type, plus wins/losses/pushes/units_won."""
+    if not is_supabase() or not rows:
+        return 0
+    try:
+        _client.table("records").upsert(rows, on_conflict="sport,bet_type").execute()
+        return len(rows)
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase upsert_records_bulk(%d) failed: %s", len(rows), exc)
+        return 0
+
+
+def list_records(sport: Optional[str] = None) -> list[dict]:
+    if not is_supabase():
+        return []
+    try:
+        q = _client.table("records").select("*")
+        if sport is not None:
+            q = q.eq("sport", sport.lower())
+        return q.execute().data or []
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase list_records failed: %s", exc)
+        return []
+
+
+# ════════════════════════════════════════════════════════════════
+#  Serialization helpers
+# ════════════════════════════════════════════════════════════════
+
+def _serialize_bet(bet: dict) -> dict:
+    """Map a Ledger bet dict → Supabase `bets` row.
+
+    Standard columns map 1:1; everything else lands in `meta` so no
+    field is lost.  Idempotent — calling it twice on the same input
+    yields the same row.
+    """
+    home = bet.get("home_team", "")
+    away = bet.get("away_team", "")
+    teams = f"{away} @ {home}" if (home and away) else ""
+
+    # Human-readable pick string for the `pick` column.
+    bet_type = bet.get("bet_type", "single")
+    pick_str = bet.get("bet_team") or ""
+    prop_line = bet.get("prop_line")
+    if bet_type == "run_line" and prop_line is not None:
+        sign = "+" if prop_line > 0 else ""
+        pick_str = f"{pick_str} {sign}{prop_line}".strip()
+    elif bet_type == "totals":
+        side = (bet.get("bet_side") or "").upper()
+        if prop_line is not None:
+            pick_str = f"{side} {prop_line}".strip()
+        else:
+            pick_str = side or pick_str
+    elif bet_type == "parlay":
+        pick_str = bet.get("parlay_name") or pick_str
+
+    placed = bet.get("placed_at", "") or ""
+    settled_at = bet.get("settled_at") or None
+    commence = bet.get("commence_time") or ""
+    date = (commence or placed)[:10] if (commence or placed) else ""
+
+    dollar_amount = bet.get("confirmed_amount") or bet.get("model_amount") or 0.0
+    edge = bet.get("edge") or 0.0
+
+    # Units: requires starting bankroll.  Ledger doesn't store it on the bet
+    # itself; we leave units NULL here and let the records-aggregator fill
+    # it in if needed.  Existing UI doesn't depend on this field.
+    units = bet.get("units")
+
+    # Everything not promoted to a column lands in meta so we lose nothing.
+    PROMOTED = {
+        "id", "sport", "bet_type", "home_team", "away_team",
+        "bet_team", "bet_side", "american_odds", "placed_at",
+        "commence_time", "edge", "confidence_tier", "result",
+        "confirmed_amount", "model_amount", "settled_at",
+    }
+    meta = {k: v for k, v in bet.items() if k not in PROMOTED}
+
+    return {
+        "id":              bet["id"],
+        "date":            date,
+        "sport":           (bet.get("sport") or "").lower(),
+        "bet_type":        bet_type,
+        "teams":           teams,
+        "pick":            pick_str,
+        "odds":            bet.get("american_odds"),
+        "dollar_amount":   round(float(dollar_amount), 2) if dollar_amount is not None else None,
+        "units":           units,
+        "confidence_tier": bet.get("confidence_tier"),
+        "edge_percentage": round(float(edge) * 100, 2) if edge is not None else None,
+        "result":          bet.get("result"),
+        "settled":         bool(bet.get("result")),
+        "placed_at":       placed or None,
+        "settled_at":      settled_at,
+        "meta":            meta,
+    }
