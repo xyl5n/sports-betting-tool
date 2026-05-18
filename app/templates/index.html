@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Atom — Sports Betting</title>
+<title>AI — Sports Betting</title>
 
 <!-- ── PWA metadata (preserved from prior PR) ──────────────────────────── -->
 <link rel="manifest" href="/static/manifest.json">
 <meta name="apple-mobile-web-app-capable"          content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title"            content="Atom">
+<meta name="apple-mobile-web-app-title"            content="AI">
 <meta name="mobile-web-app-capable"                content="yes">
 <meta name="theme-color"                           content="#0d1117">
 
@@ -481,7 +481,7 @@ body {
   white-space: nowrap;
 }
 
-/* ── Atom (AI chat) tab ─────────────────────────────────────────────── */
+/* ── AI chat tab ────────────────────────────────────────────────────── */
 .chat-wrap {
   display: flex; flex-direction: column;
   height: calc(100vh - var(--bottom-nav-h) - 130px);
@@ -699,7 +699,7 @@ body {
   <header class="topnav">
     <div class="brand">
       <span class="brand-icon">⚛</span>
-      <span><span class="brand-text-one">Atom</span><span class="brand-text-two">Bet</span></span>
+      <span><span class="brand-text-one">A</span><span class="brand-text-two">I</span></span>
     </div>
     <button class="search-btn" id="search-btn" aria-label="Search" onclick="openSearch()">⌕</button>
   </header>
@@ -725,18 +725,18 @@ body {
       </div>
 
       <!-- AI chat banner -->
-      <button class="ai-banner" onclick="showTab('atom')" aria-label="Open Atom AI chat">
-        <span class="ai-banner-icon">⚛</span>
-        <span class="ai-banner-text"><strong>Atom AI</strong> · ask anything about today's picks</span>
+      <button class="ai-banner" onclick="showTab('ai')" aria-label="Chat with AI">
+        <span class="ai-banner-icon">🤖</span>
+        <span class="ai-banner-text">Create a free account to chat with <strong>AI</strong></span>
         <span class="ai-banner-arrow">→</span>
       </button>
 
       <!-- Feature promo card -->
       <article class="promo-card">
         <span class="promo-badge">● NOW LIVE</span>
-        <h3 class="promo-title">3-model ensemble picks</h3>
-        <p class="promo-desc">XGBoost + Logistic Regression + Neural Network combined with Half-Kelly sizing across MLB and WNBA.</p>
-        <button class="promo-cta" onclick="showTab('atom')">TRY IT →</button>
+        <h3 class="promo-title">Build betting systems &amp; get picks</h3>
+        <p class="promo-desc">Design your own betting system, run it on today's slate, and surface high-edge picks across every sport — all in one place.</p>
+        <button class="promo-cta" onclick="showTab('ai')">TRY IT →</button>
       </article>
 
       <!-- EV scans -->
@@ -762,7 +762,7 @@ body {
           <button class="swipe-toggle" id="swipe-toggle" onclick="toggleSwipe()">Swipe Mode</button>
           <div class="date-nav">
             <button class="date-arrow" onclick="changeDate(-1)">‹</button>
-            <span class="date-label">Today</span>
+            <span class="date-label" id="props-date">Today</span>
             <button class="date-arrow" onclick="changeDate(1)">›</button>
           </div>
           <a class="section-link" href="#" onclick="event.preventDefault(); showTab('props')">See All →</a>
@@ -778,7 +778,7 @@ body {
         <h2>TODAY'S GAMES</h2>
         <div class="date-nav">
           <button class="date-arrow" onclick="changeDate(-1)">‹</button>
-          <span class="date-label">Today</span>
+          <span class="date-label" id="scores-date">Today</span>
           <button class="date-arrow" onclick="changeDate(1)">›</button>
         </div>
       </div>
@@ -796,13 +796,13 @@ body {
       <div class="cards-scroll" id="props-full" style="flex-direction:column;flex-wrap:wrap"></div>
     </section>
 
-    <!-- ─── ATOM (AI chat) ───────────────────────────────────────────── -->
-    <section id="tab-atom" class="tab">
-      <div class="section-hdr"><h2>ATOM AI</h2></div>
+    <!-- ─── AI (chat) ────────────────────────────────────────────────── -->
+    <section id="tab-ai" class="tab">
+      <div class="section-hdr"><h2>AI</h2></div>
       <div class="chat-wrap">
         <div class="chat-messages" id="chat-messages">
           <div class="chat-msg ai">
-            Hi — I'm Atom. Ask me about today's MLB or WNBA picks, the model's edge calculations, or what to bet.
+            Hi — ask me anything about today's MLB or WNBA picks, the model's edge calculations, or what to bet.
           </div>
         </div>
         <div class="chat-input-row">
@@ -841,7 +841,7 @@ body {
         </button>
         <a class="more-row" href="https://github.com/anthropics/claude-code/issues" target="_blank" rel="noopener">
           <span class="more-row-icon">ⓘ</span>
-          <span class="more-row-text">About AtomBet
+          <span class="more-row-text">About AI
             <div class="more-row-sub">Ensemble model details</div>
           </span>
           <span class="more-row-chev">›</span>
@@ -863,8 +863,8 @@ body {
       <button class="bottom-tab"        data-tab="props"  onclick="showTab('props')">
         <span class="bottom-tab-icon">◎</span><span>Props</span>
       </button>
-      <button class="bottom-tab"        data-tab="atom"   onclick="showTab('atom')">
-        <span class="bottom-tab-icon">⚛</span><span>Atom</span>
+      <button class="bottom-tab"        data-tab="ai"     onclick="showTab('ai')">
+        <span class="bottom-tab-icon">⚛</span><span>AI</span>
       </button>
       <button class="bottom-tab"        data-tab="more"   onclick="showTab('more')">
         <span class="bottom-tab-icon">⋯</span><span>More</span>
@@ -969,10 +969,28 @@ function fmtLastRun(d) {
   return rem > 0 ? `${hrs}h ${rem}m ago` : `${hrs}h ago`;
 }
 
+// Today in ET as a short label like "May 18" — used to populate the date
+// nav under each section header.  Re-applied to every .date-label[id] on
+// init so the EV scans, props, and scores sections share the same source.
+function fmtTodayLabel() {
+  try {
+    return new Date().toLocaleDateString('en-US', {
+      timeZone: 'America/New_York', month: 'short', day: 'numeric',
+    });
+  } catch { return 'Today'; }
+}
+function paintDateLabels() {
+  const label = fmtTodayLabel();
+  ['ev-date', 'props-date', 'scores-date'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = label;
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Tab + sport switching
 // ═══════════════════════════════════════════════════════════════════════
-const TABS = ['home', 'scores', 'props', 'atom', 'more'];
+const TABS = ['home', 'scores', 'props', 'ai', 'more'];
 function showTab(name) {
   if (!TABS.includes(name)) return;
   _tab = name;
@@ -1465,6 +1483,10 @@ setInterval(() => $('last-run').textContent = fmtLastRun(_lastRun), 30000);
 //  Initial load — restore cached snapshot
 // ═══════════════════════════════════════════════════════════════════════
 async function init() {
+  // Date labels under every section header — populated up front so they're
+  // visible before any data loads.
+  paintDateLabels();
+
   // Restore last sport
   try {
     const s = sessionStorage.getItem(LS_SPORT);
@@ -1515,7 +1537,7 @@ async function init() {
 document.addEventListener('DOMContentLoaded', init);
 
 // ═══════════════════════════════════════════════════════════════════════
-//  AI chat (Atom)
+//  AI chat tab
 // ═══════════════════════════════════════════════════════════════════════
 const _chatHistory = [];
 async function sendChat() {
@@ -1592,14 +1614,14 @@ function toggleSwipe() {
   toast(`Swipe mode ${_swipe ? 'on' : 'off'}`);
 }
 function openAnalyze(gameId, kind) {
-  // Find the game and the matching pick, then route the user to Atom with a
+  // Find the game and the matching pick, then route the user to AI chat with a
   // pre-filled question.  Keeps the surface area small while still letting
   // the user dig into a pick.
   const g = [..._mlb, ..._wnba].find(x => x.game_id === gameId);
   if (!g) { toast('Game not found'); return; }
   const matchup = `${shortName(g.away_team)} @ ${shortName(g.home_team)}`;
   $('chat-input').value = `Explain the ${kind} pick on ${matchup}.`;
-  showTab('atom');
+  showTab('ai');
 }
 async function openLedger() {
   try {
@@ -1612,7 +1634,7 @@ async function openLedger() {
 }
 function openModelPerf() {
   $('chat-input').value = 'How are the XGB / LR / NN models doing on each bet type?';
-  showTab('atom');
+  showTab('ai');
 }
 async function updateMoreSubtext() {
   const el = $('more-bankroll');
