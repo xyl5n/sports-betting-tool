@@ -437,6 +437,129 @@ body {
   font-size: 11px; color: var(--green); font-weight: 700;
 }
 
+/* ── Full-slate card (matchup + three bet-type boxes) ──────────────── */
+.slate-list {
+  display: flex; flex-direction: column; gap: 12px;
+}
+.slate-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  padding: 14px;
+  display: flex; flex-direction: column; gap: 12px;
+  transition: border-color .15s;
+}
+.slate-card:hover { border-color: var(--border); }
+.slate-meta {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--text-dim);
+}
+.slate-meta .live-dot { margin: 0; }
+.slate-sport-tag {
+  padding: 2px 7px; border-radius: 4px;
+  font-size: 9.5px; font-weight: 800; letter-spacing: .6px;
+  background: rgba(34, 211, 238, .12); color: var(--cyan);
+  border: 1px solid rgba(34, 211, 238, .25);
+}
+.slate-time { font-weight: 600; color: var(--text); }
+.slate-venue { margin-left: auto; color: var(--text-dim2); font-size: 11px; }
+.slate-matchup {
+  display: grid; grid-template-columns: 1fr auto 1fr;
+  align-items: center; gap: 12px;
+  padding: 6px 0;
+}
+.slate-team {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 4px; min-width: 0;
+}
+.slate-logo-lg {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 800; color: #fff;
+}
+.slate-team-name {
+  font-size: 13px; font-weight: 700; color: var(--text);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.slate-team-odds {
+  font-size: 11px; color: var(--text-dim); font-family: "SF Mono", Consolas, monospace;
+}
+.slate-vs-col {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  min-width: 60px;
+}
+.slate-vs {
+  font-size: 10px; color: var(--text-dim2); font-weight: 700;
+  letter-spacing: .5px;
+}
+.slate-pred {
+  font-size: 11px; color: var(--cyan-soft);
+  font-family: "SF Mono", Consolas, monospace;
+}
+.slate-live {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 14px; font-weight: 800;
+}
+.slate-live .sep { color: var(--text-dim2); }
+.slate-final-lbl {
+  font-size: 10px; font-weight: 800; letter-spacing: .5px;
+  color: var(--text-dim);
+}
+.slate-pred-row {
+  display: flex; gap: 12px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--text-dim);
+  padding: 0 2px;
+}
+.slate-pred-row strong { color: var(--text); font-weight: 700; }
+.slate-pred-row .pred-dir-over  { color: #fbbf24; font-weight: 700; }
+.slate-pred-row .pred-dir-under { color: #c084fc; font-weight: 700; }
+.slate-props {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.slate-prop {
+  background: var(--bg-elev-hi);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  padding: 9px 10px;
+  display: flex; flex-direction: column; gap: 3px;
+  min-width: 0;
+}
+.slate-prop.conflict { border-color: rgba(248, 113, 113, .25); }
+.slate-prop.no-data  { opacity: .55; }
+.slate-prop.result-win  { border-color: rgba(74, 222, 128, .55);
+                          box-shadow: 0 0 14px rgba(74, 222, 128, .14); }
+.slate-prop.result-loss { border-color: rgba(248, 113, 113, .55);
+                          box-shadow: 0 0 14px rgba(248, 113, 113, .14); }
+.slate-prop-label {
+  font-size: 9px; font-weight: 800; letter-spacing: .6px;
+  color: var(--text-dim2); text-transform: uppercase;
+}
+.slate-prop-pick {
+  font-size: 12.5px; font-weight: 700; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.slate-prop-pick .dir-over  { color: #fbbf24; }
+.slate-prop-pick .dir-under { color: #c084fc; }
+.slate-prop-meta {
+  display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--text-dim);
+  margin-top: auto;
+}
+.slate-prop-prob { font-weight: 700; color: var(--text); }
+.slate-prop-edge { font-weight: 700; }
+.slate-prop-edge.pos { color: var(--green); }
+.slate-prop-edge.neg { color: var(--red); }
+.slate-prop-odds { font-family: "SF Mono", Consolas, monospace; }
+.slate-prop-value-badge {
+  font-size: 8.5px; font-weight: 800; letter-spacing: .4px;
+  padding: 1px 5px; border-radius: 3px;
+  background: rgba(34, 211, 238, .14); color: var(--cyan);
+  border: 1px solid rgba(34, 211, 238, .3);
+  align-self: flex-start;
+}
+
 /* ── Empty state ────────────────────────────────────────────────────── */
 .empty-state {
   padding: 32px 16px; text-align: center;
@@ -776,6 +899,13 @@ body {
 @media (min-width: 1280px) {
   .ev-card { width: 360px; }
 }
+
+/* ── Phone (<480px) — slate prop boxes stack vertically ─────────────── */
+@media (max-width: 480px) {
+  .slate-props { grid-template-columns: 1fr; }
+  .slate-logo-lg { width: 42px; height: 42px; font-size: 12px; }
+  .slate-team-name { font-size: 12px; }
+}
 </style>
 </head>
 <body>
@@ -826,8 +956,22 @@ body {
         <button class="promo-cta" onclick="showTab('ai')">TRY IT →</button>
       </article>
 
+      <!-- Full slate (shown when a specific sport pill is selected) -->
+      <section class="section" id="section-slate" style="display:none">
+        <div class="section-hdr">
+          <h2 id="slate-title">FULL SLATE</h2>
+          <span class="count-badge" id="slate-count">0</span>
+          <div class="date-nav">
+            <button class="date-arrow" aria-label="Previous day" onclick="changeDate(-1)">‹</button>
+            <span class="date-label" id="slate-date">Today</span>
+            <button class="date-arrow" aria-label="Next day" onclick="changeDate(1)">›</button>
+          </div>
+        </div>
+        <div class="slate-list" id="slate-cards"></div>
+      </section>
+
       <!-- EV scans -->
-      <section class="section">
+      <section class="section" id="section-ev">
         <div class="section-hdr">
           <h2>EV SCANS</h2>
           <span class="count-badge" id="ev-count">0</span>
@@ -843,7 +987,7 @@ body {
       </section>
 
       <!-- Props -->
-      <section class="section">
+      <section class="section" id="section-props">
         <div class="section-hdr">
           <h2>PROPS</h2>
           <button class="swipe-toggle" id="swipe-toggle" onclick="toggleSwipe()">Swipe Mode</button>
@@ -1098,10 +1242,33 @@ function setSport(s) {
   document.querySelectorAll('.pill').forEach(p => {
     p.classList.toggle('active', p.dataset.sport === s);
   });
+  // The home tab swaps its layout based on the sport pill:
+  //   ALL  → AI banner + promo + EV SCANS + PROPS dashboard view
+  //   MLB  → full slate of every MLB game with matchup + 3 bet-box cards
+  //   WNBA → full slate of every WNBA game (same layout)
+  applyHomeViewForSport();
   renderEVScans();
   renderProps();
+  renderFullSlate();
   if (_tab === 'scores') renderScores();
   if (_tab === 'props')  renderPropsFull();
+}
+
+// Toggle which Home-tab sections are visible based on the active sport pill.
+// When a specific sport is selected we hide the cross-sport EV / Props
+// dashboard and show the full slate of pick-cards for that sport.
+function applyHomeViewForSport() {
+  const isAll  = _sport === 'all';
+  const evEl   = $('section-ev');
+  const ppEl   = $('section-props');
+  const slEl   = $('section-slate');
+  if (evEl) evEl.style.display = isAll ? '' : 'none';
+  if (ppEl) ppEl.style.display = isAll ? '' : 'none';
+  if (slEl) slEl.style.display = isAll ? 'none' : '';
+  if (!isAll) {
+    const title = $('slate-title');
+    if (title) title.textContent = `${_sport.toUpperCase()} FULL SLATE`;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1397,6 +1564,143 @@ function renderPropsFull() {
   }).join('');
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  Rendering — Full Slate (per-sport)
+//  Visible on the Home tab when the user clicks MLB or WNBA in the
+//  sport-pill row.  Renders every game for the selected sport as a card
+//  with the matchup at the top + three bet-type boxes (moneyline, run
+//  line / spread, totals) underneath — the same layout the old slate
+//  used to ship.
+// ═══════════════════════════════════════════════════════════════════════
+function renderFullSlate() {
+  if (_sport === 'all') return;          // dashboard view active; nothing to render
+  const games = gamesForActiveSport();
+  const wrap  = $('slate-cards');
+  if (!wrap) return;
+  $('slate-count').textContent = games.length;
+  if (!games.length) {
+    wrap.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+      <span class="icon">📋</span>
+      No ${_sport.toUpperCase()} games yet. Tap <strong>RUN ANALYSIS</strong> at the top of Home.
+    </div>`;
+    return;
+  }
+  wrap.innerHTML = games.map(buildSlateCard).join('');
+}
+
+function buildSlateCard(g) {
+  const sport      = g._sport;
+  const totals     = g.totals || {};
+  const isMLB      = sport === 'mlb';
+  const rl         = g.run_line   || null;
+  const sp         = g.spread_pick || null;
+  // Predicted-runs row only shows when the totals model returned a prediction
+  const predRow = (totals.predicted_total != null && totals.total_line != null)
+    ? `<div class="slate-pred-row">
+         <span>Pred Total <strong>${totals.predicted_total}</strong></span>
+         <span class="${totals.direction === 'over' ? 'pred-dir-over' : 'pred-dir-under'}">${(totals.direction || '').toUpperCase()}</span>
+         <span>O/U ${totals.total_line}</span>
+       </div>` : '';
+  return `<article class="slate-card" data-game-id="${g.game_id}" data-sport="${sport}">
+    <div class="slate-meta">
+      <span class="slate-time" id="slate-time-${g.game_id}">${fmtTimeET(g.commence_time)}</span>
+      <span class="slate-sport-tag">${sport.toUpperCase()}</span>
+      ${g.venue ? `<span class="slate-venue">${g.venue}</span>` : ''}
+    </div>
+    <div class="slate-matchup">
+      <div class="slate-team">
+        <span class="slate-logo-lg" style="background:${teamColor(g.away_team)}">${teamInitials(g.away_team)}</span>
+        <span class="slate-team-name">${shortName(g.away_team)}</span>
+        <span class="slate-team-odds">${fmtOdds(g.away_odds)}</span>
+      </div>
+      <div class="slate-vs-col" id="slate-ctr-${g.game_id}">
+        <span class="slate-vs">VS</span>
+      </div>
+      <div class="slate-team">
+        <span class="slate-logo-lg" style="background:${teamColor(g.home_team)}">${teamInitials(g.home_team)}</span>
+        <span class="slate-team-name">${shortName(g.home_team)}</span>
+        <span class="slate-team-odds">${fmtOdds(g.home_odds)}</span>
+      </div>
+    </div>
+    ${predRow}
+    <div class="slate-props">
+      ${buildSlateMLBox(g)}
+      ${buildSlateRLBox(g, isMLB ? rl : sp, isMLB)}
+      ${buildSlateTotalsBox(g, totals)}
+    </div>
+  </article>`;
+}
+
+function _slateMetaHtml(prob, edge, odds) {
+  const eP    = (edge || 0);
+  const edgeS = `${eP >= 0 ? '+' : ''}${(eP * 100).toFixed(1)}%`;
+  const edgeC = eP >= 0 ? 'pos' : 'neg';
+  return `<div class="slate-prop-meta">
+    <span class="slate-prop-prob">${fmtPct(prob || 0, 0)}</span>
+    <span class="slate-prop-edge ${edgeC}">${edgeS}</span>
+    <span class="slate-prop-odds">${fmtOdds(odds)}</span>
+  </div>`;
+}
+
+function buildSlateMLBox(g) {
+  if (!g.pick_team) {
+    return `<div class="slate-prop no-data"><div class="slate-prop-label">Moneyline</div><div class="slate-prop-pick">—</div></div>`;
+  }
+  const valueChip = g.value_pick ? '<span class="slate-prop-value-badge">VALUE</span>' : '';
+  const conflictCls = g.conflict ? ' conflict' : '';
+  return `<div class="slate-prop${conflictCls}">
+    <div class="slate-prop-label">Moneyline</div>
+    <div class="slate-prop-pick">${shortName(g.pick_team)}</div>
+    ${_slateMetaHtml(g.pick_prob, g.pick_edge, g.pick_odds)}
+    ${valueChip}
+  </div>`;
+}
+
+function buildSlateRLBox(g, picked, isMLB) {
+  if (!picked) {
+    return `<div class="slate-prop no-data"><div class="slate-prop-label">${isMLB ? 'Run Line' : 'Spread'}</div><div class="slate-prop-pick">—</div></div>`;
+  }
+  let label, pickText;
+  if (isMLB) {
+    label = 'Run Line';
+    const homePt = picked.run_line_point != null ? picked.run_line_point : -1.5;
+    const pt     = picked.side === 'home' ? homePt : -homePt;
+    const ptStr  = pt > 0 ? `+${pt}` : `${pt}`;
+    pickText = `${shortName(picked.pick_team)} ${ptStr}`;
+  } else {
+    label = 'Spread';
+    const ls = picked.spread_line != null
+      ? (picked.spread_line > 0 ? `+${picked.spread_line}` : `${picked.spread_line}`) : '';
+    pickText = `${shortName(picked.pick_team)} ${ls}`;
+  }
+  const valueChip   = picked.value_bet ? '<span class="slate-prop-value-badge">VALUE</span>' : '';
+  const conflictCls = picked.conflict ? ' conflict' : '';
+  return `<div class="slate-prop${conflictCls}">
+    <div class="slate-prop-label">${label}</div>
+    <div class="slate-prop-pick">${pickText}</div>
+    ${_slateMetaHtml(picked.pick_prob, picked.edge, picked.pick_odds)}
+    ${valueChip}
+  </div>`;
+}
+
+function buildSlateTotalsBox(g, t) {
+  if (!t || t.total_line == null) {
+    return `<div class="slate-prop no-data"><div class="slate-prop-label">Totals</div><div class="slate-prop-pick">—</div></div>`;
+  }
+  const dir   = (t.direction || 'over');
+  const dirUp = dir.toUpperCase();
+  const odds  = dir === 'over' ? t.over_odds : t.under_odds;
+  const dirCls = dir === 'over' ? 'dir-over' : 'dir-under';
+  const valueChip   = t.value_bet ? '<span class="slate-prop-value-badge">VALUE</span>' : '';
+  const conflictCls = t.conflict ? ' conflict' : '';
+  return `<div class="slate-prop${conflictCls}">
+    <div class="slate-prop-label">Totals · O/U ${t.total_line}</div>
+    <div class="slate-prop-pick"><span class="${dirCls}">${dirUp}</span> ${t.total_line}</div>
+    ${_slateMetaHtml(t.pick_prob, t.edge, odds)}
+    ${valueChip}
+  </div>`;
+}
+
 function buildPropCard(p) {
   const initials = (p.team || '').split(' ').slice(-1)[0].slice(0, 3).toUpperCase() || '?';
   const edgePct = `${(p.edge || 0) >= 0 ? '+' : ''}${((p.edge || 0) * 100).toFixed(1)}%`;
@@ -1552,8 +1856,10 @@ async function forceRefresh() {
 }
 
 function renderAll() {
+  applyHomeViewForSport();
   renderEVScans();
   renderProps();
+  renderFullSlate();
   if (_tab === 'scores') renderScores();
   if (_tab === 'props')  renderPropsFull();
   updateMoreSubtext();
