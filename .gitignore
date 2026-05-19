@@ -14,9 +14,15 @@ env/
 .idea/
 .DS_Store
 
-# Local env / secrets
+# Local env / secrets -- NEVER commit a real .env, only .env.example.
+# The leading ** matches at any depth, so app/.env, app/.backups/.env,
+# etc. are all covered.  Match-anywhere.  Do NOT remove or this file
+# bleeds API keys into the repo (it already happened once -- rotate
+# every key listed in the leaked .env before relying on this rule).
 .env
+**/.env
 .env.local
+**/.env.local
 
 # Runtime artifacts
 *.log
