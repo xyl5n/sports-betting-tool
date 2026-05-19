@@ -502,6 +502,36 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
     except Exception as exc:                                              # noqa: BLE001
         out.append(("Supabase", "err", f"{type(exc).__name__}: {exc}"))
 
+    # 6b. Supabase app_cache table (persistent snapshot + analysis caches)
+    try:
+        from src import db as _db
+        if not _db.is_supabase():
+            out.append(("Supabase app_cache", "info",
+                        "skipped (Supabase not connected)"))
+        else:
+            keys = ("daily_snapshot", "analysis_cache:mlb", "analysis_cache:wnba")
+            bits = []
+            anything = False
+            for k in keys:
+                row = _db.cache_get(k)
+                if row:
+                    anything = True
+                    bits.append(f"{k}: date={row.get('date')}")
+                else:
+                    bits.append(f"{k}: —")
+            out.append((
+                "Supabase app_cache",
+                "ok" if anything else "warn",
+                " | ".join(bits),
+            ))
+    except Exception as exc:                                              # noqa: BLE001
+        # Most likely failure: table doesn't exist yet.  Surface that clearly.
+        msg = str(exc)
+        hint = (" -- create the table via the SQL in src/db.py header"
+                if "PGRST205" in msg or "does not exist" in msg.lower() else "")
+        out.append(("Supabase app_cache", "err",
+                    f"{type(exc).__name__}: {msg}{hint}"))
+
     # 7. Odds API key presence (env-var only -- no spend)
     try:
         import os as _os

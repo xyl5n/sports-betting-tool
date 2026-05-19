@@ -212,6 +212,158 @@ _snapshot_lock = _threading.Lock()
 _SNAPSHOT_ENABLED = os.environ.get("SNAPSHOT_ENABLED", "1").strip() not in ("0", "false", "False", "FALSE")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Step 4: persistent-cache layer.  Snapshot + analysis caches mirror to
+#  Supabase (table `app_cache`, see src/db.py) so they survive Railway
+#  container restarts and redeployments.  Local files remain the primary
+#  read surface; this layer is the persistence sidecar.
+#
+#  Wrappers below tolerate every failure mode (Supabase off, table missing,
+#  network error) silently so file-based ops keep working when Supabase is
+#  unavailable.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Keys used in the app_cache table.  Single source of truth so write +
+# restore + delete all agree.
+_CACHE_KEY_SNAPSHOT     = "daily_snapshot"
+_CACHE_KEY_ANALYSIS_MLB  = "analysis_cache:mlb"
+_CACHE_KEY_ANALYSIS_WNBA = "analysis_cache:wnba"
+
+
+def _ensure_data_dir() -> None:
+    """Make sure data/ exists before any file op.  Railway's filesystem can
+    drop directories between deployments, so re-creating at every import is
+    cheaper than trying to detect when it's gone."""
+    try:
+        Path("data").mkdir(parents=True, exist_ok=True)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"STARTUP WARNING: could not create data/: {exc}",
+              flush=True, file=sys.stderr)
+
+
+def _supabase_cache_get(key: str) -> dict | None:
+    try:
+        from src import db as _db
+        row = _db.cache_get(key)
+        return (row or {}).get("data") if row else None
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"SUPABASE cache_get({key}) failed: {exc}",
+              flush=True, file=sys.stderr)
+        return None
+
+
+def _supabase_cache_set(key: str, sport: str | None, date: str, data: dict) -> None:
+    try:
+        from src import db as _db
+        _db.cache_set(key, sport, date, data)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"SUPABASE cache_set({key}) failed: {exc}",
+              flush=True, file=sys.stderr)
+
+
+def _supabase_cache_delete(key: str) -> None:
+    try:
+        from src import db as _db
+        _db.cache_delete(key)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"SUPABASE cache_delete({key}) failed: {exc}",
+              flush=True, file=sys.stderr)
+
+
+def _purge_stale_caches_on_boot() -> None:
+    """Issue 1 + Issue 2 fix.  Runs once at module-load time.
+
+    1. Ensures data/ exists (so subsequent writes don't ENOENT).
+    2. For each cache file, if its `date` field doesn't match today's ET
+       date, deletes the file.  Stops a snapshot from a prior day from
+       leaking into today's UI.
+    3. Asks Supabase to drop any app_cache rows whose date != today.
+    """
+    _ensure_data_dir()
+    try:
+        today = _today_et()
+    except Exception:                                                     # noqa: BLE001
+        # _today_et is defined later in the module -- skip cleanup if we're
+        # somehow imported before that point.  The midnight-reset job is
+        # the backstop in that case.
+        return
+
+    for path in (_ANALYSIS_CACHE_FILE, _WNBA_ANALYSIS_CACHE_FILE, _DAILY_SNAPSHOT_FILE):
+        try:
+            if not path.exists():
+                continue
+            raw = path.read_text(encoding="utf-8")
+            if not raw.strip():
+                path.unlink(missing_ok=True)
+                continue
+            payload = json.loads(raw)
+            file_date = payload.get("date")
+            if file_date and file_date != today:
+                print(f"STARTUP: dropping stale {path.name} "
+                      f"(date={file_date}, today={today})",
+                      flush=True, file=sys.stderr)
+                path.unlink(missing_ok=True)
+        except Exception as exc:                                          # noqa: BLE001
+            # Don't fail boot over a corrupt cache file -- just nuke it
+            # and let the next analysis run recreate it.
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            print(f"STARTUP WARNING: removed unreadable {path.name}: {exc}",
+                  flush=True, file=sys.stderr)
+
+    # Best-effort Supabase cleanup -- silent if Supabase isn't connected.
+    try:
+        from src import db as _db
+        n = _db.cache_delete_stale(today)
+        if n:
+            print(f"STARTUP: dropped {n} stale Supabase app_cache rows",
+                  flush=True, file=sys.stderr)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"STARTUP WARNING: Supabase stale-purge failed: {exc}",
+              flush=True, file=sys.stderr)
+
+
+def _restore_caches_from_supabase_on_boot() -> None:
+    """Issue 4 fix.  When the container restarts and local files are gone
+    (or stale-purged above), pull today's cache rows from Supabase and
+    write them back to disk so the rest of the code -- which reads local
+    files -- works transparently."""
+    try:
+        from src import db as _db
+        if not _db.is_supabase():
+            return
+        today = _today_et()
+    except Exception:                                                     # noqa: BLE001
+        return
+
+    pairs = [
+        (_CACHE_KEY_SNAPSHOT,      _DAILY_SNAPSHOT_FILE),
+        (_CACHE_KEY_ANALYSIS_MLB,  _ANALYSIS_CACHE_FILE),
+        (_CACHE_KEY_ANALYSIS_WNBA, _WNBA_ANALYSIS_CACHE_FILE),
+    ]
+    restored: list[str] = []
+    for key, path in pairs:
+        if path.exists():
+            continue                                                      # local file is the source of truth
+        row = _supabase_cache_get(key)
+        if not row:
+            continue
+        if row.get("date") != today:
+            continue                                                      # stale -- already deleted by _purge
+        try:
+            _ensure_data_dir()
+            path.write_text(json.dumps(row, default=str), encoding="utf-8")
+            restored.append(path.name)
+        except Exception as exc:                                          # noqa: BLE001
+            print(f"STARTUP WARNING: could not restore {path.name} from Supabase: {exc}",
+                  flush=True, file=sys.stderr)
+    if restored:
+        print(f"STARTUP: restored from Supabase -> {', '.join(restored)}",
+              flush=True, file=sys.stderr)
+
+
 def _eprint(*args, **kwargs) -> None:
     """Safe stderr print that never raises.
 
@@ -345,6 +497,9 @@ def _write_daily_snapshot(sport: str, payload: dict, ts: datetime) -> None:
             raw_out = json.dumps(snap, indent=2, default=str)
             _DAILY_SNAPSHOT_TMP.write_text(raw_out, encoding="utf-8")
             _DAILY_SNAPSHOT_TMP.replace(_DAILY_SNAPSHOT_FILE)
+            # Issue 4: also mirror to Supabase app_cache so the snapshot
+            # survives Railway redeploys.  Best-effort -- silent on failure.
+            _supabase_cache_set(_CACHE_KEY_SNAPSHOT, None, today, snap)
         except Exception as _e:
             print(f"SNAPSHOT write error (ignored): {_e}", flush=True, file=sys.stderr)
             try:
@@ -372,6 +527,13 @@ def _clear_snapshot_sport(sport: str) -> None:
             raw_out = json.dumps(snap, indent=2, default=str)
             _DAILY_SNAPSHOT_TMP.write_text(raw_out, encoding="utf-8")
             _DAILY_SNAPSHOT_TMP.replace(_DAILY_SNAPSHOT_FILE)
+            # Issue 4: keep Supabase mirror in sync.
+            try:
+                _supabase_cache_set(
+                    _CACHE_KEY_SNAPSHOT, None, snap.get("date") or _today_et(), snap,
+                )
+            except Exception:                                             # noqa: BLE001
+                pass
         except Exception as _e:
             print(f"SNAPSHOT clear error (ignored): {_e}", flush=True, file=sys.stderr)
             try:
@@ -1206,6 +1368,8 @@ def _save_wnba_analysis_cache(serialized, parlays, games_loaded, cv_acc, lr_cv_a
             "parlays":       parlays,
         }
         _WNBA_ANALYSIS_CACHE_FILE.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        # Issue 4: mirror to Supabase so the cache survives Railway redeploys.
+        _supabase_cache_set(_CACHE_KEY_ANALYSIS_WNBA, "wnba", payload["date"], payload)
     except Exception:
         pass
 
@@ -1617,6 +1781,8 @@ def _save_analysis_cache(serialized: list, parlays: dict, sport: str,
         _ANALYSIS_CACHE_FILE.write_text(
             json.dumps(payload, default=str), encoding="utf-8"
         )
+        # Issue 4: mirror to Supabase so the cache survives Railway redeploys.
+        _supabase_cache_set(_CACHE_KEY_ANALYSIS_MLB, "mlb", payload["date"], payload)
     except Exception:
         pass
 
@@ -4884,6 +5050,10 @@ def _run_midnight_reset() -> None:
                 _cache.invalidate(_odds_key)
             except Exception:
                 pass
+        # Issue 4: also wipe the Supabase mirror so a redeploy after
+        # midnight doesn't restore yesterday's data from cache.
+        for _ckey in (_CACHE_KEY_SNAPSHOT, _CACHE_KEY_ANALYSIS_MLB, _CACHE_KEY_ANALYSIS_WNBA):
+            _supabase_cache_delete(_ckey)
         _eprint("MIDNIGHT-RESET: complete — new day ready")
     except Exception as _mre:
         _eprint(f"MIDNIGHT-RESET: unexpected error: {_mre}")
@@ -5155,6 +5325,14 @@ if not _in_debug_mode or _werkzeug_main:
         print(f"STARTUP WARNING: nightly retrain scheduler failed: {_sched_err}",
               flush=True, file=sys.stderr)
         _logger.warning("nightly retrain scheduler failed to start: %s", _sched_err)
+
+# ── Persistent-cache startup steps (Issues 1 + 2 + 4) ───────────────────────
+# 1. Ensure data/ exists before any file op (Railway can drop it on redeploy)
+# 2. Purge any cache file / Supabase row whose date != today
+# 3. Restore today's cache rows from Supabase to disk when local files are
+#    missing (the common case right after a Railway redeploy)
+_purge_stale_caches_on_boot()
+_restore_caches_from_supabase_on_boot()
 
 print("STARTUP: app ready", flush=True, file=sys.stderr)
 

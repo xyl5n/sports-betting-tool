@@ -250,6 +250,82 @@ def list_records(sport: Optional[str] = None) -> list[dict]:
 
 
 # ════════════════════════════════════════════════════════════════
+#  app_cache (generic key/value persistence -- snapshot + analysis
+#  caches mirror to this table so they survive Railway redeploys).
+#
+#  Schema (run this in the Supabase SQL editor once):
+#
+#     create table if not exists app_cache (
+#       key        text primary key,
+#       sport      text,
+#       date       text,
+#       data       jsonb,
+#       updated_at timestamptz default now()
+#     );
+#     create index if not exists app_cache_date_idx on app_cache (date);
+#
+#  Keys used by app.py today:
+#     "daily_snapshot"          (sport=null, contains both MLB + WNBA)
+#     "analysis_cache:mlb"      (sport="mlb")
+#     "analysis_cache:wnba"     (sport="wnba")
+# ════════════════════════════════════════════════════════════════
+
+def cache_get(key: str) -> Optional[dict]:
+    """Read one cache row.  Returns the full row dict (key/sport/date/data/
+    updated_at) or None if not found, Supabase off, or any error."""
+    if _mode != "supabase" or _client is None:
+        return None
+    try:
+        resp = _client.table("app_cache").select("*").eq("key", key).limit(1).execute()
+        rows = resp.data or []
+        return rows[0] if rows else None
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("cache_get(%s) failed: %s", key, exc)
+        return None
+
+
+def cache_set(key: str, sport: Optional[str], date: str, data: dict) -> bool:
+    """Upsert one cache row.  Returns True on success, False on any error
+    or when Supabase isn't configured.  Never raises -- callers can ignore
+    the return when the local-file write is the source of truth."""
+    if _mode != "supabase" or _client is None:
+        return False
+    try:
+        row = {"key": key, "sport": sport, "date": date, "data": data}
+        _client.table("app_cache").upsert(row, on_conflict="key").execute()
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("cache_set(%s) failed: %s", key, exc)
+        return False
+
+
+def cache_delete(key: str) -> bool:
+    """Delete one cache row by key.  Returns True on success."""
+    if _mode != "supabase" or _client is None:
+        return False
+    try:
+        _client.table("app_cache").delete().eq("key", key).execute()
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("cache_delete(%s) failed: %s", key, exc)
+        return False
+
+
+def cache_delete_stale(today: str) -> int:
+    """Delete every cache row whose `date` field doesn't equal *today*.
+    Returns the number of rows the call reports deleting (0 if Supabase
+    off or on error).  Caller passes today's ET date string."""
+    if _mode != "supabase" or _client is None:
+        return 0
+    try:
+        resp = _client.table("app_cache").delete().neq("date", today).execute()
+        return len(resp.data or [])
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("cache_delete_stale(today=%s) failed: %s", today, exc)
+        return 0
+
+
+# ════════════════════════════════════════════════════════════════
 #  Serialization helpers
 # ════════════════════════════════════════════════════════════════
 
