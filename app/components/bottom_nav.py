@@ -17,12 +17,13 @@ from nicegui import ui
 from . import theme as t
 
 
+# Order matches the desktop navbar: Home, Sports, AI, Model, My Bets.
 _TABS = (
     ("Home",     t.TAB_HOME,   "/",            "home"),
     ("Sports",   t.TAB_SPORTS, "/sports/mlb",  "sports_baseball"),
     ("AI",       t.TAB_AI,     "/ai",          "auto_awesome"),
-    ("My Bets",  t.TAB_MYBETS, "/mybets",      "receipt_long"),
     ("Model",    t.TAB_MODEL,  "/model",       "insights"),
+    ("My Bets",  t.TAB_MYBETS, "/mybets",      "receipt_long"),
 )
 
 

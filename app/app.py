@@ -966,7 +966,14 @@ _AUTO_ANALYSIS_LOG_FILE = Path("data/auto_analysis_log.json")
 # sport from the model's auto-pick pool.  Default: MLB on, WNBA off.  Persisted
 # as a tiny JSON file so the choice survives restarts.
 _MODEL_SETTINGS_FILE = Path("data/model_settings.json")
-_MODEL_SETTINGS_DEFAULT = {"mlb_enabled": True, "wnba_enabled": False}
+_MODEL_SETTINGS_DEFAULT = {
+    "mlb_enabled":         True,
+    "wnba_enabled":        False,
+    # Home-page top-bar "overall win rate" chip toggle.  When False the
+    # chip is hidden and the two remaining chips (best model + best bet
+    # type) stretch to fill the row.  See pages/home.py + pages/admin.py.
+    "show_overall_chip":   True,
+}
 
 
 def _load_model_settings() -> dict:
@@ -1580,6 +1587,47 @@ def _serialize_wnba(r: dict, bankroll: float, starting_bankroll: float | None = 
         }
 
     return out
+
+
+def _serialize_wnba_no_model(game: dict, reason: str | None) -> dict:
+    """Build a JSON-safe serialized dict for a WNBA game the model could
+    not predict (e.g. one of the teams has no training data because it's
+    a 2026 expansion team like Toronto Tempo).
+
+    Carries matchup + bookmaker odds + market-implied probabilities.  No
+    model pick fields -- the `_no_model` flag tells the UI to render a
+    NO MODEL PICK badge instead of fake prediction bet boxes.
+
+    Result flows through the same caching + snapshot path as model-picked
+    results, so the game still appears on the WNBA tab tonight and the
+    user knows it's on -- they just can't get a model recommendation.
+    """
+    home_implied = float(game.get("home_implied_prob") or 0.5)
+    away_implied = 1.0 - home_implied
+    return {
+        "_no_model":         True,
+        "_no_model_reason":  reason or "Model could not produce a prediction for this matchup.",
+        "game_id":           game.get("id") or "",   # Track button needs this
+        "commence_time":     game.get("commence_time", ""),
+        "home_team":         game.get("home_team", ""),
+        "away_team":         game.get("away_team", ""),
+        # Field names match _serialize_wnba's matchup-row contract
+        "home_odds":         game.get("h2h_home_odds"),
+        "away_odds":         game.get("h2h_away_odds"),
+        # No model pick -- explicit Nones so MONEYLINE bet box shows '—'
+        "pick_team":         None,
+        "pick_prob":         None,
+        "pick_edge":         None,
+        "pick_odds":         None,
+        "value_pick":        False,
+        # Market-implied probabilities surfaced for transparency
+        "market_home_prob":  round(home_implied, 4),
+        "market_away_prob":  round(away_implied, 4),
+        # No spread / totals model output either
+        "spread_pick":       None,
+        "totals":            None,
+        "run_line":          None,
+    }
 
 
 def _save_wnba_analysis_cache(serialized, parlays, games_loaded, cv_acc, lr_cv_acc,
@@ -4141,6 +4189,72 @@ def confirm_bet(game_id: str):
                     "odds": odds, "confirmed_amount": conf_amt})
 
 
+@app.route("/api/wnba/ledger/confirm/<game_id>", methods=["POST"])
+def confirm_bet_wnba(game_id: str):
+    """WNBA mirror of /api/ledger/confirm/<game_id>.
+
+    The MLB version above is hardcoded to data/ledger.json + _analysis_state.
+    The NiceGUI Track button needs an equivalent that writes to
+    data/wnba_ledger.json + reads from _wnba_analysis_state.  Same shape of
+    response so the front-end uses one call pattern across sports.
+    """
+    data     = request.get_json() or {}
+    bankroll = float(data.get("bankroll", _wnba_analysis_state["bankroll"] or 1000))
+    sport_cfg = SPORTS["wnba"]
+    ledger   = Ledger(path="data/wnba_ledger.json", starting_bankroll=bankroll)
+
+    for bet in ledger.data["open_bets"]:
+        if bet["game_id"] == game_id and bet.get("bet_type", "single") == "single":
+            if bet["confirmed"]:
+                return jsonify({"error": "Already confirmed"}), 409
+            _, conf_amt = ledger.kelly_amounts(bet["model_prob"], bet["american_odds"])
+            conf_amt = round(conf_amt, 2)
+            bet["confirmed"]        = True
+            bet["confirmed_amount"] = conf_amt
+            if conf_amt > 0:
+                ledger.data["personal_bankroll"] = round(
+                    ledger.data["personal_bankroll"] - conf_amt, 2
+                )
+            ledger.save()
+            return jsonify({"success": True, "confirmed_amount": conf_amt})
+
+    raw = next(
+        (r for r in _wnba_analysis_state["results"]
+         if r.get("game", {}).get("id") == game_id),
+        None,
+    )
+    if raw is None:
+        return jsonify({"error": "Game not found in current WNBA analysis"}), 404
+
+    g  = raw["game"]
+    hp = float(raw["prediction"]["home_win_prob"])
+    mp = float(g["home_implied_prob"])
+    he = hp - mp
+
+    if hp >= 0.5:
+        side, team = "home", g["home_team"]
+        odds = int(g.get("h2h_home_odds") or -110)
+        model_p, edge = hp, he
+    else:
+        side, team = "away", g["away_team"]
+        odds = int(g.get("h2h_away_odds") or -110)
+        model_p, edge = 1 - hp, -he
+
+    ml_conf = confidence_tier_from_prob(model_p)
+    model_amt, conf_amt = ledger.kelly_amounts(model_p, odds)
+    ledger.add_bet(
+        game=g, sport="wnba", sport_key=sport_cfg.odds_key,
+        side=side, team=team, odds=odds,
+        model_prob=model_p, edge=edge,
+        model_amount=model_amt,
+        confirmed=True, confirmed_amount=conf_amt,
+        confidence_tier=ml_conf,
+    )
+    ledger.save()
+    return jsonify({"success": True, "team": team,
+                    "odds": odds, "confirmed_amount": conf_amt})
+
+
 @app.route("/api/ledger/parlay", methods=["POST"])
 def log_parlay():
     """Record all legs of a parlay as a grouped confirmed bet."""
@@ -4920,6 +5034,9 @@ def analyze_wnba():
                         "commence_time": game.get("commence_time"),
                         "reason":        "build_for_game returned None",
                         "detail":        reason,
+                        # Stash the raw game dict so we can build a
+                        # market-odds-only stub for the UI's no-model card.
+                        "game":          game,
                     })
                     continue
                 feature_vec, meta = built
@@ -4966,6 +5083,7 @@ def analyze_wnba():
                     "commence_time": game.get("commence_time"),
                     "reason":        f"{type(_g_err).__name__}",
                     "detail":        str(_g_err),
+                    "game":          game,
                 })
                 # Skip this game but continue with the rest
 
@@ -5000,7 +5118,29 @@ def analyze_wnba():
                 _eprint(f"ANALYZE [WNBA] _serialize_wnba failed on game {_si}: "
                         f"{type(_se).__name__}: {_se}")
                 _eprint(traceback.format_exc())
-        _step(f"Step 7 done: {len(serialized)}/{len(results)} games serialized")
+
+        # Option A: also serialize the games the model couldn't predict so
+        # they appear on the WNBA tab as "NO MODEL PICK" cards with the
+        # market odds visible.  Without this the user sees an empty board
+        # and has no clue Toronto Tempo @ Phoenix Mercury is even on tonight.
+        _skipped_for_ui = _wnba_analysis_state.get("skipped") or []
+        for _sk in _skipped_for_ui:
+            _game = _sk.get("game")
+            if not _game:
+                continue
+            try:
+                stub = _serialize_wnba_no_model(
+                    _game,
+                    reason=(
+                        f"No model pick: {_sk.get('detail') or _sk.get('reason') or '—'}"
+                    ),
+                )
+                serialized.append(stub)
+            except Exception as _sn:                                       # noqa: BLE001
+                _eprint(f"ANALYZE [WNBA] _serialize_wnba_no_model failed for "
+                        f"{_sk.get('matchup', '?')}: {type(_sn).__name__}: {_sn}")
+        _step(f"Step 7 done: {len(serialized)}/{len(results)} games serialized "
+              f"({len(_skipped_for_ui)} no-model stubs appended)")
 
         try:
             parlays = _generate_parlays(serialized, bankroll)

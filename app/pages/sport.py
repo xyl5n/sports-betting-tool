@@ -85,7 +85,9 @@ def _game_grid(backend, sport: str) -> None:
         return
 
     for g in games:
-        game_card.render(g, sport=sport)
+        # backend=backend so each card renders a Track button wired to
+        # /api/{sport}/ledger/confirm/<game_id> via the Flask test client.
+        game_card.render(g, sport=sport, backend=backend)
 
 
 def _serialized_games(backend, sport: str) -> list[dict]:
@@ -116,4 +118,28 @@ def _serialized_games(backend, sport: str) -> list[dict]:
             out.append(g)
         except Exception:                                                 # noqa: BLE001
             continue
+
+    # Append no-model stubs for games the model couldn't predict (e.g.
+    # 2026 WNBA expansion teams without training data).  WNBA only --
+    # MLB doesn't track skipped games yet.  The stubs render as cards
+    # with matchup + market odds + a NO MODEL PICK badge so the user
+    # at least sees the game is on tonight.
+    if sport == "wnba":
+        try:
+            stub_fn = backend._serialize_wnba_no_model
+            for sk in (state.get("skipped") or []):
+                game = sk.get("game")
+                if not game:
+                    continue
+                reason = (
+                    f"No model pick: {sk.get('detail') or sk.get('reason') or '—'}"
+                )
+                try:
+                    out.append(stub_fn(game, reason))
+                except Exception:                                         # noqa: BLE001
+                    continue
+        except AttributeError:
+            # backend._serialize_wnba_no_model not yet deployed -- ignore.
+            pass
+
     return out
