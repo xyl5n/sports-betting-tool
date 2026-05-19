@@ -2687,10 +2687,25 @@ def analyze():
             _step(f"Step 3c done: totals status={tot_status!r}")
 
         # Step 4 — odds (baseball_mlb only)
-        _step("Step 4: fetching odds from Odds API")
+        _step(f"Step 4: fetching odds from Odds API  sport_key={sport_cfg.odds_key!r}")
         odds_client = OddsClient(odds_key, _cache)
-        games = odds_client.get_odds(sport_key=sport_cfg.odds_key)
-        games = _filter_stale_games(games)  # drop yesterday's games before any processing
+        games_pre_filter = odds_client.get_odds(sport_key=sport_cfg.odds_key)
+        _step(f"Step 4: get_odds returned {len(games_pre_filter)} parsed games "
+              f"(before stale-date filter)")
+        # Drop yesterday's games before any processing.  `_filter_stale_games`
+        # converts each game's commence_time UTC -> ET via zoneinfo and keeps
+        # only games whose ET date >= today's ET date.  If you see a big drop
+        # here, check the first game's commence_time vs the today_et logged.
+        today_et = _today_et()
+        kept_dates: dict[str, int] = {}
+        dropped_dates: dict[str, int] = {}
+        for g in games_pre_filter:
+            d = _game_et_date(g.get("commence_time", "")) or "<unparsable>"
+            (kept_dates if d >= today_et else dropped_dates)[d] = \
+                (kept_dates if d >= today_et else dropped_dates).get(d, 0) + 1
+        games = _filter_stale_games(games_pre_filter)
+        _step(f"Step 4: stale-date filter  today_et={today_et}  "
+              f"kept_dates={kept_dates}  dropped_dates={dropped_dates}")
         _step(f"Step 4 done: {len(games)} games with odds")
 
         # Freeze pre-game odds: for started games, restore market odds from before first pitch
@@ -4682,11 +4697,22 @@ def analyze_wnba():
         _step(f"Step 3c done: totals status={tot_status!r}")
 
         # Step 4 — odds from The Odds API
-        _step("Step 4: fetching odds from Odds API")
+        _step("Step 4: fetching odds from Odds API  sport_key='basketball_wnba'")
         odds_client = OddsClient(odds_key, _cache)
-        games       = odds_client.get_odds(sport_key="basketball_wnba")
+        games_pre_filter = odds_client.get_odds(sport_key="basketball_wnba")
+        _step(f"Step 4: get_odds returned {len(games_pre_filter)} parsed games "
+              f"(before stale-date filter)")
+        today_et = _today_et()
+        kept_dates: dict[str, int] = {}
+        dropped_dates: dict[str, int] = {}
+        for g in games_pre_filter:
+            d = _game_et_date(g.get("commence_time", "")) or "<unparsable>"
+            (kept_dates if d >= today_et else dropped_dates)[d] = \
+                (kept_dates if d >= today_et else dropped_dates).get(d, 0) + 1
+        games = _filter_stale_games(games_pre_filter)
+        _step(f"Step 4: stale-date filter  today_et={today_et}  "
+              f"kept_dates={kept_dates}  dropped_dates={dropped_dates}")
         _step(f"Step 4 done: {len(games)} games with odds")
-        games       = _filter_stale_games(games)   # drop yesterday's games before any processing
         _step(f"Step 4b: after stale-game filter: {len(games)} games")
         games       = _lock_in_pre_game_odds(games)
         _step("Step 4c: pre-game odds locked")
