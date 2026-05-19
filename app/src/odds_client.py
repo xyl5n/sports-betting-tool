@@ -1,11 +1,22 @@
 """
-The Odds API client — fetches baseball (MLB) and basketball (WNBA) markets only.
-Docs: https://the-odds-api.com/liveapi/guides/v4/
+Odds client — primary source is SharpAPI, fallback is The Odds API.
+
+SharpAPI docs:  https://docs.sharpapi.io/en/api-reference/overview
+The Odds API:   https://the-odds-api.com/liveapi/guides/v4/
+
+SharpAPI is used when SHARPAPI_KEY is present in env.  If it's absent or the
+call fails, the client transparently retries via The Odds API (ODDS_API_KEY).
+Both clients return the same normalised per-game dict so the rest of the app
+never needs to know which source was used.
 """
 import json
+import os
 import sys
-import requests
+from collections import defaultdict
 from typing import Optional
+
+import requests
+
 from .cache import Cache
 
 BASE_URL = "https://api.the-odds-api.com/v4"
@@ -40,11 +51,210 @@ def _remove_vig(home_prob: float, away_prob: float) -> tuple[float, float]:
     return home_prob / total, away_prob / total
 
 
+# ---------------------------------------------------------------------------
+# SharpAPI client
+# ---------------------------------------------------------------------------
+
+class SharpApiClient:
+    """Fetches pre-match odds from SharpAPI (https://api.sharpapi.io/api/v1).
+
+    Returns the same normalised per-game dict as OddsClient so the two sources
+    are interchangeable from the caller's perspective.
+    """
+
+    _BASE_URL = "https://api.sharpapi.io/api/v1"
+
+    # Map Odds API sport keys → SharpAPI league values.
+    SPORT_MAP: dict[str, str] = {
+        "baseball_mlb":    "mlb",
+        "basketball_wnba": "wnba",
+    }
+
+    def __init__(self, api_key: str, cache: Optional[Cache] = None):
+        self.api_key = api_key
+        self.cache = cache or Cache()
+        self.session = requests.Session()
+        self.session.headers.update({"X-API-Key": api_key})
+
+    def _get(self, path: str, params: dict) -> dict:
+        url = f"{self._BASE_URL}{path}"
+        _log(f"[sharp] GET {url} params={params}")
+        resp = self.session.get(url, params=params, timeout=15)
+        _log(f"[sharp]   -> status={resp.status_code}  bytes={len(resp.content)}")
+        if not resp.ok:
+            raise requests.HTTPError(
+                f"{resp.status_code} {resp.reason or ''} for url: {url}".strip(),
+                response=resp,
+            )
+        data = resp.json()
+        # SharpAPI wraps every response in {"success": true/false, "data": [...]}
+        if not data.get("success", True):
+            err = data.get("error", {})
+            raise ValueError(
+                f"SharpAPI error {err.get('code', '?')}: {err.get('message', data)}"
+            )
+        return data
+
+    def get_odds(
+        self,
+        sport_key: str,
+        markets: str = "h2h,spreads,totals",
+        regions: str = "us",
+    ) -> list[dict]:
+        """Return upcoming games for *sport_key* — same shape as OddsClient."""
+        league = self.SPORT_MAP.get(sport_key)
+        if league is None:
+            raise ValueError(f"SharpAPI: unsupported sport_key {sport_key!r}")
+
+        cache_key = f"sharp_odds_{sport_key}_{markets}_{regions}"
+        cached = self.cache.get(cache_key, ttl=900)
+        if cached is not None:
+            _log(f"[sharp] cache HIT  cache_key={cache_key!r}  count={len(cached)}")
+            return cached
+
+        _log(f"[sharp] cache MISS cache_key={cache_key!r} -- calling SharpAPI")
+        raw = self._get("/odds", {
+            "league": league,
+            "market": "main",   # "main" covers moneyline + spread + totals
+            "live":   "false",
+            "limit":  200,
+        })
+
+        rows = raw.get("data") or []
+        _log(f"[sharp] raw rows={len(rows)} for league={league!r}")
+        if not rows:
+            _log("[sharp] WARN: no rows returned from SharpAPI")
+
+        parsed = self._assemble_games(rows)
+        self.cache.set(cache_key, parsed)
+        return parsed
+
+    # ------------------------------------------------------------------
+    # Parsing helpers
+    # ------------------------------------------------------------------
+
+    def _assemble_games(self, rows: list[dict]) -> list[dict]:
+        """Group flat SharpAPI rows by event_id into per-game dicts."""
+        # Bucket rows by event — preserve insertion order (first sportsbook wins).
+        event_meta: dict[str, dict] = {}
+        event_rows: dict[str, list[dict]] = defaultdict(list)
+
+        for row in rows:
+            if row.get("is_live"):
+                continue
+            eid = row.get("event_id") or row.get("id")
+            if not eid:
+                continue
+            if eid not in event_meta:
+                event_meta[eid] = {
+                    "id":            eid,
+                    "commence_time": row.get("event_start_time", ""),
+                    "home_team":     row.get("home_team", ""),
+                    "away_team":     row.get("away_team", ""),
+                }
+            event_rows[eid].append(row)
+
+        result: list[dict] = []
+        drop_reasons: dict[str, int] = {}
+
+        for eid, meta in event_meta.items():
+            game = self._build_game(meta, event_rows[eid])
+            if game is None:
+                why = meta.get("_drop_reason", "missing h2h odds")
+                drop_reasons[why] = drop_reasons.get(why, 0) + 1
+                continue
+            result.append(game)
+
+        _log(f"[sharp] assembled {len(result)} games from {len(event_meta)} events")
+        if drop_reasons:
+            _log(f"[sharp] drop reasons: "
+                 f"{ {k: v for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])} }")
+        return result
+
+    @staticmethod
+    def _build_game(meta: dict, rows: list[dict]) -> Optional[dict]:
+        """Populate odds fields from a list of same-event rows."""
+        home = meta["home_team"]
+        away = meta["away_team"]
+
+        h2h_home = h2h_away = None
+        rl_home = rl_away = rl_point = None
+        over = under = total = None
+
+        for row in rows:
+            mtype = (row.get("market_type") or "").lower()
+            sel   = (row.get("selection")   or "").lower()
+            price = row.get("odds_american")
+            line  = row.get("line")
+
+            if mtype in ("moneyline", "h2h"):
+                if sel == "home" and h2h_home is None:
+                    h2h_home = price
+                elif sel == "away" and h2h_away is None:
+                    h2h_away = price
+
+            elif mtype in ("spread", "run_line", "runline"):
+                if sel == "home" and rl_home is None:
+                    rl_home  = price
+                    rl_point = line
+                elif sel == "away" and rl_away is None:
+                    rl_away = price
+
+            elif mtype in ("total", "totals", "over_under"):
+                if sel == "over" and over is None:
+                    over  = price
+                    total = line
+                elif sel == "under" and under is None:
+                    under = price
+
+        if h2h_home is None or h2h_away is None:
+            meta["_drop_reason"] = (
+                f"h2h missing (home={home!r} h2h_home={h2h_home}, "
+                f"away={away!r} h2h_away={h2h_away})"
+            )
+            return None
+
+        raw_home = _american_to_prob(h2h_home)
+        raw_away = _american_to_prob(h2h_away)
+        home_prob, away_prob = _remove_vig(raw_home, raw_away)
+
+        return {
+            "id":                meta["id"],
+            "commence_time":     meta["commence_time"],
+            "home_team":         home,
+            "away_team":         away,
+            "h2h_home_odds":     h2h_home,
+            "h2h_away_odds":     h2h_away,
+            "home_implied_prob": round(home_prob, 4),
+            "away_implied_prob": round(away_prob, 4),
+            "spread":            rl_point,
+            "run_line_home_odds": rl_home,
+            "run_line_away_odds": rl_away,
+            "run_line_point":    rl_point,
+            "over_odds":         over,
+            "under_odds":        under,
+            "total_line":        total,
+        }
+
+
+# ---------------------------------------------------------------------------
+# The Odds API client (now acts as fallback)
+# ---------------------------------------------------------------------------
+
 class OddsClient:
     def __init__(self, api_key: str, cache: Optional[Cache] = None):
         self.api_key = api_key
         self.cache = cache or Cache()
         self.session = requests.Session()
+        # SharpAPI is opt-in — read key from env at construction time so no
+        # app.py changes are needed.  When present, get_odds() tries Sharp
+        # first and only falls back to The Odds API on failure.
+        _sharp_key = os.environ.get("SHARPAPI_KEY", "").strip()
+        self._sharp: Optional[SharpApiClient] = (
+            SharpApiClient(_sharp_key, self.cache) if _sharp_key else None
+        )
+        if self._sharp:
+            _log("OddsClient: SharpAPI primary source configured (SHARPAPI_KEY present)")
 
     def _get(self, path: str, params: dict) -> dict | list:
         params["apiKey"] = self.api_key
@@ -84,11 +294,29 @@ class OddsClient:
     ) -> list[dict]:
         """Return upcoming games for *sport_key* with implied probabilities.
 
+        Tries SharpAPI first (if SHARPAPI_KEY is set), then falls back to The
+        Odds API.  Both return the same normalised per-game dict.
+
         sport_key must be an active Odds API sport key, e.g.:
           "baseball_mlb"      — MLB moneylines / run lines / totals
           "basketball_wnba"   — WNBA moneylines / spreads / totals
         """
         _log(f"get_odds(sport_key={sport_key!r}, markets={markets!r}, regions={regions!r})")
+
+        # ── SharpAPI (primary) ────────────────────────────────────────────
+        if self._sharp and sport_key in SharpApiClient.SPORT_MAP:
+            try:
+                result = self._sharp.get_odds(sport_key, markets, regions)
+                _log(f"get_odds: SharpAPI returned {len(result)} games")
+                return result
+            except Exception as exc:
+                _log(
+                    f"get_odds: SharpAPI failed ({type(exc).__name__}: {exc}) "
+                    "-- falling back to The Odds API"
+                )
+
+        # ── The Odds API (fallback / sole source when no Sharp key) ───────
+        _log(f"get_odds: using The Odds API for sport_key={sport_key!r}")
         cache_key = f"odds_{sport_key}_{markets}_{regions}"
         cached = self.cache.get(cache_key, ttl=900)  # 15-min TTL
         if cached is not None:
