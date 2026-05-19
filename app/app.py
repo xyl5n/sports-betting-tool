@@ -185,46 +185,12 @@ def _probe_sharpapi_leagues_on_boot() -> None:
 _probe_sharpapi_leagues_on_boot()
 
 
-def _bust_daily_odds_cache_on_boot() -> None:
-    """Delete the cached daily-odds rows for both sports at startup.
-
-    Why: prior cache rows were written by an Odds API call that didn't pass
-    `commenceTimeFrom` / `commenceTimeTo`, so they could legitimately
-    contain yesterday's already-played games even when their `date` field
-    matches today.  The date-equality guard in _read_daily_odds_cache
-    can't distinguish "fresh cache from late-night call" from "fresh cache
-    with stale game contents", so we blow them away on boot.  The next
-    analyze call repopulates with the corrected (time-filtered) query.
-
-    This runs on every container boot.  In practice that's once per
-    Railway redeploy -- so one extra Odds API request per sport per
-    deploy.  Acceptable given the daily cache cap.
-
-    Best-effort: Supabase down -> no-op.  Errors swallowed.
-    """
-    try:
-        from src import db as _db
-        if not _db.is_supabase():
-            return
-        keys = (
-            "odds_daily:baseball_mlb:h2h,spreads,totals:us",
-            "odds_daily:basketball_wnba:h2h,spreads,totals:us",
-        )
-        for k in keys:
-            try:
-                _db.cache_delete(k)
-                print(f"STARTUP: busted daily odds cache row key={k!r} "
-                      f"(forces fresh API call on next analyze)",
-                      flush=True, file=sys.stderr)
-            except Exception as exc:                                      # noqa: BLE001
-                print(f"STARTUP WARNING: cache_delete({k}) failed: {exc}",
-                      flush=True, file=sys.stderr)
-    except Exception as exc:                                              # noqa: BLE001
-        print(f"STARTUP WARNING: daily odds cache bust failed: {exc}",
-              flush=True, file=sys.stderr)
-
-
-_bust_daily_odds_cache_on_boot()
+# NOTE: _bust_daily_odds_cache_on_boot used to live here and was tied to
+# the old "1 Odds API call per sport per day" Supabase cache (see PR #37
+# and PR #40).  The quota model has moved to a per-day request counter
+# (see src/odds_client._odds_check_limit) with a 500-call ceiling, so
+# the daily-cache + boot-bust combo is no longer relevant.  Removing
+# the bust + the cache layer in one swoop.
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
@@ -3211,6 +3177,28 @@ def analyze():
         })
 
     except Exception as exc:
+        # Daily Odds-API quota hit -- return a clean 429 with the counter
+        # snapshot the UI uses to render the "limit reached" banner.
+        # Class-name check avoids a hard import dance with src.odds_client.
+        if type(exc).__name__ == "OddsApiLimitExceeded":
+            try:
+                from src.odds_client import odds_usage
+                u = odds_usage()
+            except Exception:                                             # noqa: BLE001
+                u = {"count": 0, "effective_limit": 500, "limit_reached": True}
+            _eprint(f"ANALYZE [{sport.upper()}] BLOCKED: Odds API daily "
+                    f"limit reached ({u['count']}/{u['effective_limit']})")
+            return jsonify({
+                "success":       False,
+                "limit_reached": True,
+                "error":         (
+                    f"Daily Odds API limit of {u['effective_limit']} reached, "
+                    f"additional pulls require manual approval."
+                ),
+                "calls_today":   u["count"],
+                "limit":         u["effective_limit"],
+            }), 429
+
         # Log type+message FIRST with _eprint so it survives even if traceback
         # formatting or jsonify later fails (e.g. UnicodeEncodeError on Windows).
         # Every payload that leaves this block is run through _redact so an
@@ -4088,6 +4076,70 @@ def admin_reset_my_bets_record():
             data["history"] = kept
             return removed
         return jsonify({"success": True, "removed": _reset_each_ledger(_mut)})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
+
+
+# ────────────────────────────────────────────────────────────────────────────
+#  Odds API quota -- read + manual-allowance grant.
+#
+#  /api/odds/usage  (GET)   read-only snapshot for the UI to render the
+#                            counter chip + the limit-reached banner
+#  /api/admin/odds/approve_additional (POST) bump today's allowance by
+#                            +50 (the bonus_step in odds_client).  Each
+#                            click of the Admin button calls this once.
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/odds/usage", methods=["GET"])
+def odds_usage_endpoint():
+    """Return today's Odds API call count + effective limit.  Cheap, no
+    upstream traffic -- the UI hits this on page load and after every
+    analyze response."""
+    try:
+        from src.odds_client import odds_usage
+        u = odds_usage()
+        return jsonify({
+            "success":         True,
+            "count":           u["count"],
+            "base_limit":      u["base_limit"],
+            "extra_allowance": u["extra_allowance"],
+            "effective_limit": u["effective_limit"],
+            "remaining":       u["remaining"],
+            "limit_reached":   u["limit_reached"],
+            "date_et":         u["date_et"],
+        })
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({
+            "success":         False,
+            "error":           _redact(str(exc)),
+            "count":           0,
+            "base_limit":      500,
+            "extra_allowance": 0,
+            "effective_limit": 500,
+            "remaining":       500,
+            "limit_reached":   False,
+        }), 200
+
+
+@app.route("/api/admin/odds/approve_additional", methods=["POST"])
+def odds_approve_additional():
+    """Add +50 to today's Odds API allowance so blocked auto-runs can
+    proceed.  Each click adds exactly _ODDS_BONUS_STEP (50 by default --
+    see src/odds_client._ODDS_BONUS_STEP).  Idempotent only across a
+    single ET day -- the counter resets to 0 at midnight ET, and the
+    extra_allowance with it (since they live in the same dated row)."""
+    try:
+        from src.odds_client import odds_grant_additional
+        u = odds_grant_additional()
+        return jsonify({
+            "success":         True,
+            "count":           u["count"],
+            "base_limit":      u["base_limit"],
+            "extra_allowance": u["extra_allowance"],
+            "effective_limit": u["effective_limit"],
+            "remaining":       u["remaining"],
+            "limit_reached":   u["limit_reached"],
+        })
     except Exception as exc:                                              # noqa: BLE001
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
@@ -5539,6 +5591,28 @@ def analyze_wnba():
         })
 
     except Exception as exc:
+        # Daily Odds-API quota hit -- clean 429 response mirroring the MLB
+        # handler above so the UI's toast / banner logic stays uniform
+        # across sports.
+        if type(exc).__name__ == "OddsApiLimitExceeded":
+            try:
+                from src.odds_client import odds_usage
+                u = odds_usage()
+            except Exception:                                             # noqa: BLE001
+                u = {"count": 0, "effective_limit": 500, "limit_reached": True}
+            _eprint(f"ANALYZE [WNBA] BLOCKED: Odds API daily "
+                    f"limit reached ({u['count']}/{u['effective_limit']})")
+            return jsonify({
+                "success":       False,
+                "limit_reached": True,
+                "error":         (
+                    f"Daily Odds API limit of {u['effective_limit']} reached, "
+                    f"additional pulls require manual approval."
+                ),
+                "calls_today":   u["count"],
+                "limit":         u["effective_limit"],
+            }), 429
+
         # Mirror the MLB crash handler -- log type + message FIRST via _eprint
         # so it survives even if traceback formatting or jsonify later fails
         # (e.g. UnicodeEncodeError on Windows).  Every payload is run through

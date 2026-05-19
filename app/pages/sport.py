@@ -61,6 +61,7 @@ def _render_sport(backend, sport: str) -> None:
             f"gap: {t.SPACE_MD}; padding: {t.SPACE_LG}; min-width: 0;"
         ):
             _header(sport)
+            _odds_quota_banner(backend)
             # First render of the refreshable grid -- args are captured so
             # `.refresh()` on tick re-uses the same backend + sport.
             _refreshable_grid(backend, sport)
@@ -72,6 +73,47 @@ def _render_sport(backend, sport: str) -> None:
             ui.timer(_LIVE_POLL_INTERVAL, _tick)
 
     bottom_nav.render(active=t.TAB_SPORTS)
+
+
+def _odds_quota_banner(backend) -> None:
+    """Show the 'Daily Odds API limit reached' banner when applicable.
+
+    Hits /api/odds/usage (cheap, no upstream traffic).  When the daily cap
+    is reached, renders a dashed-red strip above the game grid so the
+    user sees immediately why automatic refreshes aren't happening.
+
+    Silent when the limit hasn't been hit -- no decoration so the slate
+    layout stays clean on normal days.
+    """
+    try:
+        client = backend.app.test_client()
+        resp   = client.get("/api/odds/usage")
+        data   = resp.get_json(force=True, silent=True) or {}
+    except Exception:                                                     # noqa: BLE001
+        return
+    if not data.get("limit_reached"):
+        return
+    count = int(data.get("count") or 0)
+    limit = int(data.get("effective_limit") or 500)
+    with ui.row().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px dashed {t.NEG}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 14px; "
+        f"gap: 8px; align-items: center;"
+    ):
+        ui.icon("warning").style(f"font-size: 18px; color: {t.NEG};")
+        with ui.column().style("flex: 1; gap: 2px;"):
+            ui.label(
+                f"Daily Odds API limit of {limit} reached, "
+                f"additional pulls require manual approval."
+            ).style(
+                f"font-size: 12.5px; font-weight: 700; color: {t.NEG};"
+            )
+            ui.label(
+                f"{count} / {limit} requests used today.  Open /admin and "
+                f"click Approve Additional Odds Pull (+50) to allow more."
+            ).style(
+                f"font-size: 11.5px; color: {t.TEXT_DIM};"
+            )
 
 
 @ui.refreshable

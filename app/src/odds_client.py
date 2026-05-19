@@ -52,16 +52,49 @@ def _remove_vig(home_prob: float, away_prob: float) -> tuple[float, float]:
 
 
 # ---------------------------------------------------------------------------
-# Daily Supabase odds cache
+# Odds API daily request quota
 # ---------------------------------------------------------------------------
-# Backed by the `app_cache` table introduced in PR #31 (src/db.py).  Caches
-# the final normalised list of games for one (sport_key, markets, regions)
-# triple, keyed by today's ET date.  Empty results are NOT cached so a
-# 2 AM call that returns 0 games doesn't poison the entire day -- the next
-# run will retry and pick up the lines once books post them.
+# The account allows 20,000 Odds API requests per month (~666/day average).
+# We enforce a per-day cap of _ODDS_BASE_DAILY_LIMIT to keep automatic
+# traffic safely under the average and leave headroom for ad-hoc pulls
+# near month-end.  Counted in Supabase app_cache under key
+# "odds_api_calls:<today_et>" so the count survives Railway restarts.
 #
-# Cache key shape:  odds_daily:<sport_key>:<markets>:<regions>
-# Cache row:        {data: [games], date: YYYY-MM-DD, sport: sport_key}
+# Row shape: {"count": int, "extra_allowance": int}
+#   count           total successful calls to the-odds-api.com today
+#   extra_allowance bonus quota granted via the "Approve Additional Odds
+#                   Pull" admin button (each click adds +_ODDS_BONUS_STEP)
+#
+# Effective daily limit  = _ODDS_BASE_DAILY_LIMIT + extra_allowance
+# Limit reached          = count >= effective_limit
+#
+# When the limit is reached, OddsClient._get raises OddsApiLimitExceeded
+# BEFORE making the upstream HTTP call.  The analyze routes catch this
+# and return HTTP 429 so the UI can render the appropriate banner.
+
+_ODDS_BASE_DAILY_LIMIT = 500     # automatic calls allowed per ET day
+_ODDS_BONUS_STEP       = 50      # bump per "Approve Additional Pull" click
+
+# In-process fallback counter used only when Supabase is offline so the
+# system still tracks usage (just doesn't survive container restarts).
+_odds_count_mem: dict[str, dict] = {}
+
+
+class OddsApiLimitExceeded(Exception):
+    """Raised by OddsClient._get when the daily request quota is at the
+    configured cap.  Carries the diagnostic numbers so the calling
+    /api/analyze route can surface them in its 429 response."""
+
+    def __init__(self, count: int, limit: int, extra_allowance: int = 0):
+        self.count           = count
+        self.limit           = limit
+        self.extra_allowance = extra_allowance
+        super().__init__(
+            f"Daily Odds API limit of {limit} reached "
+            f"(used {count} so far today, including +{extra_allowance} "
+            f"bonus quota granted). Additional pulls require manual approval."
+        )
+
 
 def _today_et_date() -> str:
     try:
@@ -73,66 +106,91 @@ def _today_et_date() -> str:
         return date.today().isoformat()
 
 
-def _daily_cache_key(sport_key: str, markets: str, regions: str) -> str:
-    return f"odds_daily:{sport_key}:{markets}:{regions}"
+def _odds_counter_key() -> str:
+    return f"odds_api_calls:{_today_et_date()}"
 
 
-def _read_daily_odds_cache(sport_key: str, markets: str, regions: str) -> Optional[list[dict]]:
-    """Return today's cached games for this sport, or None on miss / error.
-
-    Bypasses entirely if Supabase isn't configured (src.db falls back to
-    JSON mode and cache_get returns None).
-    """
-    try:
-        from . import db
-        row = db.cache_get(_daily_cache_key(sport_key, markets, regions))
-    except Exception as exc:                                              # noqa: BLE001
-        _log(f"[daily-cache] read error (ignored): {type(exc).__name__}: {exc}")
-        return None
-    if not row:
-        return None
+def _odds_get_row() -> dict:
+    """Return today's {count, extra_allowance} row.  Reads Supabase first
+    and falls back to the in-process counter when Supabase is offline."""
     today = _today_et_date()
-    row_date = row.get("date")
-    if row_date != today:
-        _log(f"[daily-cache] miss for {sport_key!r}: cached date={row_date!r} "
-             f"!= today_et={today!r}")
-        return None
-    data = row.get("data")
-    if not isinstance(data, list):
-        _log(f"[daily-cache] miss for {sport_key!r}: data field is not a list "
-             f"(type={type(data).__name__})")
-        return None
-    _log(f"[daily-cache] HIT for {sport_key!r}: {len(data)} games "
-         f"(date={today}, NO API call needed)")
-    return data
-
-
-def _write_daily_odds_cache(
-    sport_key: str, markets: str, regions: str, games: list[dict],
-) -> None:
-    """Write today's games to the Supabase daily cache.  No-op if Supabase
-    isn't configured.  Errors are swallowed -- the caller already has the
-    games in hand and a failed cache write should never block analysis."""
-    if not games:
-        _log(f"[daily-cache] skip write for {sport_key!r}: empty games list "
-             f"(would poison today's cache; will retry on next run)")
-        return
     try:
         from . import db
-        ok = db.cache_set(
-            _daily_cache_key(sport_key, markets, regions),
-            sport_key,
-            _today_et_date(),
-            games,
-        )
-        if ok:
-            _log(f"[daily-cache] wrote {len(games)} games for {sport_key!r} "
-                 f"(date={_today_et_date()})")
-        else:
-            _log(f"[daily-cache] write returned False for {sport_key!r} "
-                 f"(Supabase not configured or call failed)")
+        row = db.cache_get(_odds_counter_key())
+        if isinstance(row, dict):
+            data = row.get("data") if isinstance(row.get("data"), dict) else row
+            if isinstance(data, dict):
+                return {
+                    "count":           int(data.get("count") or 0),
+                    "extra_allowance": int(data.get("extra_allowance") or 0),
+                }
     except Exception as exc:                                              # noqa: BLE001
-        _log(f"[daily-cache] write error (ignored): {type(exc).__name__}: {exc}")
+        _log(f"[quota] read error (ignored): {type(exc).__name__}: {exc}")
+    return dict(_odds_count_mem.get(today, {"count": 0, "extra_allowance": 0}))
+
+
+def _odds_write_row(row: dict) -> None:
+    """Persist today's counter row.  Sync write -- the next _get must see
+    the bump immediately or it would over-spend the quota."""
+    today = _today_et_date()
+    _odds_count_mem[today] = {
+        "count":           int(row.get("count") or 0),
+        "extra_allowance": int(row.get("extra_allowance") or 0),
+    }
+    try:
+        from . import db
+        db.cache_set(_odds_counter_key(), None, today, row)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"[quota] write error (ignored): {type(exc).__name__}: {exc}")
+
+
+def odds_usage() -> dict:
+    """Return a summary of today's quota usage.  Used by the
+    /api/odds/usage endpoint + the admin counter chip."""
+    row = _odds_get_row()
+    base  = _ODDS_BASE_DAILY_LIMIT
+    extra = int(row.get("extra_allowance") or 0)
+    used  = int(row.get("count") or 0)
+    limit = base + extra
+    return {
+        "count":            used,
+        "base_limit":       base,
+        "extra_allowance":  extra,
+        "effective_limit":  limit,
+        "remaining":        max(0, limit - used),
+        "limit_reached":    used >= limit,
+        "date_et":          _today_et_date(),
+    }
+
+
+def odds_grant_additional(step: int = _ODDS_BONUS_STEP) -> dict:
+    """Increase today's allowance by `step` calls.  Used by the
+    /api/admin/odds/approve_additional endpoint."""
+    row = _odds_get_row()
+    row["extra_allowance"] = int(row.get("extra_allowance") or 0) + int(step)
+    _odds_write_row(row)
+    return odds_usage()
+
+
+def _odds_check_limit() -> None:
+    """Raise OddsApiLimitExceeded when at the configured cap.  Called from
+    OddsClient._get BEFORE every upstream HTTP request."""
+    u = odds_usage()
+    if u["limit_reached"]:
+        raise OddsApiLimitExceeded(
+            count=u["count"],
+            limit=u["effective_limit"],
+            extra_allowance=u["extra_allowance"],
+        )
+
+
+def _odds_increment_count() -> int:
+    """Increment today's count by 1 and return the new value.  Called
+    after a successful upstream response in OddsClient._get."""
+    row = _odds_get_row()
+    row["count"] = int(row.get("count") or 0) + 1
+    _odds_write_row(row)
+    return row["count"]
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +502,11 @@ class OddsClient:
             _log("OddsClient: SharpAPI fallback configured (SHARPAPI_KEY present)")
 
     def _get(self, path: str, params: dict) -> dict | list:
+        # Daily quota check -- runs BEFORE any wire traffic so an at-limit
+        # state doesn't waste a network round-trip.  Raises
+        # OddsApiLimitExceeded which the analyze routes turn into HTTP 429.
+        _odds_check_limit()
+
         params["apiKey"] = self.api_key
         url = f"{BASE_URL}{path}"
         _log(f"GET {_redact_url(url)} params={ {k: v for k, v in params.items() if k != 'apiKey'} }")
@@ -460,6 +523,13 @@ class OddsClient:
                 response=resp,
             )
         self._log_quota(resp)
+        # Successful upstream response -- charge today's quota.  Increment
+        # AFTER ok-check so non-200 responses don't burn quota tracking on
+        # our side (the API itself may or may not count failed calls, but
+        # we only enforce against successful payload deliveries).
+        new_count = _odds_increment_count()
+        _log(f"  [quota] {new_count}/{_ODDS_BASE_DAILY_LIMIT} used today "
+             f"(+ extra_allowance bonus)")
         return resp.json()
 
     @staticmethod
@@ -482,26 +552,28 @@ class OddsClient:
     ) -> list[dict]:
         """Return upcoming games for *sport_key* with implied probabilities.
 
-        Source order (changed per request): **The Odds API is primary**;
-        SharpAPI is the fallback when SHARPAPI_KEY is set and The Odds API
-        raises.  Both return the same normalised per-game dict so callers
-        don't care which path produced the result.
+        Source order: **The Odds API is primary**; SharpAPI is the fallback
+        when SHARPAPI_KEY is set and the primary call raises.  Both return
+        the same normalised per-game dict so callers don't care which path
+        produced the result.
 
-        Daily Supabase cache
-        --------------------
-        Before either source is contacted, look up today's results in the
-        `app_cache` table (key `odds_daily:<sport>:<markets>:<regions>`).
-        On a hit we skip the live call entirely -- this is what drops the
-        upstream usage to ~1 API call per sport per day.
+        Quota model
+        -----------
+        Each successful call to the-odds-api.com increments a daily counter
+        (see _odds_check_limit / _odds_increment_count above).  When the
+        counter hits _ODDS_BASE_DAILY_LIMIT + extra_allowance, _get raises
+        OddsApiLimitExceeded BEFORE the wire call and the analyze route
+        catches it as HTTP 429.
 
-        Non-empty results returned from a live call are written back to
-        the daily cache so the next analyze in the same day is free.
-        Empty results are NOT cached (otherwise an early-morning "no lines
-        posted yet" outcome would lock the cache to 0 games for the
-        remainder of the day).
+        The 15-min in-memory cache inside _fetch_via_the_odds_api still
+        deduplicates rapid identical requests so a flurry of clicks doesn't
+        burn quota -- but unlike the old daily Supabase cache, repeat
+        requests outside the 15-min window DO go to the wire.  This matches
+        the new ~666/day allowance which makes the previous 1-call-per-day
+        aggressive deduplication unnecessary.
 
-        force_refresh=True bypasses the cache read (cache write still happens
-        on success so subsequent calls today benefit).
+        force_refresh=True bypasses the 15-min cache too (still subject to
+        the daily quota cap).
 
         sport_key must be an active Odds API sport key, e.g.:
           "baseball_mlb"      — MLB moneylines / run lines / totals
@@ -510,21 +582,18 @@ class OddsClient:
         _log(f"get_odds(sport_key={sport_key!r}, markets={markets!r}, "
              f"regions={regions!r}, force_refresh={force_refresh})")
 
-        # ── Daily Supabase cache (primary fast-path) ─────────────────────
-        if not force_refresh:
-            cached = _read_daily_odds_cache(sport_key, markets, regions)
-            if cached is not None:
-                return cached
-        else:
-            _log(f"get_odds: force_refresh=True, bypassing daily Supabase cache")
-
         # ── The Odds API (primary) ───────────────────────────────────────
         primary_exc: Optional[Exception] = None
         try:
             result = self._fetch_via_the_odds_api(sport_key, markets, regions)
             _log(f"get_odds: The Odds API returned {len(result)} games (primary)")
-            _write_daily_odds_cache(sport_key, markets, regions, result)
             return result
+        except OddsApiLimitExceeded:
+            # Daily cap -- propagate AS-IS so the analyze route can
+            # produce a clean 429.  Don't try the SharpAPI fallback
+            # because that's its own quota / source -- the user asked
+            # for explicit Odds-API quota enforcement.
+            raise
         except Exception as exc:                                          # noqa: BLE001
             primary_exc = exc
             _log(f"get_odds: The Odds API failed -- "
@@ -535,7 +604,6 @@ class OddsClient:
             try:
                 result = self._sharp.get_odds(sport_key, markets, regions)
                 _log(f"get_odds: SharpAPI returned {len(result)} games (fallback)")
-                _write_daily_odds_cache(sport_key, markets, regions, result)
                 return result
             except Exception as exc:                                      # noqa: BLE001
                 _log(f"get_odds: SharpAPI fallback also failed -- "
