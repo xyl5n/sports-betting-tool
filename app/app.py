@@ -111,78 +111,15 @@ def _validate_odds_api_key_on_boot() -> None:
 _validate_odds_api_key_on_boot()
 
 
-def _validate_sharpapi_key_on_boot() -> None:
-    """Mirror of _validate_odds_api_key_on_boot for SHARPAPI_KEY.
-
-    SharpAPI is the new primary source (see src/odds_client.SharpApiClient).
-    Surfacing presence + first/last-4 + whitespace problems here means a
-    misconfigured SharpAPI key fails loud at boot, not silently inside the
-    first /api/analyze call when the fallback path quietly takes over.
-    """
-    print("STARTUP: validating SharpAPI credentials...",
-          flush=True, file=sys.stderr)
-    key_raw = os.environ.get("SHARPAPI_KEY")
-    if key_raw is None:
-        print("STARTUP CRED-CHECK [SHARPAPI_KEY]: NOT SET.  "
-              "Analysis will skip SharpAPI and fall back to The Odds API.",
-              flush=True, file=sys.stderr)
-        return
-    key = key_raw.strip()
-    problems: list[str] = []
-    if not key:
-        problems.append("value is empty after strip()")
-    if key == "your_sharpapi_key_here":
-        problems.append("value is still the .env.example placeholder text")
-    if key != key_raw:
-        problems.append(
-            f"value has surrounding whitespace "
-            f"(raw_len={len(key_raw)}, stripped_len={len(key)}) -- "
-            f"trim it in Railway Variables")
-    if " " in key:
-        problems.append("value contains an embedded space")
-    if problems:
-        print(f"STARTUP CRED-CHECK [SHARPAPI_KEY]: PROBLEMS -- "
-              f"{'; '.join(problems)}",
-              flush=True, file=sys.stderr)
-    else:
-        print(f"STARTUP CRED-CHECK [SHARPAPI_KEY]: present, "
-              f"len={len(key)}, prefix={key[:4]!r}, suffix={key[-4:]!r}",
-              flush=True, file=sys.stderr)
-
-
-_validate_sharpapi_key_on_boot()
-
-
-def _probe_sharpapi_leagues_on_boot() -> None:
-    """One-shot GET /leagues at startup so the canonical SharpAPI league
-    identifiers (e.g. 'MLB', 'WNBA', 'NBA') appear in the Railway deploy
-    log without anyone having to click anything in /admin.
-
-    Cheap: a single 5-second request.  Skipped entirely when SHARPAPI_KEY
-    isn't set.  Errors are swallowed -- the app boots regardless.
-    """
-    key = (os.environ.get("SHARPAPI_KEY") or "").strip()
-    if not key:
-        return  # already logged by the cred-check; don't double-up
-    url = "https://api.sharpapi.io/api/v1/leagues"
-    print(f"STARTUP: probing SharpAPI -- GET {url}  (auth: X-API-Key header)",
-          flush=True, file=sys.stderr)
-    try:
-        import requests as _req
-        resp = _req.get(url, headers={"X-API-Key": key}, timeout=5)
-        body = (resp.text or "")[:3000]
-        print(f"STARTUP SHARPAPI [/leagues]: status={resp.status_code}  "
-              f"bytes={len(resp.content)}",
-              flush=True, file=sys.stderr)
-        print(f"STARTUP SHARPAPI [/leagues] body (first 3000 chars):\n{body}",
-              flush=True, file=sys.stderr)
-    except Exception as exc:                                              # noqa: BLE001
-        print(f"STARTUP SHARPAPI [/leagues]: probe FAILED -- "
-              f"{type(exc).__name__}: {exc}",
-              flush=True, file=sys.stderr)
-
-
-_probe_sharpapi_leagues_on_boot()
+# NOTE: _validate_sharpapi_key_on_boot + _probe_sharpapi_leagues_on_boot
+# used to live here.  Both removed because:
+#   - SharpAPI is no longer used as a fallback (odds_client.OddsClient now
+#     treats The Odds API as the sole source -- see PR 'remove sharpapi
+#     fallback')
+#   - The startup probe + cred-check were adding network latency and log
+#     noise without adding value
+# SHARPAPI_KEY is left in env / .env.example in case we re-enable later;
+# no code touches it on this code path.
 
 
 # NOTE: _bust_daily_odds_cache_on_boot used to live here and was tied to
