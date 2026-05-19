@@ -19,8 +19,13 @@ from . import theme as t
 
 
 def render(backend) -> None:
-    """Build the sidebar against the imported `app` module (passed as backend)."""
-    with ui.column().style(
+    """Build the sidebar against the imported `app` module (passed as backend).
+
+    Hidden on mobile -- the TOP 5 PLAYS card is re-rendered inline on the
+    home page below the bankroll hero so it stays reachable without the
+    sidebar.  CONFIDENCE PERFORMANCE is desktop-only for now (lives next
+    to the Model page in spirit, where its data already appears)."""
+    with ui.column().classes("desktop-only").style(
         f"width: {t.SIDEBAR_WIDTH}; "
         f"min-width: {t.SIDEBAR_WIDTH}; "
         f"gap: {t.SPACE_MD}; "
@@ -28,6 +33,17 @@ def render(backend) -> None:
     ):
         _top_plays_card(backend)
         _confidence_card(backend)
+
+
+def render_top_plays_only(backend) -> None:
+    """Mobile inline version -- just the TOP 5 PLAYS card, no sidebar shell.
+
+    Called from pages/home.py so the home page still surfaces the picks
+    rail when the desktop sidebar is hidden by the .desktop-only rule."""
+    with ui.column().classes("mobile-only").style(
+        f"width: 100%; gap: {t.SPACE_MD};"
+    ):
+        _top_plays_card(backend)
 
 
 # ── TOP 5 PLAYS ─────────────────────────────────────────────────────────────

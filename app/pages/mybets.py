@@ -16,7 +16,7 @@ from datetime import datetime
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar
+from components import navbar, sidebar, bottom_nav
 
 
 def register(backend) -> None:
@@ -26,13 +26,14 @@ def register(backend) -> None:
         navbar.render(active=t.TAB_MYBETS)
         with ui.row().classes("no-wrap w-full").style("gap: 0;"):
             sidebar.render(backend)
-            with ui.column().style(
+            with ui.column().classes("page-content").style(
                 f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
                 _personal_bankroll(backend)
                 _open_bets(backend)
                 _history(backend)
+        bottom_nav.render(active=t.TAB_MYBETS)
 
 
 def _personal_bankroll(backend) -> None:
@@ -55,7 +56,7 @@ def _personal_bankroll(backend) -> None:
     pnl_color = t.POS if pnl >= 0 else t.NEG
     pnl_sign  = "+" if pnl >= 0 else "−"
 
-    with ui.row().classes("w-full").style(
+    with ui.row().classes("w-full hero-stats").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
         f"border-radius: {t.RADIUS_LG}; padding: {t.SPACE_LG}; "
         f"gap: {t.SPACE_XL};"
@@ -72,7 +73,7 @@ def _stat(label: str, value: str, color: str) -> None:
             f"font-size: 10px; font-weight: 700; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
-        ui.label(value).style(
+        ui.label(value).classes("stat-value").style(
             f"font-size: 20px; font-weight: 800; color: {color}; "
             f"font-family: monospace; letter-spacing: -.2px;"
         )

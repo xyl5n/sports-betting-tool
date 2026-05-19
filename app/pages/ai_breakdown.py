@@ -11,7 +11,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar
+from components import navbar, sidebar, bottom_nav
 
 
 def register(backend) -> None:
@@ -21,11 +21,11 @@ def register(backend) -> None:
         navbar.render(active=t.TAB_AI)
         with ui.row().classes("no-wrap w-full").style("gap: 0;"):
             sidebar.render(backend)
-            with ui.column().style(
+            with ui.column().classes("page-content").style(
                 f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
-                ui.label("AI BREAKDOWN").style(
+                ui.label("AI BREAKDOWN").classes("page-title").style(
                     f"font-size: 22px; font-weight: 800; color: {t.TEXT};"
                 )
                 with ui.column().style(
@@ -45,3 +45,4 @@ def register(backend) -> None:
                         f"color: {t.TEXT_DIM}; font-size: 12.5px; max-width: 520px; "
                         f"line-height: 1.5;"
                     )
+        bottom_nav.render(active=t.TAB_AI)

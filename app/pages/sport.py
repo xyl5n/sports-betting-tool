@@ -14,7 +14,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar, game_card
+from components import navbar, sidebar, game_card, bottom_nav
 
 
 def register(backend) -> None:
@@ -37,17 +37,18 @@ def _render_sport(backend, sport: str) -> None:
     navbar.render(active=t.TAB_SPORTS)
     with ui.row().classes("no-wrap w-full").style("gap: 0;"):
         sidebar.render(backend)
-        with ui.column().style(
+        with ui.column().classes("page-content").style(
             f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
             f"gap: {t.SPACE_MD}; padding: {t.SPACE_LG}; min-width: 0;"
         ):
             _header(sport)
             _game_grid(backend, sport)
+    bottom_nav.render(active=t.TAB_SPORTS)
 
 
 def _header(sport: str) -> None:
-    with ui.row().classes("items-center w-full").style("gap: 12px;"):
-        ui.label(sport.upper()).style(
+    with ui.row().classes("items-center w-full").style("gap: 12px; flex-wrap: wrap;"):
+        ui.label(sport.upper()).classes("page-title").style(
             f"font-size: 22px; font-weight: 800; color: {t.TEXT};"
         )
         ui.label("today's slate").style(
