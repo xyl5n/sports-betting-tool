@@ -248,6 +248,16 @@ def _section_model_bets(backend, refresh) -> None:
             field="show_overall_chip",
             initial=bool(settings.get("show_overall_chip", True)),
         )
+        # Anthropic chat daily cap.  Counted in Supabase app_cache under
+        # 'ai_calls:<today_et>'; the AI Breakdown page disables Send once
+        # the count hits this number.
+        _number_row(
+            backend, "AI chat: daily limit",
+            "Max Anthropic API calls per day from the AI Breakdown chat",
+            field="ai_daily_limit",
+            initial=int(settings.get("ai_daily_limit", 20) or 20),
+            min_value=1, max_value=500,
+        )
 
         ui.label("Re-pick").style(
             f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
@@ -1106,6 +1116,47 @@ def _toggle_row(backend, label: str, sub: str, field: str, initial: bool) -> Non
                 sw.value = not e.value
 
         sw.on_value_change(_on_change)
+
+
+def _number_row(backend, label: str, sub: str, field: str,
+                initial: int, *, min_value: int = 1, max_value: int = 500) -> None:
+    """Persisted integer setting -- mirrors _toggle_row but for ints.
+    Saves via the same /api/admin/model/settings endpoint; the backend's
+    _save_model_settings preserves int type for any default that's int."""
+    with ui.row().classes("items-center w-full justify-between").style(
+        f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT};"
+    ):
+        with ui.column().style("gap: 2px; min-width: 0; flex: 1;"):
+            ui.label(label).style(f"color: {t.TEXT}; font-size: 13px; font-weight: 600;")
+            ui.label(sub).style(
+                f"color: {t.TEXT_DIM}; font-size: 11px; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            )
+        num = ui.number(
+            value=int(initial), min=min_value, max=max_value, step=1, format="%.0f",
+        ).style(
+            f"width: 110px; flex-shrink: 0;"
+        ).props("dense")
+
+        async def _on_change(e):
+            try:
+                v = int(e.value) if e.value is not None else initial
+            except (TypeError, ValueError):
+                v = initial
+            v = max(min_value, min(int(v), max_value))
+            try:
+                body = {field: v}
+                ok, data, _ = await asyncio.to_thread(
+                    _call, backend, "POST", "/api/admin/model/settings", body)
+                if ok:
+                    ui.notify(f"{label} set to {v}.", type="positive")
+                else:
+                    ui.notify(f"Save failed: {data.get('error') or 'unknown'}",
+                              type="negative")
+            except Exception as exc:                                      # noqa: BLE001
+                ui.notify(f"Save failed: {exc}", type="negative")
+
+        num.on_value_change(_on_change)
 
 
 # ───────────────────────────────────────────────────────────────────────────

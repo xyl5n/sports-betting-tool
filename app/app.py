@@ -489,6 +489,84 @@ def _supabase_cache_delete(key: str) -> None:
               flush=True, file=sys.stderr)
 
 
+def _supabase_cache_set_sync(key: str, sport: str | None, date: str,
+                             data: dict, *, timeout: float = 3.0) -> bool:
+    """Synchronous Supabase cache write with a short timeout.  Used by the
+    AI daily counter where we genuinely need confirmation the write landed
+    before responding to the user.  Returns True iff cache_set returned a
+    truthy value within `timeout` seconds; False on timeout, error, or
+    when Supabase isn't connected."""
+    import concurrent.futures
+    def _do() -> bool:
+        try:
+            from src import db as _db
+            return bool(_db.cache_set(key, sport, date, data))
+        except Exception as exc:                                          # noqa: BLE001
+            print(f"SUPABASE cache_set_sync({key}) failed: {exc}",
+                  flush=True, file=sys.stderr)
+            return False
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_do).result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        print(f"SUPABASE cache_set_sync({key}) timed out after {timeout}s",
+              flush=True, file=sys.stderr)
+        return False
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"SUPABASE cache_set_sync({key}) outer error: {exc}",
+              flush=True, file=sys.stderr)
+        return False
+
+
+# ── AI daily counter (used by /api/ai/chat + /api/ai/usage) ─────────────────
+# Tracks the number of Anthropic /api/ai/chat calls made TODAY in ET.
+# Persisted in Supabase app_cache so the counter survives Railway
+# restarts.  Falls back to an in-process dict when Supabase is offline so
+# the chat still works (counter just resets on container restart).
+
+_ai_counter_mem: dict[str, int] = {}     # in-process fallback when Supabase is off
+
+
+def _ai_daily_counter_key() -> str:
+    return f"ai_calls:{_today_et()}"
+
+
+def _ai_get_daily_count() -> int:
+    """Return today's Anthropic-call count.  Reads Supabase first; falls
+    back to the in-process counter if Supabase returns nothing."""
+    today = _today_et()
+    try:
+        row = _supabase_cache_get(_ai_daily_counter_key())
+        if isinstance(row, dict) and isinstance(row.get("count"), int):
+            return int(row["count"])
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return int(_ai_counter_mem.get(today, 0))
+
+
+def _ai_increment_daily_count() -> int:
+    """Read-modify-write the daily counter.  Increments by 1 and persists
+    sync to Supabase (when configured) so the next call sees the bump
+    immediately.  Always updates the in-process fallback regardless."""
+    today = _today_et()
+    new   = _ai_get_daily_count() + 1
+    _ai_counter_mem[today] = new
+    _supabase_cache_set_sync(
+        _ai_daily_counter_key(), None, today, {"count": new},
+    )
+    return new
+
+
+def _ai_daily_limit() -> int:
+    """Return the configured per-day chat-call cap.  Bounded to a sane
+    range so a typo in settings can't make the limit absurd."""
+    try:
+        v = int(_load_model_settings().get("ai_daily_limit", 20))
+    except (TypeError, ValueError):
+        v = 20
+    return max(1, min(v, 500))
+
+
 def _purge_stale_caches_on_boot() -> None:
     """Issue 1 + Issue 2 fix.  Runs once at module-load time.
 
@@ -772,6 +850,31 @@ def _clear_snapshot_sport(sport: str) -> None:
                 pass
 
 
+# System prompt for the AI Breakdown chat UI (pages/ai_breakdown.py).
+# Distinct from _ANALYST_SYSTEM_PROMPT (which feeds the deeper
+# /api/ai/breakdown report) so each surface can be tuned independently.
+#
+# IMPORTANT: keep this prompt instructing "no markdown" -- the NiceGUI
+# chat surface renders text plainly; asterisks and pound signs would
+# show through as raw characters.
+_CHAT_SYSTEM_PROMPT = (
+    "You are a professional sports analyst assistant. You have access to "
+    "today's MLB and WNBA model predictions, pick data, confidence scores, "
+    "edge percentages, SHAP feature importance values, pitcher stats, team "
+    "stats, and betting lines. You answer questions about sports picks, "
+    "player performance, team matchups, betting strategy, and sports data "
+    "only. If the user asks anything unrelated to sports you respond with "
+    "I can only answer sports related questions about picks, players, "
+    "teams, and betting data. You never use markdown formatting like "
+    "asterisks for bold or pound signs for headers in your responses "
+    "because they display as raw symbols on this interface. Use plain "
+    "text only with line breaks for separation. When referencing picks "
+    "always include the confidence level, edge percentage, and the key "
+    "factors the model used to make the pick based on the SHAP values "
+    "available."
+)
+
+
 _ANALYST_SYSTEM_PROMPT = (
     "You are a professional sports analyst with 20 years of experience in MLB and WNBA "
     "betting markets. You have deep expertise in sabermetrics, advanced baseball statistics, "
@@ -973,6 +1076,12 @@ _MODEL_SETTINGS_DEFAULT = {
     # chip is hidden and the two remaining chips (best model + best bet
     # type) stretch to fill the row.  See pages/home.py + pages/admin.py.
     "show_overall_chip":   True,
+    # Per-day cap on /api/ai/chat Anthropic calls.  Counted in Supabase
+    # app_cache under key "ai_calls:<YYYY-MM-DD ET>".  When the count
+    # hits this number, the chat endpoint returns 429 and the UI
+    # disables Send.  Stored as int -- the save path below preserves
+    # int type for any default that is non-bool.
+    "ai_daily_limit":      20,
 }
 
 
@@ -988,13 +1097,30 @@ def _load_model_settings() -> dict:
 
 
 def _save_model_settings(settings: dict) -> dict:
-    """Persist settings (merged onto defaults) and return the saved snapshot."""
-    merged = {**_MODEL_SETTINGS_DEFAULT, **(settings or {})}
-    # Coerce booleans defensively — incoming JSON may have strings
-    merged = {k: bool(v) for k, v in merged.items()}
+    """Persist settings (merged onto defaults) and return the saved snapshot.
+
+    Per-key type coercion: any key whose default value is bool is coerced
+    via bool(v); any key whose default is int is coerced via int(v) with a
+    fallback to the default on parse failure.  Anything else is stored
+    as-is.  Keeps existing boolean toggles working while allowing
+    numeric settings (ai_daily_limit, etc.) to round-trip correctly.
+    """
+    merged: dict = {**_MODEL_SETTINGS_DEFAULT, **(settings or {})}
+    coerced: dict = {}
+    for k, v in merged.items():
+        default = _MODEL_SETTINGS_DEFAULT.get(k)
+        if isinstance(default, bool):
+            coerced[k] = bool(v)
+        elif isinstance(default, int):
+            try:
+                coerced[k] = int(v)
+            except (TypeError, ValueError):
+                coerced[k] = default
+        else:
+            coerced[k] = v
     _MODEL_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _MODEL_SETTINGS_FILE.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-    return merged
+    _MODEL_SETTINGS_FILE.write_text(json.dumps(coerced, indent=2), encoding="utf-8")
+    return coerced
 
 # ── Auto-settlement scheduler state ───────────────────────────────────────────
 _auto_settlement_lock  = threading.Lock()
@@ -4770,32 +4896,126 @@ def ai_breakdown():
 
 @app.route("/api/ai/chat", methods=["POST"])
 def ai_chat():
-    """Handle a single chat turn with the AI sports analyst.
+    """Handle a single chat turn with the AI sports analyst (NiceGUI chat).
 
-    Accepts {message: str, history: [{role, content}]} and returns {response: str}.
-    Today's game data is loaded into the system prompt so the analyst can answer
-    questions about any game without extra API calls.
+    Body:
+      message:          str                     -- the user's new message
+      history:          [{role, content}, ...]  -- prior turns this session
+      include_context:  bool (default True)     -- whether to load today's
+                                                   game data into the
+                                                   system prompt for this
+                                                   call.  The UI sends True
+                                                   on the first message of
+                                                   a session and False on
+                                                   every subsequent message
+                                                   to minimize token cost.
+
+    Response:
+      response:         str                     -- the analyst's reply
+      calls_today:      int                     -- count AFTER this call
+      daily_limit:      int                     -- configured cap
+      limit_reached:    bool                    -- whether the next call
+                                                   would be blocked
+
+    Hard daily cap: if calls_today >= daily_limit, returns 429 with
+    {error, calls_today, daily_limit, limit_reached: True} and does NOT
+    consume an Anthropic call.
     """
-    data    = request.get_json() or {}
-    message = (data.get("message") or "").strip()
-    history = data.get("history") or []
+    data            = request.get_json() or {}
+    message         = (data.get("message") or "").strip()
+    history         = data.get("history") or []
+    include_context = bool(data.get("include_context", True))
 
     if not message:
         return jsonify({"error": "No message provided"}), 400
 
-    results  = _analysis_state.get("results", [])
-    bankroll = float(_analysis_state.get("bankroll", 250))
-    sport    = _analysis_state.get("sport", "mlb") or "mlb"
+    # Daily limit -- check BEFORE making the upstream call.
+    limit  = _ai_daily_limit()
+    so_far = _ai_get_daily_count()
+    if so_far >= limit:
+        return jsonify({
+            "error":         "Daily AI limit reached, resets at midnight.",
+            "calls_today":   so_far,
+            "daily_limit":   limit,
+            "limit_reached": True,
+        }), 429
 
-    context  = _build_chat_context(results, bankroll, sport)
+    # Build the system prompt.  Mandatory portion is always present; the
+    # context block is only appended when include_context=True (first
+    # message of the session per spec).
+    system = _CHAT_SYSTEM_PROMPT
+    if include_context:
+        try:
+            mlb_results  = _analysis_state.get("results") or []
+            mlb_bankroll = float(_analysis_state.get("bankroll") or 250)
+            mlb_ctx = _build_chat_context(mlb_results, mlb_bankroll, "mlb")
+        except Exception:                                                 # noqa: BLE001
+            mlb_ctx = ""
+        try:
+            wnba_results  = _wnba_analysis_state.get("results") or []
+            wnba_bankroll = float(_wnba_analysis_state.get("bankroll") or 1000)
+            wnba_ctx = _build_chat_context(wnba_results, wnba_bankroll, "wnba")
+        except Exception:                                                 # noqa: BLE001
+            wnba_ctx = ""
+        ctx_parts = [c for c in (mlb_ctx, wnba_ctx) if c]
+        if ctx_parts:
+            system = f"{system}\n\n" + "\n\n".join(ctx_parts)
+
     messages = list(history) + [{"role": "user", "content": message}]
 
     try:
-        response = _call_analyst_chat(context, messages, max_tokens=800)
+        # _call_analyst_chat already appends its extra_context to the system
+        # prompt -- we've already done that ourselves so pass the system
+        # text via the `extra_context` param while we leave the prompt-
+        # composition in our hands.  Specifically: replace
+        # _ANALYST_SYSTEM_PROMPT here with the chat-specific one.
+        import anthropic as _anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set in env / .env")
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=800,
+            system=system,
+            messages=messages,
+        )
+        response = msg.content[0].text.strip()
     except Exception as exc:
+        # Don't increment the counter on failure -- only successful
+        # Anthropic calls consume daily quota.
         return jsonify({"error": _redact(str(exc))}), 500
 
-    return jsonify({"response": response})
+    new_count = _ai_increment_daily_count()
+    return jsonify({
+        "response":      response,
+        "calls_today":   new_count,
+        "daily_limit":   limit,
+        "limit_reached": new_count >= limit,
+    })
+
+
+@app.route("/api/ai/usage", methods=["GET"])
+def ai_usage():
+    """Cheap GET the UI calls on page load to seed the counter chip + Send
+    button enabled-state.  Does NOT make any Anthropic call -- safe per
+    the spec's 'never make any Anthropic API call automatically on page
+    load' constraint."""
+    try:
+        count = _ai_get_daily_count()
+        limit = _ai_daily_limit()
+        return jsonify({
+            "calls_today":   count,
+            "daily_limit":   limit,
+            "limit_reached": count >= limit,
+        })
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({
+            "calls_today":   0,
+            "daily_limit":   20,
+            "limit_reached": False,
+            "error":         _redact(str(exc)),
+        }), 200
 
 
 # ── WNBA analysis endpoint ────────────────────────────────────────────────────
