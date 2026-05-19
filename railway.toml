@@ -2,4 +2,4 @@
 builder = 'nixpacks'
 
 [deploy]
-startCommand = 'python app.py'
+startCommand = 'python ui_app.py'
