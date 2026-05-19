@@ -31,7 +31,18 @@ class OddsClient:
     def _get(self, path: str, params: dict) -> dict | list:
         params["apiKey"] = self.api_key
         resp = self.session.get(f"{BASE_URL}{path}", params=params, timeout=15)
-        resp.raise_for_status()
+        if not resp.ok:
+            # The default HTTPError message embeds resp.url verbatim, which
+            # includes `?apiKey=...`.  Strip the key before raising so the
+            # exception (and any traceback that surfaces it) is safe to log.
+            try:
+                from .redact import redact
+            except Exception:                                             # noqa: BLE001
+                redact = lambda s: str(s)                                 # noqa: E731
+            raise requests.HTTPError(
+                f"{resp.status_code} {resp.reason or ''} for url: {redact(resp.url)}".strip(),
+                response=resp,
+            )
         self._log_quota(resp)
         return resp.json()
 
