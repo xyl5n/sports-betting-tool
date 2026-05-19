@@ -964,15 +964,6 @@ body {
   line-height: 1.7;
   font-family: "SF Mono", Consolas, monospace;
 }
-.admin-reset-pin {
-  height: 36px; padding: 0 12px;
-  background: var(--bg-elev); border: 1px solid var(--border-soft);
-  border-radius: var(--r-pill); color: var(--text-dim);
-  font-size: 11px; font-weight: 700; letter-spacing: .4px;
-  cursor: pointer; font-family: inherit;
-}
-.admin-reset-pin:hover { border-color: var(--border); color: var(--text); }
-
 /* Small caption that sits under an admin section's h3 */
 .admin-sub {
   font-size: 11.5px; color: var(--text-dim2);
@@ -1437,7 +1428,6 @@ body {
           <button class="back-btn" onclick="closeSubPage()" aria-label="Back">‹</button>
           <h2>Admin</h2>
           <div class="subpage-spacer"></div>
-          <button class="admin-reset-pin" onclick="adminResetPin()" title="Reset PIN" aria-label="Reset PIN">Reset PIN</button>
         </header>
 
         <section class="admin-section">
@@ -2711,7 +2701,7 @@ function openAnalyze(gameId, kind) {
 //  returns to the More list.  Nothing else changes.
 // ═══════════════════════════════════════════════════════════════════════
 function _swapMoreView(target) {
-  ['more-list-view', 'more-bets-view', 'more-modelperf-view'].forEach(id => {
+  ['more-list-view', 'more-bets-view', 'more-modelperf-view', 'more-admin-view'].forEach(id => {
     const el = $(id);
     if (el) el.style.display = (id === target) ? '' : 'none';
   });
@@ -2894,44 +2884,12 @@ function _renderModelPerfHtml(d) {
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Admin sub-page
-//  Gated behind a 4-digit PIN stored as a non-cryptographic hash in
-//  localStorage.  This is a UX friction layer to prevent accidental
-//  destructive taps (wipe / reset) -- it's NOT a real security boundary
-//  since anyone with the app's URL can hit the underlying endpoints
-//  directly.  Treat it as "are-you-sure-you're-the-owner" only.
+//  Single-user app -- no auth or PIN gate.  Swap into the admin view and
+//  hydrate the status fields on open.
 // ═══════════════════════════════════════════════════════════════════════
-const _ADMIN_PIN_KEY = 'admin_pin_hash_v1';
-function _hashPin(pin) {
-  // djb2 hash -- fast, deterministic, fine for an accidental-tap gate
-  let h = 5381;
-  for (const c of String(pin)) h = (((h << 5) + h) + c.charCodeAt(0)) | 0;
-  return String(h);
-}
 function openAdmin() {
-  let stored;
-  try { stored = localStorage.getItem(_ADMIN_PIN_KEY); } catch { stored = null; }
-  if (!stored) {
-    const a = prompt('Admin is destructive (wipe / reset).  Set a 4-digit PIN to protect it:');
-    if (!a) return;
-    if (a.length < 4) { toast('PIN must be 4+ characters', 'error'); return; }
-    const b = prompt('Confirm the PIN:');
-    if (a !== b) { toast('PINs did not match', 'error'); return; }
-    try { localStorage.setItem(_ADMIN_PIN_KEY, _hashPin(a)); } catch {}
-    _swapMoreView('more-admin-view');
-    loadAdminStatus();
-    return;
-  }
-  const entered = prompt('Enter admin PIN:');
-  if (entered == null) return;
-  if (_hashPin(entered) !== stored) { toast('Wrong PIN', 'error'); return; }
   _swapMoreView('more-admin-view');
   loadAdminStatus();
-}
-function adminResetPin() {
-  if (!confirm('Forget the saved admin PIN?  You\'ll set a new one next time you open Admin.')) return;
-  try { localStorage.removeItem(_ADMIN_PIN_KEY); } catch {}
-  toast('PIN forgotten', 'success');
-  closeSubPage();
 }
 
 async function loadAdminStatus() {
