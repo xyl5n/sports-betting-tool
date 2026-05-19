@@ -532,7 +532,12 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
         out.append(("Supabase app_cache", "err",
                     f"{type(exc).__name__}: {msg}{hint}"))
 
-    # 7. Odds API key presence (env-var only -- no spend)
+    # 7. Odds API key presence + live validity probe.  Calls the
+    # /v4/sports endpoint which does NOT count against quota, so this
+    # probe is safe to run on every diagnostic refresh.  Surfaces 401
+    # ("key invalid / expired / revoked") and 429 ("quota exhausted")
+    # explicitly so the user doesn't see them as a 15-minute "hang"
+    # again -- those are the exact failures behind today's incident.
     try:
         import os as _os
         key = _os.environ.get("ODDS_API_KEY") or ""
@@ -540,9 +545,47 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
             out.append(("Odds API key", "err",
                         "ODDS_API_KEY env var not set -- analysis cannot fetch odds"))
         else:
-            out.append(("Odds API key",
-                        "ok",
-                        f"present (len={len(key)}, prefix={key[:4]}...)"))
+            try:
+                import requests as _req
+                resp = _req.get(
+                    "https://api.the-odds-api.com/v4/sports",
+                    params={"apiKey": key},
+                    timeout=5,
+                )
+                used = resp.headers.get("x-requests-used", "?")
+                rem  = resp.headers.get("x-requests-remaining", "?")
+                if resp.status_code == 401:
+                    out.append((
+                        "Odds API key", "err",
+                        f"401 Unauthorized -- key invalid / expired / revoked. "
+                        f"Update ODDS_API_KEY in Railway -> Variables.",
+                    ))
+                elif resp.status_code == 429:
+                    out.append((
+                        "Odds API key", "err",
+                        f"429 quota exhausted (used={used}, remaining={rem}). "
+                        f"Wait for monthly reset or upgrade plan.",
+                    ))
+                elif resp.status_code >= 400:
+                    out.append((
+                        "Odds API key", "warn",
+                        f"HTTP {resp.status_code} from /v4/sports  "
+                        f"(used={used}, remaining={rem})",
+                    ))
+                else:
+                    out.append((
+                        "Odds API key", "ok",
+                        f"valid -- used={used}, remaining={rem}  "
+                        f"(prefix={key[:4]}..., len={len(key)})",
+                    ))
+            except _req.Timeout:
+                out.append(("Odds API key", "warn",
+                            "probe timed out after 5s -- key untested, "
+                            "analysis may still work"))
+            except Exception as exc:                                      # noqa: BLE001
+                out.append(("Odds API key", "warn",
+                            f"probe failed ({type(exc).__name__}: {exc}); "
+                            f"env var is set (prefix={key[:4]}...)"))
     except Exception as exc:                                              # noqa: BLE001
         out.append(("Odds API key", "err", f"{type(exc).__name__}: {exc}"))
 
