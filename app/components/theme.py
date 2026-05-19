@@ -99,6 +99,38 @@ def page_head_css() -> str:
       .theme-warn {{ color: {WARN}; }}
       .theme-dim  {{ color: {TEXT_DIM}; }}
 
+      /* Team logo widget -- ported from the legacy templates/index.html.
+         The container is a sized rounded square that doubles as the
+         fallback: it carries the team-coloured background + initials.
+         When the actual logo PNG loads it sits absolutely on top with a
+         white background; if it fails, onerror=this.remove() drops the
+         img and the fallback shows again with no broken-image icon. */
+      .team-logo {{
+        position: relative;
+        width:  var(--logo-size, 36px);
+        height: var(--logo-size, 36px);
+        border-radius: 50%;
+        display: inline-flex; align-items: center; justify-content: center;
+        overflow: hidden;
+        flex-shrink: 0;
+        color: #fff;
+        font-size: var(--logo-fs, 12px); font-weight: 800;
+        background: var(--logo-bg, #555);
+        letter-spacing: -.2px;
+      }}
+      .team-logo-init {{
+        position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        z-index: 0;
+      }}
+      .team-logo-img {{
+        position: absolute; inset: 0;
+        width: 100%; height: 100%;
+        object-fit: contain;
+        background: #fff;
+        z-index: 1;
+      }}
+
       /* ── Responsive visibility ─────────────────────────────────────
          .desktop-only hides on mobile, .mobile-only hides on desktop.
          Single render path -- the browser decides which to show.    */
