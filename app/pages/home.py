@@ -24,7 +24,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, sidebar, bottom_nav
-from components import track_button
+from components import track_button, team_logo
 from pages import home_stats as hs
 
 
@@ -188,10 +188,17 @@ def _section_ev_compact(backend) -> None:
 def _ev_row(backend, r: dict) -> None:
     edge_pct = float(r.get("edge") or 0) * 100
     edge_s   = f"+{edge_pct:.1f}% Edge"
+    sport_r  = r.get("sport", "mlb")
     with ui.row().classes("items-center w-full no-wrap").style(
         f"padding: 8px 6px; gap: 10px; "
         f"border-bottom: 1px solid {t.BORDER_SOFT};"
     ):
+        # Two small logos for the matchup (away then home), 24px so the
+        # row stays compact.  Names + CDN URLs come from the full team
+        # names enumerate_value_picks now carries in r['away_full'] etc.
+        with ui.row().style("gap: -4px; align-items: center; flex-shrink: 0;"):
+            team_logo.render(r.get("away_full", ""), sport=sport_r, size=24)
+            team_logo.render(r.get("home_full", ""), sport=sport_r, size=24)
         with ui.column().style("flex: 1; min-width: 0; gap: 2px;"):
             ui.label(r["matchup"]).style(
                 f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
@@ -267,12 +274,18 @@ def _section_confidence_carousel(backend) -> None:
 def _confidence_card(r: dict) -> None:
     edge_pct = float(r.get("edge") or 0) * 100
     prob_pct = float(r.get("prob") or 0) * 100
+    sport_r  = r.get("sport", "mlb")
     with ui.column().style(
         f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
         f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; "
         f"min-width: 200px; max-width: 200px; flex-shrink: 0; gap: 4px; "
         f"scroll-snap-align: start;"
     ):
+        # Logo row: two small (22px) logos above the matchup label so the
+        # card is identifiable at a glance.
+        with ui.row().style("gap: 4px; align-items: center;"):
+            team_logo.render(r.get("away_full", ""), sport=sport_r, size=22)
+            team_logo.render(r.get("home_full", ""), sport=sport_r, size=22)
         ui.label(r["matchup"]).style(
             f"font-size: 10px; color: {t.TEXT_DIM2}; "
             f"letter-spacing: .3px; "

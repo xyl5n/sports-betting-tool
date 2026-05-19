@@ -231,6 +231,11 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
         away = g.get("away_team", "")
         home = g.get("home_team", "")
         matchup = f"{_team_nick(away)} vs {_team_nick(home)}"
+        # Carry the FULL team names alongside the shortened matchup so
+        # the home renderer can look up CDN logos (logo lookup uses
+        # full names as the dict key).
+        away_full = away
+        home_full = home
         game_id = g.get("game_id") or g.get("id")
 
         # 1) Moneyline (top-level value_pick field)
@@ -245,6 +250,8 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
                     "odds":     g.get("pick_odds"),
                     "sport":    sport,
                     "game_id":  game_id,
+                    "away_full": away_full,
+                    "home_full": home_full,
                     "bet_type": "single",
                 })
 
@@ -268,6 +275,8 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
                     "odds":     rl.get("pick_odds"),
                     "sport":    sport,
                     "game_id":  game_id,
+                    "away_full": away_full,
+                    "home_full": home_full,
                     "bet_type": ("run_line" if g.get("run_line") else "spread"),
                 })
 
@@ -294,6 +303,8 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
                     "odds":     odds,
                     "sport":    sport,
                     "game_id":  game_id,
+                    "away_full": away_full,
+                    "home_full": home_full,
                     "bet_type": "totals",
                 })
 
