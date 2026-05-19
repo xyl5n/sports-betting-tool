@@ -1579,15 +1579,17 @@ body {
           <button class="admin-btn warn"   onclick="adminModelReset('mlb')">Reset Today's MLB Model Picks</button>
           <button class="admin-btn warn"   onclick="adminModelReset('wnba')">Reset Today's WNBA Model Picks</button>
           <button class="admin-btn danger" onclick="adminModelReset('both')">Reset Today's Model Picks (Both)</button>
+
+          <button class="admin-btn"        onclick="adminSetModelBankroll()">Reset Model Bankroll…</button>
         </section>
 
         <section class="admin-section">
-          <h3>BETS / BANKROLL</h3>
+          <h3>MY BETS</h3>
+          <div class="admin-sub">Wipe your tracked bets and set your personal bankroll. Bets are unified across MLB + WNBA.</div>
           <button class="admin-btn warn"   onclick="adminWipe('mlb')">Wipe MLB Bets</button>
           <button class="admin-btn warn"   onclick="adminWipe('wnba')">Wipe WNBA Bets</button>
           <button class="admin-btn danger" onclick="adminWipe('both')">Wipe Both Sports</button>
-          <button class="admin-btn"        onclick="adminSetBankroll('mlb')">Set MLB Bankroll…</button>
-          <button class="admin-btn"        onclick="adminSetBankroll('wnba')">Set WNBA Bankroll…</button>
+          <button class="admin-btn"        onclick="adminSetMyBankroll()">Set My Bankroll…</button>
         </section>
 
         <section class="admin-section">
@@ -3243,26 +3245,51 @@ async function adminWipe(sport) {
   }
 }
 
-async function adminSetBankroll(sport) {
-  const cur = sport === 'wnba' ? (_wnbaBankroll || 1000) : _bankroll;
-  const v = prompt(`Set ${sport.toUpperCase()} starting bankroll (current: $${cur}):`, String(cur));
+async function adminSetMyBankroll() {
+  // /api/ledger/set_bankroll writes the personal bankroll to BOTH ledgers in
+  // one shot, so there's no per-sport split here -- bets are unified.
+  const cur = _bankroll || 1000;
+  const v = prompt(`Set your bankroll (applies to MLB + WNBA, current: $${cur}):`, String(cur));
   if (v == null) return;
   const n = parseFloat(v);
   if (!isFinite(n) || n <= 0) { toast('Invalid amount', 'error'); return; }
   try {
-    const url = sport === 'wnba' ? '/api/wnba/ledger/set_bankroll' : '/api/ledger/set_bankroll';
-    const r = await fetch(url, {
+    const r = await fetch('/api/ledger/set_bankroll', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ bankroll: n }),
     });
     const d = await r.json();
     if (d.error) throw new Error(d.error);
-    if (sport === 'wnba') _wnbaBankroll = n; else _bankroll = n;
-    toast(`${sport.toUpperCase()} bankroll set to $${n.toFixed(2)}`, 'success');
+    _bankroll     = n;
+    _wnbaBankroll = n;
+    toast(`Bankroll set to $${n.toFixed(2)}`, 'success');
     await fetchLedgerSummary();
     if (_tab === 'home') renderAll();
   } catch (err) {
     toast(`Set failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminSetModelBankroll() {
+  // /api/ledger/set_model_bankroll updates model_starting_bankroll +
+  // model_bankroll on both ledgers.  Open bets are unaffected -- the
+  // available balance changes but the at-risk stakes stay where they are.
+  if (!confirm('Reset the model bankroll?\n\nThis updates both model_starting_bankroll and the current model_bankroll on MLB + WNBA.  Existing open model bets are not refunded -- only the available balance is overwritten.')) return;
+  const v = prompt('New model bankroll (default $1000):', '1000');
+  if (v == null) return;
+  const n = parseFloat(v);
+  if (!isFinite(n) || n <= 0) { toast('Invalid amount', 'error'); return; }
+  try {
+    const r = await fetch('/api/ledger/set_model_bankroll', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ bankroll: n }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    toast(`Model bankroll reset to $${n.toFixed(2)}`, 'success');
+    await fetchLedgerSummary();
+  } catch (err) {
+    toast(`Reset failed: ${err.message}`, 'error');
   }
 }
 
