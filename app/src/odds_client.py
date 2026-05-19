@@ -65,9 +65,14 @@ class SharpApiClient:
     _BASE_URL = "https://api.sharpapi.io/api/v1"
 
     # Map Odds API sport keys → SharpAPI league values.
+    # SharpAPI uses UPPERCASE league identifiers ("MLB", "WNBA", "NBA", "NFL"
+    # ...) rather than lowercase or namespaced strings like "basketball_wnba".
+    # If a future SharpAPI update changes the convention, the boot probe in
+    # app.py logs the /leagues response so the right value is one log line
+    # away.
     SPORT_MAP: dict[str, str] = {
-        "baseball_mlb":    "mlb",
-        "basketball_wnba": "wnba",
+        "baseball_mlb":    "MLB",
+        "basketball_wnba": "WNBA",
     }
 
     def __init__(self, api_key: str, cache: Optional[Cache] = None):
