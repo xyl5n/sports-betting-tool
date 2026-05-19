@@ -91,6 +91,74 @@ ai_breakdown.register(backend)
 admin.register(backend)
 
 
+# ── Boot-time analysis-state hydration ──────────────────────────────────────
+# The legacy Flask UI called /api/init + /api/wnba/init from JS on every
+# page load, which returned today's snapshot in the response body and the
+# frontend stored it in its own state.  /api/init never populated the
+# in-process `_analysis_state["results"]` dict -- that only happens when
+# /api/analyze runs.
+#
+# The new NiceGUI pages read `backend._analysis_state["results"]` directly,
+# so after every container restart (== every Railway deploy) the home /
+# sports pages show "0 games" until the 8 AM / 12 PM scheduler fires or the
+# user clicks Run Analysis in /admin.
+#
+# Fix: at boot, read today's daily_snapshot.json (and the per-sport
+# analysis_cache.json fallbacks) directly via backend's internal helpers
+# and seed the in-memory state.  Same data path /api/init walks, but we
+# assign to the dict instead of returning JSON.
+
+def _hydrate_state() -> None:
+    try:
+        snap = backend._read_daily_snapshot()
+        is_today = backend._snapshot_is_today(snap)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"UI_APP: hydrate -- snapshot read failed: {exc}",
+              flush=True, file=sys.stderr)
+        snap, is_today = {}, False
+
+    def _seed(state_dict, sport_key: str, cache_path: str) -> int:
+        sp = (snap.get(sport_key) or {}) if is_today else {}
+        results = sp.get("results")
+        analyzed_at = sp.get("analyzed_at")
+
+        if not results:
+            try:
+                from datetime import datetime as _dt
+                p = Path(cache_path)
+                if p.exists():
+                    import json as _json
+                    payload = _json.loads(p.read_text(encoding="utf-8"))
+                    today = backend._today_et()
+                    if payload.get("date") == today:
+                        results = backend._filter_stale_games(
+                            payload.get("results") or []
+                        )
+                        analyzed_at = payload.get("analyzed_at") or analyzed_at
+            except Exception as exc:                                      # noqa: BLE001
+                print(f"UI_APP: hydrate -- {sport_key} cache read failed: {exc}",
+                      flush=True, file=sys.stderr)
+
+        if results:
+            state_dict["results"] = list(results)
+            if analyzed_at and state_dict.get("last_analyzed_at") is None:
+                try:
+                    from datetime import datetime as _dt
+                    state_dict["last_analyzed_at"] = _dt.fromisoformat(analyzed_at)
+                except Exception:                                         # noqa: BLE001
+                    pass
+            return len(results)
+        return 0
+
+    mlb_n  = _seed(backend._analysis_state,      "mlb",  "data/analysis_cache.json")
+    wnba_n = _seed(backend._wnba_analysis_state, "wnba", "data/wnba_analysis_cache.json")
+    print(f"UI_APP: hydrated -- MLB={mlb_n} games, WNBA={wnba_n} games",
+          flush=True, file=sys.stderr)
+
+
+_hydrate_state()
+
+
 # ── Boot ────────────────────────────────────────────────────────────────────
 if __name__ in {"__main__", "__mp_main__"}:
     port = int(os.environ.get("PORT", 8080))

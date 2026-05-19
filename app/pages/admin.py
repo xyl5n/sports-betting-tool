@@ -61,6 +61,7 @@ def register(backend) -> None:
                 _section_models(backend, _refresh)
                 _section_model_bets(backend, _refresh)
                 _section_my_bets(backend, _refresh)
+                _section_diagnostics(backend)
                 _refresh()
         bottom_nav.render(active=t.TAB_ADMIN)
 
@@ -319,6 +320,244 @@ def _section_my_bets(backend, refresh) -> None:
                 done_msg="Personal bankroll updated.",
                 refresh_status=refresh,
             )
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Section: DIAGNOSTICS
+#  End-to-end probe of every data source the UI depends on.  No mutations,
+#  no API quota burn -- everything here is read-only.
+# ───────────────────────────────────────────────────────────────────────────
+
+def _section_diagnostics(backend) -> None:
+    """Live probe panel.  Renders empty rows and a 'Run' button; the
+    button populates the rows when pressed (and re-runs on click)."""
+    with _card(
+        "DIAGNOSTICS",
+        "Probe every data source: in-memory state, snapshot files, daily "
+        "picks, Supabase, Odds API key, ledgers.",
+    ):
+        results_holder = ui.column().classes("w-full").style("gap: 0;")
+
+        async def _run():
+            results_holder.clear()
+            with results_holder:
+                ui.label("Running probes...").style(
+                    f"color: {t.TEXT_DIM}; font-size: 12px; padding: 8px 0;"
+                )
+            probes = await asyncio.to_thread(_run_diagnostics, backend)
+            results_holder.clear()
+            with results_holder:
+                for label, status, detail in probes:
+                    _diag_row(label, status, detail)
+
+        ui.button("Run Diagnostics", on_click=_run) \
+            .props("no-caps unelevated") \
+            .style(_btn_style("primary"))
+
+        # Auto-run on page open so the user doesn't need to click first
+        ui.timer(0.5, _run, once=True)
+
+
+def _diag_row(label: str, status: str, detail: str) -> None:
+    """One diagnostic line.  status: 'ok' | 'warn' | 'err' | 'info'."""
+    color = {
+        "ok":   t.POS,
+        "warn": t.WARN,
+        "err":  t.NEG,
+        "info": t.TEXT_DIM,
+    }.get(status, t.TEXT_DIM)
+    icon = {"ok": "✓", "warn": "!", "err": "×", "info": "·"}.get(status, "·")
+    with ui.row().classes("items-start w-full").style(
+        f"padding: 8px 0; gap: 10px; "
+        f"border-bottom: 1px solid {t.BORDER_SOFT};"
+    ):
+        ui.label(icon).style(
+            f"color: {color}; font-weight: 800; min-width: 16px; "
+            f"font-family: monospace; font-size: 13px;"
+        )
+        with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
+            ui.label(label).style(
+                f"color: {t.TEXT}; font-size: 13px; font-weight: 600;"
+            )
+            ui.label(detail).style(
+                f"color: {color}; font-size: 11.5px; font-family: monospace; "
+                f"line-height: 1.4; word-break: break-word;"
+            )
+
+
+# ─── Probe runner ─────────────────────────────────────────────────────────
+
+def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
+    """Run every probe synchronously and return (label, status, detail)
+    tuples.  Called via asyncio.to_thread so the UI thread stays free."""
+    out: list[tuple[str, str, str]] = []
+
+    # 1. In-memory analysis state
+    try:
+        n_mlb  = len(backend._analysis_state.get("results")      or [])
+        n_wnba = len(backend._wnba_analysis_state.get("results") or [])
+        ts_mlb  = backend._analysis_state.get("last_analyzed_at")
+        ts_wnba = backend._wnba_analysis_state.get("last_analyzed_at")
+        ok = (n_mlb + n_wnba) > 0
+        out.append((
+            "In-memory analysis state",
+            "ok" if ok else "warn",
+            f"MLB: {n_mlb} games (last {ts_mlb or '—'})  |  "
+            f"WNBA: {n_wnba} games (last {ts_wnba or '—'})",
+        ))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("In-memory analysis state", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 2. Daily snapshot file
+    try:
+        from pathlib import Path
+        import json as _json
+        p = Path("data/daily_snapshot.json")
+        if not p.exists():
+            out.append(("Daily snapshot file", "warn", "data/daily_snapshot.json -- missing"))
+        else:
+            snap = _json.loads(p.read_text(encoding="utf-8"))
+            today = backend._today_et()
+            snap_date = snap.get("date") or snap.get("mlb", {}).get("date")
+            stale = snap_date != today
+            mlb_n  = len((snap.get("mlb",  {}) or {}).get("results") or [])
+            wnba_n = len((snap.get("wnba", {}) or {}).get("results") or [])
+            status = "warn" if stale else ("ok" if (mlb_n + wnba_n) > 0 else "warn")
+            out.append((
+                "Daily snapshot file",
+                status,
+                f"date={snap_date} (today={today})  MLB={mlb_n}  WNBA={wnba_n}",
+            ))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Daily snapshot file", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 3. Per-sport analysis caches
+    for sport, cache_path in (("MLB",  "data/analysis_cache.json"),
+                               ("WNBA", "data/wnba_analysis_cache.json")):
+        try:
+            from pathlib import Path
+            import json as _json
+            p = Path(cache_path)
+            if not p.exists():
+                out.append((f"{sport} analysis cache", "warn", f"{cache_path} -- missing"))
+                continue
+            payload = _json.loads(p.read_text(encoding="utf-8"))
+            today = backend._today_et()
+            stale = payload.get("date") != today
+            n = len(payload.get("results") or [])
+            out.append((
+                f"{sport} analysis cache",
+                "warn" if stale else ("ok" if n > 0 else "warn"),
+                f"{cache_path}  date={payload.get('date')} (today={today})  games={n}",
+            ))
+        except Exception as exc:                                          # noqa: BLE001
+            out.append((f"{sport} analysis cache", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 4. Daily picks file (model's top-5-per-category selections)
+    try:
+        daily = backend.load_daily_picks() or {}
+        picks = daily.get("picks") or {}
+        cats = {k: len(v or []) for k, v in picks.items()}
+        total = sum(cats.values())
+        out.append((
+            "Daily picks file",
+            "ok" if total > 0 else "warn",
+            f"data/daily_picks.json  ML={cats.get('moneyline',0)}  "
+            f"RL/Spread={cats.get('run_line_spread',0)}  Totals={cats.get('totals',0)}",
+        ))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Daily picks file", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 5. Analysis timestamps file
+    try:
+        ts = backend._read_analysis_timestamps() or {}
+        mlb_ts  = (ts.get("mlb")  or {}).get("analyzed_at")  or "—"
+        wnba_ts = (ts.get("wnba") or {}).get("analyzed_at")  or "—"
+        out.append((
+            "Analysis timestamps",
+            "ok" if (mlb_ts != "—" or wnba_ts != "—") else "warn",
+            f"MLB={mlb_ts}  WNBA={wnba_ts}",
+        ))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Analysis timestamps", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 6. Supabase status
+    try:
+        from src import db as _db
+        st = _db.status() or {}
+        mode = st.get("mode", "json")
+        sb_on = bool(st.get("supabase"))
+        url_set = bool(st.get("url_set"))
+        key_set = bool(st.get("key_set"))
+        if mode == "supabase" and sb_on:
+            level, detail = "ok", f"mode=supabase  url_set={url_set}  key_set={key_set}"
+        elif url_set or key_set:
+            level = "warn"
+            detail = (f"mode={mode}  url_set={url_set}  key_set={key_set}  "
+                      f"-- creds present but not connected")
+        else:
+            level = "info"
+            detail = f"mode=json  (SUPABASE_URL / SUPABASE_KEY not set -- JSON-only fallback)"
+        out.append(("Supabase", level, detail))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Supabase", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 7. Odds API key presence (env-var only -- no spend)
+    try:
+        import os as _os
+        key = _os.environ.get("ODDS_API_KEY") or ""
+        if not key:
+            out.append(("Odds API key", "err",
+                        "ODDS_API_KEY env var not set -- analysis cannot fetch odds"))
+        else:
+            out.append(("Odds API key",
+                        "ok",
+                        f"present (len={len(key)}, prefix={key[:4]}...)"))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Odds API key", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 8. Ledger files
+    for sport, path in (("MLB", "data/ledger.json"), ("WNBA", "data/wnba_ledger.json")):
+        try:
+            from pathlib import Path
+            p = Path(path)
+            if not p.exists():
+                out.append((f"{sport} ledger", "warn", f"{path} -- missing"))
+                continue
+            led = backend.Ledger(path=path, starting_bankroll=1000.0)
+            s = led.get_summary()
+            open_n = len(led.data.get("open_bets") or [])
+            hist_n = len(led.data.get("history")   or [])
+            out.append((
+                f"{sport} ledger",
+                "ok",
+                f"{path}  model=${s.get('model_bankroll',0):.2f}  "
+                f"personal=${s.get('personal_bankroll',0):.2f}  "
+                f"open={open_n}  history={hist_n}",
+            ))
+        except Exception as exc:                                          # noqa: BLE001
+            out.append((f"{sport} ledger", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 9. Auto-analysis log (when did the scheduler last fire?)
+    try:
+        from pathlib import Path
+        import json as _json
+        p = Path("data/auto_analysis_log.json")
+        if not p.exists():
+            out.append(("Auto-analysis log", "info",
+                        "data/auto_analysis_log.json -- not yet written"))
+        else:
+            log = _json.loads(p.read_text(encoding="utf-8"))
+            last = log.get("last_run") or log.get("history", [{}])[-1] if isinstance(log, dict) else None
+            out.append((
+                "Auto-analysis log",
+                "ok",
+                f"last_run={last}",
+            ))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Auto-analysis log", "err", f"{type(exc).__name__}: {exc}"))
+
+    return out
 
 
 # ───────────────────────────────────────────────────────────────────────────
