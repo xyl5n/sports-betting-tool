@@ -502,7 +502,42 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
     except Exception as exc:                                              # noqa: BLE001
         out.append(("Supabase", "err", f"{type(exc).__name__}: {exc}"))
 
-    # 7. Odds API key presence (env-var only -- no spend)
+    # 6b. Supabase app_cache table (persistent snapshot + analysis caches)
+    try:
+        from src import db as _db
+        if not _db.is_supabase():
+            out.append(("Supabase app_cache", "info",
+                        "skipped (Supabase not connected)"))
+        else:
+            keys = ("daily_snapshot", "analysis_cache:mlb", "analysis_cache:wnba")
+            bits = []
+            anything = False
+            for k in keys:
+                row = _db.cache_get(k)
+                if row:
+                    anything = True
+                    bits.append(f"{k}: date={row.get('date')}")
+                else:
+                    bits.append(f"{k}: —")
+            out.append((
+                "Supabase app_cache",
+                "ok" if anything else "warn",
+                " | ".join(bits),
+            ))
+    except Exception as exc:                                              # noqa: BLE001
+        # Most likely failure: table doesn't exist yet.  Surface that clearly.
+        msg = str(exc)
+        hint = (" -- create the table via the SQL in src/db.py header"
+                if "PGRST205" in msg or "does not exist" in msg.lower() else "")
+        out.append(("Supabase app_cache", "err",
+                    f"{type(exc).__name__}: {msg}{hint}"))
+
+    # 7. Odds API key presence + live validity probe.  Calls the
+    # /v4/sports endpoint which does NOT count against quota, so this
+    # probe is safe to run on every diagnostic refresh.  Surfaces 401
+    # ("key invalid / expired / revoked") and 429 ("quota exhausted")
+    # explicitly so the user doesn't see them as a 15-minute "hang"
+    # again -- those are the exact failures behind today's incident.
     try:
         import os as _os
         key = _os.environ.get("ODDS_API_KEY") or ""
@@ -510,9 +545,100 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
             out.append(("Odds API key", "err",
                         "ODDS_API_KEY env var not set -- analysis cannot fetch odds"))
         else:
-            out.append(("Odds API key",
-                        "ok",
-                        f"present (len={len(key)}, prefix={key[:4]}...)"))
+            try:
+                import requests as _req
+                resp = _req.get(
+                    "https://api.the-odds-api.com/v4/sports",
+                    params={"apiKey": key},
+                    timeout=5,
+                )
+                used = resp.headers.get("x-requests-used", "?")
+                rem  = resp.headers.get("x-requests-remaining", "?")
+                if resp.status_code == 401:
+                    out.append((
+                        "Odds API key", "err",
+                        f"401 Unauthorized -- key invalid / expired / revoked. "
+                        f"Update ODDS_API_KEY in Railway -> Variables.",
+                    ))
+                elif resp.status_code == 429:
+                    out.append((
+                        "Odds API key", "err",
+                        f"429 quota exhausted (used={used}, remaining={rem}). "
+                        f"Wait for monthly reset or upgrade plan.",
+                    ))
+                elif resp.status_code >= 400:
+                    out.append((
+                        "Odds API key", "warn",
+                        f"HTTP {resp.status_code} from /v4/sports  "
+                        f"(used={used}, remaining={rem})",
+                    ))
+                else:
+                    out.append((
+                        "Odds API key", "ok",
+                        f"valid -- used={used}, remaining={rem}  "
+                        f"(prefix={key[:4]}..., len={len(key)})",
+                    ))
+                    # Drill-down: which sports does this plan cover?  The
+                    # /v4/sports response is a JSON array of {key, active,
+                    # title, ...} dicts.  Surface a per-sport row for
+                    # baseball_mlb and basketball_wnba so the user can
+                    # tell "0 games returned" apart from "plan does not
+                    # include this sport".
+                    try:
+                        sports = resp.json() or []
+                        wanted = {
+                            "baseball_mlb":     "MLB",
+                            "basketball_wnba":  "WNBA",
+                        }
+                        seen = {
+                            s.get("key"): s for s in sports
+                            if isinstance(s, dict)
+                        }
+                        for sport_key, label in wanted.items():
+                            entry = seen.get(sport_key)
+                            if entry is None:
+                                out.append((
+                                    f"Odds API: {label} availability",
+                                    "err",
+                                    f"sport_key '{sport_key}' NOT in your plan's "
+                                    f"coverage list ({len(seen)} sports returned). "
+                                    f"Upgrade plan or check "
+                                    f"https://the-odds-api.com/sports-odds-data/",
+                                ))
+                            elif entry.get("active") is False:
+                                out.append((
+                                    f"Odds API: {label} availability",
+                                    "warn",
+                                    f"sport is in plan but currently inactive "
+                                    f"(off-season / between updates). "
+                                    f"title='{entry.get('title')}', "
+                                    f"active=False -- no games will be returned",
+                                ))
+                            else:
+                                out.append((
+                                    f"Odds API: {label} availability",
+                                    "ok",
+                                    f"active=True, group={entry.get('group')}, "
+                                    f"title='{entry.get('title')}' -- 0 games at "
+                                    f"runtime just means no books have posted "
+                                    f"lines yet (typical between ~midnight and "
+                                    f"~10 AM ET)",
+                                ))
+                    except Exception as exc:                              # noqa: BLE001
+                        out.append((
+                            "Odds API: sport availability",
+                            "warn",
+                            f"could not parse /v4/sports response: "
+                            f"{type(exc).__name__}: {exc}",
+                        ))
+            except _req.Timeout:
+                out.append(("Odds API key", "warn",
+                            "probe timed out after 5s -- key untested, "
+                            "analysis may still work"))
+            except Exception as exc:                                      # noqa: BLE001
+                out.append(("Odds API key", "warn",
+                            f"probe failed ({type(exc).__name__}: {exc}); "
+                            f"env var is set (prefix={key[:4]}...)"))
     except Exception as exc:                                              # noqa: BLE001
         out.append(("Odds API key", "err", f"{type(exc).__name__}: {exc}"))
 
@@ -537,6 +663,24 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
             ))
         except Exception as exc:                                          # noqa: BLE001
             out.append((f"{sport} ledger", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 8b. Auto-analysis lock status -- is an analysis actively running?
+    try:
+        lock = getattr(backend, "_auto_analysis_lock", None)
+        if lock is None:
+            out.append(("Auto-analysis lock", "info",
+                        "lock object not found on backend module"))
+        else:
+            held = lock.locked()
+            out.append((
+                "Auto-analysis lock",
+                "warn" if held else "ok",
+                ("held -- the scheduled auto-analysis is currently running. "
+                 "Manual Run buttons may appear stuck until this finishes.")
+                if held else "free -- no scheduled analysis in flight",
+            ))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Auto-analysis lock", "err", f"{type(exc).__name__}: {exc}"))
 
     # 9. Auto-analysis log (when did the scheduler last fire?)
     try:
