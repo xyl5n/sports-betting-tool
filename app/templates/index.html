@@ -47,7 +47,7 @@
   --pad:          14px;
   --app-w:        430px;
   --nav-h:        62px;
-  --bottom-nav-h: 64px;
+  --bottom-nav-h: 72px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -1027,28 +1027,27 @@ body {
   display: grid; grid-template-columns: repeat(5, 1fr);
 }
 .bottom-tab {
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 3px;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
   background: none; border: none;
-  color: var(--text-dim2); font-size: 13px; font-weight: 600; letter-spacing: .2px;
-  cursor: pointer; padding: 6px 0;
+  color: var(--text-dim); font-size: 15px; font-weight: 600; letter-spacing: .2px;
+  cursor: pointer; padding: 0;
   font-family: inherit;
   transition: color .15s;
+  -webkit-tap-highlight-color: transparent;
 }
-.bottom-tab:hover { color: var(--text-dim); }
-.bottom-tab.active { color: var(--text); }
-.bottom-tab.active .bottom-tab-icon {
-  background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
-  color: #0d1117;
+.bottom-tab:hover { color: var(--text); }
+.bottom-tab.active { color: var(--text); font-weight: 700; }
+/* Cyan bar above the active tab -- the only active-state cue now that the
+   icons are gone.  Sits flush with the nav's top border. */
+.bottom-tab.active::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 22%; right: 22%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--cyan) 0%, var(--cyan-soft) 100%);
+  border-radius: 0 0 3px 3px;
   box-shadow: 0 0 10px var(--cyan-glow);
-}
-.bottom-tab-icon {
-  width: 30px; height: 30px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 50%;
-  background: transparent;
-  font-size: 15px;
-  transition: all .15s;
 }
 
 /* ── Toast / status pill ────────────────────────────────────────────── */
@@ -1168,12 +1167,14 @@ body {
     flex-direction: row;
     gap: 10px;
     padding: 12px 22px;
-    font-size: 13px;
+    font-size: 14px;
     flex: 0 1 auto;
   }
-  .bottom-tab-icon {
-    width: 26px; height: 26px;
-    font-size: 13px;
+  .bottom-tab.active::before {
+    /* Hide the mobile top-bar treatment on desktop; the active row uses
+       text-color emphasis instead and a 3px nub looks misplaced on the
+       horizontal pill bar. */
+    display: none;
   }
 
   /* Slightly larger EV cards so a few are visible side-by-side */
