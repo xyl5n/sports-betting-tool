@@ -94,6 +94,17 @@ except Exception as _e:
     print(f"STARTUP FATAL: src.daily_picks failed: {_e}", flush=True, file=sys.stderr)
     sys.exit(1)
 
+# Credential redactor — never raises; falls back to str() if the module
+# isn't importable (degenerate dev case).  Every traceback / error
+# message that lands in a log file, stderr, or a JSON response is run
+# through this so an HTTPError that embeds `?apiKey=...` in its message
+# can't leak the key.  See src/redact.py for the rules.
+try:
+    from src.redact import redact as _redact
+except Exception:                                                         # noqa: BLE001
+    def _redact(s):                                                       # type: ignore[no-redef]
+        return "" if s is None else str(s)
+
 # ensemble_store — graceful stub if unavailable
 class _EnsembleStoreStub:
     """No-op stub used when src.ensemble_store fails to import."""
@@ -206,10 +217,12 @@ def _eprint(*args, **kwargs) -> None:
 
     Encodes with UTF-8 + errors='replace' so box-drawing chars, emoji, and any
     non-cp1252 characters can't crash the crash-handler on Windows terminals.
+    Runs every message through the credential redactor so an HTTPError that
+    embeds `?apiKey=...` in its message can't leak the key into Railway logs.
     Falls back to a no-op if stderr itself is unavailable.
     """
     try:
-        msg = " ".join(str(a) for a in args) + kwargs.get("end", "\n")
+        msg = " ".join(_redact(a) for a in args) + kwargs.get("end", "\n")
         buf = getattr(sys.stderr, "buffer", None)
         if buf is not None:
             buf.write(msg.encode("utf-8", errors="replace"))
@@ -1862,8 +1875,10 @@ def wnba_schedule_proxy():
 _DEBUG_LOG = Path("data/debug_live.log")
 
 def _debug_print(msg: str) -> None:
-    """Print to stdout and append to log file with timestamp."""
-    line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+    """Print to stdout and append to log file with timestamp.  Messages
+    are redacted so a leaked URL or env-var secret can't end up in the
+    debug log file or stdout."""
+    line = f"[{datetime.now().strftime('%H:%M:%S')}] {_redact(msg)}"
     _logger.debug("%s", line)
     try:
         _DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -1925,14 +1940,15 @@ def _run_live_score_debug(label: str = "auto") -> str:
     try:
         date_str = _today_et_str()
     except Exception as exc:
-        return f"CRASH in _today_et_str(): {exc}\n{traceback.format_exc()}"
+        return _redact(f"CRASH in _today_et_str(): {exc}\n{traceback.format_exc()}")
 
     try:
         return _run_live_score_debug_inner(label, date_str, lines, sep, L)
     except Exception as exc:
-        tb = traceback.format_exc()
-        _debug_print(f"[live-debug] CRASH: {exc}\n{tb}")
-        lines.append(f"\nCRASH: {exc}\n{tb}")
+        tb = _redact(traceback.format_exc())
+        _exc_msg = _redact(str(exc))
+        _debug_print(f"[live-debug] CRASH: {_exc_msg}\n{tb}")
+        lines.append(f"\nCRASH: {_exc_msg}\n{tb}")
         return "\n".join(lines)
 
 
@@ -2099,10 +2115,10 @@ def debug_live_scores():
         report = _run_live_score_debug("manual-button")
         return jsonify({"report": report, "log_file": str(_DEBUG_LOG.resolve())})
     except Exception as exc:
-        tb = traceback.format_exc()
-        _debug_print(f"[debug-endpoint] CRASHED: {exc}\n{tb}")
+        tb = _redact(traceback.format_exc())
+        _debug_print(f"[debug-endpoint] CRASHED: {_redact(str(exc))}\n{tb}")
         return jsonify({
-            "report": f"ERROR: {exc}\n\nTraceback:\n{tb}",
+            "report": f"ERROR: {_redact(str(exc))}\n\nTraceback:\n{tb}",
             "log_file": str(_DEBUG_LOG.resolve()),
             "error": True,
         })
@@ -2588,20 +2604,23 @@ def analyze():
     except Exception as exc:
         # Log type+message FIRST with _eprint so it survives even if traceback
         # formatting or jsonify later fails (e.g. UnicodeEncodeError on Windows).
+        # Every payload that leaves this block is run through _redact so an
+        # HTTPError that embeds `?apiKey=...` can't leak into Railway logs or
+        # the JSON response body.
         _exc_type = type(exc).__name__
-        _exc_msg  = str(exc)
+        _exc_msg  = _redact(str(exc))
         _eprint(f"\nANALYZE [{sport.upper()}] CRASHED")
         _eprint(f"  type:    {_exc_type}")
         _eprint(f"  message: {_exc_msg}")
         try:
-            _tb = traceback.format_exc()
+            _tb = _redact(traceback.format_exc())
             _eprint(f"  traceback:\n{_tb}")
         except Exception:
             _tb = f"{_exc_type}: {_exc_msg}"
         try:
             return jsonify({"error": _exc_msg, "detail": _tb, "exc_type": _exc_type}), 500
         except Exception as _je:
-            _eprint(f"  jsonify also failed: {_je}")
+            _eprint(f"  jsonify also failed: {_redact(str(_je))}")
             return (
                 f'{{"error": "{_exc_type}: {_exc_msg}"}}'
             ), 500, {"Content-Type": "application/json"}
@@ -2756,7 +2775,7 @@ def refresh_models():
         })
 
     except Exception as exc:
-        return jsonify({"error": str(exc), "detail": traceback.format_exc()}), 500
+        return jsonify({"error": _redact(str(exc)), "detail": _redact(traceback.format_exc())}), 500
 
 
 @app.route("/api/model-detail", methods=["GET"])
@@ -2850,7 +2869,7 @@ def get_ensemble_picks():
             "wnba":  {"picks": wnba_picks, "count": len(wnba_picks)},
         })
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
 
 @app.route("/api/model_performance", methods=["GET"])
@@ -2977,7 +2996,7 @@ def get_model_performance():
         })
 
     except Exception as exc:
-        return jsonify({"error": str(exc), "detail": traceback.format_exc()}), 500
+        return jsonify({"error": _redact(str(exc)), "detail": _redact(traceback.format_exc())}), 500
 
 
 @app.route("/api/retrain_status", methods=["GET"])
@@ -2996,7 +3015,7 @@ def get_retrain_status():
     try:
         return jsonify(nightly_retrain.get_log())
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
 
 @app.route("/api/auto_analysis_status", methods=["GET"])
@@ -3026,7 +3045,7 @@ def get_auto_analysis_status():
             **state,
         })
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
 
 @app.route("/api/auto_settlement_status", methods=["GET"])
@@ -3042,7 +3061,7 @@ def get_auto_settlement_status():
             state = dict(_auto_settlement_state)
         return jsonify({"next_run": next_run, "scheduler_running": _sched is not None and _sched.running, **state})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
 
 @app.route("/api/retrain_now", methods=["POST"])
@@ -3059,7 +3078,7 @@ def trigger_retrain_now():
         t.start()
         return jsonify({"success": True, "message": "Retrain job started in background."})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
 
 @app.route("/api/ledger", methods=["GET"])
@@ -3234,7 +3253,7 @@ def write_clipboard():
                            input=text.encode("utf-8"), check=True, timeout=5)
         return jsonify({"success": True})
     except Exception as exc:
-        return jsonify({"success": False, "error": str(exc)}), 500
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/reset-all", methods=["POST"])
@@ -3294,7 +3313,7 @@ def reset_all():
 
         return jsonify({"success": True, "message": "All bet history cleared and records reset to 0-0."})
     except Exception as exc:
-        return jsonify({"success": False, "error": str(exc)}), 500
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/admin/wipe_ledger", methods=["POST"])
@@ -3338,7 +3357,7 @@ def admin_wipe_ledger():
             wiped.append(s)
         return jsonify({"success": True, "wiped": wiped})
     except Exception as exc:
-        return jsonify({"success": False, "error": str(exc)}), 500
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/admin/status", methods=["GET"])
@@ -3359,7 +3378,7 @@ def admin_status():
             "db":               db_status,
         })
     except Exception as exc:
-        return jsonify({"success": False, "error": str(exc)}), 500
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -3375,7 +3394,7 @@ def admin_model_settings_get():
     try:
         return jsonify({"success": True, "settings": _load_model_settings()})
     except Exception as exc:                                              # noqa: BLE001
-        return jsonify({"success": False, "error": str(exc)}), 500
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/admin/model/settings", methods=["POST"])
@@ -3390,7 +3409,7 @@ def admin_model_settings_post():
         saved = _save_model_settings(current)
         return jsonify({"success": True, "settings": saved})
     except Exception as exc:                                              # noqa: BLE001
-        return jsonify({"success": False, "error": str(exc)}), 500
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/admin/model/reset", methods=["POST"])
@@ -3416,7 +3435,7 @@ def admin_model_reset():
             removed_by_sport[s] = n
         return jsonify({"success": True, "removed": removed_by_sport})
     except Exception as exc:                                              # noqa: BLE001
-        return jsonify({"success": False, "error": str(exc), "detail": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": _redact(str(exc)), "detail": _redact(traceback.format_exc())}), 500
 
 
 @app.route("/api/admin/model/repick", methods=["POST"])
@@ -3453,7 +3472,7 @@ def admin_model_repick():
         )
         return jsonify({"success": True, "picks": _py(payload)})
     except Exception as exc:                                              # noqa: BLE001
-        return jsonify({"success": False, "error": str(exc), "detail": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": _redact(str(exc)), "detail": _redact(traceback.format_exc())}), 500
 
 
 @app.route("/api/reset-sport", methods=["POST"])
@@ -3494,7 +3513,7 @@ def reset_sport():
         return jsonify({"success": True, "sport": sport,
                         "message": f"{sport.upper()} analysis data cleared."})
     except Exception as exc:
-        return jsonify({"success": False, "error": str(exc)}), 500
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/archive", methods=["GET"])
@@ -3621,8 +3640,8 @@ def refresh_picks():
         })
 
     except Exception as exc:
-        return jsonify({"success": False, "error": str(exc),
-                        "detail": traceback.format_exc()}), 500
+        return jsonify({"success": False, "error": _redact(str(exc)),
+                        "detail": _redact(traceback.format_exc())}), 500
 
 
 @app.route("/api/ledger/confirm/<game_id>", methods=["POST"])
@@ -4037,7 +4056,7 @@ def explain_pick():
     try:
         explanation = _call_analyst(_build_explain_prompt(data), max_tokens=600)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
     # Parse "ANALYST VERDICT: …" line — marker is already uppercase so only
     # uppercase the source text once for the search.
@@ -4180,7 +4199,7 @@ def ai_breakdown():
     try:
         raw_text = _call_analyst(prompt, max_tokens=2000)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
     # Parse JSON; strip accidental markdown fences first
     try:
@@ -4225,7 +4244,7 @@ def ai_chat():
     try:
         response = _call_analyst_chat(context, messages, max_tokens=800)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _redact(str(exc))}), 500
 
     return jsonify({"response": response})
 
@@ -4527,22 +4546,23 @@ def analyze_wnba():
     except Exception as exc:
         # Mirror the MLB crash handler -- log type + message FIRST via _eprint
         # so it survives even if traceback formatting or jsonify later fails
-        # (e.g. UnicodeEncodeError on Windows).  This is the change that makes
-        # the trace visible in Railway logs, not just in the JSON response.
+        # (e.g. UnicodeEncodeError on Windows).  Every payload is run through
+        # _redact so credentials embedded in HTTPError URLs (e.g. ?apiKey=...)
+        # can't leak into Railway logs or the JSON response body.
         _exc_type = type(exc).__name__
-        _exc_msg  = str(exc)
+        _exc_msg  = _redact(str(exc))
         _eprint(f"\nANALYZE [WNBA] CRASHED")
         _eprint(f"  type:    {_exc_type}")
         _eprint(f"  message: {_exc_msg}")
         try:
-            _tb = traceback.format_exc()
+            _tb = _redact(traceback.format_exc())
             _eprint(f"  traceback:\n{_tb}")
         except Exception:
             _tb = f"{_exc_type}: {_exc_msg}"
         try:
             return jsonify({"error": _exc_msg, "detail": _tb, "exc_type": _exc_type}), 500
         except Exception as _je:
-            _eprint(f"  jsonify also failed: {_je}")
+            _eprint(f"  jsonify also failed: {_redact(str(_je))}")
             return (
                 f'{{"error": "{_exc_type}: {_exc_msg}"}}'
             ), 500, {"Content-Type": "application/json"}
