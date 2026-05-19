@@ -242,10 +242,20 @@ def _ensure_data_dir() -> None:
 
 
 def _supabase_cache_get(key: str) -> dict | None:
-    try:
+    """Synchronous read with a hard timeout.  Returns None on timeout or any
+    error so the caller can fall back to a local file without delay."""
+    import concurrent.futures
+    def _do():
         from src import db as _db
         row = _db.cache_get(key)
         return (row or {}).get("data") if row else None
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_do).result(timeout=5.0)
+    except concurrent.futures.TimeoutError:
+        print(f"SUPABASE cache_get({key}) timed out after 5s",
+              flush=True, file=sys.stderr)
+        return None
     except Exception as exc:                                              # noqa: BLE001
         print(f"SUPABASE cache_get({key}) failed: {exc}",
               flush=True, file=sys.stderr)
@@ -253,20 +263,42 @@ def _supabase_cache_get(key: str) -> dict | None:
 
 
 def _supabase_cache_set(key: str, sport: str | None, date: str, data: dict) -> None:
+    """Fire-and-forget mirror to Supabase.  Returns immediately; the write
+    happens in a daemon thread so a slow / hung Supabase NEVER blocks the
+    analyze path.  Local-file write is the source of truth -- this is just
+    a best-effort backup for cross-redeploy persistence."""
+    def _do():
+        try:
+            from src import db as _db
+            _db.cache_set(key, sport, date, data)
+        except Exception as exc:                                          # noqa: BLE001
+            print(f"SUPABASE cache_set({key}) failed: {exc}",
+                  flush=True, file=sys.stderr)
     try:
-        from src import db as _db
-        _db.cache_set(key, sport, date, data)
+        import threading as _th
+        _th.Thread(target=_do, name=f"sb-cache-set-{key}", daemon=True).start()
     except Exception as exc:                                              # noqa: BLE001
-        print(f"SUPABASE cache_set({key}) failed: {exc}",
+        # If we can't even spawn a thread, log and move on -- analysis
+        # never waits.
+        print(f"SUPABASE cache_set({key}) thread spawn failed: {exc}",
               flush=True, file=sys.stderr)
 
 
 def _supabase_cache_delete(key: str) -> None:
+    """Fire-and-forget delete.  Same safety guarantee as _supabase_cache_set
+    -- a slow Supabase never blocks the caller."""
+    def _do():
+        try:
+            from src import db as _db
+            _db.cache_delete(key)
+        except Exception as exc:                                          # noqa: BLE001
+            print(f"SUPABASE cache_delete({key}) failed: {exc}",
+                  flush=True, file=sys.stderr)
     try:
-        from src import db as _db
-        _db.cache_delete(key)
+        import threading as _th
+        _th.Thread(target=_do, name=f"sb-cache-del-{key}", daemon=True).start()
     except Exception as exc:                                              # noqa: BLE001
-        print(f"SUPABASE cache_delete({key}) failed: {exc}",
+        print(f"SUPABASE cache_delete({key}) thread spawn failed: {exc}",
               flush=True, file=sys.stderr)
 
 
@@ -314,9 +346,20 @@ def _purge_stale_caches_on_boot() -> None:
                   flush=True, file=sys.stderr)
 
     # Best-effort Supabase cleanup -- silent if Supabase isn't connected.
+    # Hard 5s timeout so a slow Supabase never blocks module import.
     try:
+        import concurrent.futures
         from src import db as _db
-        n = _db.cache_delete_stale(today)
+        def _purge():
+            return _db.cache_delete_stale(today)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            try:
+                n = ex.submit(_purge).result(timeout=5.0)
+            except concurrent.futures.TimeoutError:
+                print("STARTUP WARNING: Supabase stale-purge timed out after 5s "
+                      "(continuing -- local-file caches were already purged)",
+                      flush=True, file=sys.stderr)
+                n = 0
         if n:
             print(f"STARTUP: dropped {n} stale Supabase app_cache rows",
                   flush=True, file=sys.stderr)

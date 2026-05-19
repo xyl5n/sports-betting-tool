@@ -568,6 +568,24 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
         except Exception as exc:                                          # noqa: BLE001
             out.append((f"{sport} ledger", "err", f"{type(exc).__name__}: {exc}"))
 
+    # 8b. Auto-analysis lock status -- is an analysis actively running?
+    try:
+        lock = getattr(backend, "_auto_analysis_lock", None)
+        if lock is None:
+            out.append(("Auto-analysis lock", "info",
+                        "lock object not found on backend module"))
+        else:
+            held = lock.locked()
+            out.append((
+                "Auto-analysis lock",
+                "warn" if held else "ok",
+                ("held -- the scheduled auto-analysis is currently running. "
+                 "Manual Run buttons may appear stuck until this finishes.")
+                if held else "free -- no scheduled analysis in flight",
+            ))
+    except Exception as exc:                                              # noqa: BLE001
+        out.append(("Auto-analysis lock", "err", f"{type(exc).__name__}: {exc}"))
+
     # 9. Auto-analysis log (when did the scheduler last fire?)
     try:
         from pathlib import Path
