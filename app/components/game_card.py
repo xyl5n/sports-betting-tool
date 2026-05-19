@@ -73,17 +73,24 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
 
 
 def _track_row(backend, g: dict, sport: str) -> None:
-    """One Track button per card -- aligned right under the bet boxes.
-
-    Records the model's moneyline pick to the personal ledger via
-    /api/{sport}/ledger/confirm/<game_id>.  For NO MODEL PICK cards
-    the button is disabled with a hint -- there's nothing for the
-    model to confirm in that case.
+    """Bottom row: 'View Details →' link on the left, Track button on
+    the right.  The link navigates to /game/<sport>/<game_id> -- the
+    dedicated detail page introduced in this PR.  Track stays where
+    it always was (bottom-right) so click targets don't collide.
     """
-    with ui.row().classes("w-full justify-end").style("gap: 6px; margin-top: 4px;"):
+    gid = g.get("game_id") or g.get("id")
+    with ui.row().classes("items-center w-full").style(
+        "gap: 6px; margin-top: 4px;"
+    ):
+        if gid:
+            ui.link("View Details →", f"/game/{sport}/{gid}").style(
+                f"color: {t.PRIMARY}; text-decoration: none; "
+                f"font-size: 11.5px; font-weight: 700; padding: 4px 0;"
+            )
+        ui.element("div").style("flex: 1;")    # spacer
         if g.get("_no_model"):
             track_button.render(
-                backend, game_id=(g.get("game_id") or g.get("id")), sport=sport, size="sm",
+                backend, game_id=gid, sport=sport, size="sm",
                 label="Track",
                 disabled_reason=(
                     "No model pick available for this matchup -- "
@@ -92,7 +99,7 @@ def _track_row(backend, g: dict, sport: str) -> None:
             )
         else:
             track_button.render(
-                backend, game_id=(g.get("game_id") or g.get("id")), sport=sport, size="sm",
+                backend, game_id=gid, sport=sport, size="sm",
                 label="Track",
             )
 

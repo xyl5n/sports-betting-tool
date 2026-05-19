@@ -111,78 +111,15 @@ def _validate_odds_api_key_on_boot() -> None:
 _validate_odds_api_key_on_boot()
 
 
-def _validate_sharpapi_key_on_boot() -> None:
-    """Mirror of _validate_odds_api_key_on_boot for SHARPAPI_KEY.
-
-    SharpAPI is the new primary source (see src/odds_client.SharpApiClient).
-    Surfacing presence + first/last-4 + whitespace problems here means a
-    misconfigured SharpAPI key fails loud at boot, not silently inside the
-    first /api/analyze call when the fallback path quietly takes over.
-    """
-    print("STARTUP: validating SharpAPI credentials...",
-          flush=True, file=sys.stderr)
-    key_raw = os.environ.get("SHARPAPI_KEY")
-    if key_raw is None:
-        print("STARTUP CRED-CHECK [SHARPAPI_KEY]: NOT SET.  "
-              "Analysis will skip SharpAPI and fall back to The Odds API.",
-              flush=True, file=sys.stderr)
-        return
-    key = key_raw.strip()
-    problems: list[str] = []
-    if not key:
-        problems.append("value is empty after strip()")
-    if key == "your_sharpapi_key_here":
-        problems.append("value is still the .env.example placeholder text")
-    if key != key_raw:
-        problems.append(
-            f"value has surrounding whitespace "
-            f"(raw_len={len(key_raw)}, stripped_len={len(key)}) -- "
-            f"trim it in Railway Variables")
-    if " " in key:
-        problems.append("value contains an embedded space")
-    if problems:
-        print(f"STARTUP CRED-CHECK [SHARPAPI_KEY]: PROBLEMS -- "
-              f"{'; '.join(problems)}",
-              flush=True, file=sys.stderr)
-    else:
-        print(f"STARTUP CRED-CHECK [SHARPAPI_KEY]: present, "
-              f"len={len(key)}, prefix={key[:4]!r}, suffix={key[-4:]!r}",
-              flush=True, file=sys.stderr)
-
-
-_validate_sharpapi_key_on_boot()
-
-
-def _probe_sharpapi_leagues_on_boot() -> None:
-    """One-shot GET /leagues at startup so the canonical SharpAPI league
-    identifiers (e.g. 'MLB', 'WNBA', 'NBA') appear in the Railway deploy
-    log without anyone having to click anything in /admin.
-
-    Cheap: a single 5-second request.  Skipped entirely when SHARPAPI_KEY
-    isn't set.  Errors are swallowed -- the app boots regardless.
-    """
-    key = (os.environ.get("SHARPAPI_KEY") or "").strip()
-    if not key:
-        return  # already logged by the cred-check; don't double-up
-    url = "https://api.sharpapi.io/api/v1/leagues"
-    print(f"STARTUP: probing SharpAPI -- GET {url}  (auth: X-API-Key header)",
-          flush=True, file=sys.stderr)
-    try:
-        import requests as _req
-        resp = _req.get(url, headers={"X-API-Key": key}, timeout=5)
-        body = (resp.text or "")[:3000]
-        print(f"STARTUP SHARPAPI [/leagues]: status={resp.status_code}  "
-              f"bytes={len(resp.content)}",
-              flush=True, file=sys.stderr)
-        print(f"STARTUP SHARPAPI [/leagues] body (first 3000 chars):\n{body}",
-              flush=True, file=sys.stderr)
-    except Exception as exc:                                              # noqa: BLE001
-        print(f"STARTUP SHARPAPI [/leagues]: probe FAILED -- "
-              f"{type(exc).__name__}: {exc}",
-              flush=True, file=sys.stderr)
-
-
-_probe_sharpapi_leagues_on_boot()
+# NOTE: _validate_sharpapi_key_on_boot + _probe_sharpapi_leagues_on_boot
+# used to live here.  Both removed because:
+#   - SharpAPI is no longer used as a fallback (odds_client.OddsClient now
+#     treats The Odds API as the sole source -- see PR 'remove sharpapi
+#     fallback')
+#   - The startup probe + cred-check were adding network latency and log
+#     noise without adding value
+# SHARPAPI_KEY is left in env / .env.example in case we re-enable later;
+# no code touches it on this code path.
 
 
 # NOTE: _bust_daily_odds_cache_on_boot used to live here and was tied to
@@ -5249,6 +5186,182 @@ def ai_usage():
             "limit_reached": False,
             "error":         _redact(str(exc)),
         }), 200
+
+
+@app.route("/api/ai/pick_analysis", methods=["POST"])
+def ai_pick_analysis():
+    """Focused 3-4 sentence analysis of one specific model pick.
+
+    Body:
+      game_id:   str  -- the analysis cache key (Odds API id)
+      bet_type:  str  -- "moneyline" | "run_line" | "spread" | "totals"
+      sport:     str  -- "mlb" | "wnba"
+
+    The handler looks the game up in _analysis_state / _wnba_analysis_state
+    and assembles a tight system prompt containing only what's needed to
+    reason about THIS pick (matchup, pick team, prob, edge, odds, top
+    SHAP factors, model agreement).  Output is exactly the 3-4 sentence
+    plain-text analysis -- the chat-style markdown ban applies.
+
+    Counts toward the same daily AI cap as /api/ai/chat.  Returns 429
+    when the cap is hit, same payload shape.
+    """
+    data = request.get_json() or {}
+    game_id  = (data.get("game_id") or "").strip()
+    bet_type = (data.get("bet_type") or "moneyline").strip().lower()
+    sport    = (data.get("sport") or "mlb").strip().lower()
+    if not game_id:
+        return jsonify({"error": "game_id required"}), 400
+
+    # Daily cap check (same as /api/ai/chat).
+    limit  = _ai_daily_limit()
+    so_far = _ai_get_daily_count()
+    if so_far >= limit:
+        return jsonify({
+            "error":         "Daily AI limit reached, resets at midnight.",
+            "calls_today":   so_far,
+            "daily_limit":   limit,
+            "limit_reached": True,
+        }), 429
+
+    # Locate the raw analysis result (carries prediction + shap + meta).
+    state = _wnba_analysis_state if sport == "wnba" else _analysis_state
+    raw = next((r for r in (state.get("results") or [])
+                if (r.get("game") or {}).get("id") == game_id), None)
+    if raw is None:
+        return jsonify({
+            "error": f"Game {game_id!r} not found in {sport.upper()} analysis cache.",
+        }), 404
+
+    # Build the focused per-pick context.  Strict ~600 token cap so the
+    # call is cheap; the system prompt below limits the response to
+    # 3-4 sentences which keeps the OUTPUT cap low too.
+    try:
+        ctx = _build_pick_analysis_context(raw, bet_type, sport)
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"error": f"context build failed: {_redact(str(exc))}"}), 500
+
+    system = (
+        "You are a professional sports analyst. Output EXACTLY 3 to 4 "
+        "plain-text sentences (no markdown, no asterisks, no bullet "
+        "points, no headers) covering: (1) why the model made this "
+        "specific pick, (2) the key risk factors, and (3) whether the "
+        "edge is strong or marginal.  Be direct and confident.\n\n"
+        + ctx
+    )
+
+    try:
+        import anthropic as _anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set in env / .env")
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=350,
+            system=system,
+            messages=[{
+                "role":    "user",
+                "content": f"Analyze the {bet_type} pick for this game.",
+            }],
+        )
+        analysis = msg.content[0].text.strip()
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"error": _redact(str(exc))}), 500
+
+    new_count = _ai_increment_daily_count()
+    return jsonify({
+        "analysis":      analysis,
+        "calls_today":   new_count,
+        "daily_limit":   limit,
+        "limit_reached": new_count >= limit,
+    })
+
+
+def _build_pick_analysis_context(raw: dict, bet_type: str, sport: str) -> str:
+    """Build the per-pick context string fed to the Analyze button.
+
+    Pulls from the raw analysis dict (game / prediction / shap / meta)
+    rather than the serialized output so SHAP factors are available with
+    their plain-English labels (via _FEATURE_LABELS).
+    """
+    game = raw.get("game") or {}
+    pred = raw.get("prediction") or {}
+    meta = raw.get("meta") or {}
+    away = game.get("away_team", "Away")
+    home = game.get("home_team", "Home")
+
+    # Per-bet-type pick + probability + edge + odds.  Falls back to the
+    # moneyline numbers when the requested bet type isn't in the raw dict.
+    if bet_type in ("moneyline", "single", "ml"):
+        bt_label = "Moneyline"
+        hp       = float(pred.get("home_win_prob") or 0.5)
+        market_p = float(game.get("home_implied_prob") or 0.5)
+        if hp >= 0.5:
+            pick_team = home; pick_prob = hp;     edge = hp - market_p
+            odds = game.get("h2h_home_odds")
+        else:
+            pick_team = away; pick_prob = 1 - hp; edge = (1 - hp) - (1 - market_p)
+            odds = game.get("h2h_away_odds")
+        agree = bool(pred.get("models_agree", True))
+        shap  = pred.get("shap") or []
+    elif bet_type in ("run_line", "spread"):
+        rl       = raw.get("rl_pred") or raw.get("spread_pred") or {}
+        bt_label = "Run Line" if bet_type == "run_line" else "Spread"
+        pick_team = rl.get("pick_team") or "?"
+        pick_prob = float(rl.get("pick_prob") or 0)
+        edge      = float(rl.get("edge") or 0)
+        odds      = rl.get("pick_odds")
+        agree     = bool(rl.get("models_agree", True))
+        shap      = rl.get("shap") or []
+    elif bet_type == "totals":
+        tot       = raw.get("totals_pred") or {}
+        bt_label  = "Totals"
+        direction = (tot.get("direction") or "over").title()
+        line      = tot.get("total_line", "?")
+        pick_team = f"{direction} {line}"
+        pick_prob = float(tot.get("pick_prob") or 0)
+        edge      = float(tot.get("edge") or 0)
+        odds      = (
+            tot.get("over_odds") if direction.lower() == "over"
+            else tot.get("under_odds")
+        )
+        agree = bool(tot.get("models_agree", True))
+        shap  = tot.get("shap") or []
+    else:
+        bt_label = bet_type.title()
+        pick_team = "?"; pick_prob = 0.0; edge = 0.0; odds = None
+        agree = True; shap = []
+
+    # Top 3 SHAP factors in human-readable form.  _FEATURE_LABELS turns
+    # raw feature names ("sp_era_diff") into plain English ("SP ERA
+    # advantage").  Defensive against missing keys.
+    shap_lines: list[str] = []
+    for s in (shap or [])[:3]:
+        try:
+            label = (s.get("label")
+                     or _FEATURE_LABELS.get(s.get("feature", ""), s.get("feature", "factor")))
+            shap_val = float(s.get("shap_value") or 0)
+            direction = "supports the pick" if shap_val > 0 else "argues against the pick"
+            shap_lines.append(f"  - {label} ({direction})")
+        except Exception:                                                 # noqa: BLE001
+            continue
+    shap_block = "\n".join(shap_lines) if shap_lines else "  (none recorded)"
+
+    odds_s = (f"{odds:+d}" if isinstance(odds, (int, float)) and odds > 0
+              else (str(int(odds)) if isinstance(odds, (int, float)) else "?"))
+    edge_s = f"{edge * 100:+.1f}%"
+
+    return (
+        f"SPORT: {sport.upper()}\n"
+        f"MATCHUP: {away} @ {home}\n"
+        f"BET TYPE: {bt_label}\n"
+        f"MODEL PICK: {pick_team} at {odds_s}\n"
+        f"MODEL CONFIDENCE: {pick_prob * 100:.1f}%\n"
+        f"EDGE OVER MARKET: {edge_s}\n"
+        f"MODELS AGREE: {'yes' if agree else 'NO -- ensemble split'}\n"
+        f"TOP 3 SHAP FACTORS:\n{shap_block}"
+    )
 
 
 # ── WNBA analysis endpoint ────────────────────────────────────────────────────

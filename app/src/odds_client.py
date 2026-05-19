@@ -1,13 +1,19 @@
 """
-Odds client — primary source is The Odds API, fallback is SharpAPI.
+Odds client — The Odds API only.
 
 The Odds API: https://the-odds-api.com/liveapi/guides/v4/
-SharpAPI:     https://docs.sharpapi.io/en/api-reference/overview
 
-The Odds API (ODDS_API_KEY) is always tried first.  If the call raises and
-SHARPAPI_KEY is also set, SharpAPI is contacted as a fallback.  Both clients
-return the same normalised per-game dict so the rest of the app never needs
-to know which source produced the result.
+The SharpAPI fallback was DISABLED because its free tier returns empty
+data; the extra round-trip + delay added noise without any successful
+results.  The SharpApiClient class + SHARPAPI_KEY env var are preserved
+in this module so the fallback can be turned back on by un-commenting
+the block in OddsClient.__init__ if SharpAPI ever becomes useful.
+
+If The Odds API itself fails (auth error, network blip, malformed
+response), OddsClient.get_odds logs a clear error and returns an empty
+list rather than trying any fallback.  Daily-quota errors propagate
+as OddsApiLimitExceeded so the analyze routes can turn them into a
+clean HTTP 429.
 """
 import json
 import os
@@ -491,15 +497,17 @@ class OddsClient:
         self.api_key = api_key
         self.cache = cache or Cache()
         self.session = requests.Session()
-        # SharpAPI is opt-in fallback.  The Odds API is the primary source
-        # (last edit).  get_odds() tries The Odds API first; SharpAPI is
-        # only contacted if the primary call raises and SHARPAPI_KEY is set.
-        _sharp_key = os.environ.get("SHARPAPI_KEY", "").strip()
-        self._sharp: Optional[SharpApiClient] = (
-            SharpApiClient(_sharp_key, self.cache) if _sharp_key else None
-        )
-        if self._sharp:
-            _log("OddsClient: SharpAPI fallback configured (SHARPAPI_KEY present)")
+        # The Odds API is the SOLE source.  SharpAPI fallback was disabled
+        # because its free tier returns empty data and the extra round-
+        # trip + delay added noise without any successful results.  The
+        # SharpApiClient class + SHARPAPI_KEY env var are preserved so
+        # the fallback can be re-enabled by un-commenting the block
+        # below if SharpAPI ever becomes useful.
+        self._sharp: Optional[SharpApiClient] = None
+        # _sharp_key = os.environ.get("SHARPAPI_KEY", "").strip()
+        # self._sharp = SharpApiClient(_sharp_key, self.cache) if _sharp_key else None
+        # if self._sharp:
+        #     _log("OddsClient: SharpAPI fallback configured (SHARPAPI_KEY present)")
 
     def _get(self, path: str, params: dict) -> dict | list:
         # Daily quota check -- runs BEFORE any wire traffic so an at-limit
@@ -552,10 +560,9 @@ class OddsClient:
     ) -> list[dict]:
         """Return upcoming games for *sport_key* with implied probabilities.
 
-        Source order: **The Odds API is primary**; SharpAPI is the fallback
-        when SHARPAPI_KEY is set and the primary call raises.  Both return
-        the same normalised per-game dict so callers don't care which path
-        produced the result.
+        Source: **The Odds API is the SOLE source** (SharpAPI fallback
+        disabled -- see __init__ for the rationale).  Returns the
+        normalised per-game dict shape callers already consume.
 
         Quota model
         -----------
@@ -567,13 +574,19 @@ class OddsClient:
 
         The 15-min in-memory cache inside _fetch_via_the_odds_api still
         deduplicates rapid identical requests so a flurry of clicks doesn't
-        burn quota -- but unlike the old daily Supabase cache, repeat
-        requests outside the 15-min window DO go to the wire.  This matches
-        the new ~666/day allowance which makes the previous 1-call-per-day
-        aggressive deduplication unnecessary.
+        burn quota.
 
-        force_refresh=True bypasses the 15-min cache too (still subject to
-        the daily quota cap).
+        force_refresh=True bypasses the 15-min cache (still subject to the
+        daily quota cap).
+
+        Error handling
+        --------------
+        - OddsApiLimitExceeded propagates AS-IS so analyze routes can
+          turn it into a clean 429 + admin banner.
+        - Any other Odds API failure (auth error, network blip, malformed
+          response) logs a clear error and returns an empty list.  No
+          SharpAPI fallback attempt -- it would just add latency without
+          any successful results.
 
         sport_key must be an active Odds API sport key, e.g.:
           "baseball_mlb"      — MLB moneylines / run lines / totals
@@ -582,37 +595,20 @@ class OddsClient:
         _log(f"get_odds(sport_key={sport_key!r}, markets={markets!r}, "
              f"regions={regions!r}, force_refresh={force_refresh})")
 
-        # ── The Odds API (primary) ───────────────────────────────────────
-        primary_exc: Optional[Exception] = None
         try:
             result = self._fetch_via_the_odds_api(sport_key, markets, regions)
-            _log(f"get_odds: The Odds API returned {len(result)} games (primary)")
+            _log(f"get_odds: The Odds API returned {len(result)} games")
             return result
         except OddsApiLimitExceeded:
-            # Daily cap -- propagate AS-IS so the analyze route can
-            # produce a clean 429.  Don't try the SharpAPI fallback
-            # because that's its own quota / source -- the user asked
-            # for explicit Odds-API quota enforcement.
+            # Daily cap reached -- let it bubble; analyze route -> 429.
             raise
         except Exception as exc:                                          # noqa: BLE001
-            primary_exc = exc
-            _log(f"get_odds: The Odds API failed -- "
-                 f"{type(exc).__name__}: {exc} -- trying SharpAPI fallback")
-
-        # ── SharpAPI (fallback) ──────────────────────────────────────────
-        if self._sharp and sport_key in SharpApiClient.SPORT_MAP:
-            try:
-                result = self._sharp.get_odds(sport_key, markets, regions)
-                _log(f"get_odds: SharpAPI returned {len(result)} games (fallback)")
-                return result
-            except Exception as exc:                                      # noqa: BLE001
-                _log(f"get_odds: SharpAPI fallback also failed -- "
-                     f"{type(exc).__name__}: {exc}")
-
-        # Both sources exhausted -- re-raise the primary error so the caller
-        # sees the most important failure mode (The Odds API) rather than
-        # whatever SharpAPI returned second.
-        raise primary_exc
+            _log(
+                f"get_odds: ERROR -- The Odds API call failed for "
+                f"sport_key={sport_key!r}: {type(exc).__name__}: {exc}.  "
+                f"Returning empty result list (SharpAPI fallback disabled)."
+            )
+            return []
 
     # ------------------------------------------------------------------
     # Source implementations
