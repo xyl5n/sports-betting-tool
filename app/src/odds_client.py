@@ -1,13 +1,13 @@
 """
-Odds client — primary source is SharpAPI, fallback is The Odds API.
+Odds client — primary source is The Odds API, fallback is SharpAPI.
 
-SharpAPI docs:  https://docs.sharpapi.io/en/api-reference/overview
-The Odds API:   https://the-odds-api.com/liveapi/guides/v4/
+The Odds API: https://the-odds-api.com/liveapi/guides/v4/
+SharpAPI:     https://docs.sharpapi.io/en/api-reference/overview
 
-SharpAPI is used when SHARPAPI_KEY is present in env.  If it's absent or the
-call fails, the client transparently retries via The Odds API (ODDS_API_KEY).
-Both clients return the same normalised per-game dict so the rest of the app
-never needs to know which source was used.
+The Odds API (ODDS_API_KEY) is always tried first.  If the call raises and
+SHARPAPI_KEY is also set, SharpAPI is contacted as a fallback.  Both clients
+return the same normalised per-game dict so the rest of the app never needs
+to know which source produced the result.
 """
 import json
 import os
@@ -433,15 +433,15 @@ class OddsClient:
         self.api_key = api_key
         self.cache = cache or Cache()
         self.session = requests.Session()
-        # SharpAPI is opt-in — read key from env at construction time so no
-        # app.py changes are needed.  When present, get_odds() tries Sharp
-        # first and only falls back to The Odds API on failure.
+        # SharpAPI is opt-in fallback.  The Odds API is the primary source
+        # (last edit).  get_odds() tries The Odds API first; SharpAPI is
+        # only contacted if the primary call raises and SHARPAPI_KEY is set.
         _sharp_key = os.environ.get("SHARPAPI_KEY", "").strip()
         self._sharp: Optional[SharpApiClient] = (
             SharpApiClient(_sharp_key, self.cache) if _sharp_key else None
         )
         if self._sharp:
-            _log("OddsClient: SharpAPI primary source configured (SHARPAPI_KEY present)")
+            _log("OddsClient: SharpAPI fallback configured (SHARPAPI_KEY present)")
 
     def _get(self, path: str, params: dict) -> dict | list:
         params["apiKey"] = self.api_key
@@ -482,8 +482,10 @@ class OddsClient:
     ) -> list[dict]:
         """Return upcoming games for *sport_key* with implied probabilities.
 
-        Tries SharpAPI first (if SHARPAPI_KEY is set), then falls back to The
-        Odds API.  Both return the same normalised per-game dict.
+        Source order (changed per request): **The Odds API is primary**;
+        SharpAPI is the fallback when SHARPAPI_KEY is set and The Odds API
+        raises.  Both return the same normalised per-game dict so callers
+        don't care which path produced the result.
 
         Daily Supabase cache
         --------------------
@@ -516,21 +518,46 @@ class OddsClient:
         else:
             _log(f"get_odds: force_refresh=True, bypassing daily Supabase cache")
 
-        # ── SharpAPI (primary) ────────────────────────────────────────────
+        # ── The Odds API (primary) ───────────────────────────────────────
+        primary_exc: Optional[Exception] = None
+        try:
+            result = self._fetch_via_the_odds_api(sport_key, markets, regions)
+            _log(f"get_odds: The Odds API returned {len(result)} games (primary)")
+            _write_daily_odds_cache(sport_key, markets, regions, result)
+            return result
+        except Exception as exc:                                          # noqa: BLE001
+            primary_exc = exc
+            _log(f"get_odds: The Odds API failed -- "
+                 f"{type(exc).__name__}: {exc} -- trying SharpAPI fallback")
+
+        # ── SharpAPI (fallback) ──────────────────────────────────────────
         if self._sharp and sport_key in SharpApiClient.SPORT_MAP:
             try:
                 result = self._sharp.get_odds(sport_key, markets, regions)
-                _log(f"get_odds: SharpAPI returned {len(result)} games")
+                _log(f"get_odds: SharpAPI returned {len(result)} games (fallback)")
                 _write_daily_odds_cache(sport_key, markets, regions, result)
                 return result
-            except Exception as exc:
-                _log(
-                    f"get_odds: SharpAPI failed ({type(exc).__name__}: {exc}) "
-                    "-- falling back to The Odds API"
-                )
+            except Exception as exc:                                      # noqa: BLE001
+                _log(f"get_odds: SharpAPI fallback also failed -- "
+                     f"{type(exc).__name__}: {exc}")
 
-        # ── The Odds API (fallback / sole source when no Sharp key) ───────
-        _log(f"get_odds: using The Odds API for sport_key={sport_key!r}")
+        # Both sources exhausted -- re-raise the primary error so the caller
+        # sees the most important failure mode (The Odds API) rather than
+        # whatever SharpAPI returned second.
+        raise primary_exc
+
+    # ------------------------------------------------------------------
+    # Source implementations
+    # ------------------------------------------------------------------
+
+    def _fetch_via_the_odds_api(
+        self, sport_key: str, markets: str, regions: str,
+    ) -> list[dict]:
+        """Fetch + parse upcoming games from The Odds API.
+
+        Honors the existing in-memory 15-min TTL cache (separate from the
+        daily Supabase cache handled by the caller).  Returns the parsed
+        list; raises on HTTP / parse failure so the caller can fall back."""
         cache_key = f"odds_{sport_key}_{markets}_{regions}"
         cached = self.cache.get(cache_key, ttl=900)  # 15-min TTL
         if cached is not None:
@@ -552,14 +579,11 @@ class OddsClient:
         _log(f"  raw_count={len(raw)} games returned by API "
              f"(no client-side date / commence_time filter applied)")
         if raw:
-            # Dump the first game with truncation so logs stay readable.
             try:
                 first = json.dumps(raw[0], default=str)[:800]
             except Exception as exc:                                      # noqa: BLE001
                 first = f"<could not serialize: {type(exc).__name__}: {exc}>"
             _log(f"  raw[0] (first 800 chars): {first}")
-            # Plus a one-line summary across all games so we can see if the
-            # API returned a sane slate even when individual games drop.
             try:
                 summary = [
                     f"{(g.get('away_team') or '?')[:3]}@{(g.get('home_team') or '?')[:3]} "
@@ -570,8 +594,7 @@ class OddsClient:
             except Exception:                                             # noqa: BLE001
                 pass
 
-        # Parse + count drops.  Track WHY each None came out so a 'parse
-        # dropped every game' failure mode is diagnosable from logs alone.
+        # Parse + count drops.  Aggregate _last_drop_reason for diagnosability.
         parsed: list[dict] = []
         drop_reasons: dict[str, int] = {}
         for g in raw:
@@ -582,7 +605,6 @@ class OddsClient:
                     drop_reasons.get(f"_parse_game raised {type(exc).__name__}", 0) + 1
                 continue
             if out is None:
-                # _parse_game already records why via _last_drop_reason.
                 why = getattr(self, "_last_drop_reason", "unknown")
                 drop_reasons[why] = drop_reasons.get(why, 0) + 1
                 continue
@@ -594,9 +616,6 @@ class OddsClient:
                  f"{ {k: v for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])} }")
 
         self.cache.set(cache_key, parsed)
-        # Persist to the daily Supabase cache so subsequent runs in the same
-        # ET day skip the Odds API hit entirely.
-        _write_daily_odds_cache(sport_key, markets, regions, parsed)
         return parsed
 
     def get_scores(self, sport_key: str, days_from: int = 3) -> list[dict]:
