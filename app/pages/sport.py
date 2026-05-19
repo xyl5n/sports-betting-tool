@@ -6,15 +6,26 @@ Sports page -- two routes, one renderer.
 
 Each game row is a `game_card.render()` invocation against the
 in-memory analysis cache (_analysis_state / _wnba_analysis_state).
-Live-state polling (the "inning / outs / clock" detail line) is a
-follow-up; this skeleton just shows the slate + pick boxes.
+
+Live-score polling
+------------------
+On page open we fetch /api/{sport}/schedule?hydrate=linescore once
+(populates components/live_score's module cache), then schedule a
+ui.timer(60s, ...) that re-fetches + refreshes the game grid.  Each
+card consults live_score.lookup(...) by gamePk (with a team-name
+fallback) inside game_card.render -- LIVE games show the big center
+score + inning + B/S/O detail, FINAL games show the score + Final
+label, scheduled games show the matchup row with VS between names.
 """
 from __future__ import annotations
 
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar, game_card, bottom_nav
+from components import navbar, sidebar, game_card, bottom_nav, live_score
+
+
+_LIVE_POLL_INTERVAL = 60.0   # seconds between live-score refresh ticks
 
 
 def register(backend) -> None:
@@ -35,6 +46,14 @@ def register(backend) -> None:
 def _render_sport(backend, sport: str) -> None:
     ui.add_head_html(t.page_head_css())
     navbar.render(active=t.TAB_SPORTS)
+
+    # Kick off the live-score poller for this page.  Fetches the linescore
+    # feed immediately + every 60 seconds thereafter, populating the cache
+    # live_score.lookup() reads inside game_card.render.  The refreshable
+    # grid below redraws on each tick so the latest score lands in the UI
+    # without any per-card binding gymnastics.
+    live_score.fetch_live(backend, sport)
+
     with ui.row().classes("no-wrap w-full").style("gap: 0;"):
         sidebar.render(backend)
         with ui.column().classes("page-content").style(
@@ -42,8 +61,24 @@ def _render_sport(backend, sport: str) -> None:
             f"gap: {t.SPACE_MD}; padding: {t.SPACE_LG}; min-width: 0;"
         ):
             _header(sport)
-            _game_grid(backend, sport)
+            # First render of the refreshable grid -- args are captured so
+            # `.refresh()` on tick re-uses the same backend + sport.
+            _refreshable_grid(backend, sport)
+
+            def _tick() -> None:
+                live_score.fetch_live(backend, sport)
+                _refreshable_grid.refresh()
+
+            ui.timer(_LIVE_POLL_INTERVAL, _tick)
+
     bottom_nav.render(active=t.TAB_SPORTS)
+
+
+@ui.refreshable
+def _refreshable_grid(backend, sport: str) -> None:
+    """Wrapper so the timer can call `.refresh()` on tick.  Re-runs
+    _game_grid which re-reads live_score's cache on every render."""
+    _game_grid(backend, sport)
 
 
 def _header(sport: str) -> None:

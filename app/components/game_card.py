@@ -16,6 +16,7 @@ from . import theme as t
 from . import bet_box
 from . import track_button
 from . import team_logo
+from . import live_score
 
 _ET = ZoneInfo("America/New_York")
 
@@ -38,6 +39,17 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
     sport = (sport or g.get("_sport") or "mlb").lower()
     is_mlb = sport == "mlb"
 
+    # Live score lookup -- comes from components/live_score's cache,
+    # populated by the per-page poller in pages/sport.py.  None when no
+    # live data is available (offline backend, pre-game, etc.).
+    live = live_score.lookup(
+        sport,
+        game_id=(g.get("game_id") or g.get("id")),
+        away_team=g.get("away_team", ""),
+        home_team=g.get("home_team", ""),
+    )
+    state = live_score.state_of(live)            # 'live' | 'final' | 'scheduled'
+
     with ui.column().style(
         f"background: {t.CARD}; "
         f"border: 1px solid {t.BORDER}; "
@@ -45,8 +57,13 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
         f"padding: {t.SPACE_MD}; "
         f"gap: {t.SPACE_SM}; width: 100%;"
     ):
-        _meta_row(g, sport)
-        _matchup_row(g, sport)
+        _meta_row(g, sport, state=state)
+        _matchup_row(g, sport, state=state)
+        # In-progress / completed games show the big centered score block
+        # between the matchup row and the bet boxes.  Pre-game cards skip
+        # the score block entirely so the layout stays compact.
+        if state in ("live", "final") and live is not None:
+            live_score.render_score_block(live, sport)
         if g.get("_no_model"):
             _no_model_row(g)
         else:
@@ -103,7 +120,7 @@ def _no_model_row(g: dict) -> None:
         )
 
 
-def _meta_row(g: dict, sport: str) -> None:
+def _meta_row(g: dict, sport: str, state: str = "scheduled") -> None:
     when = _fmt_et(g.get("commence_time", ""))
     with ui.row().classes("items-center w-full").style("gap: 8px;"):
         ui.label(sport.upper()).style(
@@ -112,15 +129,42 @@ def _meta_row(g: dict, sport: str) -> None:
             f"padding: 2px 7px; border-radius: {t.RADIUS_PILL};"
         )
         ui.label(when).style(f"font-size: 12px; color: {t.TEXT_DIM};")
+        # LIVE indicator: pulsing dot + label.  Pushes to the right side
+        # of the meta row via margin-left:auto so the time stays adjacent
+        # to the sport chip.
+        if state == "live":
+            with ui.row().classes("items-center").style(
+                f"gap: 4px; margin-left: auto;"
+            ):
+                live_score.render_live_dot()
+                ui.label("LIVE").style(
+                    f"font-size: 9.5px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.POS};"
+                )
+        elif state == "final":
+            ui.label("FINAL").style(
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .8px; "
+                f"color: {t.TEXT_DIM}; margin-left: auto;"
+            )
 
 
-def _matchup_row(g: dict, sport: str) -> None:
+def _matchup_row(g: dict, sport: str, state: str = "scheduled") -> None:
+    """Matchup row layout depends on state:
+
+      scheduled  -- team name on each side, opening odds below, "VS"
+                     separator in the middle (per spec).
+      live/final -- team name only; the big score block below carries
+                     the numbers.  Odds for in-progress games are stale
+                     and would compete with the live score for attention.
+    """
     away_full = g.get("away_team", "—") or "—"
     home_full = g.get("home_team", "—") or "—"
     away   = _short(away_full)
     home   = _short(home_full)
     a_odds = _odds_str(g.get("away_odds"))
     h_odds = _odds_str(g.get("home_odds"))
+    show_odds = state == "scheduled"
+    separator = "VS" if state == "scheduled" else "–"
     with ui.row().classes("items-center w-full").style("gap: 10px;"):
         # Away: logo on the left of the name column.
         team_logo.render(away_full, sport=sport, size=36)
@@ -129,10 +173,14 @@ def _matchup_row(g: dict, sport: str) -> None:
                 f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
                 f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
-            ui.label(a_odds).style(
-                f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
-            )
-        ui.label("@").style(f"color: {t.TEXT_DIM2}; font-size: 12px;")
+            if show_odds:
+                ui.label(a_odds).style(
+                    f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+                )
+        ui.label(separator).style(
+            f"color: {t.TEXT_DIM2}; font-size: 11px; font-weight: 700; "
+            f"letter-spacing: .8px;"
+        )
         # Home: name column on the left of the logo (text right-aligned).
         with ui.column().style("flex: 1; gap: 2px; text-align: right; "
                                 "align-items: flex-end; min-width: 0;"):
@@ -140,9 +188,10 @@ def _matchup_row(g: dict, sport: str) -> None:
                 f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
                 f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
-            ui.label(h_odds).style(
-                f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
-            )
+            if show_odds:
+                ui.label(h_odds).style(
+                    f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+                )
         team_logo.render(home_full, sport=sport, size=36)
 
 
