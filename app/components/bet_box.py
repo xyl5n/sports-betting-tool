@@ -4,12 +4,33 @@ Single bet box -- one of three columns inside a game card.
 Renders a labelled pick (Moneyline / Run Line / Totals) with the model's
 probability, edge, odds, and a small VALUE chip when value_pick is true.
 The chip uses theme.PRIMARY for ML picks and theme.WARN for value highlights.
+
+Below 480px viewport width, the full label (MONEYLINE / RUN LINE / SPREAD /
+TOTALS) is swapped for an abbreviation (ML / RL / SPR / TOT) via the
+theme's .bet-label-full / .bet-label-short CSS classes -- both labels are
+emitted into the DOM and the media query toggles display.  Pure CSS swap,
+no per-render JS.
 """
 from __future__ import annotations
 
 from nicegui import ui
 
 from . import theme as t
+
+
+# Map full bet labels to their narrow-screen abbreviations.  Anything not
+# in the map gets uppercased first 3 chars as a generic fallback so a
+# future bet type (e.g. PROPS) renders sensibly without a code change.
+_SHORT_LABEL: dict[str, str] = {
+    "MONEYLINE": "ML",
+    "RUN LINE":  "RL",
+    "SPREAD":    "SPR",
+    "TOTALS":    "TOT",
+}
+
+
+def _short_label(label: str) -> str:
+    return _SHORT_LABEL.get(label.upper(), label[:3].upper())
 
 
 def render(
@@ -28,12 +49,15 @@ def render(
         f"padding: 8px 10px; "
         f"min-width: 0; gap: 4px; flex: 1;"
     ):
-        # Label + optional value chip
+        # Label + optional value chip.  Both labels (full + short) are
+        # emitted; CSS toggles which is visible based on viewport width.
         with ui.row().classes("items-center justify-between w-full").style("gap: 4px;"):
-            ui.label(label).style(
+            _LABEL_STYLE = (
                 f"font-size: 10px; font-weight: 800; letter-spacing: .5px; "
                 f"color: {t.TEXT_DIM2};"
             )
+            ui.label(label).classes("bet-label-full").style(_LABEL_STYLE)
+            ui.label(_short_label(label)).classes("bet-label-short").style(_LABEL_STYLE)
             if is_value:
                 ui.label("VALUE").style(
                     f"font-size: 8.5px; font-weight: 800; letter-spacing: .5px; "
@@ -41,12 +65,12 @@ def render(
                     f"padding: 1px 5px; border-radius: 3px;"
                 )
 
-        ui.label(pick or "—").style(
+        ui.label(pick or "—").classes("pick-text").style(
             f"font-size: 13px; font-weight: 700; color: {t.TEXT}; "
             f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
         )
 
-        with ui.row().classes("items-center justify-between w-full").style("gap: 4px;"):
+        with ui.row().classes("items-center justify-between w-full text-row").style("gap: 4px;"):
             prob_s = f"{(prob or 0) * 100:.0f}%"
             ui.label(prob_s).style(
                 f"font-size: 11px; font-weight: 700; color: {t.PRIMARY}; "

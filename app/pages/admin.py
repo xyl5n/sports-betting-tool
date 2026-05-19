@@ -239,6 +239,15 @@ def _section_model_bets(backend, refresh) -> None:
             "Include WNBA in the model's auto-picks",
             field="wnba_enabled", initial=bool(settings.get("wnba_enabled")),
         )
+        # Home-page top-bar control -- toggles the overall-record chip.
+        # Lives here because it shares model_settings.json (no need for a
+        # second settings file or new endpoint).
+        _toggle_row(
+            backend, "Home: 'Overall' chip",
+            "Show the overall W-L chip at the top of the home page",
+            field="show_overall_chip",
+            initial=bool(settings.get("show_overall_chip", True)),
+        )
 
         ui.label("Re-pick").style(
             f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
@@ -512,6 +521,35 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
         ))
     except Exception as exc:                                              # noqa: BLE001
         out.append(("In-memory analysis state", "err", f"{type(exc).__name__}: {exc}"))
+
+    # 1b. Games skipped during prediction (per-sport)
+    # The analyze loop now records games that survived the API + stale-date
+    # filters but got dropped during model prediction (e.g. unknown team
+    # has no training data).  Surface them here so "0 games" with N>0 in
+    # the cache is immediately distinguishable from "0 games returned by
+    # the API".
+    for sport_label, state_attr in (
+        ("MLB",  "_analysis_state"),
+        ("WNBA", "_wnba_analysis_state"),
+    ):
+        try:
+            state = getattr(backend, state_attr, {}) or {}
+            sk = state.get("skipped") or []
+            if not sk:
+                continue
+            preview = "  |  ".join(
+                f"{s.get('matchup','?')} ({s.get('reason','?')})"
+                for s in sk[:3]
+            )
+            more = f"  +{len(sk)-3} more" if len(sk) > 3 else ""
+            out.append((
+                f"{sport_label} games skipped during prediction",
+                "warn",
+                f"{len(sk)} games dropped post-API.  {preview}{more}",
+            ))
+        except Exception as exc:                                          # noqa: BLE001
+            out.append((f"{sport_label} skipped probe", "err",
+                        f"{type(exc).__name__}: {exc}"))
 
     # 2. Daily snapshot file
     try:

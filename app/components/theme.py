@@ -120,14 +120,41 @@ def page_head_css() -> str:
         .hero-stats > * {{ flex: 1 0 40% !important; min-width: 0 !important; }}
         .hero-stats .stat-value {{ font-size: 18px !important; }}
 
-        /* Game card -- stack the three bet boxes vertically */
-        .bet-boxes {{ flex-direction: column !important; gap: 6px !important; }}
+        /* Game card -- keep the three bet boxes side by side at every
+           width.  Previously stacked vertically below 768px; users want
+           horizontal layout on all screens (the three picks compare best
+           when shown next to each other).  Reductions below scale font
+           + padding inside each box so they fit a ~360px phone screen. */
+        .bet-boxes {{
+          flex-direction: row !important;
+          flex-wrap:      nowrap !important;
+          gap:            4px !important;
+          width:          100%;
+        }}
+        .bet-boxes > * {{
+          padding:    6px 7px !important;
+          min-width:  0 !important;       /* allow boxes to shrink past content */
+          flex:       1 1 0 !important;   /* equal width, allow shrink */
+        }}
+        /* Shrink secondary text (prob / edge / odds row + pick text) on
+           mobile so the bottom row of each box doesn't wrap. */
+        .bet-boxes .text-row > * {{ font-size: 10px !important; }}
+        .bet-boxes .pick-text   {{ font-size: 12px !important; }}
 
         /* Reserve space at the bottom for the mobile tab bar */
         .q-page-container {{ padding-bottom: calc({BOTTOM_NAV_HEIGHT} + 16px) !important; }}
 
         /* Section titles a touch smaller on mobile */
         .page-title {{ font-size: 18px !important; }}
+      }}
+
+      /* Bet-box labels: full version is visible by default; the abbreviated
+         span (ML / RL / SPR / TOT) takes over below 480px so the labels +
+         optional VALUE chip fit inside a ~110px box on a portrait phone. */
+      .bet-label-short {{ display: none; }}
+      @media (max-width: 480px) {{
+        .bet-label-full  {{ display: none !important; }}
+        .bet-label-short {{ display: inline-block !important; }}
       }}
     </style>
     """
