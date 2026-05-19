@@ -70,6 +70,54 @@ def overall_record(backend) -> dict:
     }
 
 
+# ── Model Performance section (bottom of home page) ───────────────────────
+
+def model_performance(backend) -> dict:
+    """Return aggregate settled-history performance for the model.
+
+    Shape:
+        {wins: N, losses: N, pct: float | None, units: float}
+
+    `units` is a bankroll-independent P/L computed with flat 1U-per-bet
+    sizing (i.e. the unit-tracking convention sports cappers use):
+
+        win at +N        ->  +N/100  units
+        win at -N        ->  +100/N  units
+        loss             ->  -1      units
+        push / void      ->   0      units (no W/L change either)
+
+    Missing american_odds default to -110 (the most common line) so a
+    pre-migration ledger entry without the field doesn't get silently
+    omitted from the unit calc.  Push / void / no-result rows skip the
+    P/L update entirely.
+    """
+    history = _all_history(backend)
+    wins = losses = 0
+    units = 0.0
+    for h in history:
+        result = (h.get("result") or "").lower()
+        if result == "win":
+            wins += 1
+            odds = h.get("american_odds")
+            if not isinstance(odds, (int, float)):
+                odds = -110                                               # default
+            if odds > 0:
+                units += odds / 100.0
+            elif odds < 0:
+                units += 100.0 / abs(odds)
+        elif result == "loss":
+            losses += 1
+            units -= 1.0
+        # push / void: no change to either counter
+    total = wins + losses
+    return {
+        "wins":   wins,
+        "losses": losses,
+        "pct":    (wins / total) if total else None,
+        "units":  round(units, 2),
+    }
+
+
 # ── Chip #2 -- best classifier (XGB / LR / NN) ─────────────────────────────
 
 def best_classifier(backend) -> dict | None:
@@ -183,6 +231,11 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
         away = g.get("away_team", "")
         home = g.get("home_team", "")
         matchup = f"{_team_nick(away)} vs {_team_nick(home)}"
+        # Carry the FULL team names alongside the shortened matchup so
+        # the home renderer can look up CDN logos (logo lookup uses
+        # full names as the dict key).
+        away_full = away
+        home_full = home
         game_id = g.get("game_id") or g.get("id")
 
         # 1) Moneyline (top-level value_pick field)
@@ -197,6 +250,8 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
                     "odds":     g.get("pick_odds"),
                     "sport":    sport,
                     "game_id":  game_id,
+                    "away_full": away_full,
+                    "home_full": home_full,
                     "bet_type": "single",
                 })
 
@@ -220,6 +275,8 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
                     "odds":     rl.get("pick_odds"),
                     "sport":    sport,
                     "game_id":  game_id,
+                    "away_full": away_full,
+                    "home_full": home_full,
                     "bet_type": ("run_line" if g.get("run_line") else "spread"),
                 })
 
@@ -246,6 +303,8 @@ def enumerate_value_picks(games: Iterable[dict], *, min_edge: float = 0.0) -> li
                     "odds":     odds,
                     "sport":    sport,
                     "game_id":  game_id,
+                    "away_full": away_full,
+                    "home_full": home_full,
                     "bet_type": "totals",
                 })
 

@@ -24,7 +24,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, sidebar, bottom_nav
-from components import track_button
+from components import track_button, team_logo
 from pages import home_stats as hs
 
 
@@ -49,6 +49,7 @@ def _layout(backend) -> None:
             _section_ev_compact(backend)             # Section 2
             _section_confidence_carousel(backend)    # Section 3
             _ai_banner()
+            _section_model_performance(backend)      # Section 5 (very bottom)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,10 +188,17 @@ def _section_ev_compact(backend) -> None:
 def _ev_row(backend, r: dict) -> None:
     edge_pct = float(r.get("edge") or 0) * 100
     edge_s   = f"+{edge_pct:.1f}% Edge"
+    sport_r  = r.get("sport", "mlb")
     with ui.row().classes("items-center w-full no-wrap").style(
         f"padding: 8px 6px; gap: 10px; "
         f"border-bottom: 1px solid {t.BORDER_SOFT};"
     ):
+        # Two small logos for the matchup (away then home), 24px so the
+        # row stays compact.  Names + CDN URLs come from the full team
+        # names enumerate_value_picks now carries in r['away_full'] etc.
+        with ui.row().style("gap: -4px; align-items: center; flex-shrink: 0;"):
+            team_logo.render(r.get("away_full", ""), sport=sport_r, size=24)
+            team_logo.render(r.get("home_full", ""), sport=sport_r, size=24)
         with ui.column().style("flex: 1; min-width: 0; gap: 2px;"):
             ui.label(r["matchup"]).style(
                 f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
@@ -266,12 +274,18 @@ def _section_confidence_carousel(backend) -> None:
 def _confidence_card(r: dict) -> None:
     edge_pct = float(r.get("edge") or 0) * 100
     prob_pct = float(r.get("prob") or 0) * 100
+    sport_r  = r.get("sport", "mlb")
     with ui.column().style(
         f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
         f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; "
         f"min-width: 200px; max-width: 200px; flex-shrink: 0; gap: 4px; "
         f"scroll-snap-align: start;"
     ):
+        # Logo row: two small (22px) logos above the matchup label so the
+        # card is identifiable at a glance.
+        with ui.row().style("gap: 4px; align-items: center;"):
+            team_logo.render(r.get("away_full", ""), sport=sport_r, size=22)
+            team_logo.render(r.get("home_full", ""), sport=sport_r, size=22)
         ui.label(r["matchup"]).style(
             f"font-size: 10px; color: {t.TEXT_DIM2}; "
             f"letter-spacing: .3px; "
@@ -332,6 +346,69 @@ def _carousel_arrow(scroller, direction: str) -> None:
             pass
 
     btn.on("click", _click)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Section 5 -- Model Performance (bottom of page)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _section_model_performance(backend) -> None:
+    """Three model-only stats at the very bottom of the home page.
+
+    Distinct from "personal betting performance" (which lives on /mybets):
+    this section reports the MODEL's settled-history results across both
+    sports.  Units only -- no dollar amounts, no open bets, no bankroll
+    figures.  See hs.model_performance for the unit-tracking convention.
+    """
+    perf = hs.model_performance(backend)
+    wins, losses = perf["wins"], perf["losses"]
+    pct, units  = perf["pct"], perf["units"]
+
+    pct_s   = f"{pct * 100:.1f}%" if pct is not None else "—"
+    pct_col = hs.winrate_color(pct, t)
+
+    units_sign  = "+" if units >= 0 else "−"
+    units_s     = f"{units_sign}{abs(units):.1f}U"
+    units_col   = t.POS if units >= 0 else t.NEG
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label("MODEL PERFORMANCE").style(
+                f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                f"color: {t.TEXT};"
+            )
+            ui.label("settled history · 1U flat").style(
+                f"font-size: 11px; color: {t.TEXT_DIM2};"
+            )
+        with ui.row().classes("w-full").style(
+            f"gap: {t.SPACE_SM}; flex-wrap: nowrap; align-items: stretch;"
+        ):
+            _perf_stat("WIN %",  pct_s,                 pct_col)
+            _perf_stat("RECORD", f"{wins}-{losses}",    t.TEXT)
+            _perf_stat("UNITS",  units_s,               units_col)
+
+
+def _perf_stat(label: str, value: str, color: str) -> None:
+    """One stat cell for the Model Performance row.  Equal-width siblings,
+    never wrap; matches the visual rhythm of Section 1 chips while staying
+    purely informational (no Track / no nav)."""
+    with ui.column().style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; "
+        f"padding: {t.SPACE_MD}; "
+        f"gap: 4px; "
+        f"flex: 1 1 0; min-width: 0; overflow: hidden;"
+    ):
+        ui.label(label).style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2}; "
+            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+        )
+        ui.label(value).style(
+            f"font-size: 20px; font-weight: 800; color: {color}; "
+            f"font-family: monospace; letter-spacing: -.2px; "
+            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

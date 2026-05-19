@@ -15,6 +15,7 @@ from nicegui import ui
 from . import theme as t
 from . import bet_box
 from . import track_button
+from . import team_logo
 
 _ET = ZoneInfo("America/New_York")
 
@@ -45,7 +46,7 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
         f"gap: {t.SPACE_SM}; width: 100%;"
     ):
         _meta_row(g, sport)
-        _matchup_row(g)
+        _matchup_row(g, sport)
         if g.get("_no_model"):
             _no_model_row(g)
         else:
@@ -113,27 +114,36 @@ def _meta_row(g: dict, sport: str) -> None:
         ui.label(when).style(f"font-size: 12px; color: {t.TEXT_DIM};")
 
 
-def _matchup_row(g: dict) -> None:
-    away = _short(g.get("away_team", "—"))
-    home = _short(g.get("home_team", "—"))
+def _matchup_row(g: dict, sport: str) -> None:
+    away_full = g.get("away_team", "—") or "—"
+    home_full = g.get("home_team", "—") or "—"
+    away   = _short(away_full)
+    home   = _short(home_full)
     a_odds = _odds_str(g.get("away_odds"))
     h_odds = _odds_str(g.get("home_odds"))
-    with ui.row().classes("items-center w-full").style("gap: 12px;"):
-        with ui.column().style("flex: 1; gap: 2px;"):
+    with ui.row().classes("items-center w-full").style("gap: 10px;"):
+        # Away: logo on the left of the name column.
+        team_logo.render(away_full, sport=sport, size=36)
+        with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
             ui.label(away).style(
-                f"font-size: 14px; font-weight: 700; color: {t.TEXT};"
+                f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
             ui.label(a_odds).style(
                 f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
             )
         ui.label("@").style(f"color: {t.TEXT_DIM2}; font-size: 12px;")
-        with ui.column().style("flex: 1; gap: 2px; text-align: right; align-items: flex-end;"):
+        # Home: name column on the left of the logo (text right-aligned).
+        with ui.column().style("flex: 1; gap: 2px; text-align: right; "
+                                "align-items: flex-end; min-width: 0;"):
             ui.label(home).style(
-                f"font-size: 14px; font-weight: 700; color: {t.TEXT};"
+                f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
             ui.label(h_odds).style(
                 f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
             )
+        team_logo.render(home_full, sport=sport, size=36)
 
 
 def _bet_boxes(g: dict, is_mlb: bool) -> None:
