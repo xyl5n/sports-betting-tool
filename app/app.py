@@ -152,6 +152,38 @@ def _validate_sharpapi_key_on_boot() -> None:
 
 _validate_sharpapi_key_on_boot()
 
+
+def _probe_sharpapi_leagues_on_boot() -> None:
+    """One-shot GET /leagues at startup so the canonical SharpAPI league
+    identifiers (e.g. 'MLB', 'WNBA', 'NBA') appear in the Railway deploy
+    log without anyone having to click anything in /admin.
+
+    Cheap: a single 5-second request.  Skipped entirely when SHARPAPI_KEY
+    isn't set.  Errors are swallowed -- the app boots regardless.
+    """
+    key = (os.environ.get("SHARPAPI_KEY") or "").strip()
+    if not key:
+        return  # already logged by the cred-check; don't double-up
+    url = "https://api.sharpapi.io/api/v1/leagues"
+    print(f"STARTUP: probing SharpAPI -- GET {url}  (auth: X-API-Key header)",
+          flush=True, file=sys.stderr)
+    try:
+        import requests as _req
+        resp = _req.get(url, headers={"X-API-Key": key}, timeout=5)
+        body = (resp.text or "")[:3000]
+        print(f"STARTUP SHARPAPI [/leagues]: status={resp.status_code}  "
+              f"bytes={len(resp.content)}",
+              flush=True, file=sys.stderr)
+        print(f"STARTUP SHARPAPI [/leagues] body (first 3000 chars):\n{body}",
+              flush=True, file=sys.stderr)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"STARTUP SHARPAPI [/leagues]: probe FAILED -- "
+              f"{type(exc).__name__}: {exc}",
+              flush=True, file=sys.stderr)
+
+
+_probe_sharpapi_leagues_on_boot()
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 # LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
 #   WARNING  — only errors/warnings printed; safe for Railway's 500-line/sec cap (default)
