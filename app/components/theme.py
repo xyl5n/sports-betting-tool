@@ -197,6 +197,30 @@ def page_head_css() -> str:
         .page-title {{ font-size: 18px !important; }}
       }}
 
+      /* EV scan carousel -- equal-width cards so exactly 3 are visible on
+         desktop (>768px) and 2 on mobile.  flex-basis math:
+           desktop: (100% - 2 gaps of 8px) / 3
+           mobile:  (100% - 1 gap of 8px) / 2
+         min-width: 0 lets the card shrink past its content (we rely on
+         the calc() width below; the card's own ellipsis rules keep text
+         from overflowing). */
+      .ev-card {{
+        flex: 0 0 calc((100% - 16px) / 3);
+        max-width: calc((100% - 16px) / 3);
+        min-width: 0;
+      }}
+      @media (max-width: {MOBILE_BREAKPOINT}) {{
+        .ev-card {{
+          flex: 0 0 calc((100% - 8px) / 2);
+          max-width: calc((100% - 8px) / 2);
+        }}
+      }}
+      /* Arrow buttons -- subtle hover affordance, hidden on touch via
+         the existing .desktop-only / .mobile-only media-query system. */
+      .ev-arrow:hover {{
+        background: {CARD_HI} !important;
+      }}
+
       /* Bet-box labels: full version is visible by default; the abbreviated
          span (ML / RL / SPR / TOT) takes over below 480px so the labels +
          optional VALUE chip fit inside a ~110px box on a portrait phone. */
