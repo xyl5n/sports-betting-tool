@@ -57,8 +57,9 @@ TAB_SPORTS  = "sports"
 TAB_AI      = "ai"
 TAB_MYBETS  = "mybets"
 TAB_MODEL   = "model"
+TAB_ADMIN   = "admin"
 
-TABS = (TAB_HOME, TAB_SPORTS, TAB_AI, TAB_MYBETS, TAB_MODEL)
+TABS = (TAB_HOME, TAB_SPORTS, TAB_AI, TAB_MYBETS, TAB_MODEL, TAB_ADMIN)
 
 
 def page_head_css() -> str:

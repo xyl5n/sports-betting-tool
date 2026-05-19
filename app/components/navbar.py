@@ -50,6 +50,22 @@ def render(active: str = t.TAB_HOME) -> None:
             # render it where we want by reordering this row if needed.
             _sports_dropdown(active == t.TAB_SPORTS)
 
+        # Admin gear (always visible -- desktop + mobile).  Not part of the
+        # 5 primary tabs, so it doesn't sit in the bottom-nav.
+        _admin_gear(active == t.TAB_ADMIN)
+
+
+def _admin_gear(is_active: bool) -> None:
+    color = t.PRIMARY if is_active else t.TEXT_DIM
+    bg    = "rgba(59, 130, 246, .12)" if is_active else "transparent"
+    with ui.link(target="/admin").style(
+        f"display: flex; align-items: center; justify-content: center; "
+        f"width: 38px; height: 38px; border-radius: 8px; "
+        f"background: {bg}; color: {color}; text-decoration: none; "
+        f"transition: background .15s ease;"
+    ).tooltip("Admin"):
+        ui.icon("settings").style(f"font-size: 20px; color: {color};")
+
 
 def _nav_link(label: str, href: str, is_active: bool) -> None:
     color = t.PRIMARY if is_active else t.TEXT_DIM
