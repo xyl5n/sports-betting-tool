@@ -52,6 +52,90 @@ def _remove_vig(home_prob: float, away_prob: float) -> tuple[float, float]:
 
 
 # ---------------------------------------------------------------------------
+# Daily Supabase odds cache
+# ---------------------------------------------------------------------------
+# Backed by the `app_cache` table introduced in PR #31 (src/db.py).  Caches
+# the final normalised list of games for one (sport_key, markets, regions)
+# triple, keyed by today's ET date.  Empty results are NOT cached so a
+# 2 AM call that returns 0 games doesn't poison the entire day -- the next
+# run will retry and pick up the lines once books post them.
+#
+# Cache key shape:  odds_daily:<sport_key>:<markets>:<regions>
+# Cache row:        {data: [games], date: YYYY-MM-DD, sport: sport_key}
+
+def _today_et_date() -> str:
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:                                                     # noqa: BLE001
+        from datetime import date
+        return date.today().isoformat()
+
+
+def _daily_cache_key(sport_key: str, markets: str, regions: str) -> str:
+    return f"odds_daily:{sport_key}:{markets}:{regions}"
+
+
+def _read_daily_odds_cache(sport_key: str, markets: str, regions: str) -> Optional[list[dict]]:
+    """Return today's cached games for this sport, or None on miss / error.
+
+    Bypasses entirely if Supabase isn't configured (src.db falls back to
+    JSON mode and cache_get returns None).
+    """
+    try:
+        from . import db
+        row = db.cache_get(_daily_cache_key(sport_key, markets, regions))
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"[daily-cache] read error (ignored): {type(exc).__name__}: {exc}")
+        return None
+    if not row:
+        return None
+    today = _today_et_date()
+    row_date = row.get("date")
+    if row_date != today:
+        _log(f"[daily-cache] miss for {sport_key!r}: cached date={row_date!r} "
+             f"!= today_et={today!r}")
+        return None
+    data = row.get("data")
+    if not isinstance(data, list):
+        _log(f"[daily-cache] miss for {sport_key!r}: data field is not a list "
+             f"(type={type(data).__name__})")
+        return None
+    _log(f"[daily-cache] HIT for {sport_key!r}: {len(data)} games "
+         f"(date={today}, NO API call needed)")
+    return data
+
+
+def _write_daily_odds_cache(
+    sport_key: str, markets: str, regions: str, games: list[dict],
+) -> None:
+    """Write today's games to the Supabase daily cache.  No-op if Supabase
+    isn't configured.  Errors are swallowed -- the caller already has the
+    games in hand and a failed cache write should never block analysis."""
+    if not games:
+        _log(f"[daily-cache] skip write for {sport_key!r}: empty games list "
+             f"(would poison today's cache; will retry on next run)")
+        return
+    try:
+        from . import db
+        ok = db.cache_set(
+            _daily_cache_key(sport_key, markets, regions),
+            sport_key,
+            _today_et_date(),
+            games,
+        )
+        if ok:
+            _log(f"[daily-cache] wrote {len(games)} games for {sport_key!r} "
+                 f"(date={_today_et_date()})")
+        else:
+            _log(f"[daily-cache] write returned False for {sport_key!r} "
+                 f"(Supabase not configured or call failed)")
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"[daily-cache] write error (ignored): {type(exc).__name__}: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # SharpAPI client
 # ---------------------------------------------------------------------------
 
@@ -394,23 +478,50 @@ class OddsClient:
         sport_key: str,
         markets: str = "h2h,spreads,totals",
         regions: str = "us",
+        force_refresh: bool = False,
     ) -> list[dict]:
         """Return upcoming games for *sport_key* with implied probabilities.
 
         Tries SharpAPI first (if SHARPAPI_KEY is set), then falls back to The
         Odds API.  Both return the same normalised per-game dict.
 
+        Daily Supabase cache
+        --------------------
+        Before either source is contacted, look up today's results in the
+        `app_cache` table (key `odds_daily:<sport>:<markets>:<regions>`).
+        On a hit we skip the live call entirely -- this is what drops the
+        upstream usage to ~1 API call per sport per day.
+
+        Non-empty results returned from a live call are written back to
+        the daily cache so the next analyze in the same day is free.
+        Empty results are NOT cached (otherwise an early-morning "no lines
+        posted yet" outcome would lock the cache to 0 games for the
+        remainder of the day).
+
+        force_refresh=True bypasses the cache read (cache write still happens
+        on success so subsequent calls today benefit).
+
         sport_key must be an active Odds API sport key, e.g.:
           "baseball_mlb"      — MLB moneylines / run lines / totals
           "basketball_wnba"   — WNBA moneylines / spreads / totals
         """
-        _log(f"get_odds(sport_key={sport_key!r}, markets={markets!r}, regions={regions!r})")
+        _log(f"get_odds(sport_key={sport_key!r}, markets={markets!r}, "
+             f"regions={regions!r}, force_refresh={force_refresh})")
+
+        # ── Daily Supabase cache (primary fast-path) ─────────────────────
+        if not force_refresh:
+            cached = _read_daily_odds_cache(sport_key, markets, regions)
+            if cached is not None:
+                return cached
+        else:
+            _log(f"get_odds: force_refresh=True, bypassing daily Supabase cache")
 
         # ── SharpAPI (primary) ────────────────────────────────────────────
         if self._sharp and sport_key in SharpApiClient.SPORT_MAP:
             try:
                 result = self._sharp.get_odds(sport_key, markets, regions)
                 _log(f"get_odds: SharpAPI returned {len(result)} games")
+                _write_daily_odds_cache(sport_key, markets, regions, result)
                 return result
             except Exception as exc:
                 _log(
@@ -483,6 +594,9 @@ class OddsClient:
                  f"{ {k: v for k, v in sorted(drop_reasons.items(), key=lambda kv: -kv[1])} }")
 
         self.cache.set(cache_key, parsed)
+        # Persist to the daily Supabase cache so subsequent runs in the same
+        # ET day skip the Odds API hit entirely.
+        _write_daily_odds_cache(sport_key, markets, regions, parsed)
         return parsed
 
     def get_scores(self, sport_key: str, days_from: int = 3) -> list[dict]:
