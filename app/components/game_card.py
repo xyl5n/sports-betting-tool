@@ -14,11 +14,12 @@ from nicegui import ui
 
 from . import theme as t
 from . import bet_box
+from . import track_button
 
 _ET = ZoneInfo("America/New_York")
 
 
-def render(g: dict, sport: str = "mlb") -> None:
+def render(g: dict, sport: str = "mlb", backend=None) -> None:
     """Render one game's card.  `g` is a _serialize() output dict.
 
     When `g["_no_model"]` is truthy the matchup is shown with market odds
@@ -26,6 +27,12 @@ def render(g: dict, sport: str = "mlb") -> None:
     notice.  This is how games involving teams missing from the model's
     training data (e.g. 2026 WNBA expansion teams) still appear on the
     Sports tab instead of vanishing silently.
+
+    `backend` is the imported `app` module (passed through pages -> here).
+    When provided, a Track button appears at the bottom of the card and
+    posts to the in-process /api/.../ledger/confirm/<game_id> endpoint.
+    When omitted (legacy call sites that haven't been updated), no Track
+    button is rendered -- the card still works, just without tracking.
     """
     sport = (sport or g.get("_sport") or "mlb").lower()
     is_mlb = sport == "mlb"
@@ -43,6 +50,33 @@ def render(g: dict, sport: str = "mlb") -> None:
             _no_model_row(g)
         else:
             _bet_boxes(g, is_mlb)
+        if backend is not None:
+            _track_row(backend, g, sport)
+
+
+def _track_row(backend, g: dict, sport: str) -> None:
+    """One Track button per card -- aligned right under the bet boxes.
+
+    Records the model's moneyline pick to the personal ledger via
+    /api/{sport}/ledger/confirm/<game_id>.  For NO MODEL PICK cards
+    the button is disabled with a hint -- there's nothing for the
+    model to confirm in that case.
+    """
+    with ui.row().classes("w-full justify-end").style("gap: 6px; margin-top: 4px;"):
+        if g.get("_no_model"):
+            track_button.render(
+                backend, game_id=(g.get("game_id") or g.get("id")), sport=sport, size="sm",
+                label="Track",
+                disabled_reason=(
+                    "No model pick available for this matchup -- "
+                    "tracking would record an empty bet."
+                ),
+            )
+        else:
+            track_button.render(
+                backend, game_id=(g.get("game_id") or g.get("id")), sport=sport, size="sm",
+                label="Track",
+            )
 
 
 def _no_model_row(g: dict) -> None:

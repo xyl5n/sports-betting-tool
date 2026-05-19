@@ -1600,6 +1600,7 @@ def _serialize_wnba_no_model(game: dict, reason: str | None) -> dict:
     return {
         "_no_model":         True,
         "_no_model_reason":  reason or "Model could not produce a prediction for this matchup.",
+        "game_id":           game.get("id") or "",   # Track button needs this
         "commence_time":     game.get("commence_time", ""),
         "home_team":         game.get("home_team", ""),
         "away_team":         game.get("away_team", ""),
@@ -4170,6 +4171,72 @@ def confirm_bet(game_id: str):
     model_amt, conf_amt = ledger.kelly_amounts(model_p, odds)
     ledger.add_bet(
         game=g, sport=sport, sport_key=sport_cfg.odds_key,
+        side=side, team=team, odds=odds,
+        model_prob=model_p, edge=edge,
+        model_amount=model_amt,
+        confirmed=True, confirmed_amount=conf_amt,
+        confidence_tier=ml_conf,
+    )
+    ledger.save()
+    return jsonify({"success": True, "team": team,
+                    "odds": odds, "confirmed_amount": conf_amt})
+
+
+@app.route("/api/wnba/ledger/confirm/<game_id>", methods=["POST"])
+def confirm_bet_wnba(game_id: str):
+    """WNBA mirror of /api/ledger/confirm/<game_id>.
+
+    The MLB version above is hardcoded to data/ledger.json + _analysis_state.
+    The NiceGUI Track button needs an equivalent that writes to
+    data/wnba_ledger.json + reads from _wnba_analysis_state.  Same shape of
+    response so the front-end uses one call pattern across sports.
+    """
+    data     = request.get_json() or {}
+    bankroll = float(data.get("bankroll", _wnba_analysis_state["bankroll"] or 1000))
+    sport_cfg = SPORTS["wnba"]
+    ledger   = Ledger(path="data/wnba_ledger.json", starting_bankroll=bankroll)
+
+    for bet in ledger.data["open_bets"]:
+        if bet["game_id"] == game_id and bet.get("bet_type", "single") == "single":
+            if bet["confirmed"]:
+                return jsonify({"error": "Already confirmed"}), 409
+            _, conf_amt = ledger.kelly_amounts(bet["model_prob"], bet["american_odds"])
+            conf_amt = round(conf_amt, 2)
+            bet["confirmed"]        = True
+            bet["confirmed_amount"] = conf_amt
+            if conf_amt > 0:
+                ledger.data["personal_bankroll"] = round(
+                    ledger.data["personal_bankroll"] - conf_amt, 2
+                )
+            ledger.save()
+            return jsonify({"success": True, "confirmed_amount": conf_amt})
+
+    raw = next(
+        (r for r in _wnba_analysis_state["results"]
+         if r.get("game", {}).get("id") == game_id),
+        None,
+    )
+    if raw is None:
+        return jsonify({"error": "Game not found in current WNBA analysis"}), 404
+
+    g  = raw["game"]
+    hp = float(raw["prediction"]["home_win_prob"])
+    mp = float(g["home_implied_prob"])
+    he = hp - mp
+
+    if hp >= 0.5:
+        side, team = "home", g["home_team"]
+        odds = int(g.get("h2h_home_odds") or -110)
+        model_p, edge = hp, he
+    else:
+        side, team = "away", g["away_team"]
+        odds = int(g.get("h2h_away_odds") or -110)
+        model_p, edge = 1 - hp, -he
+
+    ml_conf = confidence_tier_from_prob(model_p)
+    model_amt, conf_amt = ledger.kelly_amounts(model_p, odds)
+    ledger.add_bet(
+        game=g, sport="wnba", sport_key=sport_cfg.odds_key,
         side=side, team=team, odds=odds,
         model_prob=model_p, edge=edge,
         model_amount=model_amt,

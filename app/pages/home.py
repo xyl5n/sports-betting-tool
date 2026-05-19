@@ -102,7 +102,9 @@ def _ev_section(backend) -> None:
             )
             return
         for g in games[:8]:
-            game_card.render(g, sport=g.get("_sport", "mlb"))
+            # backend=backend so each card renders a Track button wired
+            # to the in-process /api/.../ledger/confirm/<game_id> endpoint.
+            game_card.render(g, sport=g.get("_sport", "mlb"), backend=backend)
 
 
 def _value_games(backend) -> list[dict]:

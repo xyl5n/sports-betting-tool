@@ -85,7 +85,9 @@ def _game_grid(backend, sport: str) -> None:
         return
 
     for g in games:
-        game_card.render(g, sport=sport)
+        # backend=backend so each card renders a Track button wired to
+        # /api/{sport}/ledger/confirm/<game_id> via the Flask test client.
+        game_card.render(g, sport=sport, backend=backend)
 
 
 def _serialized_games(backend, sport: str) -> list[dict]:

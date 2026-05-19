@@ -69,16 +69,23 @@ def _top_plays_card(backend) -> None:
             )
             return
         for p in picks[:5]:
-            _pick_row(p)
+            _pick_row(p, backend)
 
 
-def _pick_row(p: dict) -> None:
+def _pick_row(p: dict, backend=None) -> None:
     rank   = p.get("rank", "·")
     team   = p.get("team", "—")
-    sport  = (p.get("sport_label") or p.get("sport") or "").upper()
+    sport_raw = (p.get("sport") or p.get("sport_label") or "mlb").lower()
+    # Normalize for the Track endpoint routing: "MLB"/"mlb" -> "mlb",
+    # anything WNBA-ish -> "wnba".  Daily picks rows store the sport_label
+    # in upper-case ("MLB" / "WNBA") so this lookup is forgiving.
+    sport_norm = "wnba" if "wnba" in sport_raw else "mlb"
+    sport  = sport_raw.upper()
     prob   = float(p.get("pick_prob") or 0) * 100
     odds   = p.get("odds")
     odds_s = f"+{odds}" if isinstance(odds, (int, float)) and odds > 0 else f"{odds}"
+    # Daily picks rows carry the game id as `game_id` (see daily_picks.py).
+    game_id = p.get("game_id") or p.get("id")
     with ui.row().classes("items-center w-full").style(
         f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT}; gap: 8px;"
     ):
@@ -102,6 +109,15 @@ def _pick_row(p: dict) -> None:
             )
             ui.label(odds_s).style(
                 f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+            )
+        # Track button -- compact, lives at the right edge of the row.
+        # If backend wasn't passed or the row has no game_id, render
+        # nothing (vs a disabled button) so the layout stays tight.
+        if backend is not None and game_id:
+            from . import track_button as _tb
+            _tb.render(
+                backend, game_id=game_id, sport=sport_norm,
+                size="sm", label="Track",
             )
 
 
