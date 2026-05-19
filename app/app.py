@@ -966,7 +966,14 @@ _AUTO_ANALYSIS_LOG_FILE = Path("data/auto_analysis_log.json")
 # sport from the model's auto-pick pool.  Default: MLB on, WNBA off.  Persisted
 # as a tiny JSON file so the choice survives restarts.
 _MODEL_SETTINGS_FILE = Path("data/model_settings.json")
-_MODEL_SETTINGS_DEFAULT = {"mlb_enabled": True, "wnba_enabled": False}
+_MODEL_SETTINGS_DEFAULT = {
+    "mlb_enabled":         True,
+    "wnba_enabled":        False,
+    # Home-page top-bar "overall win rate" chip toggle.  When False the
+    # chip is hidden and the two remaining chips (best model + best bet
+    # type) stretch to fill the row.  See pages/home.py + pages/admin.py.
+    "show_overall_chip":   True,
+}
 
 
 def _load_model_settings() -> dict:

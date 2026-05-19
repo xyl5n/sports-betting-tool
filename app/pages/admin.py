@@ -239,6 +239,15 @@ def _section_model_bets(backend, refresh) -> None:
             "Include WNBA in the model's auto-picks",
             field="wnba_enabled", initial=bool(settings.get("wnba_enabled")),
         )
+        # Home-page top-bar control -- toggles the overall-record chip.
+        # Lives here because it shares model_settings.json (no need for a
+        # second settings file or new endpoint).
+        _toggle_row(
+            backend, "Home: 'Overall' chip",
+            "Show the overall W-L chip at the top of the home page",
+            field="show_overall_chip",
+            initial=bool(settings.get("show_overall_chip", True)),
+        )
 
         ui.label("Re-pick").style(
             f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
