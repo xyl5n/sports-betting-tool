@@ -940,6 +940,53 @@ body {
 }
 .admin-reset-pin:hover { border-color: var(--border); color: var(--text); }
 
+/* Small caption that sits under an admin section's h3 */
+.admin-sub {
+  font-size: 11.5px; color: var(--text-dim2);
+  line-height: 1.5; margin: -2px 0 4px;
+}
+
+/* Toggle row — label + iOS-style switch */
+.admin-toggle-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-elev-hi); border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+}
+.admin-toggle-label {
+  flex: 1; font-size: 13px; font-weight: 600; color: var(--text);
+}
+.admin-toggle-sub {
+  font-size: 11px; font-weight: 400; color: var(--text-dim); margin-top: 2px;
+}
+.switch {
+  position: relative; display: inline-block;
+  width: 44px; height: 24px;
+  flex-shrink: 0;
+}
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: 24px; transition: .2s;
+}
+.switch .slider::before {
+  content: ""; position: absolute;
+  height: 18px; width: 18px;
+  left: 2px; top: 50%; transform: translateY(-50%);
+  background: var(--text-dim); border-radius: 50%;
+  transition: .2s;
+}
+.switch input:checked + .slider {
+  background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
+  border-color: transparent;
+  box-shadow: 0 0 10px var(--cyan-glow);
+}
+.switch input:checked + .slider::before {
+  transform: translate(20px, -50%);
+  background: #0d1117;
+}
+
 /* ── Bottom navigation ──────────────────────────────────────────────── */
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 90;
@@ -1376,6 +1423,41 @@ body {
           <button class="admin-btn" onclick="adminRefreshModels()" id="admin-refresh-models">Refresh Models (cached odds)</button>
           <button class="admin-btn warn" onclick="adminClearSnapshot('mlb')">Clear Today's MLB Snapshot</button>
           <button class="admin-btn warn" onclick="adminClearSnapshot('wnba')">Clear Today's WNBA Snapshot</button>
+        </section>
+
+        <section class="admin-section">
+          <h3>MODEL BETS</h3>
+          <div class="admin-sub">Top 5 by confidence per bet type. Auto-runs after each analysis for enabled sports.</div>
+
+          <div class="admin-toggle-row">
+            <div class="admin-toggle-label">
+              Track MLB
+              <div class="admin-toggle-sub">Include MLB in the model's auto-picks</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="model-toggle-mlb" onchange="adminModelToggle('mlb', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="admin-toggle-row">
+            <div class="admin-toggle-label">
+              Track WNBA
+              <div class="admin-toggle-sub">Include WNBA in the model's auto-picks</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="model-toggle-wnba" onchange="adminModelToggle('wnba', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <button class="admin-btn primary" onclick="adminModelRepick('both')">Re-pick Today's Model Picks</button>
+          <button class="admin-btn"         onclick="adminModelRepick('mlb')">Re-pick MLB Only</button>
+          <button class="admin-btn"         onclick="adminModelRepick('wnba')">Re-pick WNBA Only</button>
+
+          <button class="admin-btn warn"   onclick="adminModelReset('mlb')">Reset Today's MLB Model Picks</button>
+          <button class="admin-btn warn"   onclick="adminModelReset('wnba')">Reset Today's WNBA Model Picks</button>
+          <button class="admin-btn danger" onclick="adminModelReset('both')">Reset Today's Model Picks (Both)</button>
         </section>
 
         <section class="admin-section">
@@ -2777,6 +2859,7 @@ async function loadAdminStatus() {
   } catch (err) {
     toast(`Status fetch failed: ${err.message}`, 'error');
   }
+  loadModelSettings();
 }
 
 // ── Admin action handlers ────────────────────────────────────────────
@@ -2895,6 +2978,75 @@ async function adminSetBankroll(sport) {
     if (_tab === 'home') renderAll();
   } catch (err) {
     toast(`Set failed: ${err.message}`, 'error');
+  }
+}
+
+// ── Model-bets admin handlers ────────────────────────────────────────
+async function loadModelSettings() {
+  try {
+    const r = await fetch('/api/admin/model/settings');
+    const d = await r.json();
+    const s = d.settings || {};
+    const mlb  = $('model-toggle-mlb');
+    const wnba = $('model-toggle-wnba');
+    if (mlb)  mlb.checked  = !!s.mlb_enabled;
+    if (wnba) wnba.checked = !!s.wnba_enabled;
+  } catch (err) {
+    toast(`Settings load failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminModelToggle(sport, enabled) {
+  const key = sport === 'wnba' ? 'wnba_enabled' : 'mlb_enabled';
+  try {
+    const r = await fetch('/api/admin/model/settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ [key]: enabled }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Save failed');
+    toast(`${sport.toUpperCase()} model picks ${enabled ? 'enabled' : 'disabled'}`, 'success');
+  } catch (err) {
+    // Roll the switch back on failure so UI state matches server state
+    const el = $(`model-toggle-${sport}`);
+    if (el) el.checked = !enabled;
+    toast(`Toggle failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminModelRepick(sport) {
+  if (!confirm(`Re-pick the model's top-5-by-confidence per bet type for ${sport.toUpperCase()}?\n\nToday's existing model picks will be wiped and replaced. Confirmed (personal) bets are untouched.`)) return;
+  try {
+    const r = await fetch('/api/admin/model/repick', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Re-pick failed');
+    const picks = (d.picks && d.picks.picks) || {};
+    const n = Object.values(picks).reduce((s, arr) => s + (arr ? arr.length : 0), 0);
+    toast(`Model re-picked ${n} bet${n === 1 ? '' : 's'}`, 'success');
+    await fetchLedgerSummary();
+  } catch (err) {
+    toast(`Re-pick failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminModelReset(sport) {
+  if (!confirm(`Wipe today's model picks for ${sport.toUpperCase()} and refund the stakes to the model account?\n\nConfirmed (personal) bets and settled history are untouched.`)) return;
+  try {
+    const r = await fetch('/api/admin/model/reset', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Reset failed');
+    const removed = d.removed || {};
+    const total = Object.values(removed).reduce((s, n) => s + (n || 0), 0);
+    toast(`Removed ${total} model bet${total === 1 ? '' : 's'}`, 'success');
+    await fetchLedgerSummary();
+  } catch (err) {
+    toast(`Reset failed: ${err.message}`, 'error');
   }
 }
 
