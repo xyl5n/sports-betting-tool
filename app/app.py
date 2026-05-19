@@ -39,6 +39,77 @@ except Exception as _e:
 load_dotenv()
 print("STARTUP: env loaded", flush=True, file=sys.stderr)
 
+
+# ── Startup credential check ────────────────────────────────────────────────
+# Print a scannable banner about ODDS_API_KEY at startup so misconfigurations
+# surface in Railway logs immediately (rather than 70 seconds later when an
+# analyze call crashes with 401).  Catches:
+#   - missing env var
+#   - empty string
+#   - placeholder text from .env.example
+#   - leading / trailing whitespace
+#   - typo'd env var names (enumerates every *_KEY / *ODDS* env var so a
+#     mistake like THE_ODDS_API_KEY / oddsapikey / Odds_Api_Key is visible
+#     in one glance)
+# Pure diagnostic -- no assertions, no exits.  Logs go to stderr so they
+# appear in Railway's deploy log alongside other STARTUP: lines.
+def _validate_odds_api_key_on_boot() -> None:
+    print("STARTUP: validating Odds API credentials...",
+          flush=True, file=sys.stderr)
+
+    key_raw = os.environ.get("ODDS_API_KEY")
+
+    if key_raw is None:
+        print("STARTUP CRED-CHECK [ODDS_API_KEY]: NOT SET.  "
+              "Add it in Railway -> service -> Variables tab.  "
+              "Until then every analyze call will fail with 401.",
+              flush=True, file=sys.stderr)
+    else:
+        key = key_raw.strip()
+        problems = []
+        if not key:
+            problems.append("value is empty after strip()")
+        if key == "your_odds_api_key_here":
+            problems.append("value is still the .env.example placeholder text")
+        if key != key_raw:
+            problems.append(
+                f"value has surrounding whitespace "
+                f"(raw_len={len(key_raw)}, stripped_len={len(key)}) -- "
+                f"trim it in Railway Variables")
+        if " " in key:
+            problems.append("value contains an embedded space")
+
+        if problems:
+            print(f"STARTUP CRED-CHECK [ODDS_API_KEY]: PROBLEMS -- "
+                  f"{'; '.join(problems)}",
+                  flush=True, file=sys.stderr)
+        else:
+            # Print first/last 4 chars + length so the user can compare
+            # against what they expect.  Never prints the full key.
+            print(f"STARTUP CRED-CHECK [ODDS_API_KEY]: present, "
+                  f"len={len(key)}, prefix={key[:4]!r}, suffix={key[-4:]!r}",
+                  flush=True, file=sys.stderr)
+
+    # Enumerate other env vars that LOOK like API keys, so a Railway typo
+    # (e.g. setting THE_ODDS_API_KEY instead of ODDS_API_KEY) becomes
+    # obvious from the log line alone.  Only var NAMES are printed --
+    # never values.
+    suspect_names = sorted(
+        k for k in os.environ
+        if ("ODDS" in k.upper() or k.upper().endswith("_KEY"))
+        and k != "ODDS_API_KEY"
+    )
+    if suspect_names:
+        print(f"STARTUP CRED-CHECK [other *ODDS* / *_KEY vars present]: "
+              f"{', '.join(suspect_names)}",
+              flush=True, file=sys.stderr)
+    else:
+        print("STARTUP CRED-CHECK [other *ODDS* / *_KEY vars]: none",
+              flush=True, file=sys.stderr)
+
+
+_validate_odds_api_key_on_boot()
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 # LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
 #   WARNING  — only errors/warnings printed; safe for Railway's 500-line/sec cap (default)
