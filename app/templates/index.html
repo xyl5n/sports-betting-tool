@@ -650,25 +650,58 @@ body {
   flex-shrink: 0;
 }
 
-/* ── Scores tab ─────────────────────────────────────────────────────── */
-.scores-list { display: flex; flex-direction: column; gap: 10px; }
-.score-card {
+/* ── Sports tab: live scores + predictions in one card ─────────────── */
+.sports-list { display: flex; flex-direction: column; gap: 12px; }
+.sport-card {
   background: var(--bg-elev); border: 1px solid var(--border-soft);
-  border-radius: var(--r-md); padding: 12px;
+  border-radius: var(--r-md);
+  overflow: hidden;
 }
-.score-row {
+.sport-card-hdr {
   display: flex; align-items: center; gap: 10px;
-  padding: 6px 0;
+  padding: 9px 12px;
+  background: var(--bg-elev-hi);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11px; font-weight: 700; letter-spacing: .5px;
 }
-.score-row + .score-row {
+.sport-card-hdr .sport-tag {
+  padding: 2px 8px; border-radius: var(--r-pill);
+  background: var(--bg-pill); color: var(--text);
+}
+.sport-card-hdr .sport-state {
+  flex: 1; text-align: right; color: var(--text-dim);
+  font-weight: 600;
+}
+.sport-card-hdr .sport-state.live { color: var(--green); }
+.sport-score-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+}
+.sport-score-row + .sport-score-row {
   border-top: 1px solid var(--border-soft);
-  padding-top: 8px;
 }
-.score-team { flex: 1; font-size: 14px; font-weight: 600; }
-.score-val  { font-size: 18px; font-weight: 800; min-width: 32px; text-align: right; }
-.score-meta {
-  font-size: 11px; color: var(--text-dim);
-  padding-top: 8px; border-top: 1px solid var(--border-soft); margin-top: 6px;
+.sport-score-team {
+  flex: 1; display: flex; align-items: center; gap: 10px;
+  min-width: 0;
+}
+.sport-score-name {
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sport-score-val {
+  font-size: 22px; font-weight: 800; min-width: 36px; text-align: right;
+}
+.sport-live-detail {
+  padding: 6px 12px 9px;
+  font-size: 11.5px; color: var(--text-dim);
+  border-top: 1px dashed var(--border-soft);
+  font-family: "SF Mono", Consolas, monospace;
+  letter-spacing: .2px;
+}
+.sport-preds {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-soft);
+  background: rgba(13, 17, 23, .35);
 }
 .live-dot {
   display: inline-block;
@@ -1272,18 +1305,18 @@ body {
 
     </section>
 
-    <!-- ─── SCORES ───────────────────────────────────────────────────── -->
-    <section id="tab-scores" class="tab">
+    <!-- ─── SPORTS (live scores + predictions) ───────────────────────── -->
+    <section id="tab-sports" class="tab">
       <div class="section-hdr">
-        <h2>TODAY'S GAMES</h2>
+        <h2>SPORTS</h2>
         <div class="date-nav">
           <button class="date-arrow" onclick="changeDate(-1)">‹</button>
-          <span class="date-label" id="scores-date">Today</span>
+          <span class="date-label" id="sports-date">Today</span>
           <button class="date-arrow" onclick="changeDate(1)">›</button>
         </div>
       </div>
-      <div class="scores-list" id="scores-list">
-        <div class="empty-state">Run analysis to load games.</div>
+      <div class="sports-list" id="sports-list">
+        <div class="empty-state">Open More → Admin to run analysis and load today's games.</div>
       </div>
     </section>
 
@@ -1488,8 +1521,8 @@ body {
       <button class="bottom-tab active" data-tab="home"   onclick="showTab('home')">
         <span>Home</span>
       </button>
-      <button class="bottom-tab"        data-tab="scores" onclick="showTab('scores')">
-        <span>Scores</span>
+      <button class="bottom-tab"        data-tab="sports" onclick="showTab('sports')">
+        <span>Sports</span>
       </button>
       <button class="bottom-tab"        data-tab="props"  onclick="showTab('props')">
         <span>Props</span>
@@ -1694,7 +1727,7 @@ function fmtTodayLabel() {
 }
 function paintDateLabels() {
   const label = fmtTodayLabel();
-  ['ev-date', 'props-date', 'scores-date'].forEach(id => {
+  ['ev-date', 'props-date', 'sports-date'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.textContent = label;
   });
@@ -1703,7 +1736,7 @@ function paintDateLabels() {
 // ═══════════════════════════════════════════════════════════════════════
 //  Tab + sport switching
 // ═══════════════════════════════════════════════════════════════════════
-const TABS = ['home', 'scores', 'props', 'ai', 'more'];
+const TABS = ['home', 'sports', 'props', 'ai', 'more'];
 function showTab(name) {
   if (!TABS.includes(name)) return;
   _tab = name;
@@ -1714,7 +1747,7 @@ function showTab(name) {
   document.querySelectorAll('.bottom-tab').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === name);
   });
-  if (name === 'scores') renderScores();
+  if (name === 'sports') renderSports();
   if (name === 'props')  renderPropsFull();
 }
 
@@ -1732,7 +1765,13 @@ function setSport(s) {
   renderEVScans();
   renderProps();
   renderFullSlate();
-  if (_tab === 'scores') renderScores();
+  // Auto-navigate to the Sports tab whenever a specific sport pill is
+  // clicked — the slate + live state lives there now.  ALL stays put.
+  if (s !== 'all') {
+    showTab('sports');
+    return;
+  }
+  if (_tab === 'sports') renderSports();
   if (_tab === 'props')  renderPropsFull();
 }
 
@@ -2306,32 +2345,48 @@ function buildPropCard(p) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Rendering — Scores
+//  Rendering — Sports (live scores + model predictions combined)
 // ═══════════════════════════════════════════════════════════════════════
-function renderScores() {
+function renderSports() {
   const games = gamesForActiveSport();
-  const wrap  = $('scores-list');
+  const wrap  = $('sports-list');
+  if (!wrap) return;
   if (!games.length) {
     wrap.innerHTML = `<div class="empty-state">Open More → Admin to run analysis and load today's games.</div>`;
     return;
   }
-  wrap.innerHTML = games.map(g => `
-    <article class="score-card" data-game-id="${g.game_id}">
-      <div class="score-row">
-        ${teamLogoHtml(g.away_team, g._sport, 28)}
-        <span class="score-team">${shortName(g.away_team)}</span>
-        <span class="score-val" id="score-away-${g.game_id}">—</span>
-      </div>
-      <div class="score-row">
-        ${teamLogoHtml(g.home_team, g._sport, 28)}
-        <span class="score-team">${shortName(g.home_team)}</span>
-        <span class="score-val" id="score-home-${g.game_id}">—</span>
-      </div>
-      <div class="score-meta" id="score-meta-${g.game_id}">${fmtTimeET(g.commence_time)} · ${g._sport.toUpperCase()}</div>
-    </article>
-  `).join('');
-  // First live-score fetch
+  wrap.innerHTML = games.map(buildSportCard).join('');
+  // First live-score fetch — hydrates score / inning / outs / clock cells
   pollLiveScores();
+}
+
+function buildSportCard(g) {
+  const sport  = g._sport;
+  const isMLB  = sport === 'mlb';
+  const picked = isMLB ? (g.run_line || null) : (g.spread_pick || null);
+  const totals = g.totals || {};
+  return `<article class="sport-card" data-game-id="${g.game_id}" data-sport="${sport}">
+    <div class="sport-card-hdr">
+      <span class="sport-tag">${sport.toUpperCase()}</span>
+      <span class="sport-state" id="sport-state-${g.game_id}">${fmtTimeET(g.commence_time)}</span>
+    </div>
+    <div class="sport-score-row">
+      <span class="sport-score-team">${teamLogoHtml(g.away_team, sport, 28)}<span class="sport-score-name">${shortName(g.away_team)}</span></span>
+      <span class="sport-score-val" id="sport-away-${g.game_id}">—</span>
+    </div>
+    <div class="sport-score-row">
+      <span class="sport-score-team">${teamLogoHtml(g.home_team, sport, 28)}<span class="sport-score-name">${shortName(g.home_team)}</span></span>
+      <span class="sport-score-val" id="sport-home-${g.game_id}">—</span>
+    </div>
+    <div class="sport-live-detail" id="sport-live-${g.game_id}" style="display:none"></div>
+    <div class="sport-preds">
+      <div class="slate-props">
+        ${buildSlateMLBox(g)}
+        ${buildSlateRLBox(g, picked, isMLB)}
+        ${buildSlateTotalsBox(g, totals)}
+      </div>
+    </div>
+  </article>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2366,20 +2421,56 @@ function paintLive(liveMap, sport) {
     if (!ls) continue;
     const aR = ls.teams?.away?.runs ?? null;
     const hR = ls.teams?.home?.runs ?? null;
-    const aEl = $(`score-away-${g.game_id}`);
-    const hEl = $(`score-home-${g.game_id}`);
-    const mEl = $(`score-meta-${g.game_id}`);
+    const aEl  = $(`sport-away-${g.game_id}`);
+    const hEl  = $(`sport-home-${g.game_id}`);
+    const sEl  = $(`sport-state-${g.game_id}`);
+    const ldEl = $(`sport-live-${g.game_id}`);
     if (aEl && aR != null) aEl.textContent = aR;
     if (hEl && hR != null) hEl.textContent = hR;
-    if (mEl) {
+
+    // Header pill: pregame time → LIVE → FINAL
+    if (sEl) {
+      sEl.classList.remove('live');
       if (state === 'Live') {
-        const ord = ls.currentInningOrdinal || '';
-        const detail = sport === 'mlb'
-          ? `${ord} · ${ls.outs ?? 0} out`
-          : `${ord} · ${ls.displayClock || ''}`;
-        mEl.innerHTML = `<span class="live-dot"></span>LIVE · ${detail}`;
+        sEl.classList.add('live');
+        sEl.innerHTML = `<span class="live-dot"></span>LIVE`;
       } else if (state === 'Final') {
-        mEl.textContent = `FINAL · ${sport.toUpperCase()}`;
+        sEl.textContent = 'FINAL';
+      } else {
+        sEl.textContent = fmtTimeET(g.commence_time);
+      }
+    }
+
+    // Live detail row: inning/half/outs/count for MLB; quarter/clock for WNBA.
+    if (ldEl) {
+      if (state === 'Live') {
+        let detail = '';
+        if (sport === 'mlb') {
+          const ord    = ls.currentInningOrdinal || '';
+          const half   = ls.isTopInning === true ? 'Top' :
+                         ls.isTopInning === false ? 'Bot' : '';
+          const inn    = (half && ord) ? `${half} ${ord}` : (ord || half);
+          const outs   = ls.outs ?? 0;
+          const outsW  = outs === 1 ? 'out' : 'outs';
+          const b      = ls.balls   ?? 0;
+          const s      = ls.strikes ?? 0;
+          const parts  = [];
+          if (inn) parts.push(inn);
+          parts.push(`${outs} ${outsW}`);
+          parts.push(`${b}-${s} count`);
+          detail = parts.join(' · ');
+        } else {
+          const ord = ls.currentInningOrdinal || '';
+          const clk = ls.displayClock || '';
+          const parts = [];
+          if (ord) parts.push(ord);
+          if (clk) parts.push(clk);
+          detail = parts.join(' · ');
+        }
+        ldEl.textContent = detail;
+        ldEl.style.display = detail ? '' : 'none';
+      } else {
+        ldEl.style.display = 'none';
       }
     }
   }
@@ -2451,7 +2542,7 @@ function renderAll() {
   renderEVScans();
   renderProps();
   renderFullSlate();
-  if (_tab === 'scores') renderScores();
+  if (_tab === 'sports') renderSports();
   if (_tab === 'props')  renderPropsFull();
   updateMoreSubtext();
 }
