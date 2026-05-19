@@ -578,6 +578,59 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
                         f"valid -- used={used}, remaining={rem}  "
                         f"(prefix={key[:4]}..., len={len(key)})",
                     ))
+                    # Drill-down: which sports does this plan cover?  The
+                    # /v4/sports response is a JSON array of {key, active,
+                    # title, ...} dicts.  Surface a per-sport row for
+                    # baseball_mlb and basketball_wnba so the user can
+                    # tell "0 games returned" apart from "plan does not
+                    # include this sport".
+                    try:
+                        sports = resp.json() or []
+                        wanted = {
+                            "baseball_mlb":     "MLB",
+                            "basketball_wnba":  "WNBA",
+                        }
+                        seen = {
+                            s.get("key"): s for s in sports
+                            if isinstance(s, dict)
+                        }
+                        for sport_key, label in wanted.items():
+                            entry = seen.get(sport_key)
+                            if entry is None:
+                                out.append((
+                                    f"Odds API: {label} availability",
+                                    "err",
+                                    f"sport_key '{sport_key}' NOT in your plan's "
+                                    f"coverage list ({len(seen)} sports returned). "
+                                    f"Upgrade plan or check "
+                                    f"https://the-odds-api.com/sports-odds-data/",
+                                ))
+                            elif entry.get("active") is False:
+                                out.append((
+                                    f"Odds API: {label} availability",
+                                    "warn",
+                                    f"sport is in plan but currently inactive "
+                                    f"(off-season / between updates). "
+                                    f"title='{entry.get('title')}', "
+                                    f"active=False -- no games will be returned",
+                                ))
+                            else:
+                                out.append((
+                                    f"Odds API: {label} availability",
+                                    "ok",
+                                    f"active=True, group={entry.get('group')}, "
+                                    f"title='{entry.get('title')}' -- 0 games at "
+                                    f"runtime just means no books have posted "
+                                    f"lines yet (typical between ~midnight and "
+                                    f"~10 AM ET)",
+                                ))
+                    except Exception as exc:                              # noqa: BLE001
+                        out.append((
+                            "Odds API: sport availability",
+                            "warn",
+                            f"could not parse /v4/sports response: "
+                            f"{type(exc).__name__}: {exc}",
+                        ))
             except _req.Timeout:
                 out.append(("Odds API key", "warn",
                             "probe timed out after 5s -- key untested, "
