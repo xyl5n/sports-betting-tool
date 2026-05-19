@@ -36,8 +36,20 @@ NiceGUI; switch back by reverting the Procfile if needed.
 """
 from __future__ import annotations
 
+# ── Railway stdout shim ─────────────────────────────────────────────────────
+# Railway wraps stdout/stderr in a _StdoutToLogger object that does not
+# implement isatty().  uvicorn's default color-formatter calls isatty()
+# during logging config and crashes with AttributeError, taking the boot
+# down with it.  Patch isatty() onto whatever stream is present *before*
+# anything imports uvicorn (transitively, NiceGUI -> FastAPI -> uvicorn).
+# Must run before every other import in this file.
+import sys                                                                # noqa: E402
+if not hasattr(sys.stdout, "isatty"):
+    sys.stdout.isatty = lambda: False
+if not hasattr(sys.stderr, "isatty"):
+    sys.stderr.isatty = lambda: False
+
 import os
-import sys
 from pathlib import Path
 
 # Ensure the `app/` directory is on sys.path so `import app` resolves to
@@ -91,4 +103,8 @@ if __name__ in {"__main__", "__mp_main__"}:
         reload=False,
         show=False,
         storage_secret=os.environ.get("UI_STORAGE_SECRET", "sports-analysis-ui"),
+        # Disable uvicorn's default color formatter -- Railway's logger
+        # wrapper trips its dictConfig() with "Unable to configure
+        # formatter 'default'" because the formatter probes isatty().
+        log_config=None,
     )
