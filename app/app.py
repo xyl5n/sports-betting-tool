@@ -4890,13 +4890,37 @@ def analyze_wnba():
         # Step 5 — predict per-game with isolation
         _step(f"Step 5: running predictions on {len(games)} games")
         results = []
+        # Track per-game outcomes so a "1 game in, 0 games out" failure mode
+        # produces a structured summary in logs AND in the API response.  The
+        # UI can render a "skipped: N" badge so the user knows a game was
+        # dropped (e.g. unknown team) rather than mysteriously empty.
+        skipped: list[dict] = []
         for _gi, game in enumerate(games):
-            _matchup = f"{game.get('away_team','?')} @ {game.get('home_team','?')}"
-            _step(f"  game {_gi+1}/{len(games)}: {_matchup}")
+            _home = game.get("home_team", "?")
+            _away = game.get("away_team", "?")
+            _matchup = f"{_away} @ {_home}"
+            _step(f"  game {_gi+1}/{len(games)}: {_matchup}  "
+                  f"(home={_home!r}, away={_away!r}, "
+                  f"commence_time={game.get('commence_time', '?')!r})")
             try:
                 built = fb.build_for_game(game)
                 if built is None:
-                    _step(f"  game {_gi+1}: build_for_game returned None -- skipping")
+                    reason = (
+                        f"build_for_game returned None -- WNBAFeatureBuilder "
+                        f"could not produce features.  Most likely cause: "
+                        f"one of the teams ({_home!r}, {_away!r}) has no "
+                        f"historical games in the training set yet (e.g. a "
+                        f"2026 expansion team).  Game NOT included in results."
+                    )
+                    _step(f"  game {_gi+1}: {reason}")
+                    skipped.append({
+                        "matchup":       _matchup,
+                        "home_team":     _home,
+                        "away_team":     _away,
+                        "commence_time": game.get("commence_time"),
+                        "reason":        "build_for_game returned None",
+                        "detail":        reason,
+                    })
                     continue
                 feature_vec, meta = built
 
@@ -4935,9 +4959,25 @@ def analyze_wnba():
                 _eprint(f"ANALYZE [WNBA] prediction loop crashed on game {_gi+1} ({_matchup}): "
                         f"{type(_g_err).__name__}: {_g_err}")
                 _eprint(traceback.format_exc())
+                skipped.append({
+                    "matchup":       _matchup,
+                    "home_team":     _home,
+                    "away_team":     _away,
+                    "commence_time": game.get("commence_time"),
+                    "reason":        f"{type(_g_err).__name__}",
+                    "detail":        str(_g_err),
+                })
                 # Skip this game but continue with the rest
 
-        _step(f"Step 5 done: {len(results)} games predicted")
+        _step(f"Step 5 done: {len(results)} games predicted, {len(skipped)} skipped")
+        if skipped:
+            for _sk in skipped:
+                _step(f"  skipped: {_sk['matchup']}  reason={_sk['reason']}")
+        # Stash the skipped list on the analysis state so the API response +
+        # /admin diagnostics can surface it.  The home / sports UI already
+        # reads from _wnba_analysis_state, so adding a sibling key here is a
+        # zero-risk extension.
+        _wnba_analysis_state["skipped"] = skipped
 
         _wnba_analysis_state["results"]  = results
         _wnba_analysis_state["bankroll"] = bankroll
@@ -5008,6 +5048,11 @@ def analyze_wnba():
             "analyzed_at":    _ts.isoformat(),
             "results":        serialized,
             "parlays":        parlays,
+            # New: games dropped during prediction (e.g. unknown teams like
+            # 2026 expansion teams missing from training data).  Empty list
+            # when nothing was skipped.  Surfaced so the UI / admin can
+            # render a "skipped: N" message instead of just an empty board.
+            "skipped":        _wnba_analysis_state.get("skipped", []),
         })
 
     except Exception as exc:
