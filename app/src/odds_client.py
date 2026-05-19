@@ -557,19 +557,47 @@ class OddsClient:
 
         Honors the existing in-memory 15-min TTL cache (separate from the
         daily Supabase cache handled by the caller).  Returns the parsed
-        list; raises on HTTP / parse failure so the caller can fall back."""
-        cache_key = f"odds_{sport_key}_{markets}_{regions}"
+        list; raises on HTTP / parse failure so the caller can fall back.
+
+        Constrains the API response to today's ET slate via the
+        `commenceTimeFrom` / `commenceTimeTo` params -- otherwise the API
+        will include yesterday's already-played games, which then get
+        dropped by _filter_stale_games and produce a confusing "0 games
+        returned" result.
+        """
+        # Today's ET midnight (inclusive) -> tomorrow's ET midnight (exclusive),
+        # converted to UTC ISO strings for the Odds API.  This range covers
+        # exactly today's ET slate including any games that commence in
+        # early UTC of the following day but late ET of today.
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        _UTC = ZoneInfo("UTC")
+        _now_et = datetime.now(_ET)
+        _today_mid_et    = _now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        _tomorrow_mid_et = _today_mid_et + timedelta(days=1)
+        commence_from = _today_mid_et.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        commence_to   = _tomorrow_mid_et.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # In-memory short-TTL cache key includes the time-range so a request
+        # made shortly before midnight ET doesn't poison the next ET day's
+        # window.
+        cache_key = f"odds_{sport_key}_{markets}_{regions}_{commence_from}_{commence_to}"
         cached = self.cache.get(cache_key, ttl=900)  # 15-min TTL
         if cached is not None:
             _log(f"  cache HIT  cache_key={cache_key!r}  cached_count={len(cached)}")
             return cached
         _log(f"  cache MISS cache_key={cache_key!r} -- calling API")
+        _log(f"  commenceTimeFrom={commence_from}  commenceTimeTo={commence_to}  "
+             f"(today_et={_today_mid_et.date().isoformat()})")
 
         raw = self._get(f"/sports/{sport_key}/odds/", {
             "regions": regions,
             "markets": markets,
             "oddsFormat": "american",
             "dateFormat": "iso",
+            "commenceTimeFrom": commence_from,
+            "commenceTimeTo":   commence_to,
         })
 
         # Telemetry on the raw API response BEFORE any parsing / filtering.
