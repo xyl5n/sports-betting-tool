@@ -184,6 +184,48 @@ def _probe_sharpapi_leagues_on_boot() -> None:
 
 _probe_sharpapi_leagues_on_boot()
 
+
+def _bust_daily_odds_cache_on_boot() -> None:
+    """Delete the cached daily-odds rows for both sports at startup.
+
+    Why: prior cache rows were written by an Odds API call that didn't pass
+    `commenceTimeFrom` / `commenceTimeTo`, so they could legitimately
+    contain yesterday's already-played games even when their `date` field
+    matches today.  The date-equality guard in _read_daily_odds_cache
+    can't distinguish "fresh cache from late-night call" from "fresh cache
+    with stale game contents", so we blow them away on boot.  The next
+    analyze call repopulates with the corrected (time-filtered) query.
+
+    This runs on every container boot.  In practice that's once per
+    Railway redeploy -- so one extra Odds API request per sport per
+    deploy.  Acceptable given the daily cache cap.
+
+    Best-effort: Supabase down -> no-op.  Errors swallowed.
+    """
+    try:
+        from src import db as _db
+        if not _db.is_supabase():
+            return
+        keys = (
+            "odds_daily:baseball_mlb:h2h,spreads,totals:us",
+            "odds_daily:basketball_wnba:h2h,spreads,totals:us",
+        )
+        for k in keys:
+            try:
+                _db.cache_delete(k)
+                print(f"STARTUP: busted daily odds cache row key={k!r} "
+                      f"(forces fresh API call on next analyze)",
+                      flush=True, file=sys.stderr)
+            except Exception as exc:                                      # noqa: BLE001
+                print(f"STARTUP WARNING: cache_delete({k}) failed: {exc}",
+                      flush=True, file=sys.stderr)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"STARTUP WARNING: daily odds cache bust failed: {exc}",
+              flush=True, file=sys.stderr)
+
+
+_bust_daily_odds_cache_on_boot()
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 # LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
 #   WARNING  — only errors/warnings printed; safe for Railway's 500-line/sec cap (default)
