@@ -350,12 +350,84 @@ def _section_diagnostics(backend) -> None:
                 for label, status, detail in probes:
                     _diag_row(label, status, detail)
 
-        ui.button("Run Diagnostics", on_click=_run) \
-            .props("no-caps unelevated") \
-            .style(_btn_style("primary"))
+        with ui.row().style("gap: 8px; flex-wrap: wrap;"):
+            ui.button("Run Diagnostics", on_click=_run) \
+                .props("no-caps unelevated") \
+                .style(_btn_style("primary"))
+            _sharpapi_probe_button(results_holder)
 
         # Auto-run on page open so the user doesn't need to click first
         ui.timer(0.5, _run, once=True)
+
+
+def _sharpapi_probe_button(results_holder) -> None:
+    """One-shot SharpAPI endpoint + auth-style probe.  Renders the result
+    rows into the same `results_holder` the main diagnostics use, so the
+    output sits in the user's existing field of view."""
+    btn = ui.button("Probe SharpAPI").props("no-caps unelevated") \
+        .style(_btn_style("default"))
+
+    async def _click():
+        btn.props("loading"); btn.disable()
+        try:
+            import os as _os
+            key = (_os.environ.get("SHARPAPI_KEY") or "").strip()
+            if not key:
+                ui.notify(
+                    "SHARPAPI_KEY is not set in Railway -- nothing to probe.",
+                    type="warning",
+                )
+                return
+
+            ui.notify("Probing SharpAPI endpoints + auth styles...",
+                      type="ongoing")
+
+            # Run in a thread so the event loop stays responsive
+            def _do():
+                from src.odds_client import SharpApiClient
+                from src.cache import Cache
+                client = SharpApiClient(key, Cache())
+                return client.probe_endpoints()
+
+            rows = await asyncio.to_thread(_do)
+
+            # Render results inline.  Use the same diag-row format so the
+            # output flows directly under the existing diagnostics rows.
+            results_holder.clear()
+            with results_holder:
+                ui.label(f"SharpAPI probe: {len(rows)} endpoint/auth combos tried").style(
+                    f"font-size: 12px; font-weight: 700; color: {t.TEXT}; "
+                    f"padding: 8px 0; letter-spacing: .5px;"
+                )
+                for r in rows:
+                    label  = f"{r['endpoint']}  [{r['auth']}]"
+                    status = (
+                        "ok"   if (r.get("ok") and r.get("status") == 200)
+                        else "warn" if (r.get("status") in (200, 401, 403))
+                        else "err"
+                    )
+                    sample = (r.get("sample") or "")[:400].replace("\n", " ")
+                    detail = (
+                        f"status={r.get('status')}  bytes={r.get('bytes')}  "
+                        f"body[:400]={sample}"
+                    )
+                    _diag_row(label, status, detail)
+
+            ok_count  = sum(1 for r in rows if r.get("ok") and r.get("status") == 200)
+            ui.notify(
+                f"SharpAPI probe done: {ok_count}/{len(rows)} returned 200 OK. "
+                f"Look at the rows -- the body samples show what each endpoint "
+                f"actually returns.",
+                type="positive" if ok_count else "warning",
+                multi_line=True,
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            ui.notify(f"SharpAPI probe failed: {type(exc).__name__}: {exc}",
+                      type="negative", multi_line=True)
+        finally:
+            btn.props(remove="loading"); btn.enable()
+
+    btn.on("click", _click)
 
 
 def _diag_row(label: str, status: str, detail: str) -> None:
