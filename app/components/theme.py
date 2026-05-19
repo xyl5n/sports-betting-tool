@@ -131,6 +131,23 @@ def page_head_css() -> str:
         z-index: 1;
       }}
 
+      /* Live dot -- small pulsing circle next to the LIVE label on
+         in-progress games.  Color is set inline at render time so the
+         green can be themed; the animation is CSS-only. */
+      .live-dot {{
+        display: inline-block;
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+        animation: live-pulse 1.4s ease-in-out infinite;
+        box-shadow: 0 0 6px currentColor;
+        vertical-align: middle;
+      }}
+      @keyframes live-pulse {{
+        0%, 100% {{ opacity: 1;   transform: scale(1);   }}
+        50%      {{ opacity: 0.45; transform: scale(0.85); }}
+      }}
+
       /* ── Responsive visibility ─────────────────────────────────────
          .desktop-only hides on mobile, .mobile-only hides on desktop.
          Single render path -- the browser decides which to show.    */
