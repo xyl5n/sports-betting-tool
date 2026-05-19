@@ -432,6 +432,32 @@ def _diag_pool(label: str, pool: list[dict]) -> None:
         )
 
 
+def _select_top5_by_confidence(pool: list[dict], label: str = "") -> list[dict]:
+    """
+    Return exactly MAX_PER_CAT picks ranked purely by pick_prob (confidence)
+    descending.  No edge gate, no tier fallback — the model's most-confident
+    bets win.  Deduplicates by (game_id, bet_type) so the same leg can't
+    appear twice in one category.
+    """
+    if label:
+        _diag_pool(label, pool)
+
+    selected: list[dict] = []
+    seen: set = set()
+    for p in sorted(pool, key=lambda x: x["pick_prob"], reverse=True):
+        key = (p["game"]["id"], p["bet_type"])
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(p)
+        if len(selected) >= MAX_PER_CAT:
+            break
+
+    if label:
+        print(f"  [picks diag] {label}: selected {len(selected)}/{MAX_PER_CAT} by pure confidence")
+    return selected
+
+
 def _select_top5_guaranteed(pool: list[dict], label: str = "") -> list[dict]:
     """
     Always return exactly MAX_PER_CAT picks using a 4-tier fallback:
@@ -508,6 +534,7 @@ def select_daily_picks(
     wnba_ledger:  "Ledger",
     now_utc:      datetime | None = None,
     today_only:   bool = False,
+    selection_mode: str = "confidence",
 ) -> dict:
     """
     Select today's top-5 picks per category from MLB + WNBA combined pools.
@@ -558,9 +585,14 @@ def select_daily_picks(
         combined[cat] = list(deduped.values())
 
     # ── 3-4. Score + select top-5 per category ────────────────────────────────
-    print("  [picks diag] ===== Daily picks filter diagnostic =====")
+    print(f"  [picks diag] ===== Daily picks filter diagnostic (mode={selection_mode}) =====")
+    _selector = (
+        _select_top5_by_confidence
+        if selection_mode == "confidence"
+        else _select_top5_guaranteed
+    )
     selected: dict[str, list] = {
-        cat: _select_top5_guaranteed(pool, label=cat.upper())
+        cat: _selector(pool, label=cat.upper())
         for cat, pool in combined.items()
     }
     print("  [picks diag] ===========================================")

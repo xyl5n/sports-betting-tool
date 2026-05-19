@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>AI — Sports Betting</title>
+<title>Sports Analysis</title>
 
 <!-- ── PWA metadata (preserved from prior PR) ──────────────────────────── -->
 <link rel="manifest" href="/static/manifest.json">
 <meta name="apple-mobile-web-app-capable"          content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title"            content="AI">
+<meta name="apple-mobile-web-app-title"            content="Sports Analysis">
 <meta name="mobile-web-app-capable"                content="yes">
 <meta name="theme-color"                           content="#0d1117">
 
@@ -650,25 +650,58 @@ body {
   flex-shrink: 0;
 }
 
-/* ── Scores tab ─────────────────────────────────────────────────────── */
-.scores-list { display: flex; flex-direction: column; gap: 10px; }
-.score-card {
+/* ── Sports tab: live scores + predictions in one card ─────────────── */
+.sports-list { display: flex; flex-direction: column; gap: 12px; }
+.sport-card {
   background: var(--bg-elev); border: 1px solid var(--border-soft);
-  border-radius: var(--r-md); padding: 12px;
+  border-radius: var(--r-md);
+  overflow: hidden;
 }
-.score-row {
+.sport-card-hdr {
   display: flex; align-items: center; gap: 10px;
-  padding: 6px 0;
+  padding: 9px 12px;
+  background: var(--bg-elev-hi);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11px; font-weight: 700; letter-spacing: .5px;
 }
-.score-row + .score-row {
+.sport-card-hdr .sport-tag {
+  padding: 2px 8px; border-radius: var(--r-pill);
+  background: var(--bg-pill); color: var(--text);
+}
+.sport-card-hdr .sport-state {
+  flex: 1; text-align: right; color: var(--text-dim);
+  font-weight: 600;
+}
+.sport-card-hdr .sport-state.live { color: var(--green); }
+.sport-score-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+}
+.sport-score-row + .sport-score-row {
   border-top: 1px solid var(--border-soft);
-  padding-top: 8px;
 }
-.score-team { flex: 1; font-size: 14px; font-weight: 600; }
-.score-val  { font-size: 18px; font-weight: 800; min-width: 32px; text-align: right; }
-.score-meta {
-  font-size: 11px; color: var(--text-dim);
-  padding-top: 8px; border-top: 1px solid var(--border-soft); margin-top: 6px;
+.sport-score-team {
+  flex: 1; display: flex; align-items: center; gap: 10px;
+  min-width: 0;
+}
+.sport-score-name {
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sport-score-val {
+  font-size: 22px; font-weight: 800; min-width: 36px; text-align: right;
+}
+.sport-live-detail {
+  padding: 6px 12px 9px;
+  font-size: 11.5px; color: var(--text-dim);
+  border-top: 1px dashed var(--border-soft);
+  font-family: "SF Mono", Consolas, monospace;
+  letter-spacing: .2px;
+}
+.sport-preds {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-soft);
+  background: rgba(13, 17, 23, .35);
 }
 .live-dot {
   display: inline-block;
@@ -883,6 +916,110 @@ body {
 .perf-row-lbl { color: var(--text-dim); }
 .perf-row-val { font-family: "SF Mono", Consolas, monospace; }
 
+/* ── Admin sub-page ─────────────────────────────────────────────────── */
+.admin-section {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 14px;
+  margin-bottom: 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.admin-section h3 {
+  font-size: 11px; font-weight: 800; letter-spacing: .8px;
+  color: var(--text-dim2);
+  margin-bottom: 6px;
+}
+.admin-btn {
+  display: block; width: 100%;
+  padding: 11px 14px;
+  background: var(--bg-elev-hi); border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm); color: var(--text);
+  font-size: 13px; font-weight: 600; letter-spacing: .2px;
+  cursor: pointer; transition: all .15s;
+  text-align: left; font-family: inherit;
+}
+.admin-btn:hover:not(:disabled) { border-color: var(--border); }
+.admin-btn:active { transform: scale(.98); }
+.admin-btn:disabled { opacity: .4; cursor: not-allowed; }
+.admin-btn.primary {
+  background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
+  color: #0d1117; border-color: transparent;
+  font-weight: 800; letter-spacing: .4px;
+  box-shadow: 0 0 12px var(--cyan-glow);
+}
+.admin-btn.primary:hover { opacity: .92; }
+.admin-btn.warn {
+  color: var(--yellow);
+  border-color: rgba(251, 191, 36, .35);
+  background: rgba(251, 191, 36, .06);
+}
+.admin-btn.danger {
+  color: var(--red);
+  border-color: rgba(248, 113, 113, .4);
+  background: rgba(248, 113, 113, .07);
+  font-weight: 800;
+}
+.admin-meta {
+  font-size: 12px; color: var(--text-dim);
+  padding: 8px 0 2px;
+  line-height: 1.7;
+  font-family: "SF Mono", Consolas, monospace;
+}
+.admin-reset-pin {
+  height: 36px; padding: 0 12px;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill); color: var(--text-dim);
+  font-size: 11px; font-weight: 700; letter-spacing: .4px;
+  cursor: pointer; font-family: inherit;
+}
+.admin-reset-pin:hover { border-color: var(--border); color: var(--text); }
+
+/* Small caption that sits under an admin section's h3 */
+.admin-sub {
+  font-size: 11.5px; color: var(--text-dim2);
+  line-height: 1.5; margin: -2px 0 4px;
+}
+
+/* Toggle row — label + iOS-style switch */
+.admin-toggle-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-elev-hi); border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+}
+.admin-toggle-label {
+  flex: 1; font-size: 13px; font-weight: 600; color: var(--text);
+}
+.admin-toggle-sub {
+  font-size: 11px; font-weight: 400; color: var(--text-dim); margin-top: 2px;
+}
+.switch {
+  position: relative; display: inline-block;
+  width: 44px; height: 24px;
+  flex-shrink: 0;
+}
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: 24px; transition: .2s;
+}
+.switch .slider::before {
+  content: ""; position: absolute;
+  height: 18px; width: 18px;
+  left: 2px; top: 50%; transform: translateY(-50%);
+  background: var(--text-dim); border-radius: 50%;
+  transition: .2s;
+}
+.switch input:checked + .slider {
+  background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
+  border-color: transparent;
+  box-shadow: 0 0 10px var(--cyan-glow);
+}
+.switch input:checked + .slider::before {
+  transform: translate(20px, -50%);
+  background: #0d1117;
+}
+
 /* ── Bottom navigation ──────────────────────────────────────────────── */
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 90;
@@ -902,7 +1039,7 @@ body {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 3px;
   background: none; border: none;
-  color: var(--text-dim2); font-size: 10.5px; font-weight: 600;
+  color: var(--text-dim2); font-size: 13px; font-weight: 600; letter-spacing: .2px;
   cursor: pointer; padding: 6px 0;
   font-family: inherit;
   transition: color .15s;
@@ -1092,8 +1229,7 @@ body {
   <!-- ─── Top nav ─────────────────────────────────────────────────────── -->
   <header class="topnav">
     <div class="brand">
-      <span class="brand-icon">⚛</span>
-      <span><span class="brand-text-one">A</span><span class="brand-text-two">I</span></span>
+      <span><span class="brand-text-one">Sports </span><span class="brand-text-two">Analysis</span></span>
     </div>
     <button class="search-btn" id="search-btn" aria-label="Search" onclick="openSearch()">⌕</button>
   </header>
@@ -1101,11 +1237,11 @@ body {
   <!-- ─── Sport filter pills ──────────────────────────────────────────── -->
   <nav class="sport-pills" id="sport-pills">
     <button class="pill active" data-sport="all"  onclick="setSport('all')">ALL</button>
-    <button class="pill"        data-sport="mlb"  onclick="setSport('mlb')"><span class="sport-glyph">⚾</span>MLB</button>
-    <button class="pill"        data-sport="wnba" onclick="setSport('wnba')"><span class="sport-glyph">🏀</span>WNBA</button>
-    <button class="pill disabled" data-sport="nba"  title="Coming soon"><span class="sport-glyph">🏀</span>NBA</button>
-    <button class="pill disabled" data-sport="nhl"  title="Coming soon"><span class="sport-glyph">🏒</span>NHL</button>
-    <button class="pill disabled" data-sport="nfl"  title="Coming soon"><span class="sport-glyph">🏈</span>NFL</button>
+    <button class="pill"        data-sport="mlb"  onclick="setSport('mlb')">MLB</button>
+    <button class="pill"        data-sport="wnba" onclick="setSport('wnba')">WNBA</button>
+    <button class="pill disabled" data-sport="nba"  title="Coming soon">NBA</button>
+    <button class="pill disabled" data-sport="nhl"  title="Coming soon">NHL</button>
+    <button class="pill disabled" data-sport="nfl"  title="Coming soon">NFL</button>
   </nav>
 
   <div class="content">
@@ -1113,14 +1249,11 @@ body {
     <!-- ─── HOME ─────────────────────────────────────────────────────── -->
     <section id="tab-home" class="tab active">
 
-      <div class="run-row">
-        <button class="run-btn" id="run-btn" onclick="runAnalysis()">▶ RUN ANALYSIS</button>
-        <span class="last-run" id="last-run">Never run</span>
-      </div>
+      <!-- The RUN ANALYSIS button has moved to More → Admin so the main
+           page stays focused on viewing picks, not running the pipeline. -->
 
       <!-- AI chat banner -->
       <button class="ai-banner" onclick="showTab('ai')" aria-label="Chat with AI">
-        <span class="ai-banner-icon">🤖</span>
         <span class="ai-banner-text">Chat with <strong>AI</strong></span>
         <span class="ai-banner-arrow">→</span>
       </button>
@@ -1172,18 +1305,18 @@ body {
 
     </section>
 
-    <!-- ─── SCORES ───────────────────────────────────────────────────── -->
-    <section id="tab-scores" class="tab">
+    <!-- ─── SPORTS (live scores + predictions) ───────────────────────── -->
+    <section id="tab-sports" class="tab">
       <div class="section-hdr">
-        <h2>TODAY'S GAMES</h2>
+        <h2>SPORTS</h2>
         <div class="date-nav">
           <button class="date-arrow" onclick="changeDate(-1)">‹</button>
-          <span class="date-label" id="scores-date">Today</span>
+          <span class="date-label" id="sports-date">Today</span>
           <button class="date-arrow" onclick="changeDate(1)">›</button>
         </div>
       </div>
-      <div class="scores-list" id="scores-list">
-        <div class="empty-state"><span class="icon">📊</span>Run analysis to load games.</div>
+      <div class="sports-list" id="sports-list">
+        <div class="empty-state">Open More → Admin to run analysis and load today's games.</div>
       </div>
     </section>
 
@@ -1222,23 +1355,20 @@ body {
         <div class="section-hdr"><h2>MORE</h2></div>
         <div class="more-list">
           <button class="more-row" onclick="openMyBets()">
-            <span class="more-row-icon">💰</span>
             <span class="more-row-text">My Bets
               <div class="more-row-sub" id="more-bankroll">Bankroll · loading…</div>
             </span>
             <span class="more-row-chev">›</span>
           </button>
           <button class="more-row" onclick="openModelPerf()">
-            <span class="more-row-icon">📈</span>
             <span class="more-row-text">Model Performance
               <div class="more-row-sub">XGB / LR / NN per-bet-type record</div>
             </span>
             <span class="more-row-chev">›</span>
           </button>
-          <button class="more-row" onclick="forceRefresh()">
-            <span class="more-row-icon">↻</span>
-            <span class="more-row-text">Force-refresh today
-              <div class="more-row-sub">Wipe snapshot, re-pull odds, retrain</div>
+          <button class="more-row" onclick="openAdmin()">
+            <span class="more-row-text">Admin
+              <div class="more-row-sub">Run analysis, wipe bets, retrain models</div>
             </span>
             <span class="more-row-chev">›</span>
           </button>
@@ -1276,14 +1406,14 @@ body {
         <div class="bets-section">
           <h3>Open Bets <span class="count-badge" id="open-bets-count">0</span></h3>
           <div id="open-bets-list">
-            <div class="empty-state"><span class="icon">🎯</span>No open bets.</div>
+            <div class="empty-state">No open bets.</div>
           </div>
         </div>
 
         <div class="bets-section">
           <h3>History <span class="count-badge" id="history-count">0</span></h3>
           <div id="history-list">
-            <div class="empty-state"><span class="icon">📋</span>No settled bets yet.</div>
+            <div class="empty-state">No settled bets yet.</div>
           </div>
         </div>
       </div>
@@ -1296,8 +1426,89 @@ body {
           <div class="subpage-spacer"></div>
         </header>
         <div id="model-perf-content">
-          <div class="empty-state"><span class="icon">📊</span>Loading model stats…</div>
+          <div class="empty-state">Loading model stats…</div>
         </div>
+      </div>
+
+      <!-- ADMIN SUB-PAGE — gated behind a 4-digit PIN.  All operational
+           controls (run analysis, wipe bets, retrain, etc.) live here. -->
+      <div id="more-admin-view" style="display:none">
+        <header class="subpage-hdr">
+          <button class="back-btn" onclick="closeSubPage()" aria-label="Back">‹</button>
+          <h2>Admin</h2>
+          <div class="subpage-spacer"></div>
+          <button class="admin-reset-pin" onclick="adminResetPin()" title="Reset PIN" aria-label="Reset PIN">Reset PIN</button>
+        </header>
+
+        <section class="admin-section">
+          <h3>ANALYSIS</h3>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('mlb')"  id="admin-run-mlb">Run MLB Analysis</button>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('wnba')" id="admin-run-wnba">Run WNBA Analysis</button>
+          <button class="admin-btn primary" onclick="adminRunAnalysis('both')" id="admin-run-both">Run Both</button>
+          <div class="admin-meta">
+            Last MLB:&nbsp; <span id="admin-last-mlb">—</span><br>
+            Last WNBA: <span id="admin-last-wnba">—</span>
+          </div>
+        </section>
+
+        <section class="admin-section">
+          <h3>MODELS</h3>
+          <button class="admin-btn" onclick="adminRefreshModels()" id="admin-refresh-models">Refresh Models (cached odds)</button>
+          <button class="admin-btn warn" onclick="adminClearSnapshot('mlb')">Clear Today's MLB Snapshot</button>
+          <button class="admin-btn warn" onclick="adminClearSnapshot('wnba')">Clear Today's WNBA Snapshot</button>
+        </section>
+
+        <section class="admin-section">
+          <h3>MODEL BETS</h3>
+          <div class="admin-sub">Top 5 by confidence per bet type. Auto-runs after each analysis for enabled sports.</div>
+
+          <div class="admin-toggle-row">
+            <div class="admin-toggle-label">
+              Track MLB
+              <div class="admin-toggle-sub">Include MLB in the model's auto-picks</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="model-toggle-mlb" onchange="adminModelToggle('mlb', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="admin-toggle-row">
+            <div class="admin-toggle-label">
+              Track WNBA
+              <div class="admin-toggle-sub">Include WNBA in the model's auto-picks</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="model-toggle-wnba" onchange="adminModelToggle('wnba', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <button class="admin-btn primary" onclick="adminModelRepick('both')">Re-pick Today's Model Picks</button>
+          <button class="admin-btn"         onclick="adminModelRepick('mlb')">Re-pick MLB Only</button>
+          <button class="admin-btn"         onclick="adminModelRepick('wnba')">Re-pick WNBA Only</button>
+
+          <button class="admin-btn warn"   onclick="adminModelReset('mlb')">Reset Today's MLB Model Picks</button>
+          <button class="admin-btn warn"   onclick="adminModelReset('wnba')">Reset Today's WNBA Model Picks</button>
+          <button class="admin-btn danger" onclick="adminModelReset('both')">Reset Today's Model Picks (Both)</button>
+        </section>
+
+        <section class="admin-section">
+          <h3>BETS / BANKROLL</h3>
+          <button class="admin-btn warn"   onclick="adminWipe('mlb')">Wipe MLB Bets</button>
+          <button class="admin-btn warn"   onclick="adminWipe('wnba')">Wipe WNBA Bets</button>
+          <button class="admin-btn danger" onclick="adminWipe('both')">Wipe Both Sports</button>
+          <button class="admin-btn"        onclick="adminSetBankroll('mlb')">Set MLB Bankroll…</button>
+          <button class="admin-btn"        onclick="adminSetBankroll('wnba')">Set WNBA Bankroll…</button>
+        </section>
+
+        <section class="admin-section">
+          <h3>SYSTEM</h3>
+          <div class="admin-meta">
+            Supabase: <span id="admin-supabase">—</span><br>
+            DB mode:&nbsp; <span id="admin-db-mode">—</span>
+          </div>
+        </section>
       </div>
 
     </section>
@@ -1308,19 +1519,19 @@ body {
   <nav class="bottom-nav">
     <div class="bottom-nav-inner">
       <button class="bottom-tab active" data-tab="home"   onclick="showTab('home')">
-        <span class="bottom-tab-icon">⌂</span><span>Home</span>
+        <span>Home</span>
       </button>
-      <button class="bottom-tab"        data-tab="scores" onclick="showTab('scores')">
-        <span class="bottom-tab-icon">▢</span><span>Scores</span>
+      <button class="bottom-tab"        data-tab="sports" onclick="showTab('sports')">
+        <span>Sports</span>
       </button>
       <button class="bottom-tab"        data-tab="props"  onclick="showTab('props')">
-        <span class="bottom-tab-icon">◎</span><span>Props</span>
+        <span>Props</span>
       </button>
       <button class="bottom-tab"        data-tab="ai"     onclick="showTab('ai')">
-        <span class="bottom-tab-icon">⚛</span><span>AI</span>
+        <span>AI</span>
       </button>
       <button class="bottom-tab"        data-tab="more"   onclick="showTab('more')">
-        <span class="bottom-tab-icon">⋯</span><span>More</span>
+        <span>More</span>
       </button>
     </div>
   </nav>
@@ -1516,7 +1727,7 @@ function fmtTodayLabel() {
 }
 function paintDateLabels() {
   const label = fmtTodayLabel();
-  ['ev-date', 'props-date', 'scores-date'].forEach(id => {
+  ['ev-date', 'props-date', 'sports-date'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.textContent = label;
   });
@@ -1525,7 +1736,7 @@ function paintDateLabels() {
 // ═══════════════════════════════════════════════════════════════════════
 //  Tab + sport switching
 // ═══════════════════════════════════════════════════════════════════════
-const TABS = ['home', 'scores', 'props', 'ai', 'more'];
+const TABS = ['home', 'sports', 'props', 'ai', 'more'];
 function showTab(name) {
   if (!TABS.includes(name)) return;
   _tab = name;
@@ -1536,7 +1747,7 @@ function showTab(name) {
   document.querySelectorAll('.bottom-tab').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === name);
   });
-  if (name === 'scores') renderScores();
+  if (name === 'sports') renderSports();
   if (name === 'props')  renderPropsFull();
 }
 
@@ -1554,7 +1765,13 @@ function setSport(s) {
   renderEVScans();
   renderProps();
   renderFullSlate();
-  if (_tab === 'scores') renderScores();
+  // Auto-navigate to the Sports tab whenever a specific sport pill is
+  // clicked — the slate + live state lives there now.  ALL stays put.
+  if (s !== 'all') {
+    showTab('sports');
+    return;
+  }
+  if (_tab === 'sports') renderSports();
   if (_tab === 'props')  renderPropsFull();
 }
 
@@ -1779,7 +1996,6 @@ function renderEVScans() {
 
   if (!bets.length) {
     wrap.innerHTML = `<div class="empty-state" style="flex:1">
-      <span class="icon">⚡</span>
       No value picks yet. Run analysis to scan today's slate.
     </div>`;
     statsEl.textContent = 'Edge ≥ 5% required for a pick to show here.';
@@ -1949,7 +2165,6 @@ function renderProps() {
   const wrap = $('props-cards');
   if (!wrap) return;
   wrap.innerHTML = `<div class="empty-state" style="flex:1">
-    <span class="icon">◎</span>
     Player props coming soon.
   </div>`;
 }
@@ -1960,7 +2175,6 @@ function renderPropsFull() {
   if (cnt)  cnt.textContent = '—';
   if (!wrap) return;
   wrap.innerHTML = `<div class="empty-state" style="flex:1;width:100%">
-    <span class="icon">◎</span>
     Player props coming soon. For now use EV SCANS for moneyline + run-line + totals picks.
   </div>`;
 }
@@ -1981,8 +2195,7 @@ function renderFullSlate() {
   $('slate-count').textContent = games.length;
   if (!games.length) {
     wrap.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
-      <span class="icon">📋</span>
-      No ${_sport.toUpperCase()} games yet. Tap <strong>RUN ANALYSIS</strong> at the top of Home.
+      No ${_sport.toUpperCase()} games yet. Open <strong>More → Admin</strong> to run analysis.
     </div>`;
     return;
   }
@@ -2132,32 +2345,48 @@ function buildPropCard(p) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Rendering — Scores
+//  Rendering — Sports (live scores + model predictions combined)
 // ═══════════════════════════════════════════════════════════════════════
-function renderScores() {
+function renderSports() {
   const games = gamesForActiveSport();
-  const wrap  = $('scores-list');
+  const wrap  = $('sports-list');
+  if (!wrap) return;
   if (!games.length) {
-    wrap.innerHTML = `<div class="empty-state"><span class="icon">📊</span>Run analysis on Home to load today's games.</div>`;
+    wrap.innerHTML = `<div class="empty-state">Open More → Admin to run analysis and load today's games.</div>`;
     return;
   }
-  wrap.innerHTML = games.map(g => `
-    <article class="score-card" data-game-id="${g.game_id}">
-      <div class="score-row">
-        ${teamLogoHtml(g.away_team, g._sport, 28)}
-        <span class="score-team">${shortName(g.away_team)}</span>
-        <span class="score-val" id="score-away-${g.game_id}">—</span>
-      </div>
-      <div class="score-row">
-        ${teamLogoHtml(g.home_team, g._sport, 28)}
-        <span class="score-team">${shortName(g.home_team)}</span>
-        <span class="score-val" id="score-home-${g.game_id}">—</span>
-      </div>
-      <div class="score-meta" id="score-meta-${g.game_id}">${fmtTimeET(g.commence_time)} · ${g._sport.toUpperCase()}</div>
-    </article>
-  `).join('');
-  // First live-score fetch
+  wrap.innerHTML = games.map(buildSportCard).join('');
+  // First live-score fetch — hydrates score / inning / outs / clock cells
   pollLiveScores();
+}
+
+function buildSportCard(g) {
+  const sport  = g._sport;
+  const isMLB  = sport === 'mlb';
+  const picked = isMLB ? (g.run_line || null) : (g.spread_pick || null);
+  const totals = g.totals || {};
+  return `<article class="sport-card" data-game-id="${g.game_id}" data-sport="${sport}">
+    <div class="sport-card-hdr">
+      <span class="sport-tag">${sport.toUpperCase()}</span>
+      <span class="sport-state" id="sport-state-${g.game_id}">${fmtTimeET(g.commence_time)}</span>
+    </div>
+    <div class="sport-score-row">
+      <span class="sport-score-team">${teamLogoHtml(g.away_team, sport, 28)}<span class="sport-score-name">${shortName(g.away_team)}</span></span>
+      <span class="sport-score-val" id="sport-away-${g.game_id}">—</span>
+    </div>
+    <div class="sport-score-row">
+      <span class="sport-score-team">${teamLogoHtml(g.home_team, sport, 28)}<span class="sport-score-name">${shortName(g.home_team)}</span></span>
+      <span class="sport-score-val" id="sport-home-${g.game_id}">—</span>
+    </div>
+    <div class="sport-live-detail" id="sport-live-${g.game_id}" style="display:none"></div>
+    <div class="sport-preds">
+      <div class="slate-props">
+        ${buildSlateMLBox(g)}
+        ${buildSlateRLBox(g, picked, isMLB)}
+        ${buildSlateTotalsBox(g, totals)}
+      </div>
+    </div>
+  </article>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2192,20 +2421,56 @@ function paintLive(liveMap, sport) {
     if (!ls) continue;
     const aR = ls.teams?.away?.runs ?? null;
     const hR = ls.teams?.home?.runs ?? null;
-    const aEl = $(`score-away-${g.game_id}`);
-    const hEl = $(`score-home-${g.game_id}`);
-    const mEl = $(`score-meta-${g.game_id}`);
+    const aEl  = $(`sport-away-${g.game_id}`);
+    const hEl  = $(`sport-home-${g.game_id}`);
+    const sEl  = $(`sport-state-${g.game_id}`);
+    const ldEl = $(`sport-live-${g.game_id}`);
     if (aEl && aR != null) aEl.textContent = aR;
     if (hEl && hR != null) hEl.textContent = hR;
-    if (mEl) {
+
+    // Header pill: pregame time → LIVE → FINAL
+    if (sEl) {
+      sEl.classList.remove('live');
       if (state === 'Live') {
-        const ord = ls.currentInningOrdinal || '';
-        const detail = sport === 'mlb'
-          ? `${ord} · ${ls.outs ?? 0} out`
-          : `${ord} · ${ls.displayClock || ''}`;
-        mEl.innerHTML = `<span class="live-dot"></span>LIVE · ${detail}`;
+        sEl.classList.add('live');
+        sEl.innerHTML = `<span class="live-dot"></span>LIVE`;
       } else if (state === 'Final') {
-        mEl.textContent = `FINAL · ${sport.toUpperCase()}`;
+        sEl.textContent = 'FINAL';
+      } else {
+        sEl.textContent = fmtTimeET(g.commence_time);
+      }
+    }
+
+    // Live detail row: inning/half/outs/count for MLB; quarter/clock for WNBA.
+    if (ldEl) {
+      if (state === 'Live') {
+        let detail = '';
+        if (sport === 'mlb') {
+          const ord    = ls.currentInningOrdinal || '';
+          const half   = ls.isTopInning === true ? 'Top' :
+                         ls.isTopInning === false ? 'Bot' : '';
+          const inn    = (half && ord) ? `${half} ${ord}` : (ord || half);
+          const outs   = ls.outs ?? 0;
+          const outsW  = outs === 1 ? 'out' : 'outs';
+          const b      = ls.balls   ?? 0;
+          const s      = ls.strikes ?? 0;
+          const parts  = [];
+          if (inn) parts.push(inn);
+          parts.push(`${outs} ${outsW}`);
+          parts.push(`${b}-${s} count`);
+          detail = parts.join(' · ');
+        } else {
+          const ord = ls.currentInningOrdinal || '';
+          const clk = ls.displayClock || '';
+          const parts = [];
+          if (ord) parts.push(ord);
+          if (clk) parts.push(clk);
+          detail = parts.join(' · ');
+        }
+        ldEl.textContent = detail;
+        ldEl.style.display = detail ? '' : 'none';
+      } else {
+        ldEl.style.display = 'none';
       }
     }
   }
@@ -2277,7 +2542,7 @@ function renderAll() {
   renderEVScans();
   renderProps();
   renderFullSlate();
-  if (_tab === 'scores') renderScores();
+  if (_tab === 'sports') renderSports();
   if (_tab === 'props')  renderPropsFull();
   updateMoreSubtext();
 }
@@ -2285,9 +2550,16 @@ function renderAll() {
 function setLastRun(d) {
   _lastRun = d;
   try { localStorage.setItem(LS_LAST_RUN, d.toISOString()); } catch (_) {}
-  $('last-run').textContent = fmtLastRun(d);
+  // #last-run lives only on the (now-removed) Home run-row, so this
+  // is defensive: the badge may be absent depending on which page
+  // surface is rendered.
+  const el = $('last-run');
+  if (el) el.textContent = fmtLastRun(d);
 }
-setInterval(() => $('last-run').textContent = fmtLastRun(_lastRun), 30000);
+setInterval(() => {
+  const el = $('last-run');
+  if (el) el.textContent = fmtLastRun(_lastRun);
+}, 30000);
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Initial load — restore cached snapshot
@@ -2313,7 +2585,8 @@ async function init() {
       const d = new Date(raw);
       if (!isNaN(d) && d.toLocaleDateString('en-CA') === new Date().toLocaleDateString('en-CA')) {
         _lastRun = d;
-        $('last-run').textContent = fmtLastRun(d);
+        const el = $('last-run');
+        if (el) el.textContent = fmtLastRun(d);
       }
     }
   } catch (_) {}
@@ -2408,7 +2681,7 @@ function updateSearchResults(q) {
         </span>
         <span class="more-row-chev">›</span>
       </button>`).join('')
-    : `<div class="empty-state"><span class="icon">⌕</span>No matches.</div>`;
+    : `<div class="empty-state">No matches.</div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2474,10 +2747,10 @@ function renderMyBets() {
 
   $('open-bets-list').innerHTML = open.length
     ? open.map(b => _renderBetCard(b, sport, false)).join('')
-    : `<div class="empty-state"><span class="icon">🎯</span>No open bets.</div>`;
+    : `<div class="empty-state">No open bets.</div>`;
   $('history-list').innerHTML = hist.length
     ? hist.slice(0, 50).map(b => _renderBetCard(b, sport, true)).join('')
-    : `<div class="empty-state"><span class="icon">📋</span>No settled bets yet.</div>`;
+    : `<div class="empty-state">No settled bets yet.</div>`;
 }
 
 function _renderBetCard(b, sport, settled) {
@@ -2568,13 +2841,13 @@ async function deleteBet(betId, sport) {
 async function openModelPerf() {
   _swapMoreView('more-modelperf-view');
   const wrap = $('model-perf-content');
-  wrap.innerHTML = `<div class="empty-state"><span class="icon">📊</span>Loading…</div>`;
+  wrap.innerHTML = `<div class="empty-state">Loading…</div>`;
   try {
     const r = await fetch('/api/model_performance');
     const d = await r.json();
     wrap.innerHTML = _renderModelPerfHtml(d);
   } catch (err) {
-    wrap.innerHTML = `<div class="empty-state"><span class="icon">⚠</span>${err.message}</div>`;
+    wrap.innerHTML = `<div class="empty-state">${err.message}</div>`;
   }
 }
 
@@ -2582,7 +2855,7 @@ function _renderModelPerfHtml(d) {
   const models = ['xgb', 'lr', 'nn'];
   const stats = d.model_stats || d;     // backend's exact key may vary
   if (!stats || typeof stats !== 'object') {
-    return `<div class="empty-state"><span class="icon">📊</span>No model history yet — settle some bets first.</div>`;
+    return `<div class="empty-state">No model history yet — settle some bets first.</div>`;
   }
   // Determine best model by overall win%
   let best = null;
@@ -2618,6 +2891,256 @@ function _renderModelPerfHtml(d) {
     </article>`;
   }).join('')}</div>`;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Admin sub-page
+//  Gated behind a 4-digit PIN stored as a non-cryptographic hash in
+//  localStorage.  This is a UX friction layer to prevent accidental
+//  destructive taps (wipe / reset) -- it's NOT a real security boundary
+//  since anyone with the app's URL can hit the underlying endpoints
+//  directly.  Treat it as "are-you-sure-you're-the-owner" only.
+// ═══════════════════════════════════════════════════════════════════════
+const _ADMIN_PIN_KEY = 'admin_pin_hash_v1';
+function _hashPin(pin) {
+  // djb2 hash -- fast, deterministic, fine for an accidental-tap gate
+  let h = 5381;
+  for (const c of String(pin)) h = (((h << 5) + h) + c.charCodeAt(0)) | 0;
+  return String(h);
+}
+function openAdmin() {
+  let stored;
+  try { stored = localStorage.getItem(_ADMIN_PIN_KEY); } catch { stored = null; }
+  if (!stored) {
+    const a = prompt('Admin is destructive (wipe / reset).  Set a 4-digit PIN to protect it:');
+    if (!a) return;
+    if (a.length < 4) { toast('PIN must be 4+ characters', 'error'); return; }
+    const b = prompt('Confirm the PIN:');
+    if (a !== b) { toast('PINs did not match', 'error'); return; }
+    try { localStorage.setItem(_ADMIN_PIN_KEY, _hashPin(a)); } catch {}
+    _swapMoreView('more-admin-view');
+    loadAdminStatus();
+    return;
+  }
+  const entered = prompt('Enter admin PIN:');
+  if (entered == null) return;
+  if (_hashPin(entered) !== stored) { toast('Wrong PIN', 'error'); return; }
+  _swapMoreView('more-admin-view');
+  loadAdminStatus();
+}
+function adminResetPin() {
+  if (!confirm('Forget the saved admin PIN?  You\'ll set a new one next time you open Admin.')) return;
+  try { localStorage.removeItem(_ADMIN_PIN_KEY); } catch {}
+  toast('PIN forgotten', 'success');
+  closeSubPage();
+}
+
+async function loadAdminStatus() {
+  try {
+    const r = await fetch('/api/admin/status');
+    const d = await r.json();
+    const fmt = (iso) => {
+      if (!iso) return 'never';
+      try { return new Date(iso).toLocaleString(); } catch { return iso; }
+    };
+    $('admin-last-mlb').textContent  = fmt(d.mlb_analyzed_at);
+    $('admin-last-wnba').textContent = fmt(d.wnba_analyzed_at);
+    const db = d.db || {};
+    $('admin-supabase').textContent = db.supabase ? 'connected' : 'JSON-only';
+    $('admin-db-mode').textContent  = db.mode || '—';
+  } catch (err) {
+    toast(`Status fetch failed: ${err.message}`, 'error');
+  }
+  loadModelSettings();
+}
+
+// ── Admin action handlers ────────────────────────────────────────────
+async function adminRunAnalysis(which) {
+  const btnIds = { mlb: 'admin-run-mlb', wnba: 'admin-run-wnba', both: 'admin-run-both' };
+  const btn = $(btnIds[which]);
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'ANALYZING…'; }
+  try {
+    const calls = [];
+    if (which === 'mlb'  || which === 'both') calls.push(fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport: 'mlb', bankroll: _bankroll, force_refresh: true }),
+    }).then(r => r.json()));
+    if (which === 'wnba' || which === 'both') calls.push(fetch('/api/wnba/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ bankroll: _wnbaBankroll || 1000, force_refresh: true }),
+    }).then(r => r.json()));
+    const res = await Promise.all(calls);
+    const errs = res.filter(x => x.error);
+    if (errs.length) toast(`Errors: ${errs.map(e => e.error).join(' | ')}`, 'error');
+    else toast(`Analysis complete (${which})`, 'success');
+    // Refresh init data so Home picks up the new results next time it renders
+    try {
+      const [mInit, wInit] = await Promise.all([
+        fetch('/api/init').then(r=>r.json()).catch(()=>({})),
+        fetch('/api/wnba/init').then(r=>r.json()).catch(()=>({})),
+      ]);
+      if (mInit.has_predictions && mInit.results)  _mlb  = mInit.results;
+      if (wInit.has_predictions && wInit.results)  _wnba = wInit.results;
+      renderAll();
+    } catch {}
+    loadAdminStatus();
+  } catch (err) {
+    toast(`Run failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+async function adminRefreshModels() {
+  const btn = $('admin-refresh-models');
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Retraining…'; }
+  try {
+    // Run for both sports — backend is per-sport via the request body.
+    const calls = ['mlb', 'wnba'].map(s => fetch('/api/refresh_models', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport: s, bankroll: s === 'wnba' ? _wnbaBankroll : _bankroll }),
+    }).then(r => r.json()));
+    const res = await Promise.all(calls);
+    const errs = res.filter(x => x.error);
+    if (errs.length) toast(`Some models failed: ${errs.length}`, 'error');
+    else toast('Models retrained on cached data', 'success');
+  } catch (err) {
+    toast(`Refresh failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+async function adminClearSnapshot(sport) {
+  if (!confirm(`Clear today's ${sport.toUpperCase()} snapshot?  The next analysis run can overwrite it.`)) return;
+  try {
+    const r = await fetch('/api/reset-sport', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (d.success === false || d.error) throw new Error(d.error || 'unknown');
+    toast(`${sport.toUpperCase()} snapshot cleared`, 'success');
+    loadAdminStatus();
+  } catch (err) {
+    toast(`Clear failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminWipe(sport) {
+  const label = sport === 'both' ? 'BOTH sports' : sport.toUpperCase();
+  if (!confirm(`Wipe all ${label} bets + reset bankroll?  This cannot be undone.`)) return;
+  if (sport === 'both' && !confirm(`Really wipe MLB AND WNBA?  Type-confirm by tapping OK once more.`)) return;
+  try {
+    const r = await fetch('/api/admin/wipe_ledger', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'unknown');
+    toast(`Wiped: ${(d.wiped || []).join(', ').toUpperCase()}`, 'success');
+    // Refresh ledger caches + render so My Bets / sidebars reflect 0 bets
+    _openBetKeys = new Set();
+    await fetchLedgerSummary();
+    if (_tab === 'home') renderAll();
+  } catch (err) {
+    toast(`Wipe failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminSetBankroll(sport) {
+  const cur = sport === 'wnba' ? (_wnbaBankroll || 1000) : _bankroll;
+  const v = prompt(`Set ${sport.toUpperCase()} starting bankroll (current: $${cur}):`, String(cur));
+  if (v == null) return;
+  const n = parseFloat(v);
+  if (!isFinite(n) || n <= 0) { toast('Invalid amount', 'error'); return; }
+  try {
+    const url = sport === 'wnba' ? '/api/wnba/ledger/set_bankroll' : '/api/ledger/set_bankroll';
+    const r = await fetch(url, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ bankroll: n }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    if (sport === 'wnba') _wnbaBankroll = n; else _bankroll = n;
+    toast(`${sport.toUpperCase()} bankroll set to $${n.toFixed(2)}`, 'success');
+    await fetchLedgerSummary();
+    if (_tab === 'home') renderAll();
+  } catch (err) {
+    toast(`Set failed: ${err.message}`, 'error');
+  }
+}
+
+// ── Model-bets admin handlers ────────────────────────────────────────
+async function loadModelSettings() {
+  try {
+    const r = await fetch('/api/admin/model/settings');
+    const d = await r.json();
+    const s = d.settings || {};
+    const mlb  = $('model-toggle-mlb');
+    const wnba = $('model-toggle-wnba');
+    if (mlb)  mlb.checked  = !!s.mlb_enabled;
+    if (wnba) wnba.checked = !!s.wnba_enabled;
+  } catch (err) {
+    toast(`Settings load failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminModelToggle(sport, enabled) {
+  const key = sport === 'wnba' ? 'wnba_enabled' : 'mlb_enabled';
+  try {
+    const r = await fetch('/api/admin/model/settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ [key]: enabled }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Save failed');
+    toast(`${sport.toUpperCase()} model picks ${enabled ? 'enabled' : 'disabled'}`, 'success');
+  } catch (err) {
+    // Roll the switch back on failure so UI state matches server state
+    const el = $(`model-toggle-${sport}`);
+    if (el) el.checked = !enabled;
+    toast(`Toggle failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminModelRepick(sport) {
+  if (!confirm(`Re-pick the model's top-5-by-confidence per bet type for ${sport.toUpperCase()}?\n\nToday's existing model picks will be wiped and replaced. Confirmed (personal) bets are untouched.`)) return;
+  try {
+    const r = await fetch('/api/admin/model/repick', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Re-pick failed');
+    const picks = (d.picks && d.picks.picks) || {};
+    const n = Object.values(picks).reduce((s, arr) => s + (arr ? arr.length : 0), 0);
+    toast(`Model re-picked ${n} bet${n === 1 ? '' : 's'}`, 'success');
+    await fetchLedgerSummary();
+  } catch (err) {
+    toast(`Re-pick failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminModelReset(sport) {
+  if (!confirm(`Wipe today's model picks for ${sport.toUpperCase()} and refund the stakes to the model account?\n\nConfirmed (personal) bets and settled history are untouched.`)) return;
+  try {
+    const r = await fetch('/api/admin/model/reset', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sport }),
+    });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || 'Reset failed');
+    const removed = d.removed || {};
+    const total = Object.values(removed).reduce((s, n) => s + (n || 0), 0);
+    toast(`Removed ${total} model bet${total === 1 ? '' : 's'}`, 'success');
+    await fetchLedgerSummary();
+  } catch (err) {
+    toast(`Reset failed: ${err.message}`, 'error');
+  }
+}
+
 async function updateMoreSubtext() {
   const el = $('more-bankroll');
   if (!el) return;

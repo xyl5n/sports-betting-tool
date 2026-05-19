@@ -1,6 +1,6 @@
 {
-  "name": "Betting Analysis",
-  "short_name": "Betting",
+  "name": "Sports Analysis",
+  "short_name": "Sports Analysis",
   "description": "MLB and WNBA betting analysis with XGBoost, Logistic Regression, and Neural Network ensemble predictions",
   "start_url": "/",
   "scope": "/",

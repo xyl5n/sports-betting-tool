@@ -556,6 +556,34 @@ _auto_analysis_state: dict = {
 }
 _AUTO_ANALYSIS_LOG_FILE = Path("data/auto_analysis_log.json")
 
+# ── Model-bets settings (per-sport toggle for auto-pick) ─────────────────────
+# The Admin sub-page exposes a switch per sport so the user can disable a
+# sport from the model's auto-pick pool.  Default: MLB on, WNBA off.  Persisted
+# as a tiny JSON file so the choice survives restarts.
+_MODEL_SETTINGS_FILE = Path("data/model_settings.json")
+_MODEL_SETTINGS_DEFAULT = {"mlb_enabled": True, "wnba_enabled": False}
+
+
+def _load_model_settings() -> dict:
+    """Return current model-bets settings.  Always returns a complete dict."""
+    try:
+        if _MODEL_SETTINGS_FILE.exists():
+            raw = json.loads(_MODEL_SETTINGS_FILE.read_text(encoding="utf-8"))
+            return {**_MODEL_SETTINGS_DEFAULT, **(raw or {})}
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("model_settings load failed: %s", exc)
+    return dict(_MODEL_SETTINGS_DEFAULT)
+
+
+def _save_model_settings(settings: dict) -> dict:
+    """Persist settings (merged onto defaults) and return the saved snapshot."""
+    merged = {**_MODEL_SETTINGS_DEFAULT, **(settings or {})}
+    # Coerce booleans defensively — incoming JSON may have strings
+    merged = {k: bool(v) for k, v in merged.items()}
+    _MODEL_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _MODEL_SETTINGS_FILE.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    return merged
+
 # ── Auto-settlement scheduler state ───────────────────────────────────────────
 _auto_settlement_lock  = threading.Lock()
 _auto_settlement_state: dict = {
@@ -2172,14 +2200,19 @@ def _run_daily_picks_selection() -> None:
     """
     # Always use in-memory results so _collect_mlb gets the raw nested structure
     # (ensemble_store returns serialized flat dicts which lack r["game"] etc.)
-    mlb_results  = _analysis_state.get("results") or []
-    wnba_results = _wnba_analysis_state.get("results") or []
+    settings = _load_model_settings()
+    mlb_results  = (_analysis_state.get("results")      or []) if settings["mlb_enabled"]  else []
+    wnba_results = (_wnba_analysis_state.get("results") or []) if settings["wnba_enabled"] else []
     if not mlb_results and not wnba_results:
         return
     try:
         mlb_ledger  = Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
         wnba_ledger = Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
-        select_daily_picks(mlb_results, wnba_results, mlb_ledger, wnba_ledger)
+        # today_only=True so a disabled sport's prior-day picks aren't wiped.
+        select_daily_picks(
+            mlb_results, wnba_results, mlb_ledger, wnba_ledger,
+            today_only=True, selection_mode="confidence",
+        )
     except Exception as exc:
         # Daily picks selection should never crash the main analyze route
         _logger.warning("daily_picks selection failed: %s", exc)
@@ -3262,6 +3295,165 @@ def reset_all():
         return jsonify({"success": True, "message": "All bet history cleared and records reset to 0-0."})
     except Exception as exc:
         return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/wipe_ledger", methods=["POST"])
+def admin_wipe_ledger():
+    """
+    Per-sport ledger wipe used by the Admin sub-page.
+    Body: {"sport": "mlb" | "wnba" | "both"}.
+    Clears open_bets + history for the chosen sport(s) and resets both
+    bankrolls to their starting values.  Model files / analysis caches /
+    API settings are untouched.  Returns {"success": true, "wiped": [...]}.
+    """
+    try:
+        sport = (request.json or {}).get("sport", "").strip().lower()
+        if sport not in ("mlb", "wnba", "both"):
+            return jsonify({"success": False, "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
+
+        sports = ["mlb", "wnba"] if sport == "both" else [sport]
+        paths  = {
+            "mlb":  Path("data/ledger.json"),
+            "wnba": Path("data/wnba_ledger.json"),
+        }
+        wiped = []
+        for s in sports:
+            path = paths[s]
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            except Exception:
+                data = {}
+            model_start    = float(data.get("model_starting_bankroll",    1000.0))
+            personal_start = float(data.get("personal_starting_bankroll", 1000.0))
+            clean = {
+                "model_starting_bankroll":    model_start,
+                "model_bankroll":             model_start,
+                "personal_starting_bankroll": personal_start,
+                "personal_bankroll":          personal_start,
+                "open_bets":                  [],
+                "history":                    [],
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(clean, indent=2), encoding="utf-8")
+            wiped.append(s)
+        return jsonify({"success": True, "wiped": wiped})
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/status", methods=["GET"])
+def admin_status():
+    """Single endpoint the Admin sub-page polls for header status fields."""
+    try:
+        ts = _read_analysis_timestamps()
+        mlb_ts  = (ts.get("mlb")  or {}).get("analyzed_at")
+        wnba_ts = (ts.get("wnba") or {}).get("analyzed_at")
+        try:
+            from src import db as _db
+            db_status = _db.status()
+        except Exception:
+            db_status = {"mode": "json"}
+        return jsonify({
+            "mlb_analyzed_at":  mlb_ts,
+            "wnba_analyzed_at": wnba_ts,
+            "db":               db_status,
+        })
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+# ────────────────────────────────────────────────────────────────────────────
+#  Model-bets admin endpoints
+#  These power the MODEL BETS section in the Admin sub-page.  All four
+#  operate on the model side of the ledger only (confirmed=False bets) — the
+#  user's personal_bankroll is never touched.
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/admin/model/settings", methods=["GET"])
+def admin_model_settings_get():
+    """Current per-sport auto-pick toggles."""
+    try:
+        return jsonify({"success": True, "settings": _load_model_settings()})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/model/settings", methods=["POST"])
+def admin_model_settings_post():
+    """Update per-sport auto-pick toggles.  Body: {mlb_enabled, wnba_enabled}."""
+    try:
+        body = request.json or {}
+        # Merge so the caller can send a single field at a time
+        current = _load_model_settings()
+        if "mlb_enabled"  in body: current["mlb_enabled"]  = bool(body["mlb_enabled"])
+        if "wnba_enabled" in body: current["wnba_enabled"] = bool(body["wnba_enabled"])
+        saved = _save_model_settings(current)
+        return jsonify({"success": True, "settings": saved})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/model/reset", methods=["POST"])
+def admin_model_reset():
+    """
+    Wipe today's non-confirmed model picks for the chosen sport(s) and
+    refund their stakes to model_bankroll.  Confirmed (personal) bets and
+    settled history are untouched.  Body: {sport: "mlb"|"wnba"|"both"}.
+    """
+    try:
+        from src.daily_picks import reset_today_model_bets
+        sport = (request.json or {}).get("sport", "").strip().lower()
+        if sport not in ("mlb", "wnba", "both"):
+            return jsonify({"success": False, "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
+        sports = ["mlb", "wnba"] if sport == "both" else [sport]
+        paths = {"mlb": "data/ledger.json", "wnba": "data/wnba_ledger.json"}
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        removed_by_sport: dict[str, int] = {}
+        for s in sports:
+            led = Ledger(path=paths[s], starting_bankroll=1000.0)
+            n = reset_today_model_bets(led, today_str)
+            led.save()
+            removed_by_sport[s] = n
+        return jsonify({"success": True, "removed": removed_by_sport})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc), "detail": traceback.format_exc()}), 500
+
+
+@app.route("/api/admin/model/repick", methods=["POST"])
+def admin_model_repick():
+    """
+    Wipe today's model picks for enabled sports, then re-pick the top 5 by
+    confidence per category using the cached analysis results.  Returns the
+    new picks payload.  Body (optional): {sport: "mlb"|"wnba"|"both"} —
+    defaults to "both" but only enabled sports actually get repicked.
+    """
+    try:
+        settings = _load_model_settings()
+        sport_filter = (request.json or {}).get("sport", "both").strip().lower()
+        if sport_filter not in ("mlb", "wnba", "both"):
+            return jsonify({"success": False, "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
+
+        want_mlb  = settings["mlb_enabled"]  and sport_filter in ("mlb",  "both")
+        want_wnba = settings["wnba_enabled"] and sport_filter in ("wnba", "both")
+
+        mlb_results  = (_analysis_state.get("results")      or []) if want_mlb  else []
+        wnba_results = (_wnba_analysis_state.get("results") or []) if want_wnba else []
+
+        if not mlb_results and not wnba_results:
+            return jsonify({
+                "success": False,
+                "error":   "No cached analysis available for the enabled sports — run analysis first.",
+            }), 400
+
+        mlb_ledger  = Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
+        wnba_ledger = Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
+        payload = select_daily_picks(
+            mlb_results, wnba_results, mlb_ledger, wnba_ledger,
+            today_only=True, selection_mode="confidence",
+        )
+        return jsonify({"success": True, "picks": _py(payload)})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc), "detail": traceback.format_exc()}), 500
 
 
 @app.route("/api/reset-sport", methods=["POST"])
