@@ -340,6 +340,7 @@ class Ledger:
         Query Odds API scores for open bets matching sport_key and auto-settle them.
         Stake was already deducted at placement:
           Win  → return stake × decimal (stake + profit)
+          Push → return stake only       (no profit, no loss)
           Loss → nothing returned
         """
         open_for_sport = [b for b in self.data["open_bets"] if b["sport_key"] == sport_key]
@@ -348,10 +349,44 @@ class Ledger:
 
         try:
             scores = odds_client.get_scores(sport_key=sport_key, days_from=3)
-        except Exception:
+        except Exception as exc:                                              # noqa: BLE001
+            _logger.warning(
+                "settle: get_scores(%s) raised %s — %d open bets stay unsettled",
+                sport_key, exc, len(open_for_sport),
+            )
             return []
 
-        score_map      = {s["id"]: s for s in scores}
+        if not scores:
+            _logger.info(
+                "settle: get_scores(%s) returned 0 rows; %d open bets stay open",
+                sport_key, len(open_for_sport),
+            )
+
+        # ── Primary lookup: by Odds API game id ──────────────────────────────
+        score_map = {s["id"]: s for s in scores if s.get("id")}
+
+        # ── Fallback lookup: by (team-pair, date) ─────────────────────────────
+        # The Odds API occasionally rotates game IDs between pre-game odds and
+        # post-game scores.  When that happens the bet's stored game_id no
+        # longer maps to a score row and the bet sits open forever.  Build a
+        # secondary index keyed by the (away+home) team set so we can rescue
+        # those orphans.
+        def _norm(t: str | None) -> str:
+            return (t or "").strip().lower()
+        pair_map: dict[tuple[frozenset[str], str], dict] = {}
+        for s in scores:
+            teams: set[str] = set()
+            ht, at = _norm(s.get("home_team")), _norm(s.get("away_team"))
+            if ht: teams.add(ht)
+            if at: teams.add(at)
+            for nm in (s.get("scores") or []):
+                n = _norm(nm.get("name") if isinstance(nm, dict) else None)
+                if n: teams.add(n)
+            if len(teams) < 2:
+                continue
+            date_str = (s.get("commence_time") or "")[:10]
+            pair_map[(frozenset(teams), date_str)] = s
+
         newly_settled: list[dict] = []
         remaining:     list[dict] = []
 
@@ -361,60 +396,121 @@ class Ledger:
                 continue
 
             score = score_map.get(bet["game_id"])
-            if not score or not score.get("completed") or not score.get("scores"):
+            if score is None:
+                # Fallback: same team pair on same date
+                key = (
+                    frozenset({_norm(bet.get("home_team")), _norm(bet.get("away_team"))}),
+                    (bet.get("commence_time") or "")[:10],
+                )
+                score = pair_map.get(key)
+                if score is not None:
+                    _logger.info(
+                        "settle: rescued bet %s via team-name fallback "
+                        "(stored game_id=%s -> Odds API id=%s)",
+                        bet.get("id"), bet.get("game_id"), score.get("id"),
+                    )
+
+            if score is None:
+                _logger.debug(
+                    "settle: no score row for bet %s (%s @ %s on %s) — leaving open",
+                    bet.get("id"), bet.get("away_team"), bet.get("home_team"),
+                    (bet.get("commence_time") or "")[:10],
+                )
+                remaining.append(bet)
+                continue
+            if not score.get("completed"):
+                remaining.append(bet)
+                continue
+            if not score.get("scores"):
+                _logger.warning(
+                    "settle: bet %s game completed=True but no scores payload — leaving open",
+                    bet.get("id"),
+                )
                 remaining.append(bet)
                 continue
 
-            home = score["home_team"]
+            # Use the matched score row's home_team (in case fallback rescued
+            # from a different ID with slightly different team spelling).
+            home = score.get("home_team") or bet.get("home_team")
             try:
                 tally     = {s["name"]: int(float(s["score"])) for s in score["scores"]}
                 away      = next(n for n in tally if n != home)
                 home_runs = tally[home]
                 away_runs = tally[away]
                 margin    = home_runs - away_runs
-            except Exception:
+            except Exception as exc:                                          # noqa: BLE001
+                _logger.warning(
+                    "settle: score-parse failure for bet %s (%s): %s",
+                    bet.get("id"), score.get("scores"), exc,
+                )
                 remaining.append(bet)
                 continue
 
             bet_type = bet.get("bet_type", "single")
             side     = bet["bet_side"]
 
+            # ── Tri-state result: "win" | "loss" | "push" ─────────────────────
+            # Pushes happen when the margin (run_line/spread) or total (totals)
+            # lands exactly on the line.  Half-integer lines (.5) make pushes
+            # impossible by design, but integer lines on WNBA spreads / totals
+            # do hit -- they must return the stake, not silently flip to loss.
             if bet_type in ("run_line", "spread"):
                 prop_line = bet.get("prop_line", 1.5)
-                won = margin > prop_line if side == "home" else margin < prop_line
+                if   margin >  prop_line: result = "win"  if side == "home" else "loss"
+                elif margin <  prop_line: result = "loss" if side == "home" else "win"
+                else:                     result = "push"
             elif bet_type == "totals":
                 prop_line = bet.get("prop_line", 8.5)
                 total     = home_runs + away_runs
-                won       = total > prop_line if side == "over" else total < prop_line
+                if   total >  prop_line: result = "win"  if side == "over" else "loss"
+                elif total <  prop_line: result = "loss" if side == "over" else "win"
+                else:                    result = "push"
             else:
+                # Moneyline — ties aren't possible in baseball / basketball.
                 won = (margin > 0) == (side == "home")
+                result = "win" if won else "loss"
 
-            decimal     = american_to_decimal(bet["american_odds"])
-            model_amt   = bet.get("model_amount", 0.0)
-            conf_amt    = bet.get("confirmed_amount", 0.0)
-            limit_hit   = bet.get("limit_reached", False)
+            decimal   = american_to_decimal(bet["american_odds"])
+            model_amt = bet.get("model_amount", 0.0)
+            conf_amt  = bet.get("confirmed_amount", 0.0)
+            limit_hit = bet.get("limit_reached", False)
 
-            # Stake already deducted — only return on win
+            # ── Model bankroll: win → stake*decimal; push → stake; loss → 0 ──
             if not limit_hit and model_amt > 0:
-                if won:
+                if result == "win":
                     self.data["model_bankroll"] = round(
                         self.data["model_bankroll"] + model_amt * decimal, 2
                     )
-                model_pnl = round(model_amt * (decimal - 1), 2) if won else -model_amt
+                    model_pnl = round(model_amt * (decimal - 1), 2)
+                elif result == "push":
+                    self.data["model_bankroll"] = round(
+                        self.data["model_bankroll"] + model_amt, 2
+                    )
+                    model_pnl = 0.0
+                else:  # loss
+                    model_pnl = -model_amt
             else:
                 model_pnl = 0.0
 
+            # ── Personal bankroll: same payout rules, only if confirmed ──────
             confirmed_pnl = 0.0
             if bet.get("confirmed") and not limit_hit and conf_amt > 0:
-                if won:
+                if result == "win":
                     self.data["personal_bankroll"] = round(
                         self.data["personal_bankroll"] + conf_amt * decimal, 2
                     )
-                confirmed_pnl = round(conf_amt * (decimal - 1), 2) if won else -conf_amt
+                    confirmed_pnl = round(conf_amt * (decimal - 1), 2)
+                elif result == "push":
+                    self.data["personal_bankroll"] = round(
+                        self.data["personal_bankroll"] + conf_amt, 2
+                    )
+                    confirmed_pnl = 0.0
+                else:  # loss
+                    confirmed_pnl = -conf_amt
 
             settled = {
                 **bet,
-                "result":        "win" if won else "loss",
+                "result":        result,
                 "model_pnl":     model_pnl,
                 "confirmed_pnl": confirmed_pnl,
                 "settled_at":    datetime.now(timezone.utc).isoformat(),
