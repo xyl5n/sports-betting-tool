@@ -47,7 +47,7 @@
   --pad:          14px;
   --app-w:        430px;
   --nav-h:        62px;
-  --bottom-nav-h: 64px;
+  --bottom-nav-h: 72px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -789,6 +789,7 @@ body {
 .bet-card.result-win  { border-color: rgba(74, 222, 128, .35); }
 .bet-card.result-loss { border-color: rgba(248, 113, 113, .35); }
 .bet-card.result-push { border-color: rgba(251, 191, 36, .35); }
+.bet-card.result-void { border-color: var(--border); opacity: .55; }
 .bet-card-top {
   display: flex; align-items: center; gap: 8px;
   font-size: 11px; color: var(--text-dim);
@@ -916,6 +917,103 @@ body {
 .perf-row-lbl { color: var(--text-dim); }
 .perf-row-val { font-family: "SF Mono", Consolas, monospace; }
 
+/* ── Model bankroll card (3-cell stat row) ─────────────────────────── */
+.perf-bk-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 8px 0 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.perf-bk-cell {
+  background: var(--bg-elev-hi);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  padding: 10px 8px;
+  text-align: center;
+}
+.perf-bk-lbl {
+  font-size: 10px; font-weight: 700; letter-spacing: .5px;
+  color: var(--text-dim2); margin-bottom: 4px;
+}
+.perf-bk-val {
+  font-size: 16px; font-weight: 800;
+  font-family: "SF Mono", Consolas, monospace; letter-spacing: -.2px;
+}
+.perf-bk-val.pos { color: var(--green); }
+.perf-bk-val.neg { color: var(--red); }
+
+/* ── Section heading that groups the picks blocks ──────────────────── */
+.perf-section-hdr {
+  font-size: 11px; font-weight: 800; letter-spacing: .8px;
+  color: var(--text-dim2);
+  margin: 16px 2px 8px;
+}
+
+/* "5 picks" mini badge — re-uses .perf-best-badge layout but a neutral
+   palette so it doesn't fight with the BEST highlight on per-model cards. */
+.perf-best-badge.perf-pick-count {
+  background: var(--bg-pill); color: var(--text-dim);
+}
+
+/* ── Today's model picks: one row per pick ─────────────────────────── */
+.model-pick-list { display: flex; flex-direction: column; gap: 4px; }
+.model-pick-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12.5px;
+}
+.model-pick-row:last-child { border-bottom: none; }
+.model-pick-rank {
+  width: 18px; flex-shrink: 0;
+  text-align: center; font-weight: 800; color: var(--text-dim);
+  font-family: "SF Mono", Consolas, monospace;
+}
+.model-pick-team {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  overflow: hidden;
+}
+.model-pick-name {
+  font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.model-pick-sport {
+  font-size: 9.5px; font-weight: 800; letter-spacing: .5px;
+  color: var(--text-dim2);
+  padding: 1px 6px;
+  background: var(--bg-pill); border-radius: 4px;
+  flex-shrink: 0;
+}
+.model-pick-flag {
+  font-size: 9px; font-weight: 800; letter-spacing: .5px;
+  color: var(--yellow); border: 1px solid var(--yellow);
+  padding: 0 4px; border-radius: 3px;
+  flex-shrink: 0; opacity: .8;
+}
+.model-pick-meta {
+  display: flex; gap: 10px; align-items: baseline;
+  font-family: "SF Mono", Consolas, monospace;
+  flex-shrink: 0;
+}
+.model-pick-prob  { color: var(--cyan);     font-weight: 700; min-width: 32px; text-align: right; }
+.model-pick-odds  { color: var(--text-dim); min-width: 40px; text-align: right; }
+.model-pick-stake { color: var(--text);     font-weight: 700; min-width: 36px; text-align: right; }
+
+/* Tighten meta on narrow screens (<360px) so it doesn't push the name out */
+@media (max-width: 360px) {
+  .model-pick-row { font-size: 11.5px; gap: 6px; }
+  .model-pick-meta { gap: 6px; }
+  .model-pick-prob  { min-width: 28px; }
+  .model-pick-odds  { min-width: 34px; }
+  .model-pick-stake { min-width: 30px; }
+}
+
+/* Stack bankroll cells when the card is squeezed on tiny phones */
+@media (max-width: 340px) {
+  .perf-bk-grid { grid-template-columns: 1fr; }
+}
+
 /* ── Admin sub-page ─────────────────────────────────────────────────── */
 .admin-section {
   background: var(--bg-elev); border: 1px solid var(--border-soft);
@@ -1027,28 +1125,27 @@ body {
   display: grid; grid-template-columns: repeat(5, 1fr);
 }
 .bottom-tab {
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 3px;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
   background: none; border: none;
-  color: var(--text-dim2); font-size: 13px; font-weight: 600; letter-spacing: .2px;
-  cursor: pointer; padding: 6px 0;
+  color: var(--text-dim); font-size: 15px; font-weight: 600; letter-spacing: .2px;
+  cursor: pointer; padding: 0;
   font-family: inherit;
   transition: color .15s;
+  -webkit-tap-highlight-color: transparent;
 }
-.bottom-tab:hover { color: var(--text-dim); }
-.bottom-tab.active { color: var(--text); }
-.bottom-tab.active .bottom-tab-icon {
-  background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
-  color: #0d1117;
+.bottom-tab:hover { color: var(--text); }
+.bottom-tab.active { color: var(--text); font-weight: 700; }
+/* Cyan bar above the active tab -- the only active-state cue now that the
+   icons are gone.  Sits flush with the nav's top border. */
+.bottom-tab.active::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 22%; right: 22%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--cyan) 0%, var(--cyan-soft) 100%);
+  border-radius: 0 0 3px 3px;
   box-shadow: 0 0 10px var(--cyan-glow);
-}
-.bottom-tab-icon {
-  width: 30px; height: 30px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 50%;
-  background: transparent;
-  font-size: 15px;
-  transition: all .15s;
 }
 
 /* ── Toast / status pill ────────────────────────────────────────────── */
@@ -1168,12 +1265,14 @@ body {
     flex-direction: row;
     gap: 10px;
     padding: 12px 22px;
-    font-size: 13px;
+    font-size: 14px;
     flex: 0 1 auto;
   }
-  .bottom-tab-icon {
-    width: 26px; height: 26px;
-    font-size: 13px;
+  .bottom-tab.active::before {
+    /* Hide the mobile top-bar treatment on desktop; the active row uses
+       text-color emphasis instead and a 3px nub looks misplaced on the
+       horizontal pill bar. */
+    display: none;
   }
 
   /* Slightly larger EV cards so a few are visible side-by-side */
@@ -1481,15 +1580,17 @@ body {
           <button class="admin-btn warn"   onclick="adminModelReset('mlb')">Reset Today's MLB Model Picks</button>
           <button class="admin-btn warn"   onclick="adminModelReset('wnba')">Reset Today's WNBA Model Picks</button>
           <button class="admin-btn danger" onclick="adminModelReset('both')">Reset Today's Model Picks (Both)</button>
+
+          <button class="admin-btn"        onclick="adminSetModelBankroll()">Reset Model Bankroll…</button>
         </section>
 
         <section class="admin-section">
-          <h3>BETS / BANKROLL</h3>
+          <h3>MY BETS</h3>
+          <div class="admin-sub">Wipe your tracked bets and set your personal bankroll. Bets are unified across MLB + WNBA.</div>
           <button class="admin-btn warn"   onclick="adminWipe('mlb')">Wipe MLB Bets</button>
           <button class="admin-btn warn"   onclick="adminWipe('wnba')">Wipe WNBA Bets</button>
           <button class="admin-btn danger" onclick="adminWipe('both')">Wipe Both Sports</button>
-          <button class="admin-btn"        onclick="adminSetBankroll('mlb')">Set MLB Bankroll…</button>
-          <button class="admin-btn"        onclick="adminSetBankroll('wnba')">Set WNBA Bankroll…</button>
+          <button class="admin-btn"        onclick="adminSetMyBankroll()">Set My Bankroll…</button>
         </section>
 
         <section class="admin-section">
@@ -2833,53 +2934,191 @@ async function openModelPerf() {
   const wrap = $('model-perf-content');
   wrap.innerHTML = `<div class="empty-state">Loading…</div>`;
   try {
-    const r = await fetch('/api/model_performance');
-    const d = await r.json();
-    wrap.innerHTML = _renderModelPerfHtml(d);
+    // Pull both endpoints in parallel:
+    //   /api/model_performance — per-classifier (XGB/LR/NN) accuracy
+    //   /api/ledger            — model bankroll, type W/L, today's daily picks
+    const [perfR, ledR] = await Promise.all([
+      fetch('/api/model_performance'),
+      fetch('/api/ledger'),
+    ]);
+    const perf = await perfR.json();
+    const led  = await ledR.json();
+    wrap.innerHTML = _renderModelPerfHtml(perf, led);
   } catch (err) {
     wrap.innerHTML = `<div class="empty-state">${err.message}</div>`;
   }
 }
 
-function _renderModelPerfHtml(d) {
+const _BET_TYPE_CATS = [
+  { key: 'moneyline',       label: 'Moneyline'         },
+  { key: 'run_line_spread', label: 'Run Line / Spread' },
+  { key: 'totals',          label: 'Totals'            },
+];
+
+function _renderModelPerfHtml(perf, led) {
+  const summary     = (led && led.summary)                              || {};
+  const typeRecords = (led && led.type_records && led.type_records.model) || {};
+  const dailyPicks  = (led && led.daily_picks && led.daily_picks.picks)   || {};
+  return [
+    _renderModelBankrollCard(summary),
+    _renderTypeRecordsCard(typeRecords),
+    _renderPerModelGrid(perf),
+    _renderModelPicksLists(dailyPicks),
+  ].filter(Boolean).join('');
+}
+
+function _renderModelBankrollCard(s) {
+  const starting = Number(s.model_starting_bankroll ?? 1000);
+  const current  = Number(s.model_bankroll ?? starting);
+  const pl       = current - starting;
+  const plCls    = pl >= 0 ? 'pos' : 'neg';
+  const plSign   = pl >= 0 ? '+' : '−';
+  const rec      = s.model_record || [0, 0];
+  const w        = Number(rec[0] || 0);
+  const l        = Number(rec[1] || 0);
+  const atRisk   = Number(s.model_at_risk ?? 0);
+  const pct      = (w + l) ? ((w / (w + l)) * 100).toFixed(1) + '%' : '—';
+  return `<article class="perf-card model-bk-card">
+    <header class="perf-hdr"><span class="perf-name">MODEL BANKROLL</span></header>
+    <div class="perf-bk-grid">
+      <div class="perf-bk-cell">
+        <div class="perf-bk-lbl">Start</div>
+        <div class="perf-bk-val">$${starting.toFixed(2)}</div>
+      </div>
+      <div class="perf-bk-cell">
+        <div class="perf-bk-lbl">Current</div>
+        <div class="perf-bk-val">$${current.toFixed(2)}</div>
+      </div>
+      <div class="perf-bk-cell">
+        <div class="perf-bk-lbl">P / L</div>
+        <div class="perf-bk-val ${plCls}">${plSign}$${Math.abs(pl).toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="perf-rows">
+      <div class="perf-row">
+        <span class="perf-row-lbl">Record</span>
+        <span class="perf-row-val">${w}-${l}${pct === '—' ? '' : ' (' + pct + ')'}</span>
+      </div>
+      <div class="perf-row">
+        <span class="perf-row-lbl">At Risk</span>
+        <span class="perf-row-val">$${atRisk.toFixed(2)}</span>
+      </div>
+    </div>
+  </article>`;
+}
+
+function _renderTypeRecordsCard(records) {
+  const rows = _BET_TYPE_CATS.map(c => {
+    const [w = 0, l = 0] = records[c.key] || [];
+    const total = w + l;
+    const pct = total ? ((w / total) * 100).toFixed(1) + '%' : '—';
+    return `<div class="perf-row">
+      <span class="perf-row-lbl">${c.label}</span>
+      <span class="perf-row-val">${w}-${l}${pct === '—' ? '' : ' (' + pct + ')'}</span>
+    </div>`;
+  }).join('');
+  return `<article class="perf-card">
+    <header class="perf-hdr"><span class="perf-name">RECORD BY BET TYPE</span></header>
+    <div class="perf-rows">${rows}</div>
+  </article>`;
+}
+
+function _renderPerModelGrid(perf) {
   const models = ['xgb', 'lr', 'nn'];
-  const stats = d.model_stats || d;     // backend's exact key may vary
-  if (!stats || typeof stats !== 'object') {
-    return `<div class="empty-state">No model history yet — settle some bets first.</div>`;
-  }
-  // Determine best model by overall win%
-  let best = null;
-  for (const m of models) {
-    const s = stats[m] || {};
-    const pct = s.overall?.pct ?? s.pct ?? 0;
-    if (best === null || pct > best.pct) best = { model: m, pct };
-  }
+  // /api/model_performance returns { models: {xgb:{...}, lr:{...}, nn:{...}},
+  //                                  best_model, total_bets }
+  // win_pct values are already on a 0-100 scale.
+  const data = (perf && perf.models) || {};
+  const best = perf && perf.best_model;
+  const labels = { xgb: 'XGBoost', lr: 'Logistic Regression', nn: 'Neural Net' };
   return `<div class="perf-grid">${models.map(m => {
-    const s   = stats[m] || {};
-    const ov  = s.overall || s;
-    const pct = ov.pct ?? 0;
-    const rec = `${ov.wins ?? 0}-${ov.losses ?? 0}`;
-    const isBest = best && best.model === m;
-    const rows = ['moneyline', 'run_line', 'totals', 'single', 'spread'].filter(k => s[k]).map(k => {
-      const r = s[k] || {};
-      const p = r.pct ?? 0;
+    const md      = data[m] || {};
+    const ov      = md.overall || {};
+    const correct = Number(ov.correct ?? 0);
+    const total   = Number(ov.total   ?? 0);
+    const wrong   = total - correct;
+    const pct     = ov.win_pct;
+    const isBest  = best === m && total > 0;
+    const byType  = md.by_type || {};
+    const rows = _BET_TYPE_CATS.map(c => {
+      const r = byType[c.key];
+      if (!r || !r.total) return '';
+      const w   = Number(r.correct ?? 0);
+      const t   = Number(r.total   ?? 0);
+      const lo  = t - w;
+      const wp  = r.win_pct;
       return `<div class="perf-row">
-        <span class="perf-row-lbl">${k.replace('_',' ').toUpperCase()}</span>
-        <span class="perf-row-val">${r.wins ?? 0}-${r.losses ?? 0} (${(p*100).toFixed(1)}%)</span>
+        <span class="perf-row-lbl">${r.label || c.label}</span>
+        <span class="perf-row-val">${w}-${lo}${wp == null ? '' : ' (' + Number(wp).toFixed(1) + '%)'}</span>
       </div>`;
-    }).join('');
+    }).filter(Boolean).join('');
     return `<article class="perf-card ${isBest ? 'best' : ''}">
       <header class="perf-hdr">
-        <span class="perf-name">${m.toUpperCase()}</span>
+        <span class="perf-name">${md.label || labels[m]}</span>
         ${isBest ? '<span class="perf-best-badge">BEST</span>' : ''}
       </header>
       <div class="perf-overall">
-        <span class="perf-pct">${(pct*100).toFixed(1)}%</span>
-        <span class="perf-rec">${rec}</span>
+        <span class="perf-pct">${pct == null ? '—' : Number(pct).toFixed(1) + '%'}</span>
+        <span class="perf-rec">${correct}-${wrong}</span>
       </div>
-      <div class="perf-rows">${rows || '<div class="perf-row"><span class="perf-row-lbl">No history yet</span></div>'}</div>
+      <div class="perf-rows">${rows || '<div class="perf-row"><span class="perf-row-lbl">No settled bets yet</span></div>'}</div>
     </article>`;
   }).join('')}</div>`;
+}
+
+function _renderModelPicksLists(picks) {
+  const blocks = _BET_TYPE_CATS.map(c => {
+    const arr = picks[c.key] || [];
+    if (!arr.length) return '';
+    const rows = arr.map(_renderModelPickRow).join('');
+    return `<article class="perf-card">
+      <header class="perf-hdr">
+        <span class="perf-name">${c.label.toUpperCase()}</span>
+        <span class="perf-best-badge perf-pick-count">${arr.length} pick${arr.length === 1 ? '' : 's'}</span>
+      </header>
+      <div class="model-pick-list">${rows}</div>
+    </article>`;
+  }).filter(Boolean).join('');
+  const heading = `<div class="perf-section-hdr">TODAY'S MODEL PICKS</div>`;
+  if (!blocks) {
+    return `${heading}<article class="perf-card">
+      <div class="empty-state" style="margin:0;background:transparent;border:none;padding:8px">
+        No picks generated yet — run an analysis to populate the model's top-5 per type.
+      </div>
+    </article>`;
+  }
+  return heading + blocks;
+}
+
+function _renderModelPickRow(p) {
+  const sport     = (p.sport || 'mlb').toLowerCase();
+  const sportLbl  = p.sport_label || sport.toUpperCase();
+  const isTotals  = p.bet_type === 'totals';
+  // Spread/RL: pre-signed prop_line.  Totals: line displays alongside O/U direction.
+  let teamLine = shortName(p.team || '—');
+  if (!isTotals && p.prop_line != null) {
+    const pt = Number(p.prop_line);
+    const ptStr = pt > 0 ? `+${pt}` : `${pt}`;
+    teamLine = `${shortName(p.team || '—')} ${ptStr}`;
+  }
+  const prob  = p.pick_prob != null ? `${(Number(p.pick_prob) * 100).toFixed(0)}%` : '—';
+  const odds  = fmtOdds(p.odds);
+  const amt   = p.model_amount != null ? `$${Number(p.model_amount).toFixed(0)}` : '—';
+  const below = p.below_threshold ? '<span class="model-pick-flag">BELOW</span>' : '';
+  return `<div class="model-pick-row">
+    <span class="model-pick-rank">${p.rank ?? '·'}</span>
+    <span class="model-pick-team">
+      ${teamLogoHtml(p.team || '', sport, 20)}
+      <span class="model-pick-name">${teamLine}</span>
+      <span class="model-pick-sport">${sportLbl}</span>
+      ${below}
+    </span>
+    <span class="model-pick-meta">
+      <span class="model-pick-prob">${prob}</span>
+      <span class="model-pick-odds">${odds}</span>
+      <span class="model-pick-stake">${amt}</span>
+    </span>
+  </div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3007,26 +3246,51 @@ async function adminWipe(sport) {
   }
 }
 
-async function adminSetBankroll(sport) {
-  const cur = sport === 'wnba' ? (_wnbaBankroll || 1000) : _bankroll;
-  const v = prompt(`Set ${sport.toUpperCase()} starting bankroll (current: $${cur}):`, String(cur));
+async function adminSetMyBankroll() {
+  // /api/ledger/set_bankroll writes the personal bankroll to BOTH ledgers in
+  // one shot, so there's no per-sport split here -- bets are unified.
+  const cur = _bankroll || 1000;
+  const v = prompt(`Set your bankroll (applies to MLB + WNBA, current: $${cur}):`, String(cur));
   if (v == null) return;
   const n = parseFloat(v);
   if (!isFinite(n) || n <= 0) { toast('Invalid amount', 'error'); return; }
   try {
-    const url = sport === 'wnba' ? '/api/wnba/ledger/set_bankroll' : '/api/ledger/set_bankroll';
-    const r = await fetch(url, {
+    const r = await fetch('/api/ledger/set_bankroll', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ bankroll: n }),
     });
     const d = await r.json();
     if (d.error) throw new Error(d.error);
-    if (sport === 'wnba') _wnbaBankroll = n; else _bankroll = n;
-    toast(`${sport.toUpperCase()} bankroll set to $${n.toFixed(2)}`, 'success');
+    _bankroll     = n;
+    _wnbaBankroll = n;
+    toast(`Bankroll set to $${n.toFixed(2)}`, 'success');
     await fetchLedgerSummary();
     if (_tab === 'home') renderAll();
   } catch (err) {
     toast(`Set failed: ${err.message}`, 'error');
+  }
+}
+
+async function adminSetModelBankroll() {
+  // /api/ledger/set_model_bankroll updates model_starting_bankroll +
+  // model_bankroll on both ledgers.  Open bets are unaffected -- the
+  // available balance changes but the at-risk stakes stay where they are.
+  if (!confirm('Reset the model bankroll?\n\nThis updates both model_starting_bankroll and the current model_bankroll on MLB + WNBA.  Existing open model bets are not refunded -- only the available balance is overwritten.')) return;
+  const v = prompt('New model bankroll (default $1000):', '1000');
+  if (v == null) return;
+  const n = parseFloat(v);
+  if (!isFinite(n) || n <= 0) { toast('Invalid amount', 'error'); return; }
+  try {
+    const r = await fetch('/api/ledger/set_model_bankroll', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ bankroll: n }),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    toast(`Model bankroll reset to $${n.toFixed(2)}`, 'success');
+    await fetchLedgerSummary();
+  } catch (err) {
+    toast(`Reset failed: ${err.message}`, 'error');
   }
 }
 
