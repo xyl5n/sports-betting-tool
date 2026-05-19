@@ -2778,10 +2778,29 @@ def analyze():
         today_et = _today_et()
         kept_dates: dict[str, int] = {}
         dropped_dates: dict[str, int] = {}
-        for g in games_pre_filter:
-            d = _game_et_date(g.get("commence_time", "")) or "<unparsable>"
-            (kept_dates if d >= today_et else dropped_dates)[d] = \
-                (kept_dates if d >= today_et else dropped_dates).get(d, 0) + 1
+        # Per-game audit trail.  For each game log the raw UTC commence_time,
+        # the parsed UTC + ET datetimes, the resulting ET date string, and
+        # whether the stale-date filter is going to keep or drop it.  If a
+        # user reports "all my games got dropped", they paste this block
+        # and we can see exactly which games on which days got dropped why.
+        for i, g in enumerate(games_pre_filter):
+            ct = g.get("commence_time", "")
+            d  = _game_et_date(ct) or "<unparsable>"
+            verdict = "KEEP" if d >= today_et else "DROP"
+            (kept_dates if verdict == "KEEP" else dropped_dates)[d] = \
+                (kept_dates if verdict == "KEEP" else dropped_dates).get(d, 0) + 1
+            try:
+                from zoneinfo import ZoneInfo as _Z
+                _utc_dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                _et_dt  = _utc_dt.astimezone(_Z("America/New_York"))
+                _step(
+                    f"Step 4: game[{i:2d}] "
+                    f"{(g.get('away_team') or '?')[:3]}@{(g.get('home_team') or '?')[:3]}  "
+                    f"raw={ct}  utc={_utc_dt.isoformat()}  et={_et_dt.isoformat()}  "
+                    f"et_date={d}  vs today_et={today_et}  -> {verdict}"
+                )
+            except Exception as _e:                                       # noqa: BLE001
+                _step(f"Step 4: game[{i:2d}] raw={ct!r} -- could not parse: {_e}")
         games = _filter_stale_games(games_pre_filter)
         _step(f"Step 4: stale-date filter  today_et={today_et}  "
               f"kept_dates={kept_dates}  dropped_dates={dropped_dates}")
@@ -4786,10 +4805,29 @@ def analyze_wnba():
         today_et = _today_et()
         kept_dates: dict[str, int] = {}
         dropped_dates: dict[str, int] = {}
-        for g in games_pre_filter:
-            d = _game_et_date(g.get("commence_time", "")) or "<unparsable>"
-            (kept_dates if d >= today_et else dropped_dates)[d] = \
-                (kept_dates if d >= today_et else dropped_dates).get(d, 0) + 1
+        # Per-game audit trail.  For each game log the raw UTC commence_time,
+        # the parsed UTC + ET datetimes, the resulting ET date string, and
+        # whether the stale-date filter is going to keep or drop it.  If a
+        # user reports "all my games got dropped", they paste this block
+        # and we can see exactly which games on which days got dropped why.
+        for i, g in enumerate(games_pre_filter):
+            ct = g.get("commence_time", "")
+            d  = _game_et_date(ct) or "<unparsable>"
+            verdict = "KEEP" if d >= today_et else "DROP"
+            (kept_dates if verdict == "KEEP" else dropped_dates)[d] = \
+                (kept_dates if verdict == "KEEP" else dropped_dates).get(d, 0) + 1
+            try:
+                from zoneinfo import ZoneInfo as _Z
+                _utc_dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                _et_dt  = _utc_dt.astimezone(_Z("America/New_York"))
+                _step(
+                    f"Step 4: game[{i:2d}] "
+                    f"{(g.get('away_team') or '?')[:3]}@{(g.get('home_team') or '?')[:3]}  "
+                    f"raw={ct}  utc={_utc_dt.isoformat()}  et={_et_dt.isoformat()}  "
+                    f"et_date={d}  vs today_et={today_et}  -> {verdict}"
+                )
+            except Exception as _e:                                       # noqa: BLE001
+                _step(f"Step 4: game[{i:2d}] raw={ct!r} -- could not parse: {_e}")
         games = _filter_stale_games(games_pre_filter)
         _step(f"Step 4: stale-date filter  today_et={today_et}  "
               f"kept_dates={kept_dates}  dropped_dates={dropped_dates}")
