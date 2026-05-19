@@ -110,6 +110,48 @@ def _validate_odds_api_key_on_boot() -> None:
 
 _validate_odds_api_key_on_boot()
 
+
+def _validate_sharpapi_key_on_boot() -> None:
+    """Mirror of _validate_odds_api_key_on_boot for SHARPAPI_KEY.
+
+    SharpAPI is the new primary source (see src/odds_client.SharpApiClient).
+    Surfacing presence + first/last-4 + whitespace problems here means a
+    misconfigured SharpAPI key fails loud at boot, not silently inside the
+    first /api/analyze call when the fallback path quietly takes over.
+    """
+    print("STARTUP: validating SharpAPI credentials...",
+          flush=True, file=sys.stderr)
+    key_raw = os.environ.get("SHARPAPI_KEY")
+    if key_raw is None:
+        print("STARTUP CRED-CHECK [SHARPAPI_KEY]: NOT SET.  "
+              "Analysis will skip SharpAPI and fall back to The Odds API.",
+              flush=True, file=sys.stderr)
+        return
+    key = key_raw.strip()
+    problems: list[str] = []
+    if not key:
+        problems.append("value is empty after strip()")
+    if key == "your_sharpapi_key_here":
+        problems.append("value is still the .env.example placeholder text")
+    if key != key_raw:
+        problems.append(
+            f"value has surrounding whitespace "
+            f"(raw_len={len(key_raw)}, stripped_len={len(key)}) -- "
+            f"trim it in Railway Variables")
+    if " " in key:
+        problems.append("value contains an embedded space")
+    if problems:
+        print(f"STARTUP CRED-CHECK [SHARPAPI_KEY]: PROBLEMS -- "
+              f"{'; '.join(problems)}",
+              flush=True, file=sys.stderr)
+    else:
+        print(f"STARTUP CRED-CHECK [SHARPAPI_KEY]: present, "
+              f"len={len(key)}, prefix={key[:4]!r}, suffix={key[-4:]!r}",
+              flush=True, file=sys.stderr)
+
+
+_validate_sharpapi_key_on_boot()
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 # LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
 #   WARNING  — only errors/warnings printed; safe for Railway's 500-line/sec cap (default)

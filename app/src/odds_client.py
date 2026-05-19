@@ -78,15 +78,30 @@ class SharpApiClient:
 
     def _get(self, path: str, params: dict) -> dict:
         url = f"{self._BASE_URL}{path}"
-        _log(f"[sharp] GET {url} params={params}")
+        _log(f"[sharp] GET {url} params={params}  auth=X-API-Key header")
         resp = self.session.get(url, params=params, timeout=15)
-        _log(f"[sharp]   -> status={resp.status_code}  bytes={len(resp.content)}")
+        _log(f"[sharp]   -> status={resp.status_code}  bytes={len(resp.content)}  "
+             f"final_url={resp.url}")
+        # Print the raw body (truncated) regardless of success / failure so we
+        # can see EXACTLY what SharpAPI is returning -- the symptom 'status=200
+        # with 0 rows' is almost always explained by an error field or a hint
+        # buried in the body that a status code alone won't surface.
+        try:
+            body_preview = resp.text[:2000]
+        except Exception as exc:                                          # noqa: BLE001
+            body_preview = f"<could not decode body: {type(exc).__name__}: {exc}>"
+        _log(f"[sharp]   body (first 2000 chars): {body_preview}")
         if not resp.ok:
             raise requests.HTTPError(
                 f"{resp.status_code} {resp.reason or ''} for url: {url}".strip(),
                 response=resp,
             )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception as exc:                                          # noqa: BLE001
+            raise ValueError(
+                f"SharpAPI: response was not valid JSON: {type(exc).__name__}: {exc}"
+            )
         # SharpAPI wraps every response in {"success": true/false, "data": [...]}
         if not data.get("success", True):
             err = data.get("error", {})
@@ -94,6 +109,89 @@ class SharpApiClient:
                 f"SharpAPI error {err.get('code', '?')}: {err.get('message', data)}"
             )
         return data
+
+    # ------------------------------------------------------------------
+    # Endpoint + auth-style discovery probe
+    # ------------------------------------------------------------------
+
+    def probe_endpoints(self) -> list[dict]:
+        """One-shot discovery probe.  Hits the likely list-style endpoints
+        (`/sports`, `/leagues`, `/competitions`) with two auth styles, plus
+        a handful of `/odds?league=...` variations covering the common
+        identifier conventions.
+
+        Returns a list of {endpoint, auth, status, sample} dicts.  Body of
+        each response is captured (truncated) so the caller can inspect what
+        identifiers SharpAPI actually accepts.
+
+        The expected use: trigger this once from /admin -> Diagnostics
+        ("Probe SharpAPI"), inspect the rows, then update SPORT_MAP +
+        endpoint path / auth style to whatever combo actually works.
+        """
+        results: list[dict] = []
+
+        # Endpoints worth probing.  Some return sport / league lists, the
+        # others reuse `/odds` with different league strings to see which
+        # SharpAPI accepts.
+        endpoints = [
+            ("GET /sports",                        "/sports",       {}),
+            ("GET /leagues",                       "/leagues",      {}),
+            ("GET /competitions",                  "/competitions", {}),
+            ("GET /odds  league=mlb",              "/odds",         {"league": "mlb"}),
+            ("GET /odds  league=MLB",              "/odds",         {"league": "MLB"}),
+            ("GET /odds  league=baseball_mlb",     "/odds",         {"league": "baseball_mlb"}),
+            ("GET /odds  league=baseball-mlb",     "/odds",         {"league": "baseball-mlb"}),
+            ("GET /odds  league=baseball",         "/odds",         {"league": "baseball"}),
+            ("GET /odds  sport=mlb",               "/odds",         {"sport": "mlb"}),
+            ("GET /odds  sport=baseball",          "/odds",         {"sport": "baseball"}),
+            ("GET /odds  league=wnba",             "/odds",         {"league": "wnba"}),
+            ("GET /odds  league=WNBA",             "/odds",         {"league": "WNBA"}),
+            ("GET /odds  league=basketball_wnba",  "/odds",         {"league": "basketball_wnba"}),
+        ]
+
+        # Two auth styles -- the existing X-API-Key header and the common
+        # Authorization Bearer header.  If neither works, the SharpAPI
+        # account may need a different scheme (e.g. ?api_key= query); add
+        # more variants here once we know what fails.
+        auth_styles = [
+            ("X-API-Key header",        {"X-API-Key": self.api_key},
+             None),
+            ("Authorization: Bearer",   {"Authorization": f"Bearer {self.api_key}"},
+             None),
+            ("?apiKey query param",     {},
+             {"apiKey": self.api_key}),
+        ]
+
+        sess = requests.Session()
+        for label, path, extra_params in endpoints:
+            for auth_label, headers, extra_qs in auth_styles:
+                url = f"{self._BASE_URL}{path}"
+                params = dict(extra_params)
+                if extra_qs:
+                    params.update(extra_qs)
+                try:
+                    resp = sess.get(
+                        url, params=params, headers=headers, timeout=8,
+                    )
+                    body = (resp.text or "")[:600]
+                    results.append({
+                        "endpoint":   label,
+                        "auth":       auth_label,
+                        "status":     resp.status_code,
+                        "ok":         resp.ok,
+                        "bytes":      len(resp.content),
+                        "sample":     body,
+                    })
+                except Exception as exc:                                  # noqa: BLE001
+                    results.append({
+                        "endpoint": label,
+                        "auth":     auth_label,
+                        "status":   "ERROR",
+                        "ok":       False,
+                        "bytes":    0,
+                        "sample":   f"{type(exc).__name__}: {exc}",
+                    })
+        return results
 
     def get_odds(
         self,
