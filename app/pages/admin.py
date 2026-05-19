@@ -99,61 +99,109 @@ def _call(backend, method: str, path: str, body: dict | None = None) -> tuple[bo
 def _section_analysis(backend, refresh) -> None:
     with _card(
         "ANALYSIS",
-        "Default Run buttons use today's cached odds from Supabase (~1 Odds "
-        "API call per sport per day).  Force Refresh bypasses the cache and "
-        "burns a live request -- use when books have updated their lines.",
+        "Each Run button fires an Odds API request.  The daily cap is 500 "
+        "(~666/day average for a 20k-month plan).  Once the cap is reached, "
+        "auto-runs pause until you click Approve Additional Odds Pull "
+        "below to grant +50 more.",
     ):
+        # Quota row -- counter + remaining + approve button.  Re-renders on
+        # every refresh() call (i.e. after every analyze + on page open).
+        quota_holder = ui.column().classes("w-full").style("gap: 6px;")
+
+        def _render_quota() -> None:
+            quota_holder.clear()
+            ok, data, _ = _call(backend, "GET", "/api/odds/usage")
+            if not ok:
+                with quota_holder:
+                    ui.label("Odds quota: could not load.").style(
+                        f"font-size: 11.5px; color: {t.TEXT_DIM};"
+                    )
+                return
+            count   = int(data.get("count") or 0)
+            limit   = int(data.get("effective_limit") or 500)
+            remain  = int(data.get("remaining") or 0)
+            extra   = int(data.get("extra_allowance") or 0)
+            reached = bool(data.get("limit_reached"))
+            color   = t.NEG if reached else (t.WARN if remain < 50 else t.POS)
+            extra_s = (f"  (+{extra} bonus granted today)") if extra else ""
+            with quota_holder:
+                with ui.row().classes("items-center w-full").style("gap: 10px;"):
+                    ui.label(
+                        f"{count} of {limit} requests used today{extra_s}"
+                    ).style(
+                        f"font-size: 12.5px; font-weight: 700; color: {color}; "
+                        f"font-family: monospace;"
+                    )
+                    ui.label(
+                        f"({remain} remaining)" if not reached
+                        else "LIMIT REACHED"
+                    ).style(
+                        f"font-size: 11px; color: {color}; "
+                        f"font-family: monospace; margin-left: auto;"
+                    )
+                if reached:
+                    ui.label(
+                        "Daily Odds API limit reached, additional pulls "
+                        "require manual approval."
+                    ).style(
+                        f"background: {t.CARD}; border: 1px dashed {t.NEG}; "
+                        f"color: {t.NEG}; font-size: 11.5px; font-weight: 600; "
+                        f"padding: 6px 10px; border-radius: {t.RADIUS_SM};"
+                    )
+                # Approve button -- bumps allowance by +50.  Always visible
+                # so the user can pre-emptively grant more even before the
+                # limit hits.  Re-renders the quota row after success so
+                # the new effective_limit is visible immediately.
+                async def _approve():
+                    ok2, data2, _ = await asyncio.to_thread(
+                        _call, backend, "POST",
+                        "/api/admin/odds/approve_additional",
+                    )
+                    if ok2:
+                        ui.notify(
+                            f"Approved +50.  New limit: "
+                            f"{data2.get('effective_limit')} "
+                            f"({data2.get('remaining')} remaining today).",
+                            type="positive",
+                        )
+                        _render_quota()
+                    else:
+                        ui.notify(
+                            f"Approve failed: {data2.get('error') or 'unknown'}",
+                            type="negative",
+                        )
+                ui.button("Approve Additional Odds Pull (+50)",
+                          on_click=_approve) \
+                    .props("no-caps unelevated dense") \
+                    .style(_btn_style("warn"))
+
+        _render_quota()
+
+        # Run buttons.  No more "cached odds" labels -- the daily cache was
+        # removed; each Run is a live API call subject to the quota above.
         with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
             _async_button(
                 backend, "Run MLB Analysis",
                 "POST", "/api/analyze",
                 body={"bankroll": 250},
-                spinner_msg="Running MLB analysis (cached odds)...",
+                spinner_msg="Running MLB analysis...",
                 done_msg=lambda d: f"MLB: analyzed {len(d.get('results') or [])} games.",
-                refresh_status=refresh,
+                refresh_status=lambda: (refresh(), _render_quota()),
                 style="primary",
             )
             _async_button(
                 backend, "Run WNBA Analysis",
                 "POST", "/api/wnba/analyze",
                 body={"bankroll": 1000},
-                spinner_msg="Running WNBA analysis (cached odds)...",
+                spinner_msg="Running WNBA analysis...",
                 done_msg=lambda d: f"WNBA: analyzed {len(d.get('results') or [])} games.",
-                refresh_status=refresh,
+                refresh_status=lambda: (refresh(), _render_quota()),
                 style="primary",
             )
-            _run_both_button(backend, refresh)
-
-        # Second row -- force-refresh variants.  Send the same body shape
-        # but with force_refresh=True so the daily Supabase odds cache is
-        # bypassed for this run.  After the live fetch finishes the cache
-        # is repopulated, so subsequent runs in the same day are free again.
-        ui.label("Force refresh (bypass daily cache, burns 1 Odds API request)").style(
-            f"font-size: 10.5px; font-weight: 800; letter-spacing: .8px; "
-            f"color: {t.TEXT_DIM2}; margin-top: 10px;"
-        )
-        with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
-            _async_button(
-                backend, "Force Refresh MLB",
-                "POST", "/api/analyze",
-                body={"bankroll": 250, "force_refresh": True},
-                spinner_msg="Force-fetching live MLB odds...",
-                done_msg=lambda d: f"MLB refreshed: {len(d.get('results') or [])} games.",
-                refresh_status=refresh,
-                style="warn",
-            )
-            _async_button(
-                backend, "Force Refresh WNBA",
-                "POST", "/api/wnba/analyze",
-                body={"bankroll": 1000, "force_refresh": True},
-                spinner_msg="Force-fetching live WNBA odds...",
-                done_msg=lambda d: f"WNBA refreshed: {len(d.get('results') or [])} games.",
-                refresh_status=refresh,
-                style="warn",
-            )
+            _run_both_button(backend, refresh, post_refresh=_render_quota)
 
 
-def _run_both_button(backend, refresh) -> None:
+def _run_both_button(backend, refresh, post_refresh=None) -> None:
     btn = ui.button("Run Both").props("no-caps unelevated").style(
         f"background: {t.PRIMARY}; color: {t.BG}; "
         f"font-weight: 700; padding: 8px 16px; border-radius: {t.RADIUS_SM};"
@@ -176,6 +224,8 @@ def _run_both_button(backend, refresh) -> None:
             kind = "positive" if (ok_mlb and ok_wnba) else "warning"
             ui.notify(" | ".join(msgs), type=kind, multi_line=True)
             refresh()
+            if post_refresh:
+                post_refresh()
         finally:
             btn.props(remove="loading")
             btn.enable()

@@ -185,46 +185,12 @@ def _probe_sharpapi_leagues_on_boot() -> None:
 _probe_sharpapi_leagues_on_boot()
 
 
-def _bust_daily_odds_cache_on_boot() -> None:
-    """Delete the cached daily-odds rows for both sports at startup.
-
-    Why: prior cache rows were written by an Odds API call that didn't pass
-    `commenceTimeFrom` / `commenceTimeTo`, so they could legitimately
-    contain yesterday's already-played games even when their `date` field
-    matches today.  The date-equality guard in _read_daily_odds_cache
-    can't distinguish "fresh cache from late-night call" from "fresh cache
-    with stale game contents", so we blow them away on boot.  The next
-    analyze call repopulates with the corrected (time-filtered) query.
-
-    This runs on every container boot.  In practice that's once per
-    Railway redeploy -- so one extra Odds API request per sport per
-    deploy.  Acceptable given the daily cache cap.
-
-    Best-effort: Supabase down -> no-op.  Errors swallowed.
-    """
-    try:
-        from src import db as _db
-        if not _db.is_supabase():
-            return
-        keys = (
-            "odds_daily:baseball_mlb:h2h,spreads,totals:us",
-            "odds_daily:basketball_wnba:h2h,spreads,totals:us",
-        )
-        for k in keys:
-            try:
-                _db.cache_delete(k)
-                print(f"STARTUP: busted daily odds cache row key={k!r} "
-                      f"(forces fresh API call on next analyze)",
-                      flush=True, file=sys.stderr)
-            except Exception as exc:                                      # noqa: BLE001
-                print(f"STARTUP WARNING: cache_delete({k}) failed: {exc}",
-                      flush=True, file=sys.stderr)
-    except Exception as exc:                                              # noqa: BLE001
-        print(f"STARTUP WARNING: daily odds cache bust failed: {exc}",
-              flush=True, file=sys.stderr)
-
-
-_bust_daily_odds_cache_on_boot()
+# NOTE: _bust_daily_odds_cache_on_boot used to live here and was tied to
+# the old "1 Odds API call per sport per day" Supabase cache (see PR #37
+# and PR #40).  The quota model has moved to a per-day request counter
+# (see src/odds_client._odds_check_limit) with a 500-call ceiling, so
+# the daily-cache + boot-bust combo is no longer relevant.  Removing
+# the bust + the cache layer in one swoop.
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
@@ -1213,41 +1179,90 @@ def _save_pre_game_odds(store: dict) -> None:
         pass
 
 def _lock_in_pre_game_odds(games: list) -> list:
-    """
-    Snapshot market odds for every upcoming game.
-    For games already in progress, substitute the stored pre-game odds so the
-    model always evaluates the opening market — not live in-play prices.
+    """Pre-game odds lock.
+
+    The model was trained on opening-market lines, so live in-play odds
+    would feed it out-of-distribution data.  This function:
+
+      1. For UPCOMING games (commence_time still in the future):
+           - Uses the API's current odds as-is (those ARE pre-game lines).
+           - Snapshots them into _PRE_GAME_ODDS_FILE so the next call -- after
+             the game starts -- can restore the same numbers.
+           - Sets g["_pregame_locked"] = True.
+
+      2. For STARTED games (commence_time in the past):
+           a. If we have a snapshot for this gamePk, restore those fields
+              over whatever the API just returned.  Set _pregame_locked=True.
+           b. If no snapshot exists, the API response is live in-play.
+              Leave the fields alone but set _pregame_locked=False so
+              downstream code can decide whether to predict on them.
+
+    Each branch logs a single line so 'why are my odds different from
+    the book right now' has an audit trail in Railway logs.
     """
     now_utc = datetime.now(timezone.utc)
     store   = _load_pre_game_odds()
     updated = False
     result  = []
+    n_fresh = n_locked = n_live_no_snap = 0
 
     for game in games:
         gid = game.get("id", "")
+        away = game.get("away_team", "?")
+        home = game.get("home_team", "?")
+        matchup = f"{away[:3]}@{home[:3]}"
         try:
             ct = datetime.fromisoformat(game["commence_time"].replace("Z", "+00:00"))
         except Exception:
+            game["_pregame_locked"] = None
             result.append(game)
             continue
 
         if ct > now_utc:
-            # Pre-game: refresh the snapshot with the latest market odds
+            # Upcoming -- API odds are pre-game by definition.  Capture
+            # them so we can restore later if the game starts before we
+            # refresh again.
             snap = {f: game.get(f) for f in _ODDS_FIELDS}
-            snap["commence_time"] = game["commence_time"]
+            snap["commence_time"]   = game["commence_time"]
+            snap["captured_at_utc"] = now_utc.isoformat()
             store[gid] = snap
             updated = True
+            game["_pregame_locked"]  = True
+            game["_odds_source"]     = "live_pre_game"
+            n_fresh += 1
+            _eprint(f"  [pre-game-lock] {matchup} {gid}: using FRESH pre-game "
+                    f"odds from API (commence_time={game['commence_time']})")
             result.append(game)
         else:
-            # In-progress: restore pre-game odds over whatever the API sent
+            # Started -- prefer the snapshot.  If absent, fall back to the
+            # live odds but flag them so downstream code knows.
             if gid in store:
                 snap = store[gid]
-                game = {**game, **{f: snap[f] for f in _ODDS_FIELDS if f in snap}}
-            result.append(game)
+                merged = {**game, **{f: snap[f] for f in _ODDS_FIELDS if f in snap}}
+                merged["_pregame_locked"] = True
+                merged["_odds_source"]    = "pre_game_snapshot"
+                merged["_odds_captured_at"] = snap.get("captured_at_utc")
+                _eprint(f"  [pre-game-lock] {matchup} {gid}: game STARTED "
+                        f"(commence={game['commence_time']}); restored "
+                        f"pre-game snapshot captured at {snap.get('captured_at_utc')}")
+                n_locked += 1
+                result.append(merged)
+            else:
+                game["_pregame_locked"] = False
+                game["_odds_source"]    = "live_no_snapshot"
+                _eprint(f"  [pre-game-lock] {matchup} {gid}: game STARTED "
+                        f"and NO pre-game snapshot exists -- live in-play "
+                        f"odds in payload, _pregame_locked=False.  Model "
+                        f"prediction NOT safe; caller should skip.")
+                n_live_no_snap += 1
+                result.append(game)
 
     if updated:
         _save_pre_game_odds(store)
 
+    _eprint(f"  [pre-game-lock] summary: fresh_pregame={n_fresh}  "
+            f"restored_from_snapshot={n_locked}  "
+            f"live_no_snapshot={n_live_no_snap}  total={len(result)}")
     return result
 
 
@@ -3025,6 +3040,15 @@ def analyze():
         # Freeze pre-game odds: for started games, restore market odds from before first pitch
         _step("Step 4b: locking pre-game odds")
         games = _lock_in_pre_game_odds(games)
+        # Per spec: never feed the model live in-play odds.  A game whose
+        # _lock_in_pre_game_odds path couldn't find a pre-game snapshot
+        # AND has already started carries _pregame_locked=False; drop
+        # those from the prediction set with a single log line.
+        _unsafe = [g for g in games if g.get("_pregame_locked") is False]
+        if _unsafe:
+            _step(f"Step 4: dropping {len(_unsafe)} game(s) with live in-play "
+                  f"odds and no pre-game snapshot -- not safe for model")
+            games = [g for g in games if g.get("_pregame_locked") is not False]
 
         if not games:
             _step("Step 4: no games found — returning empty result")
@@ -3211,6 +3235,28 @@ def analyze():
         })
 
     except Exception as exc:
+        # Daily Odds-API quota hit -- return a clean 429 with the counter
+        # snapshot the UI uses to render the "limit reached" banner.
+        # Class-name check avoids a hard import dance with src.odds_client.
+        if type(exc).__name__ == "OddsApiLimitExceeded":
+            try:
+                from src.odds_client import odds_usage
+                u = odds_usage()
+            except Exception:                                             # noqa: BLE001
+                u = {"count": 0, "effective_limit": 500, "limit_reached": True}
+            _eprint(f"ANALYZE [{sport.upper()}] BLOCKED: Odds API daily "
+                    f"limit reached ({u['count']}/{u['effective_limit']})")
+            return jsonify({
+                "success":       False,
+                "limit_reached": True,
+                "error":         (
+                    f"Daily Odds API limit of {u['effective_limit']} reached, "
+                    f"additional pulls require manual approval."
+                ),
+                "calls_today":   u["count"],
+                "limit":         u["effective_limit"],
+            }), 429
+
         # Log type+message FIRST with _eprint so it survives even if traceback
         # formatting or jsonify later fails (e.g. UnicodeEncodeError on Windows).
         # Every payload that leaves this block is run through _redact so an
@@ -4088,6 +4134,70 @@ def admin_reset_my_bets_record():
             data["history"] = kept
             return removed
         return jsonify({"success": True, "removed": _reset_each_ledger(_mut)})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
+
+
+# ────────────────────────────────────────────────────────────────────────────
+#  Odds API quota -- read + manual-allowance grant.
+#
+#  /api/odds/usage  (GET)   read-only snapshot for the UI to render the
+#                            counter chip + the limit-reached banner
+#  /api/admin/odds/approve_additional (POST) bump today's allowance by
+#                            +50 (the bonus_step in odds_client).  Each
+#                            click of the Admin button calls this once.
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/odds/usage", methods=["GET"])
+def odds_usage_endpoint():
+    """Return today's Odds API call count + effective limit.  Cheap, no
+    upstream traffic -- the UI hits this on page load and after every
+    analyze response."""
+    try:
+        from src.odds_client import odds_usage
+        u = odds_usage()
+        return jsonify({
+            "success":         True,
+            "count":           u["count"],
+            "base_limit":      u["base_limit"],
+            "extra_allowance": u["extra_allowance"],
+            "effective_limit": u["effective_limit"],
+            "remaining":       u["remaining"],
+            "limit_reached":   u["limit_reached"],
+            "date_et":         u["date_et"],
+        })
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({
+            "success":         False,
+            "error":           _redact(str(exc)),
+            "count":           0,
+            "base_limit":      500,
+            "extra_allowance": 0,
+            "effective_limit": 500,
+            "remaining":       500,
+            "limit_reached":   False,
+        }), 200
+
+
+@app.route("/api/admin/odds/approve_additional", methods=["POST"])
+def odds_approve_additional():
+    """Add +50 to today's Odds API allowance so blocked auto-runs can
+    proceed.  Each click adds exactly _ODDS_BONUS_STEP (50 by default --
+    see src/odds_client._ODDS_BONUS_STEP).  Idempotent only across a
+    single ET day -- the counter resets to 0 at midnight ET, and the
+    extra_allowance with it (since they live in the same dated row)."""
+    try:
+        from src.odds_client import odds_grant_additional
+        u = odds_grant_additional()
+        return jsonify({
+            "success":         True,
+            "count":           u["count"],
+            "base_limit":      u["base_limit"],
+            "extra_allowance": u["extra_allowance"],
+            "effective_limit": u["effective_limit"],
+            "remaining":       u["remaining"],
+            "limit_reached":   u["limit_reached"],
+        })
     except Exception as exc:                                              # noqa: BLE001
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
@@ -5539,6 +5649,28 @@ def analyze_wnba():
         })
 
     except Exception as exc:
+        # Daily Odds-API quota hit -- clean 429 response mirroring the MLB
+        # handler above so the UI's toast / banner logic stays uniform
+        # across sports.
+        if type(exc).__name__ == "OddsApiLimitExceeded":
+            try:
+                from src.odds_client import odds_usage
+                u = odds_usage()
+            except Exception:                                             # noqa: BLE001
+                u = {"count": 0, "effective_limit": 500, "limit_reached": True}
+            _eprint(f"ANALYZE [WNBA] BLOCKED: Odds API daily "
+                    f"limit reached ({u['count']}/{u['effective_limit']})")
+            return jsonify({
+                "success":       False,
+                "limit_reached": True,
+                "error":         (
+                    f"Daily Odds API limit of {u['effective_limit']} reached, "
+                    f"additional pulls require manual approval."
+                ),
+                "calls_today":   u["count"],
+                "limit":         u["effective_limit"],
+            }), 429
+
         # Mirror the MLB crash handler -- log type + message FIRST via _eprint
         # so it survives even if traceback formatting or jsonify later fails
         # (e.g. UnicodeEncodeError on Windows).  Every payload is run through
@@ -6128,9 +6260,16 @@ if not _in_debug_mode or _werkzeug_main:
                     max_instances=1,
                     kwargs={"label": "noon"},
                 )
+                # Settlement runs every 30 minutes BUT only during the
+                # game-hours window (11 AM ET through 2 AM ET the next
+                # morning).  Cron hour syntax "11-23,0-2" covers that
+                # exact range so we don't burn CPU + Odds API quota
+                # polling for completed scores at 4 AM ET when nothing
+                # is in play.
                 _sched.add_job(
                     _run_auto_settlement_job,
-                    _CronTrigger(minute="0,30", timezone=_ET),
+                    _CronTrigger(hour="11-23,0-2", minute="0,30",
+                                 timezone=_ET),
                     id="auto_settlement",
                     replace_existing=True,
                     misfire_grace_time=1800,
@@ -6145,11 +6284,32 @@ if not _in_debug_mode or _werkzeug_main:
                     max_instances=1,
                 )
                 print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET", flush=True, file=sys.stderr)
-                print("STARTUP: auto-settlement job scheduled — every 30 min (game hours 11 AM–2 AM ET)", flush=True, file=sys.stderr)
+                print("STARTUP: auto-settlement job scheduled — every 30 min during 11 AM–2 AM ET window", flush=True, file=sys.stderr)
                 print("STARTUP: midnight reset job scheduled — 12:00 AM ET", flush=True, file=sys.stderr)
             except Exception as _ae:
                 print(f"STARTUP WARNING: could not add auto-analysis jobs: {_ae}", flush=True, file=sys.stderr)
             print("STARTUP: nightly retrain scheduler running — fires 2 AM ET", flush=True, file=sys.stderr)
+
+            # Per-job manifest: print id + next_run_time + trigger for every
+            # registered job so the deploy log gives an at-a-glance view
+            # of what's actually going to fire.  Catches the case where
+            # nightly_retrain.start() silently failed to register the 2 AM
+            # job, or where DST shifted next_run_time unexpectedly.
+            try:
+                from zoneinfo import ZoneInfo as _ZI
+                _et_tz = _ZI("America/New_York")
+                print("STARTUP: scheduler job manifest --", flush=True, file=sys.stderr)
+                for _job in _sched.get_jobs():
+                    nxt = getattr(_job, "next_run_time", None)
+                    nxt_s = (
+                        nxt.astimezone(_et_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+                        if nxt else "—"
+                    )
+                    print(f"  • {_job.id:<24s} next={nxt_s}  trigger={_job.trigger}",
+                          flush=True, file=sys.stderr)
+            except Exception as _me:                                      # noqa: BLE001
+                print(f"STARTUP WARNING: could not enumerate scheduler jobs: {_me}",
+                      flush=True, file=sys.stderr)
     except Exception as _sched_err:
         print(f"STARTUP WARNING: nightly retrain scheduler failed: {_sched_err}",
               flush=True, file=sys.stderr)
