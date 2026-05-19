@@ -61,6 +61,7 @@ def register(backend) -> None:
                 _section_models(backend, _refresh)
                 _section_model_bets(backend, _refresh)
                 _section_my_bets(backend, _refresh)
+                _section_data_reset(backend, _refresh)
                 _section_diagnostics(backend)
                 _refresh()
         bottom_nav.render(active=t.TAB_ADMIN)
@@ -361,6 +362,147 @@ def _section_my_bets(backend, refresh) -> None:
                 which="personal",
                 done_msg="Personal bankroll updated.",
                 refresh_status=refresh,
+            )
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Section: DATA RESET ACTIONS -- Cannot Be Undone
+#
+#  Four granular resets per spec.  Each one is gated behind a confirm
+#  dialog that quotes exactly what will be deleted.  The buttons are all
+#  warn/danger-styled so the destructive nature is unmistakable.
+#
+#  Surface area:
+#    1. Reset Model Record    -- drop unconfirmed history rows
+#    2. Reset Model Bankroll  -- $1000 reset + drop unconfirmed open bets
+#    3. Reset Confidence Record -- null out confidence_tier on history
+#    4. Reset My Bets Record  -- drop confirmed history rows
+#
+#  Backend endpoints all live under /api/admin/reset/*  (see app.py).
+# ───────────────────────────────────────────────────────────────────────────
+
+def _section_data_reset(backend, refresh) -> None:
+    # Heavy divider + warning header so this section reads as separate from
+    # the normal admin controls above.  No card wrapper -- the buttons sit
+    # directly on the page surface to feel deliberate / not routine.
+    ui.element("div").style(
+        f"width: 100%; height: 1px; background: {t.BORDER}; "
+        f"margin-top: {t.SPACE_LG};"
+    )
+    with ui.row().classes("items-center w-full").style(
+        f"gap: 10px; margin-top: {t.SPACE_LG};"
+    ):
+        ui.icon("warning").style(
+            f"font-size: 18px; color: {t.NEG};"
+        )
+        ui.label("DATA RESET ACTIONS — Cannot Be Undone").style(
+            f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.NEG};"
+        )
+    ui.label(
+        "Each button below permanently deletes one slice of saved data. "
+        "Every action requires explicit confirmation. Bankrolls survive the "
+        "history resets; history survives the bankroll reset."
+    ).style(
+        f"font-size: 12px; color: {t.TEXT_DIM}; line-height: 1.5; "
+        f"max-width: 720px;"
+    )
+
+    with _card(
+        "Resets",
+        "Choose carefully — there is no undo.",
+    ):
+        # Group 1 -- model side
+        ui.label("Model side").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2}; margin-top: 4px;"
+        )
+        with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
+            _confirm_button(
+                backend, "Reset Model Record",
+                (
+                    "Permanently delete ALL settled model pick history "
+                    "across MLB + WNBA.  The model W/L record and units "
+                    "will reset to 0-0 and 0U.  The model bankroll dollar "
+                    "amount, open bets, and your personal records are NOT "
+                    "affected.\n\n"
+                    "This cannot be undone."
+                ),
+                "POST", "/api/admin/reset/model_record",
+                done_msg=lambda d: (
+                    f"Model record cleared. Removed: "
+                    f"MLB={(d.get('removed') or {}).get('mlb', 0)}, "
+                    f"WNBA={(d.get('removed') or {}).get('wnba', 0)}"
+                ),
+                refresh_status=refresh,
+                style="danger",
+            )
+            _confirm_button(
+                backend, "Reset Model Bankroll",
+                (
+                    "Permanently reset the model bankroll back to its "
+                    "starting amount ($1000) on both MLB + WNBA ledgers, "
+                    "AND clear every open model bet.  The settled W/L "
+                    "history, your personal bankroll, and your personal "
+                    "tracked bets are NOT affected.\n\n"
+                    "This cannot be undone."
+                ),
+                "POST", "/api/admin/reset/model_bankroll",
+                done_msg=lambda d: (
+                    f"Model bankroll reset to starting amount. Removed open "
+                    f"bets: "
+                    f"MLB={(d.get('removed_open_bets') or {}).get('mlb', 0)}, "
+                    f"WNBA={(d.get('removed_open_bets') or {}).get('wnba', 0)}"
+                ),
+                refresh_status=refresh,
+                style="danger",
+            )
+
+        # Group 2 -- everything else
+        ui.label("Other").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2}; margin-top: 10px;"
+        )
+        with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
+            _confirm_button(
+                backend, "Reset Confidence Record",
+                (
+                    "Permanently clear the Confidence Performance tracker. "
+                    "Strong, Moderate, and Low tier W/L records will all "
+                    "reset to 0-0 for BOTH model picks and your personal "
+                    "picks.\n\n"
+                    "The underlying win/loss results stay on the bets — "
+                    "only the confidence-tier tagging is cleared, so the "
+                    "Confidence Performance card recomputes from scratch.\n\n"
+                    "This cannot be undone."
+                ),
+                "POST", "/api/admin/reset/confidence_record",
+                done_msg=lambda d: (
+                    f"Confidence tiers cleared. Updated rows: "
+                    f"MLB={(d.get('cleared') or {}).get('mlb', 0)}, "
+                    f"WNBA={(d.get('cleared') or {}).get('wnba', 0)}"
+                ),
+                refresh_status=refresh,
+                style="danger",
+            )
+            _confirm_button(
+                backend, "Reset My Bets Record",
+                (
+                    "Permanently delete ALL personal tracked bet history "
+                    "across MLB + WNBA.  Personal W/L records and personal "
+                    "units will reset to 0-0 and 0U.  The personal bankroll "
+                    "dollar amount, the model's record, and open bets are "
+                    "NOT affected.\n\n"
+                    "This cannot be undone."
+                ),
+                "POST", "/api/admin/reset/my_bets_record",
+                done_msg=lambda d: (
+                    f"My Bets record cleared. Removed: "
+                    f"MLB={(d.get('removed') or {}).get('mlb', 0)}, "
+                    f"WNBA={(d.get('removed') or {}).get('wnba', 0)}"
+                ),
+                refresh_status=refresh,
+                style="danger",
             )
 
 

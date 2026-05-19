@@ -3843,6 +3843,129 @@ def admin_wipe_ledger():
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
+# ────────────────────────────────────────────────────────────────────────────
+#  Granular reset endpoints used by the Admin -> Data Reset section.  Each
+#  one wipes EXACTLY the slice named in its route -- the surrounding state
+#  is preserved.  Power-user controls; the UI gates each call behind a
+#  confirm dialog that quotes what the call deletes.
+#
+#  Schema reminder (per src/ledger.py):
+#    history       list of settled bets; each has `confirmed: bool` and
+#                  `confidence_tier: 'strong'|'moderate'|'low'|None`.
+#                  confirmed=True  => personal (user-tracked) bet
+#                  confirmed=False => pure model bet
+#    open_bets     same shape as history but unsettled.
+#    model_bankroll / model_starting_bankroll        $ figures
+#    personal_bankroll / personal_starting_bankroll  $ figures
+# ────────────────────────────────────────────────────────────────────────────
+
+_RESET_PATHS = ("data/ledger.json", "data/wnba_ledger.json")
+
+
+def _reset_each_ledger(mutator) -> dict:
+    """Helper: open each per-sport ledger, run `mutator(ledger.data)`, save.
+
+    `mutator` mutates in place; this wrapper drives the per-sport iteration
+    and returns a {sport: count} summary the route hands back to the UI.
+    Errors are caught per-sport so one bad file doesn't abort the other.
+    """
+    summary: dict[str, int] = {}
+    for path in _RESET_PATHS:
+        sport = "wnba" if "wnba" in path else "mlb"
+        try:
+            led   = Ledger(path=path, starting_bankroll=1000.0)
+            count = mutator(led.data)
+            led.save()
+            summary[sport] = int(count or 0)
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("reset(%s) failed: %s", path, exc)
+            summary[sport] = -1
+    return summary
+
+
+@app.route("/api/admin/reset/model_record", methods=["POST"])
+def admin_reset_model_record():
+    """Reset Model Record:
+       - drop all settled MODEL history (confirmed=False entries)
+       - keeps personal/confirmed history rows
+       - keeps every open_bet (both model + personal sides)
+       - keeps model_bankroll + personal_bankroll dollar amounts
+    """
+    try:
+        def _mut(data: dict) -> int:
+            hist = data.get("history") or []
+            kept = [h for h in hist if h.get("confirmed")]
+            removed = len(hist) - len(kept)
+            data["history"] = kept
+            return removed
+        return jsonify({"success": True, "removed": _reset_each_ledger(_mut)})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
+
+
+@app.route("/api/admin/reset/model_bankroll", methods=["POST"])
+def admin_reset_model_bankroll():
+    """Reset Model Bankroll:
+       - model_bankroll <- model_starting_bankroll (defaults to 1000)
+       - drop unconfirmed (model-only) open_bets so the bankroll matches
+       - keeps history + personal_bankroll untouched
+    """
+    try:
+        def _mut(data: dict) -> int:
+            start = float(data.get("model_starting_bankroll", 1000.0))
+            data["model_bankroll"] = start
+            opens = data.get("open_bets") or []
+            kept  = [b for b in opens if b.get("confirmed")]
+            removed = len(opens) - len(kept)
+            data["open_bets"] = kept
+            return removed
+        return jsonify({"success": True, "removed_open_bets": _reset_each_ledger(_mut)})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
+
+
+@app.route("/api/admin/reset/confidence_record", methods=["POST"])
+def admin_reset_confidence_record():
+    """Reset Confidence Record:
+       - sets confidence_tier=None on every settled-history row (both
+         model + personal) so the Confidence Performance card recomputes
+         to Strong/Moderate/Low all at 0-0
+       - leaves W/L counters intact -- they aggregate from result, not tier
+       - leaves bankrolls + open_bets untouched
+    """
+    try:
+        def _mut(data: dict) -> int:
+            cleared = 0
+            for h in (data.get("history") or []):
+                if h.get("confidence_tier") is not None:
+                    h["confidence_tier"] = None
+                    cleared += 1
+            return cleared
+        return jsonify({"success": True, "cleared": _reset_each_ledger(_mut)})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
+
+
+@app.route("/api/admin/reset/my_bets_record", methods=["POST"])
+def admin_reset_my_bets_record():
+    """Reset My Bets Record:
+       - drop all settled PERSONAL history (confirmed=True entries)
+       - keeps model history rows
+       - keeps every open_bet
+       - keeps both bankroll dollar amounts
+    """
+    try:
+        def _mut(data: dict) -> int:
+            hist = data.get("history") or []
+            kept = [h for h in hist if not h.get("confirmed")]
+            removed = len(hist) - len(kept)
+            data["history"] = kept
+            return removed
+        return jsonify({"success": True, "removed": _reset_each_ledger(_mut)})
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"success": False, "error": _redact(str(exc))}), 500
+
+
 @app.route("/api/admin/status", methods=["GET"])
 def admin_status():
     """Single endpoint the Admin sub-page polls for header status fields."""
