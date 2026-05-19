@@ -2763,7 +2763,12 @@ def analyze():
         # Step 4 — odds (baseball_mlb only)
         _step(f"Step 4: fetching odds from Odds API  sport_key={sport_cfg.odds_key!r}")
         odds_client = OddsClient(odds_key, _cache)
-        games_pre_filter = odds_client.get_odds(sport_key=sport_cfg.odds_key)
+        # force_refresh threads from the /api/analyze request body all the
+        # way down to bypass the daily Supabase cache when the user explicitly
+        # asks for a fresh fetch from the admin Force Refresh button.
+        games_pre_filter = odds_client.get_odds(
+            sport_key=sport_cfg.odds_key, force_refresh=force_refresh,
+        )
         _step(f"Step 4: get_odds returned {len(games_pre_filter)} parsed games "
               f"(before stale-date filter)")
         # Drop yesterday's games before any processing.  `_filter_stale_games`
@@ -4773,7 +4778,9 @@ def analyze_wnba():
         # Step 4 — odds from The Odds API
         _step("Step 4: fetching odds from Odds API  sport_key='basketball_wnba'")
         odds_client = OddsClient(odds_key, _cache)
-        games_pre_filter = odds_client.get_odds(sport_key="basketball_wnba")
+        games_pre_filter = odds_client.get_odds(
+            sport_key="basketball_wnba", force_refresh=force_refresh,
+        )
         _step(f"Step 4: get_odds returned {len(games_pre_filter)} parsed games "
               f"(before stale-date filter)")
         today_et = _today_et()

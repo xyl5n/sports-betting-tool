@@ -96,13 +96,18 @@ def _call(backend, method: str, path: str, body: dict | None = None) -> tuple[bo
 # ───────────────────────────────────────────────────────────────────────────
 
 def _section_analysis(backend, refresh) -> None:
-    with _card("ANALYSIS", "Fetch odds, run models, regenerate today's picks."):
+    with _card(
+        "ANALYSIS",
+        "Default Run buttons use today's cached odds from Supabase (~1 Odds "
+        "API call per sport per day).  Force Refresh bypasses the cache and "
+        "burns a live request -- use when books have updated their lines.",
+    ):
         with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
             _async_button(
                 backend, "Run MLB Analysis",
                 "POST", "/api/analyze",
                 body={"bankroll": 250},
-                spinner_msg="Running MLB analysis...",
+                spinner_msg="Running MLB analysis (cached odds)...",
                 done_msg=lambda d: f"MLB: analyzed {len(d.get('results') or [])} games.",
                 refresh_status=refresh,
                 style="primary",
@@ -111,12 +116,40 @@ def _section_analysis(backend, refresh) -> None:
                 backend, "Run WNBA Analysis",
                 "POST", "/api/wnba/analyze",
                 body={"bankroll": 1000},
-                spinner_msg="Running WNBA analysis...",
+                spinner_msg="Running WNBA analysis (cached odds)...",
                 done_msg=lambda d: f"WNBA: analyzed {len(d.get('results') or [])} games.",
                 refresh_status=refresh,
                 style="primary",
             )
             _run_both_button(backend, refresh)
+
+        # Second row -- force-refresh variants.  Send the same body shape
+        # but with force_refresh=True so the daily Supabase odds cache is
+        # bypassed for this run.  After the live fetch finishes the cache
+        # is repopulated, so subsequent runs in the same day are free again.
+        ui.label("Force refresh (bypass daily cache, burns 1 Odds API request)").style(
+            f"font-size: 10.5px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2}; margin-top: 10px;"
+        )
+        with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
+            _async_button(
+                backend, "Force Refresh MLB",
+                "POST", "/api/analyze",
+                body={"bankroll": 250, "force_refresh": True},
+                spinner_msg="Force-fetching live MLB odds...",
+                done_msg=lambda d: f"MLB refreshed: {len(d.get('results') or [])} games.",
+                refresh_status=refresh,
+                style="warn",
+            )
+            _async_button(
+                backend, "Force Refresh WNBA",
+                "POST", "/api/wnba/analyze",
+                body={"bankroll": 1000, "force_refresh": True},
+                spinner_msg="Force-fetching live WNBA odds...",
+                done_msg=lambda d: f"WNBA refreshed: {len(d.get('results') or [])} games.",
+                refresh_status=refresh,
+                style="warn",
+            )
 
 
 def _run_both_button(backend, refresh) -> None:
@@ -596,6 +629,36 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
                 "ok" if anything else "warn",
                 " | ".join(bits),
             ))
+
+            # 6c. Daily odds cache rows -- the new ~1-call-per-sport-per-day
+            # entries.  Show date + game count so the user can see at a glance
+            # whether today's MLB/WNBA odds are already cached (no live API
+            # call needed) and how many games are in each.
+            odds_keys = (
+                ("MLB",  "odds_daily:baseball_mlb:h2h,spreads,totals:us"),
+                ("WNBA", "odds_daily:basketball_wnba:h2h,spreads,totals:us"),
+            )
+            today = backend._today_et()
+            for label, k in odds_keys:
+                row = _db.cache_get(k)
+                if row is None:
+                    out.append((
+                        f"Odds daily cache: {label}",
+                        "warn",
+                        f"key={k}  -- no row yet, next analyze will burn 1 live API call",
+                    ))
+                    continue
+                row_date = row.get("date")
+                data = row.get("data") or []
+                n = len(data) if isinstance(data, list) else "?"
+                fresh = (row_date == today)
+                out.append((
+                    f"Odds daily cache: {label}",
+                    "ok" if fresh else "warn",
+                    f"date={row_date}  games={n}  "
+                    + ("(today -- analyze will skip live API)" if fresh
+                       else f"(stale -- today is {today}, will be refreshed)"),
+                ))
     except Exception as exc:                                              # noqa: BLE001
         # Most likely failure: table doesn't exist yet.  Surface that clearly.
         msg = str(exc)
