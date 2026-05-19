@@ -73,7 +73,7 @@ def _bet_boxes(g: dict, is_mlb: bool) -> None:
     rl = g.get("run_line") if is_mlb else g.get("spread_pick")
     totals = g.get("totals") or {}
 
-    with ui.row().classes("w-full").style("gap: 6px;"):
+    with ui.row().classes("w-full bet-boxes").style("gap: 6px;"):
         # Moneyline -- always present
         bet_box.render(
             label="MONEYLINE",

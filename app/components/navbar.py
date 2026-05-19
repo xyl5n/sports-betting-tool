@@ -40,8 +40,8 @@ def render(active: str = t.TAB_HOME) -> None:
                 f"font-weight: 800; font-size: 16px; color: {t.PRIMARY};"
             )
 
-        # Main links
-        with ui.row().classes("items-center gap-1"):
+        # Main links (hidden on mobile -- bottom_nav takes over there)
+        with ui.row().classes("items-center gap-1 desktop-only"):
             # Home / AI / My Bets / Model
             for label, tab_key, href in _NAV_LINKS:
                 _nav_link(label, href, active == tab_key)

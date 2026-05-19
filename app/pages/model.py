@@ -18,7 +18,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar
+from components import navbar, sidebar, bottom_nav
 
 
 _CATS = (
@@ -35,7 +35,7 @@ def register(backend) -> None:
         navbar.render(active=t.TAB_MODEL)
         with ui.row().classes("no-wrap w-full").style("gap: 0;"):
             sidebar.render(backend)
-            with ui.column().style(
+            with ui.column().classes("page-content").style(
                 f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
@@ -44,6 +44,7 @@ def register(backend) -> None:
                 _type_records_card(history)
                 _picks_card(backend)
                 _classifier_card(history)
+        bottom_nav.render(active=t.TAB_MODEL)
 
 
 # ── Data helpers ────────────────────────────────────────────────────────────
@@ -96,7 +97,7 @@ def _bankroll_card(backend, history: list[dict]) -> None:
             f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
-        with ui.row().classes("w-full").style(f"gap: {t.SPACE_MD};"):
+        with ui.row().classes("w-full hero-stats").style(f"gap: {t.SPACE_MD};"):
             _stat("START",   f"${start:,.2f}",     t.TEXT_DIM)
             _stat("CURRENT", f"${current:,.2f}",   t.TEXT)
             _stat("P / L",   f"{pnl_sign}${abs(pnl):,.2f}", pnl_color)
@@ -118,7 +119,7 @@ def _stat(label: str, value: str, color: str) -> None:
             f"font-size: 10px; font-weight: 700; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
-        ui.label(value).style(
+        ui.label(value).classes("stat-value").style(
             f"font-size: 18px; font-weight: 800; color: {color}; "
             f"font-family: monospace; letter-spacing: -.2px;"
         )
@@ -295,7 +296,7 @@ def _classifier_card(history: list[dict]) -> None:
         f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
         f"color: {t.TEXT_DIM2};"
     )
-    with ui.row().classes("w-full").style(f"gap: {t.SPACE_MD};"):
+    with ui.row().classes("w-full bet-boxes").style(f"gap: {t.SPACE_MD};"):
         for m in models:
             _classifier_block(m, labels[m], overall[m], tallies[m], m == best)
 

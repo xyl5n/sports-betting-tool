@@ -15,7 +15,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar, game_card
+from components import navbar, sidebar, game_card, bottom_nav
 
 
 def register(backend) -> None:
@@ -24,16 +24,18 @@ def register(backend) -> None:
         ui.add_head_html(t.page_head_css())
         navbar.render(active=t.TAB_HOME)
         _layout(backend)
+        bottom_nav.render(active=t.TAB_HOME)
 
 
 def _layout(backend) -> None:
     with ui.row().classes("no-wrap w-full").style("gap: 0;"):
         sidebar.render(backend)
-        with ui.column().style(
+        with ui.column().classes("page-content").style(
             f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
             f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
         ):
             _bankroll_hero(backend)
+            sidebar.render_top_plays_only(backend)   # mobile-only inline
             _ev_section(backend)
             _ai_banner()
 
@@ -54,7 +56,7 @@ def _bankroll_hero(backend) -> None:
     pnl_color = t.POS if pnl >= 0 else t.NEG
     pnl_sign  = "+" if pnl >= 0 else "−"
 
-    with ui.row().classes("w-full").style(
+    with ui.row().classes("w-full hero-stats").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
         f"border-radius: {t.RADIUS_LG}; padding: {t.SPACE_LG}; "
         f"gap: {t.SPACE_XL}; align-items: center;"
@@ -70,7 +72,7 @@ def _stat_cell(label: str, value: str, color: str) -> None:
             f"font-size: 10px; font-weight: 700; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
-        ui.label(value).style(
+        ui.label(value).classes("stat-value").style(
             f"font-size: 22px; font-weight: 800; color: {color}; "
             f"font-family: monospace; letter-spacing: -.2px;"
         )

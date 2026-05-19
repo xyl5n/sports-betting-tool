@@ -45,9 +45,11 @@ RADIUS_LG   = "16px"
 RADIUS_PILL = "999px"
 
 # ── Layout ──────────────────────────────────────────────────────────────────
-NAVBAR_HEIGHT  = "56px"
-SIDEBAR_WIDTH  = "260px"
-MAX_CONTENT_W  = "1180px"
+NAVBAR_HEIGHT     = "56px"
+SIDEBAR_WIDTH     = "260px"
+MAX_CONTENT_W     = "1180px"
+MOBILE_BREAKPOINT = "768px"        # below this width -> mobile layout
+BOTTOM_NAV_HEIGHT = "60px"         # mobile bottom tab bar
 
 # ── Tab keys (single source of truth so navbar + router stay in sync) ───────
 TAB_HOME    = "home"
@@ -95,5 +97,36 @@ def page_head_css() -> str:
       .theme-neg  {{ color: {NEG}; }}
       .theme-warn {{ color: {WARN}; }}
       .theme-dim  {{ color: {TEXT_DIM}; }}
+
+      /* ── Responsive visibility ─────────────────────────────────────
+         .desktop-only hides on mobile, .mobile-only hides on desktop.
+         Single render path -- the browser decides which to show.    */
+      .mobile-only  {{ display: none !important; }}
+
+      @media (max-width: {MOBILE_BREAKPOINT}) {{
+        .desktop-only {{ display: none !important; }}
+        .mobile-only  {{ display: flex !important; }}
+
+        /* Tighter padding everywhere on mobile */
+        .page-content {{ padding: 12px !important; gap: 12px !important; }}
+
+        /* Hero stat cells -- wrap to 2 per row instead of 3 across */
+        .hero-stats {{
+          flex-wrap: wrap !important;
+          gap: 12px !important;
+          padding: 14px !important;
+        }}
+        .hero-stats > * {{ flex: 1 0 40% !important; min-width: 0 !important; }}
+        .hero-stats .stat-value {{ font-size: 18px !important; }}
+
+        /* Game card -- stack the three bet boxes vertically */
+        .bet-boxes {{ flex-direction: column !important; gap: 6px !important; }}
+
+        /* Reserve space at the bottom for the mobile tab bar */
+        .q-page-container {{ padding-bottom: calc({BOTTOM_NAV_HEIGHT} + 16px) !important; }}
+
+        /* Section titles a touch smaller on mobile */
+        .page-title {{ font-size: 18px !important; }}
+      }}
     </style>
     """
