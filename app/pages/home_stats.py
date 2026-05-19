@@ -70,6 +70,54 @@ def overall_record(backend) -> dict:
     }
 
 
+# ── Model Performance section (bottom of home page) ───────────────────────
+
+def model_performance(backend) -> dict:
+    """Return aggregate settled-history performance for the model.
+
+    Shape:
+        {wins: N, losses: N, pct: float | None, units: float}
+
+    `units` is a bankroll-independent P/L computed with flat 1U-per-bet
+    sizing (i.e. the unit-tracking convention sports cappers use):
+
+        win at +N        ->  +N/100  units
+        win at -N        ->  +100/N  units
+        loss             ->  -1      units
+        push / void      ->   0      units (no W/L change either)
+
+    Missing american_odds default to -110 (the most common line) so a
+    pre-migration ledger entry without the field doesn't get silently
+    omitted from the unit calc.  Push / void / no-result rows skip the
+    P/L update entirely.
+    """
+    history = _all_history(backend)
+    wins = losses = 0
+    units = 0.0
+    for h in history:
+        result = (h.get("result") or "").lower()
+        if result == "win":
+            wins += 1
+            odds = h.get("american_odds")
+            if not isinstance(odds, (int, float)):
+                odds = -110                                               # default
+            if odds > 0:
+                units += odds / 100.0
+            elif odds < 0:
+                units += 100.0 / abs(odds)
+        elif result == "loss":
+            losses += 1
+            units -= 1.0
+        # push / void: no change to either counter
+    total = wins + losses
+    return {
+        "wins":   wins,
+        "losses": losses,
+        "pct":    (wins / total) if total else None,
+        "units":  round(units, 2),
+    }
+
+
 # ── Chip #2 -- best classifier (XGB / LR / NN) ─────────────────────────────
 
 def best_classifier(backend) -> dict | None:

@@ -49,6 +49,7 @@ def _layout(backend) -> None:
             _section_ev_compact(backend)             # Section 2
             _section_confidence_carousel(backend)    # Section 3
             _ai_banner()
+            _section_model_performance(backend)      # Section 5 (very bottom)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +333,69 @@ def _carousel_arrow(scroller, direction: str) -> None:
             pass
 
     btn.on("click", _click)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Section 5 -- Model Performance (bottom of page)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _section_model_performance(backend) -> None:
+    """Three model-only stats at the very bottom of the home page.
+
+    Distinct from "personal betting performance" (which lives on /mybets):
+    this section reports the MODEL's settled-history results across both
+    sports.  Units only -- no dollar amounts, no open bets, no bankroll
+    figures.  See hs.model_performance for the unit-tracking convention.
+    """
+    perf = hs.model_performance(backend)
+    wins, losses = perf["wins"], perf["losses"]
+    pct, units  = perf["pct"], perf["units"]
+
+    pct_s   = f"{pct * 100:.1f}%" if pct is not None else "—"
+    pct_col = hs.winrate_color(pct, t)
+
+    units_sign  = "+" if units >= 0 else "−"
+    units_s     = f"{units_sign}{abs(units):.1f}U"
+    units_col   = t.POS if units >= 0 else t.NEG
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label("MODEL PERFORMANCE").style(
+                f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                f"color: {t.TEXT};"
+            )
+            ui.label("settled history · 1U flat").style(
+                f"font-size: 11px; color: {t.TEXT_DIM2};"
+            )
+        with ui.row().classes("w-full").style(
+            f"gap: {t.SPACE_SM}; flex-wrap: nowrap; align-items: stretch;"
+        ):
+            _perf_stat("WIN %",  pct_s,                 pct_col)
+            _perf_stat("RECORD", f"{wins}-{losses}",    t.TEXT)
+            _perf_stat("UNITS",  units_s,               units_col)
+
+
+def _perf_stat(label: str, value: str, color: str) -> None:
+    """One stat cell for the Model Performance row.  Equal-width siblings,
+    never wrap; matches the visual rhythm of Section 1 chips while staying
+    purely informational (no Track / no nav)."""
+    with ui.column().style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; "
+        f"padding: {t.SPACE_MD}; "
+        f"gap: 4px; "
+        f"flex: 1 1 0; min-width: 0; overflow: hidden;"
+    ):
+        ui.label(label).style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2}; "
+            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+        )
+        ui.label(value).style(
+            f"font-size: 20px; font-weight: 800; color: {color}; "
+            f"font-family: monospace; letter-spacing: -.2px; "
+            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
