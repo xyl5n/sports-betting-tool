@@ -30,6 +30,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, sidebar, bottom_nav
+from components import completion_watcher
 
 
 _ET = ZoneInfo("America/New_York")
@@ -64,6 +65,15 @@ def register(backend) -> None:
                 _section_data_reset(backend, _refresh)
                 _section_diagnostics(backend)
                 _refresh()
+
+                # Cross-page completion watcher.  On admin, the per-button
+                # polling timer (_start_status_poll) already handles
+                # in-session progress + notification when the user clicked
+                # Run themselves -- it pre-marks the completion as seen in
+                # app.storage.tab before the watcher's next tick, so we
+                # don't double-notify.  The watcher still fires for
+                # completions started elsewhere (scheduler, other tabs).
+                completion_watcher.mount(backend, on_complete=lambda _: _refresh())
         bottom_nav.render(active=t.TAB_ADMIN)
 
 
@@ -397,6 +407,17 @@ def _start_status_poll(
             except Exception:                                             # noqa: BLE001
                 pass
         btn.props(remove="loading"); btn.enable()
+        # Pre-mark this completion as seen in tab storage BEFORE the
+        # cross-page watcher's next tick fires.  The watcher would
+        # otherwise surface a second ui.notify for the same event
+        # since it can't tell the difference between an in-tab click
+        # and a cross-tab / scheduled completion.
+        completed_at_val = data.get("completed_at")
+        if completed_at_val:
+            try:
+                completion_watcher.mark_seen(sport_key, float(completed_at_val))
+            except Exception:                                             # noqa: BLE001
+                pass
         if completed and not error:
             progress_label.text = (
                 f"{sport_key.upper()} complete -- {n_games or 0} games "
@@ -576,6 +597,16 @@ def _start_both_status_poll(
             except Exception:                                             # noqa: BLE001
                 pass
         btn.props(remove="loading"); btn.enable()
+
+        # Pre-mark both completions as seen so the cross-page watcher
+        # doesn't fire a duplicate ui.notify for the same Run Both click.
+        for sport in ("mlb", "wnba"):
+            ca = rows[sport].get("completed_at")
+            if ca:
+                try:
+                    completion_watcher.mark_seen(sport, float(ca))
+                except Exception:                                          # noqa: BLE001
+                    pass
 
         msgs = []
         kind = "positive"

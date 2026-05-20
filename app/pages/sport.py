@@ -23,6 +23,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, sidebar, game_card, bottom_nav, live_score
+from components import completion_watcher
 
 
 _LIVE_POLL_INTERVAL = 60.0   # seconds between live-score refresh ticks
@@ -71,6 +72,14 @@ def _render_sport(backend, sport: str) -> None:
                 _refreshable_grid.refresh()
 
             ui.timer(_LIVE_POLL_INTERVAL, _tick)
+
+            # Watch for analysis completions kicked off from /admin or
+            # the scheduler.  When one fires, re-render the grid so the
+            # fresh picks land without a manual reload.
+            completion_watcher.mount(
+                backend,
+                on_complete=lambda _: _refreshable_grid.refresh(),
+            )
 
     bottom_nav.render(active=t.TAB_SPORTS)
 

@@ -3009,6 +3009,43 @@ def analyze_status():
     return jsonify(row)
 
 
+@app.route("/api/analyze/completions", methods=["GET"])
+def analyze_completions():
+    """Cross-page completion watcher poll endpoint.  Returns the
+    progress dict for *both* sports in one call so the page-level
+    watcher (components/completion_watcher.py) doesn't have to hit
+    /status twice per tick.
+
+    Cheap, no upstream traffic -- just reads the in-process
+    _analysis_progress dict under its lock.
+
+    Payload shape:
+      {
+        "mlb":  {running, step, completed_at, n_games, error, ...},
+        "wnba": {running, step, completed_at, n_games, error, ...},
+        "now":  <unix_ts>,
+      }
+
+    The UI compares each sport's `completed_at` against a per-tab
+    "last seen" marker in app.storage.tab to decide whether to fire
+    the success notification on this tick.
+    """
+    import time as _time
+    payload: dict[str, object] = {}
+    for sport in ("mlb", "wnba"):
+        row = _get_analysis_progress(sport)
+        started_at   = row.get("started_at")
+        completed_at = row.get("completed_at")
+        if started_at:
+            end = completed_at or _time.time()
+            row["elapsed_sec"] = max(0, int(end - started_at))
+        else:
+            row["elapsed_sec"] = 0
+        payload[sport] = row
+    payload["now"] = _time.time()
+    return jsonify(payload)
+
+
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     """Run the full analysis pipeline (mirrors main.py Steps 1-4 + 6)."""
