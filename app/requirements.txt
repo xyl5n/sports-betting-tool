@@ -56,7 +56,13 @@ scipy==1.17.1
 shap==0.51.0
 slicer==0.0.8
 threadpoolctl==3.6.0
-xgboost[cpu]==3.2.0
+# xgboost is NOT installed via this file -- xgboost 3.x's metadata
+# unconditionally lists nvidia-nccl-cu12 (~300 MB CUDA runtime) as a
+# runtime dependency, and the [cpu] extra was only added in 3.3+.
+# Railway's build container OOMs on disk before pip finishes resolving.
+# Install xgboost separately with --no-deps via RAILPACK_INSTALL_CMD
+# (env var, set in the Railway dashboard).  See README / PR #53 for
+# the exact command to paste in.
 
 # Baseball / sports data
 beautifulsoup4==4.14.3
