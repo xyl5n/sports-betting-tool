@@ -24,7 +24,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, sidebar, bottom_nav
-from components import track_button, team_logo, completion_watcher
+from components import track_button, team_logo
 from pages import home_stats as hs
 
 
@@ -35,12 +35,6 @@ def register(backend) -> None:
         navbar.render(active=t.TAB_HOME)
         _layout(backend)
         bottom_nav.render(active=t.TAB_HOME)
-        # Cross-page completion watcher: forces a full ui.navigate.reload()
-        # when a background analysis (started from /admin or the
-        # scheduler) writes a fresh `completed_at` after this page
-        # mounted.  Simpler than the old refreshable callback path --
-        # always reloads, can't get out of sync with server state.
-        completion_watcher.mount(backend)
 
 
 def _layout(backend) -> None:
