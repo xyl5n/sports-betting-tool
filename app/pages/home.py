@@ -24,7 +24,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, sidebar, bottom_nav
-from components import track_button, team_logo
+from components import track_button, team_logo, completion_watcher
 from pages import home_stats as hs
 
 
@@ -35,6 +35,15 @@ def register(backend) -> None:
         navbar.render(active=t.TAB_HOME)
         _layout(backend)
         bottom_nav.render(active=t.TAB_HOME)
+        # Cross-page completion watcher: fires ui.notify + reloads the
+        # page when a background analysis (started elsewhere -- admin
+        # or scheduled) finishes while the user is sitting on Home.
+        # On reconnect after a brief socket drop, the watcher's primer
+        # tick surfaces the completion immediately.
+        completion_watcher.mount(
+            backend,
+            on_complete=lambda _: ui.navigate.reload(),
+        )
 
 
 def _layout(backend) -> None:
