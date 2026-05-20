@@ -184,10 +184,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         # NOTE: ping_interval=30 was removed -- the installed NiceGUI
         # version does not expose it as a ui.run() kwarg and the import
         # crashed boot with TypeError: Config.__init__() got an
-        # unexpected keyword argument 'ping_interval'.  The cross-page
-        # completion watcher (components/completion_watcher.py) already
-        # papers over WebSocket drops via its on-mount primer, so the
-        # keepalive isn't load-bearing.
+        # unexpected keyword argument 'ping_interval'.
         # Disable uvicorn's default color formatter -- Railway's logger
         # wrapper trips its dictConfig() with "Unable to configure
         # formatter 'default'" because the formatter probes isatty().

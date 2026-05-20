@@ -3011,10 +3011,11 @@ def analyze_status():
 
 @app.route("/api/analyze/completions", methods=["GET"])
 def analyze_completions():
-    """Cross-page completion watcher poll endpoint.  Returns the
-    progress dict for *both* sports in one call so the page-level
-    watcher (components/completion_watcher.py) doesn't have to hit
-    /status twice per tick.
+    """Returns the progress dict for *both* sports in one call.
+    Historically powered the cross-page completion watcher; the UI
+    no longer polls it (admin buttons now run analyze synchronously
+    and force ui.navigate.reload() on success), but the endpoint is
+    kept for external callers / future tooling.
 
     Cheap, no upstream traffic -- just reads the in-process
     _analysis_progress dict under its lock.
