@@ -164,32 +164,4 @@ _hydrate_state()
 if __name__ in {"__main__", "__mp_main__"}:
     port = int(os.environ.get("PORT", 8080))
     print(f"UI_APP: NiceGUI starting on 0.0.0.0:{port}", flush=True, file=sys.stderr)
-    ui.run(
-        host="0.0.0.0",
-        port=port,
-        title="Sports Analysis",
-        favicon="🏀",
-        dark=True,
-        reload=False,
-        show=False,
-        storage_secret=os.environ.get("UI_STORAGE_SECRET", "sports-analysis-ui"),
-        # Bump the client reconnect grace from NiceGUI's 3 s default to
-        # 300 s so brief WebSocket drops during a long analysis (or
-        # mobile-screen-lock events) don't tear down the page state
-        # before the background-worker polling can resume.  The actual
-        # analyze run is decoupled into a daemon thread (see
-        # app._run_analysis_worker) so even longer drops are fine; this
-        # is the safety-net mentioned in PR #49.
-        reconnect_timeout=300,
-        # NOTE: ping_interval=30 was removed -- the installed NiceGUI
-        # version does not expose it as a ui.run() kwarg and the import
-        # crashed boot with TypeError: Config.__init__() got an
-        # unexpected keyword argument 'ping_interval'.  The cross-page
-        # completion watcher (components/completion_watcher.py) already
-        # papers over WebSocket drops via its on-mount primer, so the
-        # keepalive isn't load-bearing.
-        # Disable uvicorn's default color formatter -- Railway's logger
-        # wrapper trips its dictConfig() with "Unable to configure
-        # formatter 'default'" because the formatter probes isatty().
-        log_config=None,
-    )
+    ui.run(host='0.0.0.0', port=8080, reload=False, log_config=None)
