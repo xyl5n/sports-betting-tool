@@ -317,27 +317,28 @@ def _cache_aware_run_button(
                 return
 
             n_games = len(data_a.get("results") or [])
+
+            # 4) Re-hydrate the in-memory state from disk + refresh the
+            # admin status widgets in place.  No page reload, no
+            # flicker -- the user stays on /admin and sees the cache
+            # pills flip stale->fresh + the last-analyzed timestamp
+            # update.  When they navigate to /home or /sports, those
+            # pages' own hydrate_state() call at render time picks up
+            # the fresh _analysis_state["results"] from disk.
+            try:
+                backend.hydrate_state()
+            except Exception as exc:                                       # noqa: BLE001
+                # Don't fail the whole click -- the cache was still
+                # written, the user can manually navigate to see it.
+                print(f"admin: post-run hydrate failed: {exc}", flush=True)
+            if refresh_status:
+                refresh_status()
+
             ui.notify(
                 f"{sport_key.upper()}: analyzed {n_games} games.  "
-                f"Refreshing page...",
-                type="positive",
+                f"Open Home or Sports to see fresh picks.",
+                type="positive", multi_line=True,
             )
-
-            # 4) Force a full browser reload so every page picks up the
-            # fresh _analysis_state["results"].  Soft refreshable
-            # callbacks re-rendered from stale closures on this
-            # NiceGUI build, which is why the UI silently stayed on
-            # yesterday's picks even though analyze returned HTTP 200.
-            try:
-                ui.navigate.reload()
-            except Exception:                                             # noqa: BLE001
-                try:
-                    ui.run_javascript("window.location.reload();")
-                except Exception:                                         # noqa: BLE001
-                    # Last resort: at least refresh the admin status
-                    # widgets so the user sees something change.
-                    if refresh_status:
-                        refresh_status()
         except Exception as exc:                                          # noqa: BLE001
             ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
                       type="negative", multi_line=True)
@@ -409,21 +410,22 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
                         f"{data_a.get('error') or f'HTTP {status_a}'}"
                     )
 
+            # Re-hydrate + refresh admin widgets in place.  Same
+            # rationale as _cache_aware_run_button -- no flicker,
+            # other pages pick up the fresh state on next render.
+            try:
+                backend.hydrate_state()
+            except Exception as exc:                                       # noqa: BLE001
+                print(f"admin: post-run-both hydrate failed: {exc}", flush=True)
+            refresh()
+            if post_refresh:
+                post_refresh()
+
             ui.notify(
-                " | ".join(msgs) + ".  Refreshing page...",
+                " | ".join(msgs) + ".  Open Home or Sports to see fresh picks.",
                 type="warning" if had_err else "positive",
                 multi_line=True,
             )
-
-            try:
-                ui.navigate.reload()
-            except Exception:                                             # noqa: BLE001
-                try:
-                    ui.run_javascript("window.location.reload();")
-                except Exception:                                         # noqa: BLE001
-                    refresh()
-                    if post_refresh:
-                        post_refresh()
         except Exception as exc:                                          # noqa: BLE001
             ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
                       type="negative", multi_line=True)

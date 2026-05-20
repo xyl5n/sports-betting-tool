@@ -31,6 +31,13 @@ from pages import home_stats as hs
 def register(backend) -> None:
     @ui.page("/")
     def home_page():
+        # Re-read today's analysis cache into the in-memory state dict
+        # so this render always sees the newest picks on disk, not
+        # whatever was hydrated at boot.  Cheap (JSON read + parse).
+        try:
+            backend.hydrate_state()
+        except Exception:                                                  # noqa: BLE001
+            pass
         ui.add_head_html(t.page_head_css())
         navbar.render(active=t.TAB_HOME)
         _layout(backend)

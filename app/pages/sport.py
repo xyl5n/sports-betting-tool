@@ -44,6 +44,14 @@ def register(backend) -> None:
 
 
 def _render_sport(backend, sport: str) -> None:
+    # Re-read today's analysis cache into the in-memory state dict so
+    # this render sees the newest picks on disk.  Without this, a Run
+    # Analysis triggered elsewhere (admin, scheduler) only becomes
+    # visible after a container restart.
+    try:
+        backend.hydrate_state()
+    except Exception:                                                      # noqa: BLE001
+        pass
     ui.add_head_html(t.page_head_css())
     navbar.render(active=t.TAB_SPORTS)
 
