@@ -35,15 +35,12 @@ def register(backend) -> None:
         navbar.render(active=t.TAB_HOME)
         _layout(backend)
         bottom_nav.render(active=t.TAB_HOME)
-        # Cross-page completion watcher: fires ui.notify + reloads the
-        # page when a background analysis (started elsewhere -- admin
-        # or scheduled) finishes while the user is sitting on Home.
-        # On reconnect after a brief socket drop, the watcher's primer
-        # tick surfaces the completion immediately.
-        completion_watcher.mount(
-            backend,
-            on_complete=lambda _: ui.navigate.reload(),
-        )
+        # Cross-page completion watcher: forces a full ui.navigate.reload()
+        # when a background analysis (started from /admin or the
+        # scheduler) writes a fresh `completed_at` after this page
+        # mounted.  Simpler than the old refreshable callback path --
+        # always reloads, can't get out of sync with server state.
+        completion_watcher.mount(backend)
 
 
 def _layout(backend) -> None:
