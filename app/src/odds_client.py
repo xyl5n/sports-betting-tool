@@ -80,6 +80,7 @@ def _remove_vig(home_prob: float, away_prob: float) -> tuple[float, float]:
 
 _ODDS_BASE_DAILY_LIMIT = 500     # automatic calls allowed per ET day
 _ODDS_BONUS_STEP       = 50      # bump per "Approve Additional Pull" click
+_ODDS_CACHE_TTL        = 900     # in-memory cache TTL in seconds (15 min)
 
 # In-process fallback counter used only when Supabase is offline so the
 # system still tracks usage (just doesn't survive container restarts).
@@ -197,6 +198,60 @@ def _odds_increment_count() -> int:
     row["count"] = int(row.get("count") or 0) + 1
     _odds_write_row(row)
     return row["count"]
+
+
+# ── Cache key + freshness helpers (shared by _fetch_via_the_odds_api and
+#    the public cache_status() probe) ───────────────────────────────────────
+
+def _odds_cache_key(sport_key: str, markets: str, regions: str) -> tuple[str, str, str]:
+    """Compute the in-memory-cache key + the ET-window UTC strings used
+    in the Odds API call.  Returns (cache_key, commence_from, commence_to).
+
+    Today's ET midnight (inclusive) -> tomorrow's ET midnight (exclusive),
+    expressed in UTC.  Including the window in the cache key means a
+    request made shortly before midnight ET can't poison the next ET
+    day's window.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    et  = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    now_et = datetime.now(et)
+    today_mid    = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_mid = today_mid + timedelta(days=1)
+    commence_from = today_mid.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    commence_to   = tomorrow_mid.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cache_key = f"odds_{sport_key}_{markets}_{regions}_{commence_from}_{commence_to}"
+    return cache_key, commence_from, commence_to
+
+
+def cache_status(
+    cache,
+    sport_key: str,
+    markets: str = "h2h,spreads,totals",
+    regions: str = "us",
+) -> dict:
+    """Tell the caller whether the 15-min in-memory cache has fresh data
+    for this (sport, markets, regions) triple WITHOUT making any wire
+    call -- no HTTP, no quota burn.
+
+    Returns {fresh, ttl_sec, sport_key}.  fresh=True means
+    OddsClient.get_odds(sport_key) would return the cached games
+    without consuming daily quota.  fresh=False means the next
+    get_odds call would hit the API (assuming the daily cap isn't
+    reached).
+
+    The cache is the in-process Cache() instance.  `cache.get(key, ttl)`
+    returns None when the entry is older than `ttl` so a None return
+    means stale-or-missing.
+    """
+    cache_key, _, _ = _odds_cache_key(sport_key, markets, regions)
+    fresh = cache.get(cache_key, ttl=_ODDS_CACHE_TTL) is not None
+    return {
+        "fresh":      fresh,
+        "ttl_sec":    _ODDS_CACHE_TTL,
+        "sport_key":  sport_key,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -619,9 +674,9 @@ class OddsClient:
     ) -> list[dict]:
         """Fetch + parse upcoming games from The Odds API.
 
-        Honors the existing in-memory 15-min TTL cache (separate from the
-        daily Supabase cache handled by the caller).  Returns the parsed
-        list; raises on HTTP / parse failure so the caller can fall back.
+        Honors the existing in-memory 15-min TTL cache.  Returns the parsed
+        list; raises on HTTP / parse failure (callers turn it into 429 or
+        return [] per get_odds policy).
 
         Constrains the API response to today's ET slate via the
         `commenceTimeFrom` / `commenceTimeTo` params -- otherwise the API
@@ -629,25 +684,10 @@ class OddsClient:
         dropped by _filter_stale_games and produce a confusing "0 games
         returned" result.
         """
-        # Today's ET midnight (inclusive) -> tomorrow's ET midnight (exclusive),
-        # converted to UTC ISO strings for the Odds API.  This range covers
-        # exactly today's ET slate including any games that commence in
-        # early UTC of the following day but late ET of today.
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        _ET = ZoneInfo("America/New_York")
-        _UTC = ZoneInfo("UTC")
-        _now_et = datetime.now(_ET)
-        _today_mid_et    = _now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-        _tomorrow_mid_et = _today_mid_et + timedelta(days=1)
-        commence_from = _today_mid_et.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        commence_to   = _tomorrow_mid_et.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # In-memory short-TTL cache key includes the time-range so a request
-        # made shortly before midnight ET doesn't poison the next ET day's
-        # window.
-        cache_key = f"odds_{sport_key}_{markets}_{regions}_{commence_from}_{commence_to}"
-        cached = self.cache.get(cache_key, ttl=900)  # 15-min TTL
+        cache_key, commence_from, commence_to = _odds_cache_key(
+            sport_key, markets, regions,
+        )
+        cached = self.cache.get(cache_key, ttl=_ODDS_CACHE_TTL)
         if cached is not None:
             _log(f"  cache HIT  cache_key={cache_key!r}  cached_count={len(cached)}")
             return cached

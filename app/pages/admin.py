@@ -99,10 +99,12 @@ def _call(backend, method: str, path: str, body: dict | None = None) -> tuple[bo
 def _section_analysis(backend, refresh) -> None:
     with _card(
         "ANALYSIS",
-        "Each Run button fires an Odds API request.  The daily cap is 500 "
-        "(~666/day average for a 20k-month plan).  Once the cap is reached, "
-        "auto-runs pause until you click Approve Additional Odds Pull "
-        "below to grant +50 more.",
+        "Cache-aware Run.  Within 15 minutes of the last live fetch, "
+        "clicking Run reuses the cached odds -- zero quota burn.  After "
+        "15 minutes the button asks for confirmation before pulling "
+        "fresh odds.  Daily cap is 500 (~666/day average for a 20k-month "
+        "plan); use Approve Additional Odds Pull below to grant +50 "
+        "more when the cap is reached.",
     ):
         # Quota row -- counter + remaining + approve button.  Re-renders on
         # every refresh() call (i.e. after every analyze + on page open).
@@ -177,28 +179,144 @@ def _section_analysis(backend, refresh) -> None:
 
         _render_quota()
 
-        # Run buttons.  No more "cached odds" labels -- the daily cache was
-        # removed; each Run is a live API call subject to the quota above.
+        # 15-min cache info row -- shows whether each sport is currently
+        # cached-fresh so the user knows up-front whether clicking Run
+        # would be free (cache hit) or would burn a quota request.
+        cache_info_holder = ui.row().classes("items-center w-full").style(
+            "gap: 12px; flex-wrap: wrap;"
+        )
+
+        def _render_cache_info() -> None:
+            cache_info_holder.clear()
+            ok, data, _ = _call(backend, "GET", "/api/odds/cache_status?sport=both")
+            mlb_fresh  = bool((data.get("mlb")  or {}).get("fresh")) if ok else False
+            wnba_fresh = bool((data.get("wnba") or {}).get("fresh")) if ok else False
+            with cache_info_holder:
+                ui.label("15-min cache:").style(
+                    f"font-size: 11.5px; color: {t.TEXT_DIM2};"
+                )
+                for label, fresh in (("MLB", mlb_fresh), ("WNBA", wnba_fresh)):
+                    color = t.POS if fresh else t.WARN
+                    txt   = f"{label}: {'fresh' if fresh else 'stale'}"
+                    ui.label(txt).style(
+                        f"font-size: 11.5px; font-weight: 700; color: {color}; "
+                        f"background: {t.CARD_HI}; padding: 2px 8px; "
+                        f"border-radius: {t.RADIUS_PILL};"
+                    )
+
+        _render_cache_info()
+
+        # Run buttons.  Cache-aware behavior:
+        #   - if /api/odds/cache_status says fresh -> POST analyze directly
+        #     (cache hit inside OddsClient.get_odds means 0 quota burn)
+        #   - if stale -> _confirm_dialog asks the user before firing the
+        #     live API call.  Cancelling aborts the run entirely.
         with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
-            _async_button(
+            _cache_aware_run_button(
                 backend, "Run MLB Analysis",
-                "POST", "/api/analyze",
-                body={"bankroll": 250},
-                spinner_msg="Running MLB analysis...",
-                done_msg=lambda d: f"MLB: analyzed {len(d.get('results') or [])} games.",
-                refresh_status=lambda: (refresh(), _render_quota()),
+                "/api/analyze", {"bankroll": 250},
+                sport_key="mlb",
+                refresh_status=lambda: (refresh(), _render_quota(), _render_cache_info()),
                 style="primary",
             )
-            _async_button(
+            _cache_aware_run_button(
                 backend, "Run WNBA Analysis",
-                "POST", "/api/wnba/analyze",
-                body={"bankroll": 1000},
-                spinner_msg="Running WNBA analysis...",
-                done_msg=lambda d: f"WNBA: analyzed {len(d.get('results') or [])} games.",
-                refresh_status=lambda: (refresh(), _render_quota()),
+                "/api/wnba/analyze", {"bankroll": 1000},
+                sport_key="wnba",
+                refresh_status=lambda: (refresh(), _render_quota(), _render_cache_info()),
                 style="primary",
             )
-            _run_both_button(backend, refresh, post_refresh=_render_quota)
+            _run_both_button(
+                backend, refresh,
+                post_refresh=lambda: (_render_quota(), _render_cache_info()),
+            )
+
+
+def _cache_aware_run_button(
+    backend, label: str, path: str, body: dict, *,
+    sport_key: str, refresh_status=None, style: str = "primary",
+) -> None:
+    """Run button that gates the live Odds API call behind a 15-min cache
+    check + confirmation dialog.
+
+    Flow:
+      1. GET /api/odds/cache_status?sport=<sport_key>
+      2. fresh=True       -> POST {path} immediately (cache hit, 0 quota)
+      3. fresh=False      -> _confirm_dialog("Pull fresh odds? ...")
+                              - user confirms -> POST {path}
+                              - user cancels  -> abort, no quota burn
+
+    Both paths use the same toast / spinner pattern as _async_button so
+    the visual experience is identical when the cache happens to be hot.
+    """
+    btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+
+    async def _click():
+        btn.props("loading"); btn.disable()
+        try:
+            # 1) Cache freshness check -- free, no upstream traffic.
+            ok, status_data, _ = await asyncio.to_thread(
+                _call, backend, "GET",
+                f"/api/odds/cache_status?sport={sport_key}",
+            )
+            fresh = bool(ok and status_data.get("fresh"))
+
+            # 2) Stale -> ask the user.
+            if not fresh:
+                # Pull current quota too so the dialog can quote what's
+                # left.  Cheap -- /api/odds/usage doesn't hit upstream.
+                ok_u, usage, _ = await asyncio.to_thread(
+                    _call, backend, "GET", "/api/odds/usage")
+                remaining_s = ""
+                if ok_u:
+                    rem  = int(usage.get("remaining") or 0)
+                    lim  = int(usage.get("effective_limit") or 500)
+                    remaining_s = f"  ({rem} of {lim} remaining today)"
+                proceed = await _confirm_dialog(
+                    f"{sport_key.upper()} odds cache is older than 15 minutes "
+                    f"(or missing).  Pull fresh odds from The Odds API now?"
+                    f"\n\nThis uses 1 daily quota request.{remaining_s}"
+                )
+                if not proceed:
+                    ui.notify(
+                        f"{sport_key.upper()} analysis cancelled.  "
+                        f"No API request made.",
+                        type="info",
+                    )
+                    return
+
+            # 3) Run the analysis.  Cache hit on a fresh sport -> no
+            # quota burn; live call on a stale (now confirmed) sport ->
+            # +1 quota burn handled inside OddsClient._get.
+            spinner = f"Running {sport_key.upper()} analysis..."
+            ui.notify(spinner, type="ongoing")
+            ok2, data2, status = await asyncio.to_thread(
+                _call, backend, "POST", path, body,
+            )
+            if ok2:
+                n = len(data2.get("results") or [])
+                ui.notify(
+                    f"{sport_key.upper()}: analyzed {n} games.",
+                    type="positive",
+                )
+            elif status == 429:
+                ui.notify(
+                    f"{sport_key.upper()} blocked: "
+                    f"{data2.get('error') or 'daily Odds API limit reached'}.",
+                    type="negative", multi_line=True,
+                )
+            else:
+                ui.notify(
+                    f"{sport_key.upper()} failed: "
+                    f"{data2.get('error') or 'unknown error'}",
+                    type="negative", multi_line=True,
+                )
+            if refresh_status:
+                refresh_status()
+        finally:
+            btn.props(remove="loading"); btn.enable()
+
+    btn.on("click", _click)
 
 
 def _run_both_button(backend, refresh, post_refresh=None) -> None:
@@ -211,6 +329,37 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
         btn.props("loading")
         btn.disable()
         try:
+            # Combined cache check -- if either sport is stale, ask once
+            # before running both.  Both sports' analyses then run in
+            # sequence; cache-fresh ones burn 0 quota and the freshly
+            # confirmed ones burn 1 each.
+            _, status_data, _ = await asyncio.to_thread(
+                _call, backend, "GET", "/api/odds/cache_status?sport=both")
+            mlb_fresh  = bool((status_data.get("mlb")  or {}).get("fresh"))
+            wnba_fresh = bool((status_data.get("wnba") or {}).get("fresh"))
+            stale = [
+                lbl for lbl, fresh in (("MLB", mlb_fresh), ("WNBA", wnba_fresh))
+                if not fresh
+            ]
+            if stale:
+                # Get current quota for the dialog text.
+                _, usage, _ = await asyncio.to_thread(
+                    _call, backend, "GET", "/api/odds/usage")
+                rem  = int(usage.get("remaining") or 0)
+                lim  = int(usage.get("effective_limit") or 500)
+                stale_s = " + ".join(stale)
+                proceed = await _confirm_dialog(
+                    f"{stale_s} odds cache is older than 15 minutes (or "
+                    f"missing).  Pull fresh odds from The Odds API now?"
+                    f"\n\nThis uses {len(stale)} daily quota request"
+                    f"{'s' if len(stale) > 1 else ''}  "
+                    f"({rem} of {lim} remaining today)."
+                )
+                if not proceed:
+                    ui.notify("Run Both cancelled.  No API requests made.",
+                              type="info")
+                    return
+
             ui.notify("Running MLB + WNBA analysis...", type="ongoing")
             ok_mlb,  d_mlb,  _ = await asyncio.to_thread(
                 _call, backend, "POST", "/api/analyze", {"bankroll": 250})
