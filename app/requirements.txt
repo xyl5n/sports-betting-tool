@@ -56,7 +56,7 @@ scipy==1.17.1
 shap==0.51.0
 slicer==0.0.8
 threadpoolctl==3.6.0
-xgboost==3.2.0
+xgboost[cpu]==3.2.0
 
 # Baseball / sports data
 beautifulsoup4==4.14.3
