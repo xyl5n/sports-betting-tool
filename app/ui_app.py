@@ -164,4 +164,10 @@ _hydrate_state()
 if __name__ in {"__main__", "__mp_main__"}:
     port = int(os.environ.get("PORT", 8080))
     print(f"UI_APP: NiceGUI starting on 0.0.0.0:{port}", flush=True, file=sys.stderr)
-    ui.run(host='0.0.0.0', port=8080, reload=False, log_config=None)
+    ui.run(
+        host='0.0.0.0',
+        port=port,
+        reload=False,
+        log_config=None,
+        storage_secret=os.environ.get('UI_STORAGE_SECRET', 'sports-analysis-ui'),
+    )
