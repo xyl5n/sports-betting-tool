@@ -1,64 +1,80 @@
 """
-Cross-page analysis-completion watcher.
+Analysis-completion watcher -- forces a full page reload when a
+background analyze writes a fresh `completed_at` to the shared progress
+dict on the backend.
 
-Mounts a 5 s polling timer on every page that compares each sport's
-`completed_at` (from /api/analyze/completions) against a per-tab
-"last seen" value persisted in `app.storage.tab`.  When a new completion
-is observed:
+Why the rewrite (was: 5 s polling + app.storage.tab dedup + page-specific
+refreshable callbacks):
 
-  - fires a single ui.notify ("Analysis complete -- N MLB games and
-    M WNBA games loaded")
-  - records the new completed_at in tab storage so a page reload won't
-    re-fire
-  - invokes the page's `on_complete` callback (default: a soft refresh
-    of the current page) so game data updates without a manual click.
+  The previous design tried to be clever -- refresh just the
+  `@ui.refreshable` game grid in place, dedupe notifications via
+  app.storage.tab.  In practice users reported that the UI never
+  updated after analyze completed; the most plausible failure mode is
+  that page-local refreshable wrappers re-render from stale Python
+  state (closures captured during the original page render don't see
+  re-bound module-level attributes), so the "fresh" render still drew
+  yesterday's picks.
 
-Why a per-page watcher (instead of relying on a single long-running
-button-bound timer):
+  The simplest design that can't fail is: when the background worker
+  finishes, force a full browser reload.  That kicks the page through
+  every server-side data-load path from scratch -- no closures, no
+  refreshable bookkeeping, no Python-state-vs-served-render skew.
 
-  1.  Browser WebSocket drops kill the timer; reconnects don't restore
-      it.  A page-level timer is re-created on every page mount, so a
-      disconnect + reconnect always picks back up.
-  2.  Users on the Home / Sports tab while analysis runs in the
-      background should still see the completion banner -- not just
-      users sitting on the Admin tab.
-  3.  Per-tab "seen" markers in app.storage.tab dedupe notifications
-      across page reloads in the same tab without preventing other tabs
-      from firing their own.
+How it works:
 
-Pairs with the existing admin per-button polling: that timer drives the
-inline "step 4: Predicting Spread (37s)" label.  Completion *notification*
-is owned by this watcher.  Admin's _start_status_poll now writes its
-own completed_at to app.storage.tab before the watcher polls, so the
-admin page doesn't double-notify when the user clicked Run there.
+  1.  Page mount captures `mount_time = time.time()` into a closure dict.
+  2.  ui.timer(2.0) ticks every 2 s.  Each tick GETs
+      /api/analyze/completions and looks at each sport's `completed_at`.
+  3.  If any sport's completed_at > mount_time, the timer fires
+      ui.navigate.reload() exactly once, then sets `stopped = True`
+      so subsequent ticks no-op (and deactivate()s the timer).
+  4.  After the reload the new page render captures a fresh mount_time,
+      so it won't re-fire on the same completion.
+
+No app.storage.tab anywhere -- the dedup is implicit in the reload
+itself (the new render bumps mount_time past the completed_at value
+so the same event can't fire twice).
+
+Mounted on pages that show game data (home, sport, game_detail).  The
+admin page is intentionally excluded -- its per-button polling timer
+already handles in-session progress + completion feedback, and a
+forced reload mid-click would yank the user off their position.
 """
 from __future__ import annotations
 
 import time as _time
-from typing import Callable, Optional
 
-from nicegui import ui, app
-
-
-_POLL_INTERVAL_SEC   = 5.0
-_PRIMER_DELAY_SEC    = 0.3
-_RECENT_WINDOW_SEC   = 600        # only fire for completions <10 min old
-_TAB_KEY_TEMPLATE    = "_analysis_completion_seen_{sport}"
+from nicegui import ui
 
 
-def mount(
-    backend,
-    on_complete: Optional[Callable[[list[tuple[str, int, str | None]]], None]] = None,
-) -> None:
-    """Start the watcher on the current page.
+_POLL_INTERVAL_SEC = 2.0
+_PRIMER_DELAY_SEC  = 0.4   # first check shortly after mount
 
-    `on_complete` receives the list of new completions, where each entry
-    is (sport, n_games, error_or_None).  If omitted, no page refresh is
-    triggered -- only the ui.notify fires.  Pages that show game data
-    should pass a refresher (e.g. `lambda _: _refreshable_grid.refresh()`).
-    """
+
+def mount(backend) -> None:
+    """Start the watcher on the current page.  No callback parameter --
+    completion always triggers a full ui.navigate.reload()."""
+
+    mount_time = _time.time()
+    state = {"stopped": False, "timer": None}
+
+    def _trigger_reload() -> None:
+        """Fire a full browser reload.  ui.navigate.reload() is the
+        canonical NiceGUI 2.x API; falls back to direct JS for older
+        builds that may not have plumbed it through to the page handler
+        scope (we've seen one NiceGUI kwarg silently missing on this
+        deployment before)."""
+        try:
+            ui.navigate.reload()
+        except Exception:                                                  # noqa: BLE001
+            try:
+                ui.run_javascript("window.location.reload();")
+            except Exception:                                              # noqa: BLE001
+                pass  # nothing else we can do -- next tick will retry
 
     async def _tick() -> None:
+        if state["stopped"]:
+            return
         try:
             client = backend.app.test_client()
             resp   = client.get("/api/analyze/completions")
@@ -66,15 +82,7 @@ def mount(
         except Exception:                                                  # noqa: BLE001
             return  # transient -- next tick retries
 
-        # tab storage is only available inside a page handler; defensive
-        # check for the rare case we're called from elsewhere.
-        try:
-            tab_store = app.storage.tab
-        except Exception:                                                  # noqa: BLE001
-            tab_store = None
-
-        now = _time.time()
-        new_completions: list[tuple[str, int, str | None]] = []
+        newer = False
         for sport in ("mlb", "wnba"):
             row = data.get(sport) or {}
             completed_at = row.get("completed_at")
@@ -84,65 +92,27 @@ def mount(
                 completed_at = float(completed_at)
             except (TypeError, ValueError):
                 continue
-            if completed_at < (now - _RECENT_WINDOW_SEC):
-                continue   # stale completion -- don't surface
+            if completed_at > mount_time:
+                newer = True
+                break
 
-            seen_key  = _TAB_KEY_TEMPLATE.format(sport=sport)
-            if tab_store is not None:
-                last_seen = float(tab_store.get(seen_key) or 0)
-            else:
-                last_seen = 0.0
-            if completed_at <= last_seen + 0.5:
-                continue   # already surfaced this completion in this tab
-
-            if tab_store is not None:
-                tab_store[seen_key] = completed_at
-            new_completions.append((
-                sport,
-                int(row.get("n_games") or 0),
-                row.get("error"),
-            ))
-
-        if not new_completions:
+        if not newer:
             return
 
-        had_err = any(err for _, _, err in new_completions)
-        parts: list[str] = []
-        for sport, n, err in new_completions:
-            if err:
-                parts.append(f"{sport.upper()} failed: {err}")
-            else:
-                parts.append(f"{n} {sport.upper()} games")
-
-        ui.notify(
-            f"Analysis complete -- {' and '.join(parts)} loaded.",
-            type="warning" if had_err else "positive",
-            multi_line=True, timeout=8000, close_button=True,
-        )
-
-        if on_complete is not None:
+        # Mark stopped FIRST so the deactivate path + reload don't race
+        # an additional tick into firing a second reload.
+        state["stopped"] = True
+        timer = state.get("timer")
+        if timer is not None:
             try:
-                on_complete(new_completions)
+                timer.deactivate()
             except Exception:                                              # noqa: BLE001
-                pass   # never let a page's refresh crash the watcher
+                pass
+        _trigger_reload()
 
-    ui.timer(_POLL_INTERVAL_SEC, _tick, active=True)
-    # Primer: fires once on mount so a disconnected-then-reconnected
-    # client sees a fresh completion immediately, not after 5 s.
+    state["timer"] = ui.timer(_POLL_INTERVAL_SEC, _tick, active=True)
+    # Primer: fires shortly after mount so a page opened *just after*
+    # an analyze completes (e.g. user clicked Run on /admin then tabbed
+    # back to /sports right away) doesn't wait the full 2 s before
+    # picking up the fresh data.
     ui.timer(_PRIMER_DELAY_SEC, _tick, once=True)
-
-
-def mark_seen(sport: str, completed_at: float) -> None:
-    """Record a completed_at as already-surfaced in this tab.  Called
-    from the admin per-button polling timer when IT surfaces a completion,
-    so the watcher's next tick won't double-notify."""
-    try:
-        tab_store = app.storage.tab
-    except Exception:                                                      # noqa: BLE001
-        return
-    if not completed_at:
-        return
-    seen_key = _TAB_KEY_TEMPLATE.format(sport=sport)
-    current  = float(tab_store.get(seen_key) or 0)
-    if completed_at > current:
-        tab_store[seen_key] = float(completed_at)

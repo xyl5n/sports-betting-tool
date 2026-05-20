@@ -45,6 +45,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, bottom_nav, team_logo, track_button, live_score
+from components import completion_watcher
 
 
 _ET = ZoneInfo("America/New_York")
@@ -75,6 +76,10 @@ def register(backend) -> None:
                 _section_team_context_placeholder()
                 _section_game_context(serialized)
                 _section_upset_factor(serialized)
+        # Reload this page if an analyze writes fresh `completed_at`
+        # while the user's reading the detail view.  Same watcher as
+        # /sports/* -- 2 s polling, full ui.navigate.reload() on hit.
+        completion_watcher.mount(backend)
         bottom_nav.render(active=t.TAB_SPORTS)
 
 

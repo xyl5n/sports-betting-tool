@@ -74,12 +74,12 @@ def _render_sport(backend, sport: str) -> None:
             ui.timer(_LIVE_POLL_INTERVAL, _tick)
 
             # Watch for analysis completions kicked off from /admin or
-            # the scheduler.  When one fires, re-render the grid so the
-            # fresh picks land without a manual reload.
-            completion_watcher.mount(
-                backend,
-                on_complete=lambda _: _refreshable_grid.refresh(),
-            )
+            # the scheduler.  Forces a full ui.navigate.reload() rather
+            # than calling _refreshable_grid.refresh() -- the refreshable
+            # path was redrawing from closures that still pointed at
+            # stale Python state on this NiceGUI version, so users saw
+            # the same picks even after the worker wrote fresh ones.
+            completion_watcher.mount(backend)
 
     bottom_nav.render(active=t.TAB_SPORTS)
 
