@@ -2820,64 +2820,148 @@ def _record_analysis_step(sport: str, label: str) -> None:
 
 def _run_analysis_worker(sport: str, body: dict) -> None:
     """Daemon-thread entry point: runs one sport's analyze via the Flask
-    test client and writes status updates throughout."""
+    test client and writes status updates throughout.
+
+    Every code path here is logged to stderr because the analyze pipeline
+    is long, the thread isn't attached to a request, and the only way to
+    see where it died (if it dies) is the Railway log stream.  The
+    outermost handler catches BaseException so SystemExit / KeyboardInterrupt
+    don't slip through silently — the thread MUST always either set
+    completed_at + error or print a traceback to stderr before exiting."""
     import time as _time
-    _set_analysis_progress(
-        sport,
-        running=True, step="Starting analysis...",
-        step_num=0, total_steps=8,
-        started_at=_time.time(), completed_at=None,
-        error=None, n_games=None,
+    import traceback as _traceback
+
+    print(
+        f"BACKGROUND THREAD STARTED [{sport.upper()}] "
+        f"thread={_threading_for_analyze.current_thread().name}",
+        flush=True, file=sys.stderr,
     )
-    path = "/api/wnba/analyze" if sport == "wnba" else "/api/analyze"
+
     try:
-        client = app.test_client()
-        resp = client.post(path, json=body or {})
-        try:
-            data = resp.get_json(force=True, silent=True) or {}
-        except Exception:                                                 # noqa: BLE001
-            data = {}
-        if resp.status_code >= 400:
-            err = data.get("error") or f"HTTP {resp.status_code}"
+        _set_analysis_progress(
+            sport,
+            running=True, step="Starting analysis...",
+            step_num=0, total_steps=8,
+            started_at=_time.time(), completed_at=None,
+            error=None, n_games=None,
+        )
+        print(f"WORKER [{sport.upper()}] progress dict initialized",
+              flush=True, file=sys.stderr)
+
+        path = "/api/wnba/analyze" if sport == "wnba" else "/api/analyze"
+
+        # Push an app context for the whole worker run.  test_client.post()
+        # pushes its own request context per-call, but if any upstream
+        # code touches current_app / g outside the request scope (e.g.
+        # logging extensions, scheduler hooks, db.session.* helpers) it
+        # would NoneType-explode in a bare thread.  app_context covers
+        # that.
+        print(f"WORKER [{sport.upper()}] entering app_context",
+              flush=True, file=sys.stderr)
+        with app.app_context():
+            print(f"WORKER [{sport.upper()}] app_context entered; "
+                  f"building test client",
+                  flush=True, file=sys.stderr)
+            client = app.test_client()
+            print(f"WORKER [{sport.upper()}] POSTing {path} ...",
+                  flush=True, file=sys.stderr)
+            resp = client.post(path, json=body or {})
+            print(f"WORKER [{sport.upper()}] POST {path} -> "
+                  f"HTTP {resp.status_code}",
+                  flush=True, file=sys.stderr)
+            try:
+                data = resp.get_json(force=True, silent=True) or {}
+            except Exception as exc_json:                                 # noqa: BLE001
+                print(f"WORKER [{sport.upper()}] get_json failed: "
+                      f"{type(exc_json).__name__}: {exc_json}",
+                      flush=True, file=sys.stderr)
+                data = {}
+
+            if resp.status_code >= 400:
+                err = data.get("error") or f"HTTP {resp.status_code}"
+                print(f"WORKER [{sport.upper()}] analyze returned error: {err}",
+                      flush=True, file=sys.stderr)
+                _set_analysis_progress(
+                    sport, running=False, step=f"Failed: {err}",
+                    completed_at=_time.time(), error=err, n_games=0,
+                )
+                return
+
+            n = len(data.get("results") or [])
+            print(f"WORKER [{sport.upper()}] analyze complete -- {n} games",
+                  flush=True, file=sys.stderr)
             _set_analysis_progress(
-                sport, running=False, step=f"Failed: {err}",
-                completed_at=_time.time(), error=err, n_games=0,
+                sport, running=False,
+                step=f"Complete -- {n} games analyzed",
+                completed_at=_time.time(), error=None, n_games=n,
             )
-            return
-        n = len(data.get("results") or [])
-        _set_analysis_progress(
-            sport, running=False,
-            step=f"Complete -- {n} games analyzed",
-            completed_at=_time.time(), error=None, n_games=n,
+            print(f"WORKER [{sport.upper()}] progress dict finalized; "
+                  f"thread exiting cleanly",
+                  flush=True, file=sys.stderr)
+
+    except BaseException as exc:                                          # noqa: BLE001
+        # Catches Exception, SystemExit, KeyboardInterrupt, GeneratorExit
+        # — anything that could otherwise kill the thread silently.
+        tb = _traceback.format_exc()
+        print(
+            f"WORKER [{sport.upper()}] FATAL "
+            f"{type(exc).__name__}: {exc}\n{tb}",
+            flush=True, file=sys.stderr,
         )
-    except Exception as exc:                                              # noqa: BLE001
-        _set_analysis_progress(
-            sport, running=False,
-            step=f"Failed: {type(exc).__name__}",
-            completed_at=_time.time(),
-            error=f"{type(exc).__name__}: {exc}", n_games=0,
-        )
+        try:
+            _set_analysis_progress(
+                sport, running=False,
+                step=f"Failed: {type(exc).__name__}",
+                completed_at=_time.time(),
+                error=f"{type(exc).__name__}: {exc}", n_games=0,
+            )
+        except BaseException as exc_inner:                                # noqa: BLE001
+            # Even the progress dict write could in theory fail — log
+            # but don't re-raise.
+            print(
+                f"WORKER [{sport.upper()}] could not record fatal: "
+                f"{type(exc_inner).__name__}: {exc_inner}",
+                flush=True, file=sys.stderr,
+            )
+        # SystemExit etc are intentionally swallowed here so the thread
+        # doesn't propagate them; the only caller is Thread.run which
+        # would just log them and exit anyway.
 
 
 def _start_analysis_thread(sport: str, body: dict) -> dict:
-    """Spawn a daemon thread for the given sport, refusing if one is
+    """Spawn a worker thread for the given sport, refusing if one is
     already in flight.  Returns the payload the /start endpoint sends
-    back to the UI."""
+    back to the UI.
+
+    Uses daemon=False so a slow analyze in flight at shutdown gets a
+    chance to finish (uvicorn's graceful-shutdown window).  The thread
+    is observable on Railway as 'analyze-<sport>' in any thread dump."""
     current = _get_analysis_progress(sport)
     if current.get("running"):
+        print(f"START_THREAD [{sport.upper()}] refused -- already running",
+              flush=True, file=sys.stderr)
         return {
             "success": False, "started": False,
             "error":   f"{sport.upper()} analysis already running.",
             "status":  current,
             "http_status": 409,
         }
+
+    print(f"START_THREAD [{sport.upper()}] constructing Thread...",
+          flush=True, file=sys.stderr)
     th = _threading_for_analyze.Thread(
         target=_run_analysis_worker,
         args=(sport, body),
         name=f"analyze-{sport}",
-        daemon=True,
+        daemon=False,
     )
+    print(f"START_THREAD [{sport.upper()}] calling .start() "
+          f"(daemon={th.daemon})",
+          flush=True, file=sys.stderr)
     th.start()
+    print(f"START_THREAD [{sport.upper()}] started; "
+          f"is_alive={th.is_alive()}",
+          flush=True, file=sys.stderr)
     return {
         "success": True, "started": True,
         "sport":   sport,
