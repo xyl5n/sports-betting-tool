@@ -181,14 +181,13 @@ if __name__ in {"__main__", "__mp_main__"}:
         # app._run_analysis_worker) so even longer drops are fine; this
         # is the safety-net mentioned in PR #49.
         reconnect_timeout=300,
-        # 30 s WebSocket keepalive (was Socket.IO's 25 s default in
-        # NiceGUI's older builds).  Keeps the connection warm through
-        # long analyze runs and mobile-network idle periods so the
-        # browser doesn't tear it down mid-poll.  Pairs with the
-        # cross-page completion watcher: even if a keepalive miss does
-        # drop the socket, the watcher's primer fires on reconnect
-        # and immediately surfaces any completed run.
-        ping_interval=30,
+        # NOTE: ping_interval=30 was removed -- the installed NiceGUI
+        # version does not expose it as a ui.run() kwarg and the import
+        # crashed boot with TypeError: Config.__init__() got an
+        # unexpected keyword argument 'ping_interval'.  The cross-page
+        # completion watcher (components/completion_watcher.py) already
+        # papers over WebSocket drops via its on-mount primer, so the
+        # keepalive isn't load-bearing.
         # Disable uvicorn's default color formatter -- Railway's logger
         # wrapper trips its dictConfig() with "Unable to configure
         # formatter 'default'" because the formatter probes isatty().
