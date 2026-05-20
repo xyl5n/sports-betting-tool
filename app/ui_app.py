@@ -173,6 +173,14 @@ if __name__ in {"__main__", "__mp_main__"}:
         reload=False,
         show=False,
         storage_secret=os.environ.get("UI_STORAGE_SECRET", "sports-analysis-ui"),
+        # Bump the client reconnect grace from NiceGUI's 3 s default to
+        # 300 s so brief WebSocket drops during a long analysis (or
+        # mobile-screen-lock events) don't tear down the page state
+        # before the background-worker polling can resume.  The actual
+        # analyze run is decoupled into a daemon thread (see
+        # app._run_analysis_worker) so even longer drops are fine; this
+        # is the safety-net mentioned in PR #49.
+        reconnect_timeout=300,
         # Disable uvicorn's default color formatter -- Railway's logger
         # wrapper trips its dictConfig() with "Unable to configure
         # formatter 'default'" because the formatter probes isatty().
