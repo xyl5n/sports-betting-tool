@@ -4116,6 +4116,43 @@ def odds_usage_endpoint():
         }), 200
 
 
+@app.route("/api/odds/cache_status", methods=["GET"])
+def odds_cache_status_endpoint():
+    """Return whether the 15-min Odds API cache has fresh data for the
+    given sport.  No HTTP call to the-odds-api.com, no quota burn.
+
+    Used by the admin Run buttons to decide whether to show the
+    "Pull fresh odds?" confirmation dialog before calling /api/analyze.
+
+    Query:
+      sport=mlb|wnba|both   (default 'both' -> returns both sports)
+
+    Returns:
+      single sport  -> {sport, fresh, ttl_sec}
+      both          -> {mlb: {fresh, ttl_sec}, wnba: {fresh, ttl_sec}}
+    """
+    try:
+        from src.odds_client import cache_status as _cache_status
+        sport = (request.args.get("sport") or "both").strip().lower()
+        sport_keys = {
+            "mlb":  "baseball_mlb",
+            "wnba": "basketball_wnba",
+        }
+        if sport in sport_keys:
+            return jsonify(_cache_status(_cache, sport_keys[sport]))
+        # 'both' (or anything else) -> aggregate response.
+        return jsonify({
+            "mlb":  _cache_status(_cache, sport_keys["mlb"]),
+            "wnba": _cache_status(_cache, sport_keys["wnba"]),
+        })
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({
+            "error":         _redact(str(exc)),
+            "mlb":  {"fresh": False, "ttl_sec": 900, "sport_key": "baseball_mlb"},
+            "wnba": {"fresh": False, "ttl_sec": 900, "sport_key": "basketball_wnba"},
+        }), 200
+
+
 @app.route("/api/admin/odds/approve_additional", methods=["POST"])
 def odds_approve_additional():
     """Add +50 to today's Odds API allowance so blocked auto-runs can
