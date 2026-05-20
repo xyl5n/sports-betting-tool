@@ -237,19 +237,39 @@ def _cache_aware_run_button(
     sport_key: str, refresh_status=None, style: str = "primary",
 ) -> None:
     """Run button that gates the live Odds API call behind a 15-min cache
-    check + confirmation dialog.
+    check + confirmation dialog, and then KICKS OFF a background worker
+    via /api/<sport>/analyze/start.  The actual analyze pipeline runs in
+    a daemon thread; this handler polls /api/analyze/status every 5 s
+    and updates an inline progress label until the worker reports
+    completion.
+
+    Why the polling indirection instead of awaiting the analyze POST
+    directly: a synchronous /api/analyze response can take 30-90 s,
+    which is longer than the WebSocket / load-balancer idle timeouts
+    that Railway sees.  Decoupling means the work survives transient
+    disconnects -- the worker keeps running in the background and the
+    user's next page-load (or this same handler's next tick) sees the
+    same completed status.
+
+    `path` is the legacy analyze route ("/api/analyze" or
+    "/api/wnba/analyze"); we derive the start path by appending /start.
 
     Flow:
       1. GET /api/odds/cache_status?sport=<sport_key>
-      2. fresh=True       -> POST {path} immediately (cache hit, 0 quota)
-      3. fresh=False      -> _confirm_dialog("Pull fresh odds? ...")
-                              - user confirms -> POST {path}
-                              - user cancels  -> abort, no quota burn
-
-    Both paths use the same toast / spinner pattern as _async_button so
-    the visual experience is identical when the cache happens to be hot.
+      2. fresh=True       -> POST {path}/start  (cache hit -> 0 quota
+                              inside OddsClient.get_odds anyway)
+      3. fresh=False      -> _confirm_dialog("Pull fresh odds?")
+                              -> confirm -> POST {path}/start
+                              -> cancel  -> abort, no quota burn
+      4. Render a "Running... Step X: <label>  (Ns)" line under the
+         button.  ui.timer(5.0) polls /api/analyze/status until done.
     """
     btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+    # Inline progress label under the button -- empty when idle, filled
+    # in once a worker starts.
+    progress_label = ui.label("").style(
+        f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+    )
 
     async def _click():
         btn.props("loading"); btn.disable()
@@ -263,8 +283,6 @@ def _cache_aware_run_button(
 
             # 2) Stale -> ask the user.
             if not fresh:
-                # Pull current quota too so the dialog can quote what's
-                # left.  Cheap -- /api/odds/usage doesn't hit upstream.
                 ok_u, usage, _ = await asyncio.to_thread(
                     _call, backend, "GET", "/api/odds/usage")
                 remaining_s = ""
@@ -283,56 +301,149 @@ def _cache_aware_run_button(
                         f"No API request made.",
                         type="info",
                     )
+                    btn.props(remove="loading"); btn.enable()
                     return
 
-            # 3) Run the analysis.  Cache hit on a fresh sport -> no
-            # quota burn; live call on a stale (now confirmed) sport ->
-            # +1 quota burn handled inside OddsClient._get.
-            spinner = f"Running {sport_key.upper()} analysis..."
-            ui.notify(spinner, type="ongoing")
-            ok2, data2, status = await asyncio.to_thread(
-                _call, backend, "POST", path, body,
+            # 3) Kick off the background worker via /start.  Returns
+            # 202 immediately -- the daemon thread runs analyze() via
+            # the in-process test client.  Returns 409 with the current
+            # status payload if a worker for this sport is already
+            # in flight.
+            start_path = f"{path}/start"
+            ok_s, data_s, status_s = await asyncio.to_thread(
+                _call, backend, "POST", start_path, body,
             )
-            if ok2:
-                n = len(data2.get("results") or [])
-                ui.notify(
-                    f"{sport_key.upper()}: analyzed {n} games.",
-                    type="positive",
-                )
-            elif status == 429:
-                ui.notify(
-                    f"{sport_key.upper()} blocked: "
-                    f"{data2.get('error') or 'daily Odds API limit reached'}.",
-                    type="negative", multi_line=True,
-                )
+            if not ok_s:
+                if status_s == 409:
+                    ui.notify(
+                        f"{sport_key.upper()} analysis already running.  "
+                        f"Watching the existing run...",
+                        type="info",
+                    )
+                    # Fall through to polling -- the existing worker
+                    # will still report status here.
+                else:
+                    ui.notify(
+                        f"{sport_key.upper()} failed to start: "
+                        f"{data_s.get('error') or f'HTTP {status_s}'}",
+                        type="negative", multi_line=True,
+                    )
+                    btn.props(remove="loading"); btn.enable()
+                    return
             else:
                 ui.notify(
-                    f"{sport_key.upper()} failed: "
-                    f"{data2.get('error') or 'unknown error'}",
-                    type="negative", multi_line=True,
+                    f"{sport_key.upper()} analysis started.",
+                    type="info",
                 )
-            if refresh_status:
-                refresh_status()
-        finally:
+
+            # 4) Start the polling timer.  Each tick re-renders the
+            # progress label; the timer self-disables when the worker
+            # reports completed_at is set.
+            _start_status_poll(
+                backend, sport_key, progress_label, btn, refresh_status,
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
+                      type="negative", multi_line=True)
             btn.props(remove="loading"); btn.enable()
 
     btn.on("click", _click)
 
 
+def _start_status_poll(
+    backend, sport_key: str, progress_label, btn, refresh_status,
+) -> None:
+    """Spin up a ui.timer that hits /api/analyze/status every 5 s and
+    updates the inline progress label.  Disables itself when the worker
+    reports a completed_at value, then refreshes the surrounding admin
+    state (quota, cache pills, etc.) and re-enables the button."""
+
+    # 'state' is a closure dict so the timer callback can flip the
+    # 'should_stop' flag from inside an async generator.
+    state = {"stopped": False, "timer": None}
+
+    async def _tick() -> None:
+        if state["stopped"]:
+            return
+        ok, data, _ = await asyncio.to_thread(
+            _call, backend, "GET", f"/api/analyze/status?sport={sport_key}")
+        if not ok:
+            progress_label.text = (
+                f"Running {sport_key.upper()}... status check failed; "
+                f"will retry."
+            )
+            return
+        running     = bool(data.get("running"))
+        step_label  = data.get("step", "") or "(no step recorded yet)"
+        step_num    = int(data.get("step_num") or 0)
+        elapsed     = int(data.get("elapsed_sec") or 0)
+        n_games     = data.get("n_games")
+        error       = data.get("error")
+        completed   = bool(data.get("completed_at"))
+
+        if running:
+            progress_label.text = (
+                f"{sport_key.upper()} running...  step {step_num}: "
+                f"{step_label}   ({elapsed}s elapsed)"
+            )
+            return
+
+        # Worker is no longer running -- terminal state.
+        state["stopped"] = True
+        timer = state.get("timer")
+        if timer is not None:
+            try:
+                timer.deactivate()
+            except Exception:                                             # noqa: BLE001
+                pass
+        btn.props(remove="loading"); btn.enable()
+        if completed and not error:
+            progress_label.text = (
+                f"{sport_key.upper()} complete -- {n_games or 0} games "
+                f"({elapsed}s)"
+            )
+            ui.notify(
+                f"{sport_key.upper()}: analyzed {n_games or 0} games "
+                f"in {elapsed}s.",
+                type="positive",
+            )
+        else:
+            progress_label.text = (
+                f"{sport_key.upper()} failed: {error or 'unknown error'}"
+            )
+            ui.notify(
+                f"{sport_key.upper()} failed: {error or 'unknown error'}",
+                type="negative", multi_line=True,
+            )
+        if refresh_status:
+            refresh_status()
+
+    state["timer"] = ui.timer(5.0, _tick, active=True)
+    # Fire one immediately so the user sees state without a 5-s wait.
+    ui.timer(0.2, _tick, once=True)
+
+
 def _run_both_button(backend, refresh, post_refresh=None) -> None:
+    """Run Both: combined cache check, single confirmation, then KICK OFF
+    two background workers (MLB + WNBA) via /start.  A single ui.timer
+    polls /api/analyze/status for each sport every 5 s until both report
+    completed_at.  Same decoupled architecture as the per-sport buttons --
+    avoids the 60 s WebSocket / load-balancer timeout that synchronous
+    POST analyze runs into during slow days."""
     btn = ui.button("Run Both").props("no-caps unelevated").style(
         f"background: {t.PRIMARY}; color: {t.BG}; "
         f"font-weight: 700; padding: 8px 16px; border-radius: {t.RADIUS_SM};"
     )
+    progress_label = ui.label("").style(
+        f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+    )
 
     async def _click():
-        btn.props("loading")
-        btn.disable()
+        btn.props("loading"); btn.disable()
         try:
             # Combined cache check -- if either sport is stale, ask once
-            # before running both.  Both sports' analyses then run in
-            # sequence; cache-fresh ones burn 0 quota and the freshly
-            # confirmed ones burn 1 each.
+            # before running both.  Cache-fresh sports burn 0 quota and
+            # the freshly confirmed ones burn 1 each.
             _, status_data, _ = await asyncio.to_thread(
                 _call, backend, "GET", "/api/odds/cache_status?sport=both")
             mlb_fresh  = bool((status_data.get("mlb")  or {}).get("fresh"))
@@ -342,7 +453,6 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
                 if not fresh
             ]
             if stale:
-                # Get current quota for the dialog text.
                 _, usage, _ = await asyncio.to_thread(
                     _call, backend, "GET", "/api/odds/usage")
                 rem  = int(usage.get("remaining") or 0)
@@ -358,28 +468,134 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
                 if not proceed:
                     ui.notify("Run Both cancelled.  No API requests made.",
                               type="info")
+                    btn.props(remove="loading"); btn.enable()
                     return
 
-            ui.notify("Running MLB + WNBA analysis...", type="ongoing")
-            ok_mlb,  d_mlb,  _ = await asyncio.to_thread(
-                _call, backend, "POST", "/api/analyze", {"bankroll": 250})
-            ok_wnba, d_wnba, _ = await asyncio.to_thread(
-                _call, backend, "POST", "/api/wnba/analyze", {"bankroll": 1000})
-            msgs = []
-            if ok_mlb:  msgs.append(f"MLB: {len(d_mlb.get('results') or [])} games")
-            else:       msgs.append(f"MLB failed: {d_mlb.get('error') or 'unknown'}")
-            if ok_wnba: msgs.append(f"WNBA: {len(d_wnba.get('results') or [])} games")
-            else:       msgs.append(f"WNBA failed: {d_wnba.get('error') or 'unknown'}")
-            kind = "positive" if (ok_mlb and ok_wnba) else "warning"
-            ui.notify(" | ".join(msgs), type=kind, multi_line=True)
-            refresh()
-            if post_refresh:
-                post_refresh()
-        finally:
-            btn.props(remove="loading")
-            btn.enable()
+            # Kick off both background workers.  Each /start returns 202
+            # immediately (or 409 if a worker is already in flight for
+            # that sport -- in which case we just attach the polling
+            # timer to the existing run).
+            start_results: dict[str, bool] = {}
+            for sport_key, path, body in (
+                ("mlb",  "/api/analyze/start",      {"bankroll": 250}),
+                ("wnba", "/api/wnba/analyze/start", {"bankroll": 1000}),
+            ):
+                ok_s, data_s, status_s = await asyncio.to_thread(
+                    _call, backend, "POST", path, body,
+                )
+                if ok_s or status_s == 409:
+                    start_results[sport_key] = True
+                else:
+                    start_results[sport_key] = False
+                    ui.notify(
+                        f"{sport_key.upper()} failed to start: "
+                        f"{data_s.get('error') or f'HTTP {status_s}'}",
+                        type="negative", multi_line=True,
+                    )
+
+            if not any(start_results.values()):
+                # Both failed to start -- nothing to poll.
+                btn.props(remove="loading"); btn.enable()
+                return
+
+            ui.notify("MLB + WNBA analysis started in background.",
+                      type="info")
+
+            # Single polling timer that watches both sports.  Disables
+            # itself once both have completed.
+            _start_both_status_poll(
+                backend, progress_label, btn,
+                refresh_status=lambda: (
+                    refresh(),
+                    post_refresh() if post_refresh else None,
+                ),
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
+                      type="negative", multi_line=True)
+            btn.props(remove="loading"); btn.enable()
 
     btn.on("click", _click)
+
+
+def _start_both_status_poll(
+    backend, progress_label, btn, refresh_status,
+) -> None:
+    """Poll /api/analyze/status?sport=<mlb|wnba> every 5 s for both
+    sports.  Stops when neither is still running AND both have a
+    completed_at value (or one was never started, in which case it's
+    skipped)."""
+    state = {"stopped": False, "timer": None}
+
+    async def _tick() -> None:
+        if state["stopped"]:
+            return
+        rows: dict[str, dict] = {}
+        for sport in ("mlb", "wnba"):
+            ok, data, _ = await asyncio.to_thread(
+                _call, backend, "GET", f"/api/analyze/status?sport={sport}")
+            rows[sport] = data if ok else {}
+
+        # Build a one-line summary like:
+        #   MLB step 4 (run odds)  |  WNBA done -- 6 games  (47s)
+        parts = []
+        for sport in ("mlb", "wnba"):
+            r = rows[sport]
+            elapsed = int(r.get("elapsed_sec") or 0)
+            if r.get("running"):
+                step = r.get("step") or "(no step yet)"
+                num  = int(r.get("step_num") or 0)
+                parts.append(
+                    f"{sport.upper()} step {num}: {step}  ({elapsed}s)"
+                )
+            elif r.get("completed_at"):
+                err = r.get("error")
+                if err:
+                    parts.append(f"{sport.upper()} FAILED: {err}")
+                else:
+                    parts.append(
+                        f"{sport.upper()} done -- {r.get('n_games') or 0} games "
+                        f"({elapsed}s)"
+                    )
+            else:
+                parts.append(f"{sport.upper()} (idle)")
+        progress_label.text = "   |   ".join(parts)
+
+        # Done when neither is running.  Don't require completed_at on
+        # both -- if one sport never ran in this session it'll stay
+        # idle, which is fine.
+        any_running = any(rows[s].get("running") for s in ("mlb", "wnba"))
+        if any_running:
+            return
+
+        state["stopped"] = True
+        timer = state.get("timer")
+        if timer is not None:
+            try:
+                timer.deactivate()
+            except Exception:                                             # noqa: BLE001
+                pass
+        btn.props(remove="loading"); btn.enable()
+
+        msgs = []
+        kind = "positive"
+        for sport in ("mlb", "wnba"):
+            r = rows[sport]
+            if not r.get("completed_at"):
+                continue
+            err = r.get("error")
+            if err:
+                msgs.append(f"{sport.upper()} failed: {err}")
+                kind = "warning"
+            else:
+                msgs.append(f"{sport.upper()}: {r.get('n_games') or 0} games")
+        if msgs:
+            ui.notify(" | ".join(msgs), type=kind, multi_line=True)
+        if refresh_status:
+            refresh_status()
+
+    state["timer"] = ui.timer(5.0, _tick, active=True)
+    ui.timer(0.2, _tick, once=True)
 
 
 # ───────────────────────────────────────────────────────────────────────────

@@ -2756,6 +2756,175 @@ def _run_daily_picks_selection() -> None:
         _logger.warning("daily_picks selection failed: %s", exc)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Background-worker plumbing for /api/analyze + /api/wnba/analyze
+#
+#  Decouples the long-running analyze pipeline (30-90 s) from the calling
+#  HTTP / WebSocket lifetime.  The /start endpoints spawn a daemon thread
+#  that invokes the existing analyze routes via Flask's in-process test
+#  client and writes per-step progress into a module-level dict.  The UI
+#  polls /api/analyze/status every 5 s instead of waiting on the slow
+#  POST response.
+#
+#  Why threads (not the APScheduler executor):
+#   - the analyze code already runs synchronously and pulls in heavy
+#     ML imports per call; a thread per analyze is the minimum change
+#   - daemon=True means the thread won't block container shutdown
+#   - one analyze per sport at a time (re-clicking Run while a job is
+#     in flight returns HTTP 409 with the current status payload)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import threading as _threading_for_analyze   # local alias to avoid name shadow
+
+_analysis_progress: dict[str, dict] = {
+    "mlb":  {
+        "running": False, "step": "", "step_num": 0, "total_steps": 8,
+        "started_at": None, "completed_at": None,
+        "error": None, "n_games": None,
+    },
+    "wnba": {
+        "running": False, "step": "", "step_num": 0, "total_steps": 8,
+        "started_at": None, "completed_at": None,
+        "error": None, "n_games": None,
+    },
+}
+_analysis_progress_lock = _threading_for_analyze.Lock()
+
+
+def _get_analysis_progress(sport: str) -> dict:
+    """Thread-safe read of one sport's progress row."""
+    with _analysis_progress_lock:
+        return dict(_analysis_progress.get(sport, {}))
+
+
+def _set_analysis_progress(sport: str, **kwargs) -> None:
+    """Thread-safe partial update of one sport's progress row."""
+    with _analysis_progress_lock:
+        row = _analysis_progress.setdefault(sport, {})
+        row.update(kwargs)
+
+
+def _record_analysis_step(sport: str, label: str) -> None:
+    """Called from each route's _step() closure to mirror its log line
+    into the polling payload.  Auto-increments step_num and trims label
+    to keep the JSON small.  No-op if sport isn't a recognized key."""
+    if sport not in _analysis_progress:
+        return
+    with _analysis_progress_lock:
+        row = _analysis_progress[sport]
+        if not row.get("running"):
+            return  # only count steps while the worker is active
+        row["step_num"]  = int(row.get("step_num") or 0) + 1
+        row["step"]      = str(label)[:200]
+
+
+def _run_analysis_worker(sport: str, body: dict) -> None:
+    """Daemon-thread entry point: runs one sport's analyze via the Flask
+    test client and writes status updates throughout."""
+    import time as _time
+    _set_analysis_progress(
+        sport,
+        running=True, step="Starting analysis...",
+        step_num=0, total_steps=8,
+        started_at=_time.time(), completed_at=None,
+        error=None, n_games=None,
+    )
+    path = "/api/wnba/analyze" if sport == "wnba" else "/api/analyze"
+    try:
+        client = app.test_client()
+        resp = client.post(path, json=body or {})
+        try:
+            data = resp.get_json(force=True, silent=True) or {}
+        except Exception:                                                 # noqa: BLE001
+            data = {}
+        if resp.status_code >= 400:
+            err = data.get("error") or f"HTTP {resp.status_code}"
+            _set_analysis_progress(
+                sport, running=False, step=f"Failed: {err}",
+                completed_at=_time.time(), error=err, n_games=0,
+            )
+            return
+        n = len(data.get("results") or [])
+        _set_analysis_progress(
+            sport, running=False,
+            step=f"Complete -- {n} games analyzed",
+            completed_at=_time.time(), error=None, n_games=n,
+        )
+    except Exception as exc:                                              # noqa: BLE001
+        _set_analysis_progress(
+            sport, running=False,
+            step=f"Failed: {type(exc).__name__}",
+            completed_at=_time.time(),
+            error=f"{type(exc).__name__}: {exc}", n_games=0,
+        )
+
+
+def _start_analysis_thread(sport: str, body: dict) -> dict:
+    """Spawn a daemon thread for the given sport, refusing if one is
+    already in flight.  Returns the payload the /start endpoint sends
+    back to the UI."""
+    current = _get_analysis_progress(sport)
+    if current.get("running"):
+        return {
+            "success": False, "started": False,
+            "error":   f"{sport.upper()} analysis already running.",
+            "status":  current,
+            "http_status": 409,
+        }
+    th = _threading_for_analyze.Thread(
+        target=_run_analysis_worker,
+        args=(sport, body),
+        name=f"analyze-{sport}",
+        daemon=True,
+    )
+    th.start()
+    return {
+        "success": True, "started": True,
+        "sport":   sport,
+        "status":  _get_analysis_progress(sport),
+        "http_status": 202,
+    }
+
+
+@app.route("/api/analyze/start", methods=["POST"])
+def analyze_start_mlb():
+    """Spawn a background MLB analyze; return immediately."""
+    body = request.get_json() or {}
+    resp = _start_analysis_thread("mlb", body)
+    http_status = resp.pop("http_status", 202)
+    return jsonify(resp), http_status
+
+
+@app.route("/api/wnba/analyze/start", methods=["POST"])
+def analyze_start_wnba():
+    """Spawn a background WNBA analyze; return immediately."""
+    body = request.get_json() or {}
+    resp = _start_analysis_thread("wnba", body)
+    http_status = resp.pop("http_status", 202)
+    return jsonify(resp), http_status
+
+
+@app.route("/api/analyze/status", methods=["GET"])
+def analyze_status():
+    """Polled by the UI every ~5 s.  Returns one sport's current
+    progress dict.  Cheap, no upstream traffic."""
+    sport = (request.args.get("sport") or "mlb").strip().lower()
+    if sport not in _analysis_progress:
+        return jsonify({"error": f"unknown sport: {sport}"}), 400
+    row = _get_analysis_progress(sport)
+    # Derive a small "elapsed_sec" so the UI doesn't have to do the math
+    # client-side.  Useful for "Running for 42s" subtitles.
+    import time as _time
+    started_at   = row.get("started_at")
+    completed_at = row.get("completed_at")
+    if started_at:
+        end = completed_at or _time.time()
+        row["elapsed_sec"] = max(0, int(end - started_at))
+    else:
+        row["elapsed_sec"] = 0
+    return jsonify(row)
+
+
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     """Run the full analysis pipeline (mirrors main.py Steps 1-4 + 6)."""
@@ -2877,6 +3046,9 @@ def analyze():
     # ── Step checkpoint helper — prints to stderr so errors appear in Railway logs ──
     def _step(label: str) -> None:
         print(f"ANALYZE [{sport.upper()}] {label}", flush=True, file=sys.stderr)
+        # Mirror into the polling payload for /api/analyze/status.  No-op
+        # when sport isn't a tracked key or the worker isn't running.
+        _record_analysis_step(sport, label)
 
     try:
         _step("importing model modules")
@@ -5497,6 +5669,9 @@ def analyze_wnba():
     # bisectable to a step.
     def _step(label: str) -> None:
         print(f"ANALYZE [WNBA] {label}", flush=True, file=sys.stderr)
+        # Mirror into the /api/analyze/status polling payload (no-op
+        # when no worker thread is active).
+        _record_analysis_step("wnba", label)
 
     try:
         _step("importing model modules + config")
