@@ -53,6 +53,13 @@ _ET = ZoneInfo("America/New_York")
 def register(backend) -> None:
     @ui.page("/game/{sport}/{game_id}")
     def game_detail_page(sport: str, game_id: str):
+        # Re-read today's analysis cache into the in-memory state so
+        # _lookup_game below sees the freshest picks on disk, not
+        # whatever was hydrated at boot.
+        try:
+            backend.hydrate_state()
+        except Exception:                                                  # noqa: BLE001
+            pass
         ui.add_head_html(t.page_head_css())
         navbar.render(active=t.TAB_SPORTS)
         sport = (sport or "mlb").lower()

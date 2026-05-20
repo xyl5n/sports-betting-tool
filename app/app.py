@@ -674,6 +674,76 @@ def _snapshot_is_today(snap: dict) -> bool:
         return False
 
 
+def hydrate_state() -> tuple[int, int]:
+    """Re-read today's analysis from disk and seed the in-memory
+    _analysis_state / _wnba_analysis_state dicts.
+
+    Call this at the start of every page render so:
+      - cold containers (post-deploy) immediately have today's picks
+      - any path that wrote to the cache files (scheduler, manual
+        Run, external tool) is visible to the UI on the next page
+        load WITHOUT requiring app restart
+      - the in-memory dicts always reflect whichever cache file is
+        newest on disk -- no stale-Python-state-vs-served-render skew
+
+    Idempotent + safe to call concurrently.  Source-of-truth order:
+      1. data/daily_snapshot.json (atomic write-once per ET day)
+      2. data/analysis_cache.json / data/wnba_analysis_cache.json
+         (legacy per-sport caches, written by /api/analyze)
+      3. nothing -- leave state as-is, return zeros
+
+    Returns (mlb_count, wnba_count) for caller logging."""
+
+    try:
+        snap = _read_daily_snapshot()
+        is_today = _snapshot_is_today(snap)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"hydrate_state: snapshot read failed: {exc}",
+              flush=True, file=sys.stderr)
+        snap, is_today = {}, False
+
+    import json as _json
+    from pathlib import Path as _Path
+
+    def _seed(state_dict, sport_key: str, cache_path: str) -> int:
+        sp = (snap.get(sport_key) or {}) if is_today else {}
+        results = sp.get("results")
+        analyzed_at = sp.get("analyzed_at")
+
+        if not results:
+            try:
+                p = _Path(cache_path)
+                if p.exists():
+                    payload = _json.loads(p.read_text(encoding="utf-8"))
+                    if payload.get("date") == _today_et():
+                        results = _filter_stale_games(
+                            payload.get("results") or []
+                        )
+                        analyzed_at = payload.get("analyzed_at") or analyzed_at
+            except Exception as exc:                                      # noqa: BLE001
+                print(f"hydrate_state: {sport_key} cache read failed: {exc}",
+                      flush=True, file=sys.stderr)
+
+        if not results:
+            return 0
+
+        # Replace the list -- crucial that we assign a fresh list rather
+        # than mutate in place, so any UI render that captured the old
+        # results reference sees an empty view and the page's own
+        # state_dict["results"] read on next render gets the new list.
+        state_dict["results"] = list(results)
+        if analyzed_at:
+            try:
+                state_dict["last_analyzed_at"] = datetime.fromisoformat(analyzed_at)
+            except Exception:                                             # noqa: BLE001
+                pass
+        return len(results)
+
+    mlb_n  = _seed(_analysis_state,      "mlb",  "data/analysis_cache.json")
+    wnba_n = _seed(_wnba_analysis_state, "wnba", "data/wnba_analysis_cache.json")
+    return mlb_n, wnba_n
+
+
 def _write_daily_snapshot(sport: str, payload: dict, ts: datetime) -> None:
     """
     Persist sport's analysis into the daily snapshot file.  Write-once per day
