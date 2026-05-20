@@ -16,11 +16,17 @@ Color palette is the OLED-black spec from the migration brief:
 from __future__ import annotations
 
 # ── Colors ──────────────────────────────────────────────────────────────────
-BG          = "#000000"          # pure black -- OLED
-CARD        = "#0d0d0d"          # elevated panel
-CARD_HI     = "#161616"          # nested elevation (hover, sub-panel)
-BORDER      = "#1f1f1f"          # subtle line
-BORDER_SOFT = "#141414"          # almost-invisible separator
+# Palette is tuned for OLED panels: BG is true #000 so unlit pixels stay
+# off, and elevated surfaces are kept as close to black as possible while
+# still being distinguishable from the page background.  Borders carry a
+# faint cool tint that pairs with the blue accent glow added below; on
+# IPS / LCD this reads as a clean dark theme, on OLED the cards almost
+# float against the (off) background.
+BG          = "#000000"          # pure black -- OLED unlit
+CARD        = "#050507"          # elevated panel (was #0d0d0d -- darker for OLED)
+CARD_HI     = "#0c0d12"          # nested elevation / hover (was #161616)
+BORDER      = "#1a2030"          # subtle blue-tinted line (was neutral #1f1f1f)
+BORDER_SOFT = "#0a0c12"          # almost-invisible separator (was #141414)
 PRIMARY     = "#3b82f6"          # blue accent (active tab, ML pick, CTA)
 PRIMARY_HI  = "#60a5fa"          # primary hover / lighter
 TEXT        = "#ffffff"          # primary text
@@ -30,6 +36,10 @@ POS         = "#22c55e"          # win, profit, value
 NEG         = "#ef4444"          # loss, deficit
 WARN        = "#fbbf24"          # push, void, warning
 CYAN        = "#22d3ee"          # legacy accent (charts, links)
+
+# RGB components of PRIMARY so CSS can build rgba() shadows + tints
+# without hard-coding them in three places.
+PRIMARY_R, PRIMARY_G, PRIMARY_B = 59, 130, 246
 
 # ── Spacing ─────────────────────────────────────────────────────────────────
 SPACE_XS    = "4px"
@@ -84,8 +94,48 @@ def page_head_css() -> str:
         border: 1px solid {BORDER};
         border-radius: {RADIUS_MD};
         padding: {SPACE_MD};
+        box-shadow:
+          inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.05),
+          0 1px 0 rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.04),
+          0 6px 18px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.06);
       }}
       .theme-card-hi {{ background: {CARD_HI}; }}
+
+      /* Card glow -- applied via an attribute selector to every element
+         whose inline border matches our theme BORDER constant.  This is
+         how we reach all the card-style containers without changing
+         every render call: components inline-style their cards with
+         the f-string `border: 1px solid {{t.BORDER}}` which produces a
+         predictable substring we can target.
+
+         The shadow stack:
+           inset 1px ring at 6% PRIMARY -- the "tinted highlight" ring
+           outer soft bloom at 6%       -- the subtle blue glow that
+                                            reads as "lifted off" on OLED
+         Both layers are intentionally weak; together they nudge cards
+         away from the pure-black background without competing with
+         active/selected states (which use higher opacities). */
+      [style*="border: 1px solid {BORDER}"] {{
+        box-shadow:
+          inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.06),
+          0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.02),
+          0 6px 20px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.06);
+        transition: box-shadow 180ms ease-out, border-color 180ms ease-out;
+      }}
+      /* Stronger glow on hover -- gives interactive cards a tactile
+         affordance without changing the layout (no border-width swap,
+         no padding shift). */
+      [style*="border: 1px solid {BORDER}"]:hover {{
+        box-shadow:
+          inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.12),
+          0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.08),
+          0 10px 28px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.10);
+      }}
+      /* Dashed borders (used by NO MODEL PICK chips, EV banners) shouldn't
+         pick up the blue ring -- the dashed visual is the affordance. */
+      [style*="border: 1px dashed {BORDER}"] {{
+        box-shadow: none !important;
+      }}
       .theme-chip {{
         display: inline-block;
         padding: 2px 8px;
