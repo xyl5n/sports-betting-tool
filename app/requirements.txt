@@ -60,9 +60,19 @@ threadpoolctl==3.6.0
 # unconditionally lists nvidia-nccl-cu12 (~300 MB CUDA runtime) as a
 # runtime dependency, and the [cpu] extra was only added in 3.3+.
 # Railway's build container OOMs on disk before pip finishes resolving.
-# Install xgboost separately with --no-deps via RAILPACK_INSTALL_CMD
-# (env var, set in the Railway dashboard).  See README / PR #53 for
-# the exact command to paste in.
+#
+# Install xgboost separately, AFTER the Nixpacks/Railpack install
+# phase has already pip-installed everything in this file.  Set this
+# env var in the Railway dashboard (Project -> Variables):
+#
+#   RAILPACK_INSTALL_CMD = pip install --no-deps xgboost==3.2.0
+#
+# DO NOT prepend `pip install -r app/requirements.txt &&` to that
+# value -- the builder's own install phase already runs it, and
+# re-running it doubles disk usage during the build (this is what
+# kept blowing up earlier deploys).  --no-deps prevents pip from
+# pulling the CUDA wheels back in; xgboost's real runtime imports
+# (numpy, scipy) are pinned above so the skip is safe.
 
 # Baseball / sports data
 beautifulsoup4==4.14.3
