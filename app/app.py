@@ -3466,6 +3466,22 @@ def analyze():
         _step("Step 6: daily picks selection")
         _run_daily_picks_selection()
 
+        # Step 6b — immediate settlement of any freshly-recorded picks
+        # whose games are already Final.  Runs ungated by ET game hours
+        # so a late-night analyze run still settles same-day instead of
+        # waiting until the 30-min scheduler fires (which is gated to
+        # 11 AM-2 AM ET).  Logs each settled pick to stderr; bankroll +
+        # confidence-tier history + per-model trackers all update via
+        # Ledger.settle()'s existing fan-out.
+        _step("Step 6b: immediate settlement check")
+        try:
+            _settle_freshly_recorded_picks()
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(
+                f"IMMEDIATE-SETTLE: hook failed (analyze continues): "
+                f"{type(exc).__name__}: {exc}"
+            )
+
         # Reload ledger to get current personal_starting_bankroll for serialization
         _step("Step 7: serializing results")
         _ledger_for_serial  = Ledger(path="data/ledger.json", starting_bankroll=bankroll)
@@ -6074,6 +6090,19 @@ def analyze_wnba():
         _step("Step 6: daily picks selection")
         _run_daily_picks_selection()
 
+        # Step 6b — immediate settlement of any freshly-recorded picks
+        # whose games are already Final.  See the MLB analyze route for
+        # the full rationale; this mirror runs the same hook so a WNBA
+        # analyze fired late on a game day also closes out same-day.
+        _step("Step 6b: immediate settlement check")
+        try:
+            _settle_freshly_recorded_picks()
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(
+                f"IMMEDIATE-SETTLE: hook failed (analyze continues): "
+                f"{type(exc).__name__}: {exc}"
+            )
+
         # Reload wnba ledger to get current personal_starting_bankroll for serialization
         _step("Step 7: serializing results")
         _wledger_serial = Ledger(path="data/wnba_ledger.json", starting_bankroll=bankroll)
@@ -6645,6 +6674,106 @@ def _void_postponed_mlb_bets() -> list:
         _ldr.data["open_bets"] = remaining
         _ldr.save()
     return voided
+
+
+def _settle_freshly_recorded_picks() -> dict:
+    """Settle any open bets whose games are ALREADY Final, regardless of
+    the 11 AM-2 AM ET game-hours gate that _run_auto_settlement_job uses.
+
+    Called from /api/analyze and /api/wnba/analyze right after
+    _run_daily_picks_selection() writes today's picks to the ledger.
+    Closes the gap where running analyze late at night (or the morning
+    after) would record picks for games that finished hours ago, then
+    leave them sitting open until the next scheduler tick (potentially
+    the following day if it's currently outside the gate window).
+
+    Settles BOTH ledgers because select_daily_picks() may have written
+    to either sport's ledger regardless of which sport's analyze route
+    invoked us (the picks-selection function is cross-sport).
+
+    Logs each immediately-settled pick to stderr with matchup, bet
+    side, result (W/L/PUSH), and P&L so the path is observable in
+    Railway logs:
+
+      IMMEDIATE-SETTLE [MLB]: settled 2 freshly-recorded pick(s)
+        IMMEDIATE-SETTLE [MLB]: Yankees @ Red Sox | ML Yankees -> WIN  | model P&L: $+45.20
+        IMMEDIATE-SETTLE [MLB]: Mets @ Cubs       | RL Mets    -> LOSS | model P&L: $-25.00
+
+    Returns a summary dict the caller can include in /api/analyze's
+    JSON response if needed.  No-op when ODDS_API_KEY is missing
+    (matches _run_auto_settlement_job's behavior).
+
+    Side effects propagate automatically through Ledger.settle():
+      - history list grows -> Confidence Performance card updates
+      - model_bankroll / personal_bankroll adjusted in place
+      - _settle_model_trackers() updates xgb/lr/nn picks histories
+      - _append_to_archive() writes to data/bet_history_archive.json
+    """
+    odds_key = os.getenv("ODDS_API_KEY", "")
+    if not odds_key or odds_key == "your_odds_api_key_here":
+        _eprint("IMMEDIATE-SETTLE: skipped (ODDS_API_KEY not configured)")
+        return {"mlb_settled": 0, "wnba_settled": 0, "settled": []}
+
+    oc = OddsClient(odds_key, _cache)
+    settled_all: list = []
+
+    _BET_TYPE_SHORT = {"single": "ML", "run_line": "RL", "spread": "SPR", "totals": "TOT"}
+
+    for label, path, sport_key, cache_key in (
+        ("MLB",  "data/ledger.json",      "baseball_mlb",   "scores_baseball_mlb_3"),
+        ("WNBA", "data/wnba_ledger.json", "basketball_wnba", "scores_basketball_wnba_3"),
+    ):
+        try:
+            led = Ledger(path=path, starting_bankroll=250)
+            open_for_sport = [
+                b for b in (led.data.get("open_bets") or [])
+                if b.get("sport_key") == sport_key
+            ]
+            if not open_for_sport:
+                continue
+            # Invalidate the scores cache so settle sees the freshest
+            # completion state -- a game that finished 10 minutes ago
+            # may still be missing from the 3-day rolling cache.
+            _cache.invalidate(cache_key)
+            new = led.settle(oc, sport_key)
+            if not new:
+                _eprint(
+                    f"IMMEDIATE-SETTLE [{label}]: 0 of {len(open_for_sport)} "
+                    f"open pick(s) ready to settle (games still in progress / pre-game)"
+                )
+                continue
+            settled_all.extend(new)
+            _eprint(
+                f"IMMEDIATE-SETTLE [{label}]: settled {len(new)} "
+                f"freshly-recorded pick(s)"
+            )
+            for s in new:
+                bts    = _BET_TYPE_SHORT.get(s.get("bet_type", "single"), "ML")
+                result = s.get("result", "?").upper()
+                team   = s.get("bet_team", "?")
+                away   = s.get("away_team", "?")
+                home   = s.get("home_team", "?")
+                pnl    = s.get("model_pnl", 0.0)
+                _eprint(
+                    f"  IMMEDIATE-SETTLE [{label}]: "
+                    f"{away} @ {home} | {bts} {team} -> {result} "
+                    f"| model P&L: ${pnl:+.2f}"
+                )
+        except Exception as exc:                                              # noqa: BLE001
+            _eprint(
+                f"IMMEDIATE-SETTLE [{label}]: error: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    return {
+        "mlb_settled":  sum(
+            1 for s in settled_all if s.get("sport_key") == "baseball_mlb"
+        ),
+        "wnba_settled": sum(
+            1 for s in settled_all if s.get("sport_key") == "basketball_wnba"
+        ),
+        "settled": settled_all,
+    }
 
 
 def _run_auto_settlement_job() -> None:
