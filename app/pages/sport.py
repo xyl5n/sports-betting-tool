@@ -383,6 +383,172 @@ def _pill(label: str, href: str, active: bool) -> None:
         )
 
 
+def _norm_team(name) -> str:
+    """Aggressive team-name normalization for cross-API matching.
+    Lowercases, strips whitespace, and drops every non-alphanumeric
+    character.  "Los Angeles Dodgers" -> "losangelesdodgers", same as
+    "LA Dodgers".  Used by the renderer-side merge below to bridge
+    MLB statsapi game ids to Odds API ids when the schedule endpoint
+    fails to merge them itself."""
+    if not name:
+        return ""
+    s = str(name).lower()
+    return "".join(ch for ch in s if ch.isalnum())
+
+
+def _game_et_date(commence_time) -> str:
+    """Convert an ISO commence_time to its ET calendar date.  Returns
+    "" on parse failure so unparseable rows don't collide on a single
+    empty-date bucket."""
+    if not commence_time:
+        return ""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:                                                     # noqa: BLE001
+        return ""
+
+
+def _analysis_index(backend, sport: str) -> dict[tuple[str, str, str], dict]:
+    """Build a {(home_norm, away_norm, et_date): serialized_game} index
+    from every place an analysis result could live -- in-memory state
+    + on-disk cache.  Used by _game_grid to merge schedule stubs with
+    full analysis rows when /api/schedule failed to do the join (the
+    ID-mismatch bug -- MLB statsapi gamePk vs Odds API hex id).
+
+    Tries hard to produce a flat serialized row for each entry: if the
+    row is already serialized (passthrough shape with home_team /
+    away_team top-level), it's used as-is; if it's a raw analysis dict
+    (nested r["game"]) the backend's _serialize / _serialize_wnba is
+    called to flatten it.  Serialization failures are skipped silently
+    so one bad row doesn't break the merge.
+    """
+    state = (
+        backend._wnba_analysis_state if sport == "wnba"
+        else backend._analysis_state
+    )
+    rows: list[dict] = list(state.get("results") or [])
+
+    # Also pull from the daily snapshot on disk -- when the analyze
+    # route ran in a prior worker process the in-memory state in this
+    # NiceGUI worker may be empty even though the snapshot has the
+    # fresh picks.  hydrate_state() is the canonical path but tolerate
+    # its absence.
+    try:
+        backend.hydrate_state()
+        rows = list(state.get("results") or [])
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    out: dict[tuple[str, str, str], dict] = {}
+    try:
+        bankroll = float(state.get("bankroll") or (1000 if sport == "wnba" else 250))
+    except Exception:                                                     # noqa: BLE001
+        bankroll = 250.0
+    for r in rows:
+        try:
+            if "home_team" in r and "away_team" in r:
+                ser = dict(r)
+            else:
+                if sport == "wnba":
+                    ser = backend._serialize_wnba(r, bankroll, bankroll)
+                else:
+                    ser = backend._serialize(r, bankroll, "mlb", bankroll)
+        except Exception:                                                 # noqa: BLE001
+            continue
+        home = _norm_team(ser.get("home_team"))
+        away = _norm_team(ser.get("away_team"))
+        et_d = _game_et_date(ser.get("commence_time"))
+        if home and away and et_d:
+            out[(home, away, et_d)] = ser
+    return out
+
+
+def _merge_schedule_with_analysis(backend, sport: str, games: list[dict]) -> list[dict]:
+    """For each schedule row flagged _no_odds=True, try to find a
+    matching analysis row by (home_norm, away_norm, et_date).  When a
+    match is found, swap the stub for the analysis row so the card
+    renders with full odds + picks instead of "NO ODDS AVAILABLE".
+    Logs MERGED / NO MATCH per game so the deploy log shows whether
+    the join did anything.
+    """
+    if not games:
+        return games
+    idx = _analysis_index(backend, sport)
+    _dbg(f"_merge_schedule_with_analysis [{sport.upper()}] analysis_index_size={len(idx)}")
+    if not idx:
+        for g in games:
+            _dbg(
+                f"  NO MATCH (empty index) kept as stub  "
+                f"gid={g.get('game_id') or g.get('id')!r}  "
+                f"{g.get('away_team')} @ {g.get('home_team')}"
+            )
+        return games
+
+    out: list[dict] = []
+    merged_count = 0
+    stub_count   = 0
+    for g in games:
+        # Only attempt the merge for stubs -- rows that came back from
+        # /api/schedule with full odds (_no_odds is False or absent and
+        # pick_team is set) already won the join server-side.
+        already_merged = (not g.get("_no_odds")) and bool(g.get("pick_team"))
+        gid = g.get("game_id") or g.get("id")
+        if already_merged:
+            _dbg(
+                f"  MERGED with odds (server-side) gid={gid!r}  "
+                f"{g.get('away_team')} @ {g.get('home_team')}  "
+                f"data_source={g.get('_data_source')!r}"
+            )
+            out.append(g)
+            continue
+
+        key = (
+            _norm_team(g.get("home_team")),
+            _norm_team(g.get("away_team")),
+            _game_et_date(g.get("commence_time")),
+        )
+        match = idx.get(key)
+        if match is None:
+            _dbg(
+                f"  NO MATCH kept as stub  gid={gid!r}  "
+                f"{g.get('away_team')} @ {g.get('home_team')}  "
+                f"key={key}"
+            )
+            stub_count += 1
+            out.append(g)
+            continue
+
+        # Preserve schedule-only fields the analysis row doesn't carry
+        # (status, final-score linescore values, schedule id).  Layer
+        # the analysis row on top so its odds + pick_* fields win.
+        merged = dict(match)
+        merged["_data_source"] = "renderer_merged_team_date"
+        merged["_schedule_id"] = str(gid) if gid else merged.get("_schedule_id")
+        if g.get("_status"):
+            merged["_status"] = g["_status"]
+        if g.get("_final_score"):
+            merged["_final_score"] = g["_final_score"]
+        # Clear any leftover no-odds markers since we now have odds.
+        merged.pop("_no_odds", None)
+        merged.pop("_model_prediction", None)
+        _dbg(
+            f"  MERGED with odds (renderer) gid={gid!r}  "
+            f"{g.get('away_team')} @ {g.get('home_team')}  "
+            f"-> pick_team={merged.get('pick_team')!r}"
+        )
+        merged_count += 1
+        out.append(merged)
+
+    _dbg(
+        f"_merge_schedule_with_analysis [{sport.upper()}] "
+        f"merged={merged_count} kept_as_stub={stub_count}"
+    )
+    return out
+
+
 def _game_grid(backend, sport: str, state: dict) -> None:
     """Render every game from the schedule for the currently-selected
     date.  Games with model picks get the full bet-box card; games
@@ -393,6 +559,11 @@ def _game_grid(backend, sport: str, state: dict) -> None:
     _analysis_state (today) or the ledger history (past dates).
     Cached per-date in Supabase by the backend so repeated visits
     don't burn live API calls.
+
+    Defense in depth: even when /api/schedule misses the join (MLB
+    statsapi gamePk vs Odds API hex id), the renderer re-runs the
+    match by normalized team name + ET date before drawing each
+    card.  See _merge_schedule_with_analysis for the details.
     """
     date_str = state["date"]
     _dbg(f"_game_grid ENTER sport={sport} date={date_str}")
@@ -405,7 +576,20 @@ def _game_grid(backend, sport: str, state: dict) -> None:
         _dbg(f"_game_grid schedule fetch FAILED: {type(exc).__name__}: {exc}")
         data = {}
     games = data.get("games") or []
-    _dbg(f"_game_grid RENDER {sport.upper()} SLATE: {len(games)} games for {date_str}")
+    _dbg(f"_game_grid RENDER {sport.upper()} SLATE: {len(games)} games for {date_str} (pre-merge)")
+
+    # Only attempt the renderer-side merge for today's slate -- past
+    # dates render from ledger history (settled bets), and future
+    # dates render from the schedule alone (no analysis was ever run).
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        today_et = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:                                                     # noqa: BLE001
+        today_et = ""
+    if date_str == today_et:
+        games = _merge_schedule_with_analysis(backend, sport, games)
+        _dbg(f"_game_grid RENDER {sport.upper()} SLATE: {len(games)} games for {date_str} (post-merge)")
 
     if not games:
         ui.label(
