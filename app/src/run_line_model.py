@@ -87,12 +87,28 @@ class RunLineModel:
     def train_or_load(self, stats_client, feature_builder, season: int,
                       force_retrain: bool = False,
                       high_change_team_ids: "set[int] | None" = None) -> str:
+        # Pull the joblib snapshot down from Supabase app_cache if it's
+        # missing locally (Railway's ephemeral filesystem wipes
+        # .cache/ on every redeploy).
+        try:
+            from . import model_cache_persist as _persist
+            _persist.try_download(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
+
         if not force_retrain and self.model_path.exists():
             saved = joblib.load(self.model_path)
             # Verify saved model uses the current feature count.
             from .sports_config import MLB_FEATURES
             expected_n_feat = len(MLB_FEATURES)
             actual_n_feat   = getattr(saved.get("scaler"), "n_features_in_", expected_n_feat)
+            import sys as _sys
+            print(
+                f"MODEL[run_line_mlb]: cache feature count "
+                f"loaded={actual_n_feat}  expected={expected_n_feat}  "
+                f"match={actual_n_feat == expected_n_feat}",
+                flush=True, file=_sys.stderr,
+            )
             # Old caches stored a "marginal" LR (independent classifier on margin>=2).
             # The new LR is a conditional/hurdle model — caches lacking the schema
             # flag must be retrained so the LR head is regenerated correctly.
@@ -128,17 +144,35 @@ class RunLineModel:
                 xgb_s = f"{self.xgb_cv:.1%}" if self.xgb_cv else "N/A"
                 lr_s  = f"{self.lr_cv:.1%}"  if self.lr_cv  else "N/A"
                 nn_s  = f"{self.nn_val_accuracy:.1%}" if self.nn_val_accuracy else "N/A"
+                print(
+                    f"MODEL[run_line_mlb]: LOADED FROM CACHE  "
+                    f"features={actual_n_feat}  XGB_CV={xgb_s}  LR_CV={lr_s}  NN_val={nn_s}",
+                    flush=True, file=_sys.stderr,
+                )
                 return f"Loaded run line model (XGB CV: {xgb_s} | LR CV: {lr_s} | NN: {nn_s})"
             if actual_n_feat != expected_n_feat:
-                print(f"  Run line: feature count changed ({actual_n_feat} -> {expected_n_feat}) -- retraining.")
+                print(f"MODEL[run_line_mlb]: feature count drift "
+                      f"({actual_n_feat} -> {expected_n_feat}) -- "
+                      f"RETRAINED FROM SCRATCH", flush=True, file=_sys.stderr)
             elif not lr_kind_ok:
-                print("  Run line: LR target kind upgraded to conditional -- retraining.")
+                print("MODEL[run_line_mlb]: LR target kind upgraded to conditional -- "
+                      "RETRAINED FROM SCRATCH", flush=True, file=_sys.stderr)
             elif not xgb_kind_ok:
-                print("  Run line: XGB target kind upgraded to conditional cover -- retraining.")
+                print("MODEL[run_line_mlb]: XGB target kind upgraded to conditional cover "
+                      "-- RETRAINED FROM SCRATCH", flush=True, file=_sys.stderr)
             elif not nn_kind_ok:
-                print("  Run line: NN target kind upgraded to conditional cover -- retraining.")
+                print("MODEL[run_line_mlb]: NN target kind upgraded to conditional cover "
+                      "-- RETRAINED FROM SCRATCH", flush=True, file=_sys.stderr)
             elif not xgb_input_ok:
-                print("  Run line: XGB input kind upgraded to market_free -- retraining.")
+                print("MODEL[run_line_mlb]: XGB input kind upgraded to market_free -- "
+                      "RETRAINED FROM SCRATCH", flush=True, file=_sys.stderr)
+        else:
+            import sys as _sys
+            reason = "force_retrain=True" if force_retrain else (
+                "no cache file (local or Supabase)"
+            )
+            print(f"MODEL[run_line_mlb]: RETRAINED FROM SCRATCH ({reason})",
+                  flush=True, file=_sys.stderr)
         return self._train(stats_client, feature_builder, season, high_change_team_ids)
 
     def _train_nn(
@@ -443,6 +477,14 @@ class RunLineModel:
             # final NN P(home covers -1.5) is bounded above by P(home wins).
             "nn_target_kind":  nn_target_kind,
         }, self.model_path)
+
+        # Mirror the freshly-trained joblib up to Supabase so the next
+        # Railway restart can re-download it instead of retraining.
+        try:
+            from . import model_cache_persist as _persist
+            _persist.upload(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
 
         nn_s = f"{self.nn_val_accuracy:.1%}" if self.nn_val_accuracy else "N/A"
         total_n = len(y_combined)

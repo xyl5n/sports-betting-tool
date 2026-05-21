@@ -73,9 +73,21 @@ class WNBATotalsModel:
         recency weighting (target_type == "wnba_totals_v2").
         Otherwise trains from scratch.  Returns a human-readable status string.
         """
+        try:
+            from . import model_cache_persist as _persist
+            _persist.try_download(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
+
+        import sys as _sys
         if not force_retrain and self.model_path.exists():
             try:
                 saved = joblib.load(self.model_path)
+                n_feat = getattr(saved.get("scaler"), "n_features_in_", None)
+                print(
+                    f"MODEL[totals_wnba]: cache feature count loaded={n_feat}",
+                    flush=True, file=_sys.stderr,
+                )
                 if saved.get("target_type") == "wnba_totals_v2" and "lr" in saved:
                     self.xgb = saved["xgb"]
                     self.lr = saved["lr"]
@@ -86,12 +98,23 @@ class WNBATotalsModel:
                     self.lr_is_trained = True
                     xgb_s = f"{self.xgb_rmse:.2f}" if self.xgb_rmse is not None else "N/A"
                     lr_s = f"{self.lr_rmse:.2f}" if self.lr_rmse is not None else "N/A"
+                    print(
+                        f"MODEL[totals_wnba]: LOADED FROM CACHE  features={n_feat}  "
+                        f"XGB_RMSE={xgb_s}  LR_RMSE={lr_s}",
+                        flush=True, file=_sys.stderr,
+                    )
                     return (
                         f"Loaded WNBA totals model (recency-weighted) "
                         f"(XGB RMSE: {xgb_s} pts | LR RMSE: {lr_s} pts)"
                     )
-            except Exception:
-                pass  # Fall through to retrain if load fails
+            except Exception as exc:                                      # noqa: BLE001
+                print(f"MODEL[totals_wnba]: cache read failed "
+                      f"({type(exc).__name__}: {exc}) -- RETRAINED FROM SCRATCH",
+                      flush=True, file=_sys.stderr)
+        else:
+            reason = "force_retrain=True" if force_retrain else "no cache file (local or Supabase)"
+            print(f"MODEL[totals_wnba]: RETRAINED FROM SCRATCH ({reason})",
+                  flush=True, file=_sys.stderr)
 
         return self._train(stats_client, feature_builder, season)
 
@@ -220,6 +243,12 @@ class WNBATotalsModel:
             },
             self.model_path,
         )
+
+        try:
+            from . import model_cache_persist as _persist
+            _persist.upload(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
 
         return (
             f"Totals: XGB RMSE {self.xgb_rmse:.2f} pts | "

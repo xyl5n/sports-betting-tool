@@ -66,8 +66,20 @@ class TotalsModel:
 
     def train_or_load(self, stats_client, feature_builder, season: int,
                       force_retrain: bool = False) -> str:
+        try:
+            from . import model_cache_persist as _persist
+            _persist.try_download(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
+
+        import sys as _sys
         if not force_retrain and self.model_path.exists():
             saved = joblib.load(self.model_path)
+            n_feat = getattr(saved.get("scaler"), "n_features_in_", None)
+            print(
+                f"MODEL[totals_mlb]: cache feature count loaded={n_feat}",
+                flush=True, file=_sys.stderr,
+            )
             if saved.get("target_type") == "totals" and "lr" in saved:
                 self.xgb           = saved["xgb"]
                 self.lr            = saved["lr"]
@@ -82,7 +94,21 @@ class TotalsModel:
                 self.nn_is_trained = self.nn is not None
                 xgb_s = f"{self.xgb_rmse:.2f}" if self.xgb_rmse else "N/A"
                 nn_s  = f"{self.nn_rmse:.2f}"   if self.nn_rmse  else "N/A"
+                print(
+                    f"MODEL[totals_mlb]: LOADED FROM CACHE  features={n_feat}  "
+                    f"XGB_RMSE={xgb_s}  NN_RMSE={nn_s}",
+                    flush=True, file=_sys.stderr,
+                )
                 return f"Loaded totals model (XGB RMSE: {xgb_s} | NN RMSE: {nn_s} runs)"
+            print(
+                f"MODEL[totals_mlb]: cache present but target_type / lr field "
+                f"missing -- RETRAINED FROM SCRATCH",
+                flush=True, file=_sys.stderr,
+            )
+        else:
+            reason = "force_retrain=True" if force_retrain else "no cache file (local or Supabase)"
+            print(f"MODEL[totals_mlb]: RETRAINED FROM SCRATCH ({reason})",
+                  flush=True, file=_sys.stderr)
         return self._train(stats_client, feature_builder, season)
 
     def _train_nn(
@@ -258,6 +284,12 @@ class TotalsModel:
             "nn_rmse": self.nn_rmse,
             "target_type": "totals",
         }, self.model_path)
+
+        try:
+            from . import model_cache_persist as _persist
+            _persist.upload(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
 
         total_n = len(y_combined)
         return (f"Totals: XGB RMSE {self.xgb_rmse:.2f} | LR RMSE {self.lr_rmse:.2f} | "

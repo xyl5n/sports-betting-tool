@@ -7282,6 +7282,70 @@ if not _in_debug_mode or _werkzeug_main:
 _purge_stale_caches_on_boot()
 _restore_caches_from_supabase_on_boot()
 
+# 4. Model cache inventory + pre-download from Supabase.  Railway's
+# filesystem is ephemeral so the .cache/*.joblib model snapshots are
+# wiped on every redeploy.  src.model_cache_persist mirrors them to
+# the app_cache table; this block fires the download up-front (so the
+# first analyze sees them on disk + bypasses the retrain path) and
+# prints a structured inventory with paths + sizes for both the local
+# and Supabase view of each file.
+def _model_cache_boot_inventory() -> None:
+    try:
+        from src import model_cache_persist as _persist
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"MODEL CACHE INVENTORY: persist module import failed "
+              f"({type(exc).__name__}: {exc})", flush=True, file=sys.stderr)
+        return
+
+    model_paths = [
+        Path(".cache/model_baseball_mlb.joblib"),
+        Path(".cache/model_run_line_mlb.joblib"),
+        Path(".cache/model_totals_mlb.joblib"),
+        Path(".cache/model_basketball_wnba.joblib"),
+        Path(".cache/model_spread_wnba.joblib"),
+        Path(".cache/model_totals_wnba.joblib"),
+    ]
+
+    print("MODEL CACHE INVENTORY: pre-analyze view of joblib snapshots",
+          flush=True, file=sys.stderr)
+    rows = _persist.inventory(model_paths)
+    for r in rows:
+        local_s = (
+            f"local={r['local_size_bytes']:,}B"
+            if r["exists_locally"] else "local=MISSING"
+        )
+        if r["supabase_on"]:
+            sb_s = (
+                f"supabase={r['supabase_size']:,}B"
+                if r["supabase_present"] else "supabase=MISSING"
+            )
+        else:
+            sb_s = "supabase=OFF"
+        print(f"  MODEL CACHE: {r['path']}  {local_s}  {sb_s}",
+              flush=True, file=sys.stderr)
+
+    # Pre-download every file that's missing locally but present in
+    # Supabase.  Without this, the first analyze run would still hit
+    # the retrain path because the train_or_load .exists() check fires
+    # before its own _persist.try_download call (we double-cover both
+    # paths so this is just an optimization, not a correctness fix).
+    n_downloaded = 0
+    for r in rows:
+        if r["exists_locally"]:
+            continue
+        if not r["supabase_present"]:
+            continue
+        if _persist.try_download(Path(r["path"])):
+            n_downloaded += 1
+    print(
+        f"MODEL CACHE INVENTORY: pre-downloaded {n_downloaded} "
+        f"file(s) from Supabase",
+        flush=True, file=sys.stderr,
+    )
+
+
+_model_cache_boot_inventory()
+
 print("STARTUP: app ready", flush=True, file=sys.stderr)
 
 
