@@ -113,7 +113,7 @@ def page_head_css() -> str:
          wheel-to-horizontal JS in components/carousel_wheel.py provide
          the affordances now.  Per-browser:
            Firefox      -- scrollbar-width: none
-           Chromium/WK  -- ::-webkit-scrollbar { display: none }
+           Chromium/WK  -- ::-webkit-scrollbar {{ display: none }}
            Edge old IE  -- -ms-overflow-style: none
          No layout reflow on Firefox because scrollbar-width:none
          removes the gutter too. */
