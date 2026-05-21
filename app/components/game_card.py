@@ -36,6 +36,14 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
     When omitted (legacy call sites that haven't been updated), no Track
     button is rendered -- the card still works, just without tracking.
     """
+    import sys as _sys
+    print(
+        f"[RENDER] game_card.render ENTER sport={sport} "
+        f"game_id={g.get('game_id') or g.get('id')!r} "
+        f"away={g.get('away_team')!r} home={g.get('home_team')!r} "
+        f"no_model={bool(g.get('_no_model'))}",
+        flush=True, file=_sys.stderr,
+    )
     sport = (sport or g.get("_sport") or "mlb").lower()
     is_mlb = sport == "mlb"
 

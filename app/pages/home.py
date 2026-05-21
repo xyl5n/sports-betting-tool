@@ -20,6 +20,8 @@ All data comes from `backend._analysis_state` / `_wnba_analysis_state`
 """
 from __future__ import annotations
 
+import sys
+
 from nicegui import ui
 
 from components import theme as t
@@ -28,16 +30,36 @@ from components import track_button, team_logo
 from pages import home_stats as hs
 
 
+def _dbg(msg: str) -> None:
+    """Diagnostic print -- always flushes to stderr so the Railway log
+    stream picks it up.  Tagged so it's grep-able in production."""
+    print(f"[RENDER] {msg}", flush=True, file=sys.stderr)
+
+
 def register(backend) -> None:
     @ui.page("/")
     def home_page():
+        _dbg("home_page ENTER")
         # Re-read today's analysis cache into the in-memory state dict
         # so this render always sees the newest picks on disk, not
         # whatever was hydrated at boot.  Cheap (JSON read + parse).
         try:
-            backend.hydrate_state()
-        except Exception:                                                  # noqa: BLE001
-            pass
+            mlb_n, wnba_n = backend.hydrate_state()
+            _dbg(f"home_page hydrate_state returned mlb={mlb_n} wnba={wnba_n}")
+        except Exception as exc:                                           # noqa: BLE001
+            _dbg(f"home_page hydrate_state FAILED: {type(exc).__name__}: {exc}")
+        try:
+            mlb_state  = backend._analysis_state
+            wnba_state = backend._wnba_analysis_state
+            _dbg(
+                f"home_page STATE_CHECK "
+                f"mlb_results={len(mlb_state.get('results') or [])} "
+                f"wnba_results={len(wnba_state.get('results') or [])} "
+                f"mlb_keys={list(mlb_state.keys())} "
+                f"wnba_keys={list(wnba_state.keys())}"
+            )
+        except Exception as exc:                                           # noqa: BLE001
+            _dbg(f"home_page STATE_CHECK FAILED: {type(exc).__name__}: {exc}")
         ui.add_head_html(t.page_head_css())
         navbar.render(active=t.TAB_HOME)
         _layout(backend)
@@ -557,6 +579,16 @@ def _all_serialized_games(backend) -> list[dict]:
     safe; enumerate_value_picks skips _no_model entries.
     """
     out: list[dict] = []
+    mlb_failures = 0
+    wnba_failures = 0
+    first_mlb_err: str | None = None
+    first_wnba_err: str | None = None
+    mlb_total = len(backend._analysis_state.get("results") or [])
+    wnba_total = len(backend._wnba_analysis_state.get("results") or [])
+    _dbg(
+        f"_all_serialized_games ENTER mlb_in_state={mlb_total} "
+        f"wnba_in_state={wnba_total}"
+    )
     try:
         bankroll = float(backend._analysis_state.get("bankroll") or 250)
         for r in (backend._analysis_state.get("results") or []):
@@ -567,10 +599,14 @@ def _all_serialized_games(backend) -> list[dict]:
                 g = backend._serialize(r, bankroll, "mlb", s_bank)
                 g["_sport"] = "mlb"
                 out.append(g)
-            except Exception:                                             # noqa: BLE001
+            except Exception as exc:                                      # noqa: BLE001
+                mlb_failures += 1
+                if first_mlb_err is None:
+                    import traceback as _tb
+                    first_mlb_err = f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}"
                 continue
-    except Exception:                                                     # noqa: BLE001
-        pass
+    except Exception as exc:                                              # noqa: BLE001
+        _dbg(f"_all_serialized_games MLB SETUP FAILED: {type(exc).__name__}: {exc}")
     try:
         bankroll = float(backend._wnba_analysis_state.get("bankroll") or 1000)
         wnba_results = backend._wnba_analysis_state.get("results") or []
@@ -583,10 +619,23 @@ def _all_serialized_games(backend) -> list[dict]:
                     g = backend._serialize_wnba(r, bankroll, s_bank)
                     g["_sport"] = "wnba"
                     out.append(g)
-                except Exception:                                         # noqa: BLE001
+                except Exception as exc:                                  # noqa: BLE001
+                    wnba_failures += 1
+                    if first_wnba_err is None:
+                        import traceback as _tb
+                        first_wnba_err = f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}"
                     continue
-    except Exception:                                                     # noqa: BLE001
-        pass
+    except Exception as exc:                                              # noqa: BLE001
+        _dbg(f"_all_serialized_games WNBA SETUP FAILED: {type(exc).__name__}: {exc}")
+    if first_mlb_err:
+        _dbg(f"_all_serialized_games FIRST MLB SERIALIZE FAILURE: {first_mlb_err}")
+    if first_wnba_err:
+        _dbg(f"_all_serialized_games FIRST WNBA SERIALIZE FAILURE: {first_wnba_err}")
+    _dbg(
+        f"_all_serialized_games EXIT serialized={len(out)} "
+        f"mlb_failures={mlb_failures}/{mlb_total} "
+        f"wnba_failures={wnba_failures}/{wnba_total}"
+    )
     return out
 
 
