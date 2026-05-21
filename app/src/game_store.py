@@ -26,6 +26,78 @@ from typing import Optional
 from .cache import Cache
 
 
+def _fetch_espn_wnba_scoreboard() -> list[dict]:
+    """Fetch the current ESPN WNBA scoreboard window and normalize the
+    response shape to the API-Sports schema that GameStore._build_stats
+    expects.  Used as the secondary WNBA fallback after sportsdataverse
+    (see GameStore._load_wnba_fallback).
+
+    ESPN's scoreboard endpoint is keyless and returns a rolling window
+    of upcoming + recent games -- much smaller than a full season, but
+    enough for the no-odds predictor to know which teams play today
+    and build a thin team index for feature lookups.  Returns [] on
+    any HTTP / parse failure (caller logs the source).
+    """
+    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"  [wnba] ESPN scoreboard request failed: {exc}")
+        return []
+
+    games: list[dict] = []
+    for ev in (body.get("events") or []):
+        try:
+            comp = (ev.get("competitions") or [None])[0] or {}
+            comps = comp.get("competitors") or []
+            home_c = next((c for c in comps if c.get("homeAway") == "home"), None)
+            away_c = next((c for c in comps if c.get("homeAway") == "away"), None)
+            if not home_c or not away_c:
+                continue
+            home_team = home_c.get("team") or {}
+            away_team = away_c.get("team") or {}
+            status = (ev.get("status") or {}).get("type", {}).get("name", "")
+            home_score = home_c.get("score")
+            away_score = away_c.get("score")
+            try:
+                home_runs = int(home_score) if home_score not in (None, "") else None
+            except (TypeError, ValueError):
+                home_runs = None
+            try:
+                away_runs = int(away_score) if away_score not in (None, "") else None
+            except (TypeError, ValueError):
+                away_runs = None
+            # API-Sports-compatible game dict:
+            games.append({
+                "id":     str(ev.get("id", "") or ""),
+                "date":   {"start": ev.get("date", "")},
+                "status": {"long": status,
+                           "short": "FT" if "Final" in status else "NS"},
+                "teams": {
+                    "home": {
+                        "id":   int(home_team.get("id") or 0),
+                        "name": home_team.get("displayName") or
+                                home_team.get("name") or "",
+                    },
+                    "away": {
+                        "id":   int(away_team.get("id") or 0),
+                        "name": away_team.get("displayName") or
+                                away_team.get("name") or "",
+                    },
+                },
+                "scores": {
+                    "home": {"total": home_runs},
+                    "away": {"total": away_runs},
+                },
+                "_source": "espn_scoreboard",
+            })
+        except Exception:                                                # noqa: BLE001
+            continue
+    return games
+
+
 def _status_ok(game: dict) -> bool:
     """Return True if the game is fully completed."""
     # NFL structure: game["game"]["status"]["short"]
@@ -141,15 +213,86 @@ class GameStore:
             return games
 
         except Exception as primary_exc:
-            if self.sport_tag != "mlb":
-                raise   # non-MLB sports: propagate as before
+            if self.sport_tag == "mlb":
+                print(f"  [mlb] API-Sports unavailable ({primary_exc}) -- "
+                      f"trying fallback sources")
+                games = self._load_mlb_fallback(season)
+                if games:
+                    self.cache.set(cache_key, games)
+                return games or []
 
-            print(f"  [mlb] API-Sports unavailable ({primary_exc}) -- "
-                  f"trying fallback sources")
-            games = self._load_mlb_fallback(season)
-            if games:
-                self.cache.set(cache_key, games)
-            return games or []
+            # WNBA fallback chain: sportsdataverse (Python port of the R
+            # wehoop package) first, then ESPN scoreboard.  Same pattern
+            # as the MLB chain above so the no-odds predictor can build
+            # the GameStore from free sources when API-Sports is
+            # unavailable (e.g. WNBA is gated behind API-Sports' paid
+            # plan).  Other non-MLB sports keep the original behaviour
+            # of propagating the API-Sports failure.
+            if self.sport_tag == "wnba":
+                print(f"  [wnba] API-Sports unavailable ({primary_exc}) -- "
+                      f"trying free fallback sources (wehoop / ESPN)")
+                games = self._load_wnba_fallback(season)
+                if games:
+                    self.cache.set(cache_key, games)
+                return games or []
+
+            raise   # other sports: propagate as before
+
+    def _load_wnba_fallback(self, season: int) -> list[dict]:
+        """
+        WNBA fallback chain: sportsdataverse (wehoop equivalent) -> ESPN.
+        Returns the first non-empty result, or [] if all sources fail.
+
+        Both sources are free and key-less.  sportsdataverse pulls a full
+        season from ESPN's internal WNBA API (more history, used during
+        training); the ESPN scoreboard endpoint is a smaller live-window
+        view (used when sportsdataverse fails to import or returns
+        empty).  Either way the returned shape matches the API-Sports
+        response that GameStore._build_stats expects.
+        """
+        # Fallback 1: sportsdataverse (the existing wnba_fallback_fetcher
+        # helper already wraps espn_wnba_schedule + result normalization).
+        # Its return shape uses scalar "status": "FT" and scalar "date":
+        # "YYYY-MM-DD", but _status_ok / _build_stats below expect the
+        # API-Sports nested {"status": {"short": "FT"}} and
+        # {"date": {"start": iso}}.  Promote each game's status / date
+        # to that nested shape before returning so callers don't care
+        # which fallback produced the row.
+        try:
+            from .wnba_fallback_fetcher import fetch_sportsdataverse_wnba_season
+            sdv_games = fetch_sportsdataverse_wnba_season(season, cache=self.cache)
+            if sdv_games:
+                for g in sdv_games:
+                    st = g.get("status")
+                    if isinstance(st, str):
+                        g["status"] = {"short": st, "long": st}
+                    dt = g.get("date")
+                    if isinstance(dt, str):
+                        g["date"] = {"start": dt}
+                print(f"  [wnba] {len(sdv_games)} games from sportsdataverse "
+                      f"(wehoop equivalent) [SOURCE: sportsdataverse]")
+                return sdv_games
+            print(f"  [wnba] sportsdataverse returned 0 games for {season}")
+        except Exception as exc:
+            print(f"  [wnba] sportsdataverse fallback failed: {exc}")
+
+        # Fallback 2: ESPN scoreboard (free, no key).  This is a live
+        # window of upcoming + recent games -- much smaller than a full
+        # season, but enough to populate today's teams + give the
+        # predictor a baseline.
+        try:
+            espn_games = _fetch_espn_wnba_scoreboard()
+            if espn_games:
+                print(f"  [wnba] {len(espn_games)} games from ESPN scoreboard "
+                      f"[SOURCE: ESPN]")
+                return espn_games
+            print("  [wnba] ESPN scoreboard returned 0 games")
+        except Exception as exc:
+            print(f"  [wnba] ESPN fallback failed: {exc}")
+
+        print(f"  [wnba] All fallback sources exhausted for season {season} -- "
+              f"no game data available")
+        return []
 
     def _load_mlb_fallback(self, season: int) -> list[dict]:
         """

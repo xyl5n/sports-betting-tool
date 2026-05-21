@@ -724,8 +724,25 @@ class OddsClient:
         )
         cached = self.cache.get(cache_key, ttl=_ODDS_CACHE_TTL)
         if cached is not None:
-            _log(f"  cache HIT  cache_key={cache_key!r}  cached_count={len(cached)}")
-            return cached
+            # Empty-cache bypass: an `[]` entry shouldn't block a fresh
+            # fetch.  A 0-game cache hit was a real bug -- a previous
+            # call returned no games (transient API blip, off-season
+            # gap, parse drop), the empty list got cached for 15 min,
+            # and every subsequent call returned [] without ever
+            # retrying.  Treat empty cache as a miss + drop the entry
+            # so the next call starts clean.
+            if not cached:
+                _log(
+                    f"  cache HIT but EMPTY (0 games) -- treating as MISS "
+                    f"+ dropping cache entry  cache_key={cache_key!r}"
+                )
+                try:
+                    self.cache.invalidate(cache_key)
+                except Exception:                                          # noqa: BLE001
+                    pass
+            else:
+                _log(f"  cache HIT  cache_key={cache_key!r}  cached_count={len(cached)}")
+                return cached
         _log(f"  cache MISS cache_key={cache_key!r} -- calling API")
         _log(f"  commenceTimeFrom={commence_from}  commenceTimeTo={commence_to}  "
              f"(today_et={_today_et_date()})")
