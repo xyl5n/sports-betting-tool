@@ -1387,7 +1387,22 @@ def _py(obj):
 
 
 def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: float | None = None) -> dict:
-    """Convert a raw analysis result to a JSON-safe dict for the frontend."""
+    """Convert a raw analysis result to a JSON-safe dict for the frontend.
+
+    Tolerates flat passthrough input: if *r* lacks the nested `game` +
+    `prediction` keys but already carries the flat serialized shape
+    (home_team / away_team / pick_team at the top level), return a copy
+    of it as-is.  The two callers that hit this path are the cached-
+    analyze branches (lines ~4153 and ~7285) which read directly from
+    _analysis_state["results"]; those entries may already be flat after
+    a snapshot hydration and re-serializing them crashed with
+    KeyError('game').
+    """
+    if not isinstance(r.get("game"), dict):
+        if r.get("home_team") and r.get("away_team"):
+            return dict(r)
+        # Not flat-shape either -- let the original KeyError propagate
+        # so we don't silently swallow truly malformed input.
     game = r["game"]
     pred = r["prediction"]
     shap_data = r.get("shap")
@@ -1725,7 +1740,13 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
 # ── WNBA serialization ───────────────────────────────────────────────────────
 
 def _serialize_wnba(r: dict, bankroll: float, starting_bankroll: float | None = None) -> dict:
-    """Convert a raw WNBA analysis result to a JSON-safe dict for the frontend."""
+    """Convert a raw WNBA analysis result to a JSON-safe dict for the
+    frontend.  Mirrors _serialize's flat-passthrough guard so the
+    cached-analyze branch at ~line 7285 doesn't KeyError when
+    _wnba_analysis_state["results"] was hydrated as flat rows."""
+    if not isinstance(r.get("game"), dict):
+        if r.get("home_team") and r.get("away_team"):
+            return dict(r)
     game        = r["game"]
     pred        = r["prediction"]
     spread_pred = r.get("spread_pred")
