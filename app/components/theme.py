@@ -245,6 +245,45 @@ def page_head_css() -> str:
 
         /* Section titles a touch smaller on mobile */
         .page-title {{ font-size: 18px !important; }}
+
+        /* iOS Human Interface Guidelines + Material Design both recommend
+           a minimum 44 x 44 CSS-px tap target for primary controls on
+           touch screens.  Quasar's q-btn defaults to ~36px height which
+           is fine on desktop but cramped on phones -- bump everywhere
+           inside our page-content tree so every CTA, Run, Track, and
+           confirm-dialog button gets a comfortable touch slab on
+           mobile.  Inline `ui.link` rendered as a button shape (Track
+           buttons in cards) gets the same minimum via the [role=button]
+           selector below. */
+        .q-btn,
+        button.q-btn,
+        .nicegui-button,
+        .q-btn-item,
+        a.q-btn,
+        [role="button"] {{
+          min-height: 44px !important;
+        }}
+        /* Quasar's button-internal stretcher needs the same so the
+           hit area inside the button matches its outer dimensions. */
+        .q-btn__wrapper {{
+          min-height: 44px !important;
+        }}
+        /* Game-card Track + admin section's run-button -- both use
+           Quasar `dense` to look compact on desktop.  Override the
+           dense reduction so they still hit the 44px floor. */
+        .q-btn--dense {{
+          min-height: 44px !important;
+          padding-top: 4px !important;
+          padding-bottom: 4px !important;
+        }}
+
+        /* AI Breakdown chat input -- the SEND button + the input row
+           need the same touch slab; the input itself stretches via
+           Quasar's q-input but the wrapping row's gap can squeeze it. */
+        .q-input,
+        .q-field__control {{
+          min-height: 44px !important;
+        }}
       }}
 
       /* EV scan carousel -- equal-width cards so exactly 3 are visible on
@@ -278,6 +317,24 @@ def page_head_css() -> str:
       @media (max-width: 480px) {{
         .bet-label-full  {{ display: none !important; }}
         .bet-label-short {{ display: inline-block !important; }}
+
+        /* Sub-480px safety net for very long strings: an unbroken team
+           name, a malformed odds field, or an upstream label change
+           would otherwise push the layout wider than the viewport and
+           cause horizontal scroll on the whole page.  These two rules
+           force breakable wrapping while keeping the per-card ellipsis
+           rules from PR #29 as the primary truncation mechanism. */
+        .nicegui-content,
+        .nicegui-content * {{
+          overflow-wrap: anywhere;
+          word-break:    break-word;
+        }}
+        /* Outer page never scrolls horizontally on a phone.  Per-card
+           ellipsis still handles long strings inside; this is just the
+           safety belt. */
+        body, html {{
+          overflow-x: hidden !important;
+        }}
       }}
     </style>
     """
