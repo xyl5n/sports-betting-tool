@@ -325,7 +325,12 @@ def page_head_css() -> str:
         .bet-boxes .pick-text   {{ font-size: 12px !important; }}
 
         /* Reserve space at the bottom for the mobile tab bar */
-        .q-page-container {{ padding-bottom: calc({BOTTOM_NAV_HEIGHT} + 16px) !important; }}
+        /* Reserve space for the floating bottom nav: bar height + the
+           12px-or-safe-area lift + breathing room above so the last
+           content row doesn't sit flush under the bar. */
+        .q-page-container {{
+          padding-bottom: calc({BOTTOM_NAV_HEIGHT} + env(safe-area-inset-bottom) + 28px) !important;
+        }}
 
         /* Section titles a touch smaller on mobile */
         .page-title {{ font-size: 18px !important; }}
