@@ -324,37 +324,34 @@ def _pick_row(
 # ── Section: Per-classifier accuracy ────────────────────────────────────────
 
 def _classifier_card(history: list[dict]) -> None:
+    """Render per-classifier accuracy from the tracker files (NOT from
+    ledger history).
+
+    Previously this read xgb_prob / lr_prob / nn_prob off `history` rows,
+    which only exist for top-5 picks the daily-picks selector actually
+    placed.  The tracker files (.cache/xgb_picks_history.json,
+    .cache/lr_picks_history.json, data/nn_picks_history.json) carry one
+    entry per ANALYZED GAME per bet_type so the tallies here now reflect
+    the model's full prediction surface, matching what the user expects
+    from the spec.
+
+    `history` argument is kept for backward compat with the call site but
+    no longer consulted -- the data comes from home_stats.classifier_accuracy_from_trackers().
+    """
+    from pages import home_stats as hs
+    tallies = hs.classifier_accuracy_from_trackers()
+
     models = ("xgb", "lr", "nn")
     labels = {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}
-    # tallies[model][bet_type] = [correct, total]
-    tallies: dict[str, dict[str, list[int]]] = {
-        m: {k: [0, 0] for k, _, _ in _CATS} for m in models
+
+    # Reshape from {m: {overall, moneyline, run_line_spread, totals}}
+    # into the per-cat shape _classifier_block expects.
+    overall: dict[str, list[int]] = {m: tallies[m]["overall"] for m in models}
+    by_cat: dict[str, dict[str, list[int]]] = {
+        m: {k: tallies[m][k] for k, _, _ in _CATS} for m in models
     }
-    overall: dict[str, list[int]] = {m: [0, 0] for m in models}
 
-    for bet in history:
-        result = bet.get("result")
-        if result not in ("win", "loss"):
-            continue
-        side = bet.get("bet_side") or bet.get("side") or "home"
-        bt   = bet.get("bet_type") or "single"
-        cat  = next((k for k, _, aliases in _CATS if bt in aliases), None)
-        if cat is None:
-            continue
-        for m in models:
-            p = bet.get(f"{m}_prob")
-            if p is None:
-                continue
-            picks_home = float(p) >= 0.5
-            bet_on_home = side == "home"
-            home_won = bet_on_home if result == "win" else not bet_on_home
-            correct = (picks_home == home_won)
-            tallies[m][cat][1] += 1
-            tallies[m][cat][0] += int(correct)
-            overall[m][1] += 1
-            overall[m][0] += int(correct)
-
-    # Best model by overall win % (minimum 10 settled bets to qualify)
+    # Best model by overall correct-call rate (minimum 10 settled predictions).
     best = None
     best_pct = 0.0
     for m in models:
@@ -367,9 +364,15 @@ def _classifier_card(history: list[dict]) -> None:
         f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
         f"color: {t.TEXT_DIM2};"
     )
+    ui.label(
+        "Across every game predicted (full slate, not just placed picks).  "
+        "Source: per-classifier tracker history files."
+    ).style(
+        f"font-size: 10.5px; color: {t.TEXT_DIM2}; margin-top: -4px;"
+    )
     with ui.row().classes("w-full bet-boxes").style(f"gap: {t.SPACE_MD};"):
         for m in models:
-            _classifier_block(m, labels[m], overall[m], tallies[m], m == best)
+            _classifier_block(m, labels[m], overall[m], by_cat[m], m == best)
 
 
 def _classifier_block(model: str, label: str, ov: list[int], by_cat: dict[str, list[int]], is_best: bool) -> None:
