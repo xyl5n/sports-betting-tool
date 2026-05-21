@@ -176,17 +176,105 @@ def record_lr_pick(
         pass
 
 
+def record_lr_pick_totals(
+    *,
+    sport:           str,
+    home_team:       str,
+    away_team:       str,
+    game_date:       str,
+    predicted_total: float,
+    market_line:     float,
+    game_id:         Optional[str] = None,
+    history_path:    Path = _HISTORY_PATH,
+) -> None:
+    """LR-only recorder for totals (over/under) predictions.
+
+    Stores in the same history file as moneyline + run_line picks, with
+    bet_type="totals", lr_pick in {"over","under"}, and a `line` field
+    that settle_lr_pick uses to compute correctness.  Same idempotent
+    (sport,date,away,home,bet_type) pick_id keying as the other
+    record_*  functions in this module.
+    """
+    try:
+        if predicted_total is None or market_line is None:
+            return
+        pt = float(predicted_total)
+        ln = float(market_line)
+        pick = "over" if pt > ln else "under"
+        date_str = (game_date or "")[:10] or datetime.now(timezone.utc).date().isoformat()
+        pick_id  = _make_pick_id(sport, date_str, away_team, home_team, "totals")
+
+        store = _load(history_path)
+        existing = next((p for p in store["picks"] if p["pick_id"] == pick_id), None)
+        if existing and existing.get("settled_at"):
+            return
+
+        if existing is None:
+            entry: dict[str, Any] = {
+                "pick_id":            pick_id,
+                "game_id":            game_id,
+                "sport":              sport,
+                "date":               date_str,
+                "matchup":            f"{away_team} @ {home_team}",
+                "home_team":          home_team,
+                "away_team":          away_team,
+                "bet_type":           "totals",
+                "lr_pick":            pick,
+                "lr_predicted_total": pt,
+                "line":               ln,
+                "recorded_at":        _utc_now_iso(),
+                "outcome":            None,
+                "correct":            None,
+                "settled_at":         None,
+            }
+            store["picks"].append(entry)
+        else:
+            existing.update({
+                "game_id":            game_id or existing.get("game_id"),
+                "lr_pick":            pick,
+                "lr_predicted_total": pt,
+                "line":               ln,
+                "recorded_at":        _utc_now_iso(),
+            })
+
+        _save(store, history_path)
+    except Exception:
+        pass
+
+
 # ── settlement ────────────────────────────────────────────────────────────────
 
-def _decide_correct(bet_type: str, lr_pick: str, home_runs: int, away_runs: int) -> tuple[str, bool]:
-    """Return (outcome_side, lr_correct) for one finished game."""
+def _decide_correct(
+    bet_type: str, lr_pick: str, home_runs: int, away_runs: int,
+    line: Optional[float] = None,
+) -> tuple[str, bool]:
+    """Return (outcome_side, lr_correct) for one finished game.
+
+    bet_type:
+      moneyline  -> outcome in {"home","away"}, picker side matches the
+                    winning side
+      run_line   -> outcome in {"home","away"}, home covers -1.5 iff
+                    margin > 1.5
+      totals     -> outcome in {"over","under","push"}, decided by
+                    (home+away) vs `line` (caller passes it from the
+                    stored entry's "line" field)
+    """
     margin = home_runs - away_runs
     if bet_type == "run_line":
-        # Home covers -1.5 when home wins by 2+; otherwise away covers +1.5.
         outcome = "home" if margin > 1.5 else "away"
-    else:
-        # Moneyline (or anything else): winner of the game.
-        outcome = "home" if margin > 0 else "away"
+        return outcome, (lr_pick == outcome)
+    if bet_type == "totals":
+        if line is None:
+            # Shouldn't happen -- totals entries are written with `line`.
+            # Mark settle correctness False so the audit log surfaces it.
+            return ("push", False)
+        total = home_runs + away_runs
+        if   total >  line: outcome = "over"
+        elif total <  line: outcome = "under"
+        else:               outcome = "push"
+        return outcome, (lr_pick == outcome)
+    # Moneyline (or anything else): winner of the game.
+    outcome = "home" if margin > 0 else "away"
     return outcome, (lr_pick == outcome)
 
 
@@ -233,7 +321,8 @@ def settle_pending(
             continue
 
         outcome, correct = _decide_correct(
-            entry["bet_type"], entry["lr_pick"], home_runs, away_runs
+            entry["bet_type"], entry["lr_pick"], home_runs, away_runs,
+            line=entry.get("line"),
         )
         entry["outcome"]    = outcome
         entry["correct"]    = bool(correct)
@@ -389,7 +478,8 @@ def settle_lr_pick(
         newly = 0
         for entry in pending:
             outcome, correct = _decide_correct(
-                entry.get("bet_type", "moneyline"), entry["lr_pick"], hs, as_
+                entry.get("bet_type", "moneyline"), entry["lr_pick"], hs, as_,
+                line=entry.get("line"),
             )
             entry["outcome"]    = outcome
             entry["correct"]    = bool(correct)

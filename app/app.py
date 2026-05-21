@@ -3117,6 +3117,63 @@ def analyze_completions():
     return jsonify(payload)
 
 
+def _track_line_mlb(matchup: str, prediction: dict, rl_pred: dict | None,
+                    totals_pred: dict | None) -> None:
+    """Emit one [TRACK] stderr line per game summarizing what each
+    per-classifier recorder saw.  The recorders themselves live inside
+    model.predict / rl_model.predict / totals_model.predict and fire on
+    every game regardless of value-pick / top-5 selection -- this line
+    is the visible proof they did so for THIS particular game.
+
+    Format:
+      [TRACK] Yankees @ Red Sox |
+        ML  xgb=0.732 lr=0.681 nn=0.711 |
+        RL  xgb=0.612 lr=0.583 nn=0.624 |
+        TOT xgb=OVER 0.561 lr=OVER 0.547 nn=OVER 0.583
+    """
+    def _f(v) -> str:
+        try:
+            return f"{float(v):.3f}"
+        except (TypeError, ValueError):
+            return "?"
+
+    ml = prediction or {}
+    ml_part = (
+        f"ML  xgb={_f(ml.get('xgb_prob'))} "
+        f"lr={_f(ml.get('lr_prob'))} "
+        f"nn={_f(ml.get('nn_prob'))}"
+    )
+
+    if rl_pred:
+        rl_part = (
+            f"RL  xgb={_f(rl_pred.get('xgb_prob'))} "
+            f"lr={_f(rl_pred.get('lr_prob'))} "
+            f"nn={_f(rl_pred.get('nn_prob'))}"
+        )
+    else:
+        rl_part = "RL  (not run)"
+
+    if totals_pred:
+        line = totals_pred.get("market_line") or totals_pred.get("total_line")
+        def _dir(v) -> str:
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return "?"
+            if line is None:
+                return "?"
+            return "OVER " + _f(v) if f > float(line) else "UNDER " + _f(v)
+        tot_part = (
+            f"TOT xgb={_dir(totals_pred.get('xgb_predicted_total'))} "
+            f"lr={_dir(totals_pred.get('lr_predicted_total'))} "
+            f"nn={_dir(totals_pred.get('nn_predicted_total'))}"
+        )
+    else:
+        tot_part = "TOT (not run)"
+
+    _eprint(f"[TRACK] {matchup} | {ml_part} | {rl_part} | {tot_part}")
+
+
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     """Run the full analysis pipeline (mirrors main.py Steps 1-4 + 6)."""
@@ -3425,6 +3482,13 @@ def analyze():
                         _eprint(f"ANALYZE [MLB] totals.predict failed for {_matchup}: "
                                 f"{type(_te).__name__}: {_te}")
                         totals_pred = None
+
+                # Per-game tracking confirmation -- proves all three per-classifier
+                # recorders fired (inside model.predict / rl_model.predict /
+                # totals_model.predict) for EVERY game in the slate, not just
+                # the top-5 daily picks.  If a tracker silently failed, the
+                # corresponding field reads "?" instead of a probability.
+                _track_line_mlb(_matchup, prediction, rl_pred, totals_pred)
 
                 results.append({
                     "game":        game,
@@ -4372,14 +4436,74 @@ def _reset_each_ledger(mutator) -> dict:
     return summary
 
 
+_PICKS_HISTORY_FILES = (
+    Path(".cache/xgb_picks_history.json"),
+    Path(".cache/lr_picks_history.json"),
+    Path("data/nn_picks_history.json"),
+)
+_ENSEMBLE_PICKS_FILE = Path("data/ensemble_picks_today.json")
+
+
+def _truncate_picks_history(path: Path) -> bool:
+    """Write {"picks": []} to a tracker history file.  Returns True iff
+    we successfully wrote it (False on any IO error, but never raises).
+
+    Writing the empty structure rather than deleting the file keeps the
+    tracker code (which assumes the file shape on next call) happy
+    without an extra existence check."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"picks": []}, indent=2), encoding="utf-8")
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("truncate(%s) failed: %s", path, exc)
+        return False
+
+
+def _delete_file(path: Path) -> bool:
+    """Delete a file if present.  Returns True iff the file was removed."""
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("delete_file(%s) failed: %s", path, exc)
+        return False
+
+
+def _audit_log(label: str, lines: list[str]) -> None:
+    """Emit a structured stderr report of every file + Supabase
+    table the reset endpoint touched.  One header line + one indented
+    line per item; explicit ZERO line so the user can tell the
+    endpoint ran and just found nothing to clear."""
+    _eprint(f"RESET[{label}]: confirmation log")
+    if not lines:
+        _eprint(f"  RESET[{label}]: (nothing was found to clear)")
+        return
+    for ln in lines:
+        _eprint(f"  RESET[{label}]: {ln}")
+
+
 @app.route("/api/admin/reset/model_record", methods=["POST"])
 def admin_reset_model_record():
-    """Reset Model Record:
-       - drop all settled MODEL history (confirmed=False entries)
-       - keeps personal/confirmed history rows
-       - keeps every open_bet (both model + personal sides)
-       - keeps model_bankroll + personal_bankroll dollar amounts
+    """Reset Model Record -- comprehensive clear of every per-classifier
+    record sink:
+
+      Local JSON
+        - data/ledger.json + data/wnba_ledger.json: drop history rows
+          with confirmed=False (the model's own settled bets)
+        - .cache/xgb_picks_history.json -> {"picks": []}
+        - .cache/lr_picks_history.json  -> {"picks": []}
+        - data/nn_picks_history.json    -> {"picks": []}
+        - data/ensemble_picks_today.json deleted (regenerated by
+          next analyze run)
+
+      Supabase
+        - records table: every (sport, bet_type) W/L row removed so
+          the per-bet-type counter card returns to 0-0
     """
+    audit: list[str] = []
     try:
         def _mut(data: dict) -> int:
             hist = data.get("history") or []
@@ -4387,18 +4511,58 @@ def admin_reset_model_record():
             removed = len(hist) - len(kept)
             data["history"] = kept
             return removed
-        return jsonify({"success": True, "removed": _reset_each_ledger(_mut)})
+        removed_summary = _reset_each_ledger(_mut)
+        for sport, n in removed_summary.items():
+            audit.append(f"ledger {sport}: dropped {n} model history row(s)")
+
+        for path in _PICKS_HISTORY_FILES:
+            if _truncate_picks_history(path):
+                audit.append(f"file: truncated {path} -> {{\"picks\": []}}")
+            else:
+                audit.append(f"file: FAILED to truncate {path}")
+
+        if _delete_file(_ENSEMBLE_PICKS_FILE):
+            audit.append(f"file: deleted {_ENSEMBLE_PICKS_FILE}")
+        else:
+            audit.append(f"file: {_ENSEMBLE_PICKS_FILE} (not present, skipped)")
+
+        try:
+            from src import db as _db
+            if _db.is_supabase():
+                n_rows = _db.delete_records(sport=None)
+                audit.append(f"supabase records: deleted {n_rows} row(s)")
+            else:
+                audit.append("supabase records: (Supabase off, skipped)")
+        except Exception as exc:                                          # noqa: BLE001
+            audit.append(f"supabase records: error {type(exc).__name__}: {exc}")
+
+        _audit_log("model_record", audit)
+        return jsonify({
+            "success":   True,
+            "removed":   removed_summary,
+            "audit_log": audit,
+        })
     except Exception as exc:                                              # noqa: BLE001
+        _audit_log("model_record", audit + [f"FATAL: {exc}"])
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/admin/reset/model_bankroll", methods=["POST"])
 def admin_reset_model_bankroll():
-    """Reset Model Bankroll:
-       - model_bankroll <- model_starting_bankroll (defaults to 1000)
-       - drop unconfirmed (model-only) open_bets so the bankroll matches
-       - keeps history + personal_bankroll untouched
+    """Reset Model Bankroll -- the bankroll dollars + every unconfirmed
+    bet across local + Supabase:
+
+      Local JSON
+        - model_bankroll <- model_starting_bankroll on each per-sport ledger
+        - drop confirmed=False open_bets so the bankroll dollars match
+          what's actually exposed in the market
+
+      Supabase
+        - bets table: delete every row with confirmed=false
+        - bankroll table: re-upsert each sport's row to the starting
+          balance with 0 open exposure
     """
+    audit: list[str] = []
     try:
         def _mut(data: dict) -> int:
             start = float(data.get("model_starting_bankroll", 1000.0))
@@ -4408,20 +4572,70 @@ def admin_reset_model_bankroll():
             removed = len(opens) - len(kept)
             data["open_bets"] = kept
             return removed
-        return jsonify({"success": True, "removed_open_bets": _reset_each_ledger(_mut)})
+        removed_summary = _reset_each_ledger(_mut)
+        for sport, n in removed_summary.items():
+            audit.append(f"ledger {sport}: bankroll -> starting, dropped {n} model open_bet(s)")
+
+        try:
+            from src import db as _db
+            if _db.is_supabase():
+                n_bets = _db.delete_bets_bulk(confirmed=False)
+                audit.append(f"supabase bets: deleted {n_bets} unconfirmed row(s)")
+                for sport in ("mlb", "wnba"):
+                    try:
+                        led = Ledger(
+                            path=f"data/{'wnba_ledger' if sport == 'wnba' else 'ledger'}.json",
+                            starting_bankroll=1000.0,
+                        )
+                        start = float(led.data.get("model_starting_bankroll", 1000.0))
+                        _db.delete_bankroll(sport)
+                        _db.upsert_bankroll(sport, {
+                            "model_bankroll":          start,
+                            "model_starting_bankroll": start,
+                            "personal_bankroll":       float(led.data.get(
+                                "personal_bankroll",
+                                led.data.get("personal_starting_bankroll", 1000.0))),
+                            "personal_starting_bankroll": float(
+                                led.data.get("personal_starting_bankroll", 1000.0)),
+                        })
+                        audit.append(f"supabase bankroll {sport}: reset to ${start:.2f}")
+                    except Exception as bx:                                # noqa: BLE001
+                        audit.append(f"supabase bankroll {sport}: error {bx}")
+            else:
+                audit.append("supabase bets/bankroll: (Supabase off, skipped)")
+        except Exception as exc:                                          # noqa: BLE001
+            audit.append(f"supabase bets/bankroll: error {type(exc).__name__}: {exc}")
+
+        _audit_log("model_bankroll", audit)
+        return jsonify({
+            "success":           True,
+            "removed_open_bets": removed_summary,
+            "audit_log":         audit,
+        })
     except Exception as exc:                                              # noqa: BLE001
+        _audit_log("model_bankroll", audit + [f"FATAL: {exc}"])
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/admin/reset/confidence_record", methods=["POST"])
 def admin_reset_confidence_record():
-    """Reset Confidence Record:
-       - sets confidence_tier=None on every settled-history row (both
-         model + personal) so the Confidence Performance card recomputes
-         to Strong/Moderate/Low all at 0-0
-       - leaves W/L counters intact -- they aggregate from result, not tier
-       - leaves bankrolls + open_bets untouched
+    """Reset Confidence Record -- clear the confidence_tier field on
+    every settled-history row across both ledgers.
+
+      Local JSON
+        - data/ledger.json + data/wnba_ledger.json: confidence_tier
+          set to None on history rows that had a tier.  Open bets
+          keep their tier so the next settlement still records it
+          (this reset is about historical record, not future picks).
+
+      Supabase
+        - bets table rows mirror the ledger; the next call to
+          upsert_bets_bulk (after any settle / reset) syncs the
+          cleared field.  No separate Supabase mutation here -- the
+          confidence_tier card reads from the local ledger and the
+          ledger save fans out on next write.
     """
+    audit: list[str] = []
     try:
         def _mut(data: dict) -> int:
             cleared = 0
@@ -4430,28 +4644,122 @@ def admin_reset_confidence_record():
                     h["confidence_tier"] = None
                     cleared += 1
             return cleared
-        return jsonify({"success": True, "cleared": _reset_each_ledger(_mut)})
+        cleared_summary = _reset_each_ledger(_mut)
+        for sport, n in cleared_summary.items():
+            audit.append(
+                f"ledger {sport}: cleared confidence_tier on {n} history row(s)"
+            )
+        audit.append(
+            "supabase: (confidence_tier propagates via the next ledger upsert; "
+            "no separate Supabase call needed -- the card reads from local history)"
+        )
+        _audit_log("confidence_record", audit)
+        return jsonify({
+            "success":   True,
+            "cleared":   cleared_summary,
+            "audit_log": audit,
+        })
     except Exception as exc:                                              # noqa: BLE001
+        _audit_log("confidence_record", audit + [f"FATAL: {exc}"])
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
 @app.route("/api/admin/reset/my_bets_record", methods=["POST"])
 def admin_reset_my_bets_record():
-    """Reset My Bets Record:
-       - drop all settled PERSONAL history (confirmed=True entries)
-       - keeps model history rows
-       - keeps every open_bet
-       - keeps both bankroll dollar amounts
+    """Reset My Bets Record -- comprehensive personal-side wipe:
+
+      Local JSON
+        - data/ledger.json + data/wnba_ledger.json:
+            history list: drop every row with confirmed=True
+            open_bets:    drop every row with confirmed=True
+            personal_bankroll <- personal_starting_bankroll
+
+      Supabase
+        - bets table: delete every row with confirmed=true
+        - bankroll table: re-upsert personal_bankroll to starting on
+          each sport's row (model side preserved as-is)
     """
+    audit: list[str] = []
     try:
-        def _mut(data: dict) -> int:
+        def _mut(data: dict) -> dict:
+            # Tuple-shaped count so the per-sport summary captures
+            # both history + open_bets removals.
             hist = data.get("history") or []
-            kept = [h for h in hist if not h.get("confirmed")]
-            removed = len(hist) - len(kept)
-            data["history"] = kept
-            return removed
-        return jsonify({"success": True, "removed": _reset_each_ledger(_mut)})
+            kept_hist = [h for h in hist if not h.get("confirmed")]
+            removed_hist = len(hist) - len(kept_hist)
+            data["history"] = kept_hist
+
+            opens = data.get("open_bets") or []
+            kept_open = [b for b in opens if not b.get("confirmed")]
+            removed_open = len(opens) - len(kept_open)
+            data["open_bets"] = kept_open
+
+            start = float(data.get("personal_starting_bankroll", 1000.0))
+            data["personal_bankroll"] = start
+
+            return {
+                "history":      removed_hist,
+                "open_bets":    removed_open,
+                "bankroll_to": start,
+            }
+
+        # _reset_each_ledger returns {sport: int} -- adapt by stashing
+        # the per-sport detail dict in a closure so the audit log gets
+        # full granularity even though the public summary stays an int.
+        detail: dict[str, dict] = {}
+        def _mut_int(data: dict) -> int:
+            d = _mut(data)
+            sport = "wnba" if data.get("sport") == "wnba" else "mlb"
+            detail[sport] = d
+            return d["history"] + d["open_bets"]
+        summary = _reset_each_ledger(_mut_int)
+        for sport, n in summary.items():
+            d = detail.get(sport, {})
+            audit.append(
+                f"ledger {sport}: dropped {d.get('history', 0)} confirmed "
+                f"history + {d.get('open_bets', 0)} confirmed open_bet(s), "
+                f"personal_bankroll -> ${d.get('bankroll_to', 0):.2f}"
+            )
+
+        try:
+            from src import db as _db
+            if _db.is_supabase():
+                n_bets = _db.delete_bets_bulk(confirmed=True)
+                audit.append(f"supabase bets: deleted {n_bets} confirmed row(s)")
+                for sport in ("mlb", "wnba"):
+                    try:
+                        led = Ledger(
+                            path=f"data/{'wnba_ledger' if sport == 'wnba' else 'ledger'}.json",
+                            starting_bankroll=1000.0,
+                        )
+                        start = float(led.data.get("personal_starting_bankroll", 1000.0))
+                        _db.upsert_bankroll(sport, {
+                            "model_bankroll":          float(led.data.get(
+                                "model_bankroll",
+                                led.data.get("model_starting_bankroll", 1000.0))),
+                            "model_starting_bankroll": float(
+                                led.data.get("model_starting_bankroll", 1000.0)),
+                            "personal_bankroll":          start,
+                            "personal_starting_bankroll": start,
+                        })
+                        audit.append(
+                            f"supabase bankroll {sport}: personal_bankroll -> ${start:.2f}"
+                        )
+                    except Exception as bx:                                # noqa: BLE001
+                        audit.append(f"supabase bankroll {sport}: error {bx}")
+            else:
+                audit.append("supabase bets/bankroll: (Supabase off, skipped)")
+        except Exception as exc:                                          # noqa: BLE001
+            audit.append(f"supabase bets/bankroll: error {type(exc).__name__}: {exc}")
+
+        _audit_log("my_bets_record", audit)
+        return jsonify({
+            "success":   True,
+            "removed":   summary,
+            "audit_log": audit,
+        })
     except Exception as exc:                                              # noqa: BLE001
+        _audit_log("my_bets_record", audit + [f"FATAL: {exc}"])
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
@@ -6050,6 +6358,11 @@ def analyze_wnba():
                         _eprint(f"ANALYZE [WNBA] totals.predict failed for {_matchup}: "
                                 f"{type(_t_err).__name__}: {_t_err}")
                         totals_pred = None
+
+                # Same per-game [TRACK] confirmation as the MLB loop --
+                # proves the per-classifier recorders fired for every
+                # WNBA game.  spread_pred takes the RL slot.
+                _track_line_mlb(_matchup, prediction, spread_pred, totals_pred)
 
                 results.append({
                     "game":        game,
