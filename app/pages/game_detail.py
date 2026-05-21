@@ -797,6 +797,91 @@ def _render_analysis(holder, text: str, *,
 #  Section 4 -- Pitching matchup (MLB)  /  Starting Five (WNBA)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Per-process pitcher cache used by _section_pitching_or_lineup so
+# multiple matchup page visits for the same game on the same ET date
+# share one PitcherClient round-trip.  Keyed by (away_team, home_team,
+# et_date); value is the {"home": {...}, "away": {...}} dict.  Cleared
+# implicitly on container restart -- pitcher_client itself also has a
+# 1-hour disk cache so even a cold container only re-hits MLB at most
+# once per (pid, season).
+_PITCHER_PAGE_CACHE: dict[tuple[str, str, str], dict] = {}
+
+
+def _fetch_pitchers_direct(
+    sport: str, ser: dict,
+) -> tuple[dict, dict]:
+    """Call pitcher_client.get_starters_for_game DIRECTLY rather than
+    reading the serialized analysis row's home_sp / away_sp.  The
+    analysis cache may be in the pre-PR-#84 shape (era / hand / rest /
+    whip / k_rate only -- no full_name / team_abbrev / k_per_9 /
+    era_home / era_away / last3_era / wins / losses) which is what
+    used to leave the matchup page stuck on TBD.
+
+    Returns (away_sp, home_sp) in the new full-field shape.  Empty
+    dicts when pitcher_client can't resolve the game; the caller's
+    _pitcher_card falls back to TBD + N/A for those.
+    """
+    if sport != "mlb":
+        return {}, {}
+
+    home_team    = (ser.get("home_team") or "").strip()
+    away_team    = (ser.get("away_team") or "").strip()
+    commence     = ser.get("commence_time") or ""
+    # ET date keys the cache + drives the pitcher_client schedule call.
+    game_date = ""
+    if commence:
+        try:
+            dt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+            game_date = dt.astimezone(_ET).date().isoformat()
+        except Exception:                                                  # noqa: BLE001
+            game_date = ""
+    if not game_date:
+        game_date = datetime.now(_ET).date().isoformat()
+
+    if not (home_team and away_team):
+        _log(
+            f"  _fetch_pitchers_direct: missing team names "
+            f"(home={home_team!r} away={away_team!r}) -- skipping fetch"
+        )
+        return {}, {}
+
+    cache_key = (away_team.lower(), home_team.lower(), game_date)
+    cached = _PITCHER_PAGE_CACHE.get(cache_key)
+    if cached is not None:
+        _log(
+            f"  _fetch_pitchers_direct: PAGE CACHE HIT  "
+            f"key={cache_key}  home={'YES' if cached.get('home') else 'NO'}  "
+            f"away={'YES' if cached.get('away') else 'NO'}"
+        )
+        return cached.get("away") or {}, cached.get("home") or {}
+
+    _log(
+        f"  _fetch_pitchers_direct: calling pitcher_client  "
+        f"home={home_team!r}  away={away_team!r}  date={game_date}"
+    )
+    try:
+        from src.pitcher_client import get_pitcher_client
+        data = get_pitcher_client().get_starters_for_game(
+            home_team, away_team, game_date,
+        )
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"  _fetch_pitchers_direct: ERROR  "
+             f"{type(exc).__name__}: {exc}")
+        return {}, {}
+
+    home_sp = (data or {}).get("home") or {}
+    away_sp = (data or {}).get("away") or {}
+    _PITCHER_PAGE_CACHE[cache_key] = {"home": home_sp, "away": away_sp}
+    _log(
+        f"  _fetch_pitchers_direct: pitcher_client returned  "
+        f"home.full_name={home_sp.get('full_name')!r}  "
+        f"home.team_abbrev={home_sp.get('team_abbrev')!r}  "
+        f"away.full_name={away_sp.get('full_name')!r}  "
+        f"away.team_abbrev={away_sp.get('team_abbrev')!r}"
+    )
+    return away_sp, home_sp
+
+
 def _section_pitching_or_lineup(ser: dict, sport: str) -> None:
     if sport == "wnba":
         _section_card(
@@ -804,13 +889,12 @@ def _section_pitching_or_lineup(ser: dict, sport: str) -> None:
             rows_renderer=_starting_five_placeholder,
         )
         return
-    home_sp = ser.get("home_sp") or {}
-    away_sp = ser.get("away_sp") or {}
-    # Diagnostic dump of what actually arrived at the UI.  The user
-    # reported pitcher_client fetching real data while the UI still
-    # showed TBD -- these two lines make it obvious which path the
-    # render took: full dict (analysis hit) vs empty dict (schedule
-    # stub or lookup miss).
+    # Bypass ser["home_sp"] / ser["away_sp"] -- those carry whatever
+    # shape the analysis cache was last written in, which may be the
+    # pre-PR-#84 format without full_name / team_abbrev / k_per_9 /
+    # era_home / era_away / last3_era / wins / losses.  Calling
+    # pitcher_client directly guarantees the new full-field shape.
+    away_sp, home_sp = _fetch_pitchers_direct(sport, ser)
     _log(
         f"PITCHING_DATA sport={sport}  "
         f"home_team={ser.get('home_team')!r}  away_team={ser.get('away_team')!r}  "
