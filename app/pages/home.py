@@ -589,14 +589,34 @@ def _all_serialized_games(backend) -> list[dict]:
         f"_all_serialized_games ENTER mlb_in_state={mlb_total} "
         f"wnba_in_state={wnba_total}"
     )
+    # Pre-serialized passthrough rationale: when state was hydrated from
+    # data/analysis_cache.json or daily_snapshot.json, the cached
+    # entries are already flat _serialize() outputs (home_team,
+    # away_team, pick_prob, etc.) -- calling _serialize() again crashes
+    # with KeyError: 'game' because the raw nested r["game"] /
+    # r["prediction"] shape only exists in the in-process post-analyze
+    # pipeline.  The guard `if "home_team" in r and "away_team" in r`
+    # routes cache entries straight through and only invokes the
+    # serializer on raw results.
+    mlb_passthrough = 0
     try:
         bankroll = float(backend._analysis_state.get("bankroll") or 250)
+        mlb_ledger = None  # lazy: only built when we hit a raw row
         for r in (backend._analysis_state.get("results") or []):
             try:
-                mlb_ledger = backend.Ledger(path="data/ledger.json",
-                                            starting_bankroll=bankroll)
-                s_bank = mlb_ledger.data.get("personal_starting_bankroll", bankroll)
-                g = backend._serialize(r, bankroll, "mlb", s_bank)
+                if "home_team" in r and "away_team" in r:
+                    g = dict(r)
+                    mlb_passthrough += 1
+                else:
+                    if mlb_ledger is None:
+                        mlb_ledger = backend.Ledger(
+                            path="data/ledger.json",
+                            starting_bankroll=bankroll,
+                        )
+                    s_bank = mlb_ledger.data.get(
+                        "personal_starting_bankroll", bankroll
+                    )
+                    g = backend._serialize(r, bankroll, "mlb", s_bank)
                 g["_sport"] = "mlb"
                 out.append(g)
             except Exception as exc:                                      # noqa: BLE001
@@ -607,16 +627,27 @@ def _all_serialized_games(backend) -> list[dict]:
                 continue
     except Exception as exc:                                              # noqa: BLE001
         _dbg(f"_all_serialized_games MLB SETUP FAILED: {type(exc).__name__}: {exc}")
+    wnba_passthrough = 0
     try:
         bankroll = float(backend._wnba_analysis_state.get("bankroll") or 1000)
         wnba_results = backend._wnba_analysis_state.get("results") or []
         if wnba_results:
-            wnba_ledger = backend.Ledger(path="data/wnba_ledger.json",
-                                         starting_bankroll=bankroll)
-            s_bank = wnba_ledger.data.get("personal_starting_bankroll", bankroll)
+            wnba_ledger = None  # lazy
             for r in wnba_results:
                 try:
-                    g = backend._serialize_wnba(r, bankroll, s_bank)
+                    if "home_team" in r and "away_team" in r:
+                        g = dict(r)
+                        wnba_passthrough += 1
+                    else:
+                        if wnba_ledger is None:
+                            wnba_ledger = backend.Ledger(
+                                path="data/wnba_ledger.json",
+                                starting_bankroll=bankroll,
+                            )
+                        s_bank = wnba_ledger.data.get(
+                            "personal_starting_bankroll", bankroll
+                        )
+                        g = backend._serialize_wnba(r, bankroll, s_bank)
                     g["_sport"] = "wnba"
                     out.append(g)
                 except Exception as exc:                                  # noqa: BLE001
@@ -633,6 +664,8 @@ def _all_serialized_games(backend) -> list[dict]:
         _dbg(f"_all_serialized_games FIRST WNBA SERIALIZE FAILURE: {first_wnba_err}")
     _dbg(
         f"_all_serialized_games EXIT serialized={len(out)} "
+        f"mlb_passthrough={mlb_passthrough}/{mlb_total} "
+        f"wnba_passthrough={wnba_passthrough}/{wnba_total} "
         f"mlb_failures={mlb_failures}/{mlb_total} "
         f"wnba_failures={wnba_failures}/{wnba_total}"
     )

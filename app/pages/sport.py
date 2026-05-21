@@ -246,13 +246,27 @@ def _serialized_games(backend, sport: str) -> list[dict]:
     )
     out: list[dict] = []
     failures = 0
+    passthrough = 0
     first_err: str | None = None
     for i, r in enumerate(results):
         try:
-            if sport == "mlb":
-                g = ser_fn(r, bankroll, "mlb", s_bank)
+            # Pre-serialized passthrough: when the state was hydrated
+            # from data/{,wnba_}analysis_cache.json or the daily
+            # snapshot, the cached entries are ALREADY flat
+            # _serialize() outputs (home_team, away_team, pick_prob,
+            # etc.).  Calling _serialize() on them crashes with
+            # KeyError: 'game' because the raw nested shape (r["game"],
+            # r["prediction"]) only exists in the in-process post-
+            # analyze pipeline.  The guard distinguishes the two
+            # shapes by the presence of the user-facing team names.
+            if "home_team" in r and "away_team" in r:
+                g = dict(r)
+                passthrough += 1
             else:
-                g = ser_fn(r, bankroll, s_bank)
+                if sport == "mlb":
+                    g = ser_fn(r, bankroll, "mlb", s_bank)
+                else:
+                    g = ser_fn(r, bankroll, s_bank)
             out.append(g)
         except Exception as exc:                                          # noqa: BLE001
             failures += 1
@@ -264,6 +278,11 @@ def _serialized_games(backend, sport: str) -> list[dict]:
                     f"FIRST SERIALIZE FAILURE on game[{i}]: {first_err}"
                 )
             continue
+    if passthrough:
+        _dbg(
+            f"_serialized_games sport={sport} passthrough={passthrough} "
+            f"(already-serialized cache entries)"
+        )
     if failures:
         _dbg(
             f"_serialized_games sport={sport} {failures} of {len(results)} "

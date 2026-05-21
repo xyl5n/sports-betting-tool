@@ -92,19 +92,45 @@ def register(backend) -> None:
 def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict | None]:
     """Return (raw_analysis_dict, serialized_game_dict) or (None, None).
 
-    raw  -- {game, prediction, shap, meta, rl_pred, totals_pred, ...}
-            from _analysis_state["results"][i].  Carries SHAP detail.
-    ser  -- _serialize / _serialize_wnba output for the same game.  This
-            is the JSON-safe view used by the existing UI.
+    raw  -- nested {game, prediction, shap, meta, rl_pred, totals_pred,
+            ...} from _analysis_state["results"][i] when the analyze
+            pipeline just finished.  May be None when state was hydrated
+            from data/{,wnba_}analysis_cache.json or daily_snapshot.json
+            instead -- those store already-serialized flat dicts, and
+            the raw nested view (with SHAP detail) isn't recoverable
+            from them.
+    ser  -- the flat serialized dict the UI renders.  Either freshly
+            built via _serialize / _serialize_wnba (raw path) or the
+            cache entry itself (passthrough path).
     """
     state    = backend._wnba_analysis_state if sport == "wnba" else backend._analysis_state
     results  = state.get("results") or []
-    raw = next(
-        (r for r in results if (r.get("game") or {}).get("id") == game_id),
+    # Match both shapes: raw rows expose the id at r["game"]["id"];
+    # serialized rows expose it as r["game_id"] (or fall back to
+    # r["id"]).  Without this dual-key lookup the page reports "not
+    # found" for every game after a snapshot-hydrated boot.
+    entry = next(
+        (
+            r for r in results
+            if (r.get("game") or {}).get("id") == game_id
+            or r.get("game_id") == game_id
+            or r.get("id") == game_id
+        ),
         None,
     )
-    if raw is None:
+    if entry is None:
         return None, None
+
+    # Pre-serialized passthrough: skip the serialize call entirely (it
+    # would KeyError on r["game"]) and use the cache entry as both
+    # the "raw" and "ser" return values.  The raw view loses its SHAP
+    # detail in this path -- callers that need SHAP for an explainer
+    # section will see empty/missing fields, which the renderers
+    # already handle gracefully.
+    if "home_team" in entry and "away_team" in entry:
+        return entry, dict(entry)
+
+    raw = entry
     try:
         bankroll  = float(state.get("bankroll") or (1000 if sport == "wnba" else 250))
         path      = f"data/{'wnba_ledger' if sport == 'wnba' else 'ledger'}.json"
