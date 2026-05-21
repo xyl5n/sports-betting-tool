@@ -2,7 +2,90 @@
 MLB ballpark run factors (user-calibrated values, normalized so 1.000 = league average).
 >1 = hitter-friendly (more runs), <1 = pitcher-friendly (fewer runs).
 The run_factor is used directly by the totals prediction model as a multiplier.
+
+Live override: get_park_factors() attempts to pull current-season values
+from pybaseball's park_factors() (FanGraphs source, 100-base) before
+falling back to the static table below.  pybaseball returns 100-base
+values (100 = league average) which we convert to 1.000-base for
+model compatibility.  Failures (pybaseball not installed, FanGraphs
+unreachable, parse error) are silent -- the static table below is
+always available as a backstop.
 """
+from __future__ import annotations
+
+import time
+from typing import Optional
+
+# In-process memo so we only pay the pybaseball / FanGraphs round-trip
+# once per process (per season).  Each entry is keyed by season int.
+_LIVE_FACTOR_CACHE: dict[int, dict[str, tuple[float, float]]] = {}
+
+
+def _fetch_pybaseball_park_factors(season: int) -> dict[str, tuple[float, float]]:
+    """Return {team_name: (run_factor, hr_factor)} in 1.000-base from
+    pybaseball.park_factors(season).  Returns {} on any failure.
+
+    pybaseball.park_factors hits FanGraphs which publishes 100-base
+    factors (100 = league average, 110 = 10% above average for runs).
+    We divide by 100 to keep the rest of the pipeline on the same
+    1.000-base scale the totals model expects.
+    """
+    cached = _LIVE_FACTOR_CACHE.get(season)
+    if cached is not None:
+        return cached
+    try:
+        import pybaseball  # noqa: PLC0415
+    except ImportError:
+        _LIVE_FACTOR_CACHE[season] = {}
+        return {}
+    try:
+        df = pybaseball.park_factors(season)
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"  [park_factors] pybaseball.park_factors({season}) "
+              f"unavailable: {exc}")
+        _LIVE_FACTOR_CACHE[season] = {}
+        return {}
+
+    out: dict[str, tuple[float, float]] = {}
+    try:
+        # FanGraphs columns vary by release.  Probe a few of the
+        # commonly seen names and tolerate either a Basic column or
+        # a 1yr / multi-year average.
+        team_col = next(
+            (c for c in ("Team", "Home Team", "team", "TeamName") if c in df.columns),
+            None,
+        )
+        run_col = next(
+            (c for c in ("Basic", "1yr", "5yr", "Park Factor", "PF") if c in df.columns),
+            None,
+        )
+        hr_col = next(
+            (c for c in ("HR as L", "HR", "HRPF", "hr_park_factor") if c in df.columns),
+            None,
+        )
+        if not team_col or not run_col:
+            _LIVE_FACTOR_CACHE[season] = {}
+            return {}
+        for _, row in df.iterrows():
+            try:
+                team = str(row[team_col])
+                run = float(row[run_col]) / 100.0
+                hr  = float(row[hr_col]) / 100.0 if hr_col else run
+                if team and run > 0:
+                    out[team] = (run, hr)
+            except (TypeError, ValueError):
+                continue
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"  [park_factors] failed to parse pybaseball frame: {exc}")
+        _LIVE_FACTOR_CACHE[season] = {}
+        return {}
+
+    _LIVE_FACTOR_CACHE[season] = out
+    if out:
+        print(f"  [park_factors] loaded {len(out)} parks from pybaseball "
+              f"(season={season}) [SOURCE: pybaseball / FanGraphs]")
+    return out
+
 
 # (run_factor, hr_factor) — run_factor drives the totals model multiplier
 _PARK: dict[str, tuple[float, float]] = {
@@ -41,20 +124,104 @@ _PARK: dict[str, tuple[float, float]] = {
 _NEUTRAL = (1.000, 1.000)
 
 
-def get_park_factors(home_team: str) -> tuple[float, float]:
-    """Return (run_factor, hr_factor) for the home team's ballpark."""
-    if home_team in _PARK:
-        return _PARK[home_team]
-    # Fuzzy: try matching on last one or two words
+# Each MLB club -> the official home ballpark name.  Used by the
+# matchup-detail Venue section so the user sees "Coors Field" rather
+# than just "1.38".  Kept in sync with _PARK above by the same comment
+# trail; if a team relocates / renames the park, update both.
+_VENUE_NAME: dict[str, str] = {
+    "Colorado Rockies":       "Coors Field",
+    "Cincinnati Reds":        "Great American Ball Park",
+    "Boston Red Sox":         "Fenway Park",
+    "Chicago Cubs":           "Wrigley Field",
+    "Texas Rangers":          "Globe Life Field",
+    "Houston Astros":         "Minute Maid Park",
+    "Atlanta Braves":         "Truist Park",
+    "Milwaukee Brewers":      "American Family Field",
+    "New York Yankees":       "Yankee Stadium",
+    "Philadelphia Phillies":  "Citizens Bank Park",
+    "Baltimore Orioles":      "Oriole Park at Camden Yards",
+    "Chicago White Sox":      "Guaranteed Rate Field",
+    "Cleveland Guardians":    "Progressive Field",
+    "Los Angeles Angels":     "Angel Stadium",
+    "Arizona Diamondbacks":   "Chase Field",
+    "Washington Nationals":   "Nationals Park",
+    "Los Angeles Dodgers":    "Dodger Stadium",
+    "New York Mets":          "Citi Field",
+    "St. Louis Cardinals":    "Busch Stadium",
+    "Pittsburgh Pirates":     "PNC Park",
+    "Minnesota Twins":        "Target Field",
+    "Detroit Tigers":         "Comerica Park",
+    "Seattle Mariners":       "T-Mobile Park",
+    "Oakland Athletics":      "Oakland Coliseum",
+    "Tampa Bay Rays":         "Tropicana Field",
+    "Toronto Blue Jays":      "Rogers Centre",
+    "Kansas City Royals":     "Kauffman Stadium",
+    "Miami Marlins":          "loanDepot Park",
+    "San Diego Padres":       "Petco Park",
+    "San Francisco Giants":   "Oracle Park",
+}
+
+
+def get_venue_name(home_team: str) -> str:
+    """Return the home ballpark name for `home_team`, "" when unknown.
+    Uses the same exact / substring / token-overlap fuzzy match as
+    get_park_factors so MLB statsapi team names and Odds API team
+    names both resolve."""
+    if not home_team:
+        return ""
+    if home_team in _VENUE_NAME:
+        return _VENUE_NAME[home_team]
     home_lower = home_team.lower()
-    for team, factors in _PARK.items():
+    for team, name in _VENUE_NAME.items():
+        if team.lower() in home_lower or home_lower in team.lower():
+            return name
+    tokens = set(home_lower.split())
+    best, best_n = "", 0
+    for team, name in _VENUE_NAME.items():
+        n = len(tokens & set(team.lower().split()))
+        if n > best_n:
+            best, best_n = name, n
+    return best
+
+
+def _lookup_in_table(
+    home_team: str,
+    table: dict[str, tuple[float, float]],
+) -> Optional[tuple[float, float]]:
+    """Exact / substring / token-overlap match for `home_team` in
+    `table`.  Returns None when nothing scored above 0 tokens.
+    Shared between the live pybaseball table and the static fallback
+    so both go through identical fuzzy matching."""
+    if not table:
+        return None
+    if home_team in table:
+        return table[home_team]
+    home_lower = home_team.lower()
+    for team, factors in table.items():
         if team.lower() in home_lower or home_lower in team.lower():
             return factors
-    # Token overlap fallback
     tokens = set(home_lower.split())
-    best, best_n = _NEUTRAL, 0
-    for team, factors in _PARK.items():
+    best, best_n = None, 0
+    for team, factors in table.items():
         n = len(tokens & set(team.lower().split()))
         if n > best_n:
             best, best_n = factors, n
     return best
+
+
+def get_park_factors(
+    home_team: str,
+    season: Optional[int] = None,
+) -> tuple[float, float]:
+    """Return (run_factor, hr_factor) for the home team's ballpark in
+    1.000-base.  Tries pybaseball.park_factors(season) first when a
+    season is supplied; falls back to the hand-calibrated static
+    table when pybaseball is unavailable or the team can't be found
+    in the live data."""
+    if season is not None:
+        live = _fetch_pybaseball_park_factors(int(season))
+        hit = _lookup_in_table(home_team, live)
+        if hit is not None:
+            return hit
+    hit = _lookup_in_table(home_team, _PARK)
+    return hit if hit is not None else _NEUTRAL

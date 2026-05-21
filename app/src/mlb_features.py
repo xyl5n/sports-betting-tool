@@ -283,8 +283,10 @@ class MLBFeatureBuilder:
             if away_lineup_inputs else None
         )
 
-        # Ballpark
-        park_run, _ = get_park_factors(home_team)
+        # Ballpark -- pass season so the call tries pybaseball's
+        # current-season FanGraphs factors first, falls back to the
+        # hand-calibrated static table when pybaseball is offline.
+        park_run, _ = get_park_factors(home_team, season=season)
 
         # Weather
         wx = get_game_weather(home_team, commence) if commence else {

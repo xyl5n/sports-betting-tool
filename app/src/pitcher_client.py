@@ -29,10 +29,13 @@ _NEUTRAL_PITCHER = {
     "era":       4.50,
     "whip":      1.30,
     "k_rate":    0.215,
+    "k_per_9":   8.50,
     "bb9":       3.30,
     "era_home":  4.50,
     "era_away":  4.50,
     "last3_era": 4.50,
+    "wins":      0,
+    "losses":    0,
     "hand":      0,    # 0 = RHP, 1 = LHP
     "rest":      4,
 }
@@ -160,7 +163,8 @@ class PitcherClient:
         url = f"{_BASE}/people/{pid}/stats?stats=season&group=pitching&sportId=1"
         data = _fetch(url)
 
-        era = whip = k_rate = bb9 = None
+        era = whip = k_rate = bb9 = k_per_9 = None
+        wins = losses = None
         for grp in data.get("stats", []):
             for split in grp.get("splits", []):
                 st = split.get("stat", {})
@@ -178,6 +182,16 @@ class PitcherClient:
                 except (ValueError, TypeError):
                     ip = 0.0
                 bb9 = (bb * 9.0 / ip) if ip > 0 else None
+                # K/9 -- prefer the pre-computed strikeoutsPer9Inn field
+                # MLB Stats API returns; fall back to the raw division
+                # when it's missing.
+                k_per_9 = _safe(st.get("strikeoutsPer9Inn"), None)
+                if k_per_9 is None and ip > 0:
+                    k_per_9 = k * 9.0 / ip
+                # Season record -- shown beneath each pitcher's stats
+                # in the matchup view.
+                wins   = _safe(st.get("wins"), None)
+                losses = _safe(st.get("losses"), None)
                 break
             if era is not None:
                 break
@@ -195,12 +209,15 @@ class PitcherClient:
             "era":       era      if era       is not None else 4.50,
             "whip":      whip     if whip      is not None else 1.30,
             "k_rate":    k_rate   if k_rate    is not None else 0.215,
+            "k_per_9":   k_per_9  if k_per_9   is not None else 8.50,
             "bb9":       bb9      if bb9       is not None else 3.30,
             "era_home":  splits.get("home", 4.50),
             "era_away":  splits.get("away", 4.50),
             "last3_era": last3_era if last3_era is not None else (
                 era if era is not None else 4.50
             ),
+            "wins":      int(wins)   if wins   is not None else 0,
+            "losses":    int(losses) if losses is not None else 0,
             "hand":      1 if hand_code == "L" else 0,
             "rest":      _parse_rest(pitcher_info.get("note", "")),
         }

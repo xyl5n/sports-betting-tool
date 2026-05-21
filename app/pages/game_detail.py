@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from nicegui import ui
@@ -81,6 +82,12 @@ def register(backend) -> None:
                 if raw:
                     _section_model_picks(backend, raw, serialized, sport, game_id)
                 _section_pitching_or_lineup(serialized, sport)
+                # Venue card sits right under the pitcher matchup so
+                # the user reads ballpark + run factor as part of the
+                # pitching context (MLB only -- WNBA doesn't have a
+                # park-factor equivalent).
+                if sport == "mlb":
+                    _section_venue(serialized)
                 _section_lineups_placeholder(sport)
                 _section_team_context_placeholder()
                 _section_game_context(serialized)
@@ -705,54 +712,205 @@ def _section_pitching_or_lineup(ser: dict, sport: str) -> None:
     )
 
 
+# Sanity ranges -- any pitcher stat that falls outside its plausible
+# real-world band renders "N/A" instead of the bad number.  Locks the
+# matchup page against ever showing another "2140%" artifact when the
+# upstream pipeline regresses.
+_STAT_BOUNDS: dict[str, tuple[float, float]] = {
+    "era":       (0.0, 15.0),
+    "era_home":  (0.0, 15.0),
+    "era_away":  (0.0, 15.0),
+    "last3_era": (0.0, 15.0),
+    "k_per_9":   (0.0, 20.0),
+    "bb9":       (0.0, 15.0),
+    "whip":      (0.0, 4.0),
+    "rest":      (0.0, 30.0),
+}
+
+
+def _sane(value, key: str) -> Optional[float]:
+    """Coerce *value* to float and return it only when inside the
+    plausible band for *key*.  None for missing / out-of-range so the
+    caller can render "N/A"."""
+    if value is None or value == "":
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    lo, hi = _STAT_BOUNDS.get(key, (None, None))
+    if lo is not None and (v < lo or v > hi):
+        return None
+    return v
+
+
+def _fmt_stat(value, key: str, fmt: str) -> str:
+    """Sanity-check + format a pitcher stat.  Returns "N/A" for
+    missing / out-of-range values; otherwise applies *fmt*."""
+    v = _sane(value, key)
+    if v is None:
+        return "N/A"
+    try:
+        return fmt.format(v)
+    except (TypeError, ValueError):
+        return "N/A"
+
+
 def _pitching_table(away_sp: dict, home_sp: dict, away_team: str, home_team: str) -> None:
+    """Side-by-side pitcher comparison: away on the left, home on the
+    right.  Each column stacks ERA / Home ERA / Away ERA / Last 3 GS /
+    WHIP / K per 9 / BB per 9 / Days Rest / Season W-L.  Every numeric
+    value passes _fmt_stat which clamps to the plausible band per
+    _STAT_BOUNDS and renders N/A for anything outside.
+    """
+    # The fields list drives the row order in both columns -- keep them
+    # in lockstep so the labels in the middle gutter line up with each
+    # pair of values.  (label, key, fmt) per the existing _fmt helper.
     fields = [
-        ("ERA",         "era",       "{:.2f}"),
-        ("WHIP",        "whip",      "{:.2f}"),
-        ("K rate",      "k_rate",    "{:.1%}"),
-        ("BB / 9",      "bb9",       "{:.2f}"),
-        ("Home ERA",    "era_home",  "{:.2f}"),
-        ("Away ERA",    "era_away",  "{:.2f}"),
-        ("Last 3 ERA",  "last3_era", "{:.2f}"),
-        ("Days rest",   "rest",      "{}"),
-        ("Hand",        "hand",      "{}"),
+        ("ERA",          "era",       "{:.2f}"),
+        ("Home ERA",     "era_home",  "{:.2f}"),
+        ("Away ERA",     "era_away",  "{:.2f}"),
+        ("Last 3 GS",    "last3_era", "{:.2f}"),
+        ("WHIP",         "whip",      "{:.2f}"),
+        ("K/9",          "k_per_9",   "{:.1f} K/9"),
+        ("BB/9",         "bb9",       "{:.1f} BB/9"),
+        ("Days Rest",    "rest",      "{:.0f}"),
     ]
-    # Header row -- pitcher names
+
+    # Top: pitcher column headers.  Show team name as the heading; the
+    # "Away" / "Home" tag below disambiguates which slot is which.
     with ui.row().classes("items-center w-full").style(
-        f"padding: 6px 0; gap: 12px; "
+        f"padding: 8px 0 10px; gap: 12px; "
         f"border-bottom: 1px solid {t.BORDER};"
     ):
-        ui.label("").style(f"flex: 0 0 35%;")
-        ui.label(f"{away_team} (Away SP)").style(
-            f"flex: 1; font-size: 11.5px; font-weight: 700; color: {t.TEXT};"
-        )
-        ui.label(f"{home_team} (Home SP)").style(
-            f"flex: 1; font-size: 11.5px; font-weight: 700; color: {t.TEXT};"
-        )
+        with ui.column().style("flex: 1; min-width: 0; gap: 2px;"):
+            ui.label(away_team).style(
+                f"font-size: 13px; font-weight: 800; color: {t.TEXT}; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            )
+            ui.label(f"Away SP · {away_sp.get('hand') or '—'}").style(
+                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                f"letter-spacing: .3px;"
+            )
+        ui.label("").style(f"flex: 0 0 95px; text-align: center;")
+        with ui.column().style(
+            "flex: 1; min-width: 0; gap: 2px; "
+            "align-items: flex-end; text-align: right;"
+        ):
+            ui.label(home_team).style(
+                f"font-size: 13px; font-weight: 800; color: {t.TEXT}; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            )
+            ui.label(f"Home SP · {home_sp.get('hand') or '—'}").style(
+                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                f"letter-spacing: .3px;"
+            )
+
+    # Stat rows: away value | label | home value.  Center-aligned label
+    # column keeps everything visually anchored without a separate
+    # divider line.
     for label, key, fmt in fields:
-        av = away_sp.get(key)
-        hv = home_sp.get(key)
+        av_raw = away_sp.get(key)
+        hv_raw = home_sp.get(key)
+        av_txt = _fmt_stat(av_raw, key, fmt)
+        hv_txt = _fmt_stat(hv_raw, key, fmt)
         with ui.row().classes("items-center w-full").style(
-            f"padding: 6px 0; gap: 12px; "
+            f"padding: 7px 0; gap: 12px; "
             f"border-bottom: 1px solid {t.BORDER_SOFT};"
         ):
+            ui.label(av_txt).style(
+                f"flex: 1; font-size: 13px; color: {t.TEXT}; "
+                f"font-family: monospace; font-weight: 600; "
+                f"text-align: left;"
+            )
             ui.label(label).style(
-                f"flex: 0 0 35%; font-size: 12px; color: {t.TEXT_DIM};"
+                f"flex: 0 0 95px; font-size: 10.5px; color: {t.TEXT_DIM}; "
+                f"letter-spacing: .4px; text-align: center; font-weight: 700;"
             )
-            ui.label(_fmt(av, fmt)).style(
-                f"flex: 1; font-size: 12.5px; color: {t.TEXT}; "
-                f"font-family: monospace;"
+            ui.label(hv_txt).style(
+                f"flex: 1; font-size: 13px; color: {t.TEXT}; "
+                f"font-family: monospace; font-weight: 600; "
+                f"text-align: right;"
             )
-            ui.label(_fmt(hv, fmt)).style(
-                f"flex: 1; font-size: 12.5px; color: {t.TEXT}; "
-                f"font-family: monospace;"
+
+    # Season record row: W-L as a string, no sanity bounds (any
+    # integer pair makes sense).  Rendered separate from the
+    # numeric-bounded rows so the format stays "W-L".
+    a_w = int(away_sp.get("wins")   or 0)
+    a_l = int(away_sp.get("losses") or 0)
+    h_w = int(home_sp.get("wins")   or 0)
+    h_l = int(home_sp.get("losses") or 0)
+    a_record = f"{a_w}-{a_l}" if (a_w or a_l) else "N/A"
+    h_record = f"{h_w}-{h_l}" if (h_w or h_l) else "N/A"
+    with ui.row().classes("items-center w-full").style(
+        f"padding: 7px 0; gap: 12px;"
+    ):
+        ui.label(a_record).style(
+            f"flex: 1; font-size: 13px; color: {t.TEXT}; "
+            f"font-family: monospace; font-weight: 700; text-align: left;"
+        )
+        ui.label("Season W-L").style(
+            f"flex: 0 0 95px; font-size: 10.5px; color: {t.TEXT_DIM}; "
+            f"letter-spacing: .4px; text-align: center; font-weight: 700;"
+        )
+        ui.label(h_record).style(
+            f"flex: 1; font-size: 13px; color: {t.TEXT}; "
+            f"font-family: monospace; font-weight: 700; text-align: right;"
+        )
+
+
+def _section_venue(ser: dict) -> None:
+    """Standalone Venue card under the pitcher matchup.  Shows the
+    home ballpark name plus its run factor labeled as Hitter Friendly
+    (>105), Pitcher Friendly (<95), or Neutral (95-105) -- the user-
+    facing convention from FanGraphs' 100-base park factors."""
+    park = ser.get("park_run_factor")
+    venue = ser.get("venue_name") or "—"
+    try:
+        pv = int(round(float(park))) if park is not None else None
+    except (TypeError, ValueError):
+        pv = None
+    if pv is None:
+        tag, tag_color = "—", t.TEXT_DIM2
+    elif pv > 105:
+        tag, tag_color = "Hitter Friendly", t.POS
+    elif pv < 95:
+        tag, tag_color = "Pitcher Friendly", t.NEG
+    else:
+        tag, tag_color = "Neutral", t.TEXT_DIM
+
+    def _rows() -> None:
+        with ui.row().classes("items-center w-full").style(
+            f"padding: 4px 0; gap: 12px;"
+        ):
+            with ui.column().style("flex: 1; min-width: 0; gap: 2px;"):
+                ui.label("Ballpark").style(
+                    f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                    f"letter-spacing: .5px; font-weight: 700;"
+                )
+                ui.label(venue).style(
+                    f"font-size: 14px; color: {t.TEXT}; font-weight: 700; "
+                    f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+                )
+            with ui.column().style(
+                "flex: 0 0 auto; gap: 2px; align-items: flex-end;"
+            ):
+                ui.label("Run Factor").style(
+                    f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                    f"letter-spacing: .5px; font-weight: 700;"
+                )
+                ui.label(f"{pv}" if pv is not None else "N/A").style(
+                    f"font-size: 22px; font-weight: 800; color: {t.TEXT}; "
+                    f"font-family: monospace; letter-spacing: -.2px;"
+                )
+            ui.label(tag).style(
+                f"flex: 0 0 auto; font-size: 11px; font-weight: 800; "
+                f"letter-spacing: .5px; color: {tag_color}; "
+                f"background: {t.CARD_HI}; "
+                f"padding: 4px 10px; border-radius: {t.RADIUS_PILL};"
             )
-    ui.label(
-        "Last 3 start-by-start breakdown coming soon."
-    ).style(
-        f"font-size: 11px; color: {t.TEXT_DIM2}; "
-        f"margin-top: 8px; font-style: italic;"
-    )
+
+    _section_card("VENUE", rows_renderer=_rows)
 
 
 def _starting_five_placeholder() -> None:
@@ -814,15 +972,13 @@ def _section_game_context(ser: dict) -> None:
 
 
 def _game_context_rows(ser: dict) -> None:
-    park = ser.get("park_run_factor")
     wx   = ser.get("weather") or {}
     line_move = (ser.get("meta") or {}).get("line_movement")
 
+    # Ballpark run factor lives in its own VENUE card above (MLB only).
+    # Game Context now focuses on weather + line movement so the two
+    # sections don't repeat the same number.
     rows: list[tuple[str, str]] = []
-    rows.append((
-        "Ballpark run factor",
-        f"{float(park):.2f}" if isinstance(park, (int, float)) else "—",
-    ))
     if wx:
         temp = wx.get("temperature")
         wind = wx.get("wind_speed")
