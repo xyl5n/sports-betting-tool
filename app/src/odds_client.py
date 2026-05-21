@@ -113,6 +113,41 @@ def _today_et_date() -> str:
         return date.today().isoformat()
 
 
+def _today_mid_et() -> str:
+    """Today's midnight Eastern time, returned as a UTC ISO 8601 string
+    (Z suffix).  Used as the `commenceTimeFrom` parameter on /odds
+    requests so the API only returns today's games.
+
+    Example: when today is 2026-05-21 ET (EDT, UTC-4), midnight ET
+    is 2026-05-21T00:00:00-04:00 which equals 2026-05-21T04:00:00Z
+    in UTC.  zoneinfo handles DST automatically -- no manual offset
+    math, no pytz dep beyond stdlib.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    et  = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    today_mid_et = datetime.now(et).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    return today_mid_et.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tomorrow_mid_et() -> str:
+    """Tomorrow's midnight Eastern time as a UTC ISO 8601 string.
+    Used as the `commenceTimeTo` parameter (exclusive upper bound)
+    so the API window covers exactly one ET calendar day."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    et  = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    tomorrow_mid_et = (
+        datetime.now(et).replace(hour=0, minute=0, second=0, microsecond=0)
+        + timedelta(days=1)
+    )
+    return tomorrow_mid_et.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _odds_counter_key() -> str:
     return f"odds_api_calls:{_today_et_date()}"
 
@@ -693,7 +728,7 @@ class OddsClient:
             return cached
         _log(f"  cache MISS cache_key={cache_key!r} -- calling API")
         _log(f"  commenceTimeFrom={commence_from}  commenceTimeTo={commence_to}  "
-             f"(today_et={_today_mid_et.date().isoformat()})")
+             f"(today_et={_today_et_date()})")
 
         raw = self._get(f"/sports/{sport_key}/odds/", {
             "regions": regions,

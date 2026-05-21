@@ -28,13 +28,28 @@ _TABS = (
 
 
 def render(active: str = t.TAB_HOME) -> None:
-    """Render the bottom tab bar.  Hidden on desktop via .mobile-only."""
+    """Render the bottom tab bar.  Hidden on desktop via .mobile-only.
+
+    `bottom: max(12px, env(safe-area-inset-bottom))` lifts the bar
+    off the viewport edge so the tabs don't sit flush against the
+    iPhone home indicator / Safari address bar swipe zone.  On
+    devices without a safe-area inset the explicit 12px floor still
+    leaves clearance; on iPhones the env() value (usually 34px on
+    notched models) wins automatically.  The page container's
+    padding-bottom reservation in theme.py was bumped to match so
+    content above stays scrollable without being hidden under the
+    lifted bar.
+    """
     with ui.element("div").classes("mobile-only").style(
-        f"position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; "
+        f"position: fixed; left: 0; right: 0; "
+        f"bottom: max(12px, env(safe-area-inset-bottom)); z-index: 50; "
         f"height: {t.BOTTOM_NAV_HEIGHT}; "
         f"background: {t.CARD}; "
-        f"border-top: 1px solid {t.BORDER}; "
-        f"padding: 4px 0 max(4px, env(safe-area-inset-bottom)) 0; "
+        f"border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_LG}; "
+        f"margin: 0 8px; "
+        f"box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6); "
+        f"padding: 4px 6px; "
         f"justify-content: space-around; align-items: stretch;"
     ):
         for label, tab_key, href, icon in _TABS:
