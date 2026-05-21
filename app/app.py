@@ -2679,6 +2679,197 @@ def _picks_index_for_historical(sport: str, date_str: str) -> dict[str, dict]:
     return {k: {"history_rows": v} for k, v in out.items()}
 
 
+# ── No-odds predictions: model output for games The Odds API hasn't priced ───
+# Schedule rows flagged with _no_odds normally render as a "No Odds Available"
+# placeholder.  We can do better: the trained model only needs team identity
+# (+ optional spread/implied prob, both of which default to neutral values) to
+# emit ML / RL / totals predictions.  This block lazy-loads the predictor stack
+# on first request and reuses it across subsequent calls.  First request after
+# a Railway deploy is slow (GameStore.load() touches the API to hydrate the
+# season window); subsequent requests within the same boot are cheap.
+
+_no_odds_predictor: dict[str, object] = {"mlb": None, "wnba": None}
+# Negative-cache slot so a failed first-load doesn't retry on every render.
+_no_odds_predictor_failed: dict[str, bool] = {"mlb": False, "wnba": False}
+
+
+def _ensure_no_odds_predictor(sport: str):
+    """Return (fb, ml_model, rl_or_spread_model, totals_model) for the
+    sport, lazy-loading from cached joblib snapshots if not yet built.
+    Returns None on any failure (cached so we don't retry every render).
+    """
+    sport = sport.lower()
+    if _no_odds_predictor.get(sport) is not None:
+        return _no_odds_predictor[sport]
+    if _no_odds_predictor_failed.get(sport):
+        return None
+    try:
+        cfg = SPORTS.get(sport)
+        if cfg is None:
+            _no_odds_predictor_failed[sport] = True
+            return None
+
+        season = int(os.getenv("SEASON", 2025))
+        sports_key = os.getenv("API_SPORTS_KEY", "")
+
+        store = GameStore(
+            api_key=sports_key,
+            base_url=cfg.api_sports_base,
+            league_id=cfg.league_id,
+            sport_tag=sport,
+            cache=_cache,
+        )
+        try:
+            store.load(season)
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"NO-ODDS PREDICT [{sport.upper()}]: GameStore.load failed: {exc}")
+            _no_odds_predictor_failed[sport] = True
+            return None
+
+        if sport == "mlb":
+            from src.mlb_features import MLBFeatureBuilder
+            fb = MLBFeatureBuilder(store)
+        else:
+            from src.wnba_features import WNBAFeatureBuilder
+            fb = WNBAFeatureBuilder(store)
+
+        ml_model = BettingModel(cfg)
+        ml_model.train_or_load(stats_client=store, feature_builder=fb,
+                               season=season, force_retrain=False)
+
+        rl_model = totals_model = None
+        if sport == "mlb":
+            try:
+                rl_model = RunLineModel()
+                rl_model.train_or_load(store, fb, season)
+            except Exception as exc:                                      # noqa: BLE001
+                _eprint(f"NO-ODDS PREDICT [MLB]: RL load failed: {exc}")
+            try:
+                totals_model = TotalsModel()
+                totals_model.train_or_load(store, fb, season)
+            except Exception as exc:                                      # noqa: BLE001
+                _eprint(f"NO-ODDS PREDICT [MLB]: totals load failed: {exc}")
+        else:
+            try:
+                from src.wnba_spread_model import WNBASpreadModel
+                rl_model = WNBASpreadModel()
+                rl_model.train_or_load(store, fb, season)
+            except Exception as exc:                                      # noqa: BLE001
+                _eprint(f"NO-ODDS PREDICT [WNBA]: spread load failed: {exc}")
+            try:
+                from src.wnba_totals_model import WNBATotalsModel
+                totals_model = WNBATotalsModel()
+                totals_model.train_or_load(store, fb, season)
+            except Exception as exc:                                      # noqa: BLE001
+                _eprint(f"NO-ODDS PREDICT [WNBA]: totals load failed: {exc}")
+
+        _no_odds_predictor[sport] = (fb, ml_model, rl_model, totals_model)
+        _eprint(
+            f"NO-ODDS PREDICT [{sport.upper()}]: predictor stack ready "
+            f"(ml={ml_model.is_trained}, rl={(rl_model.is_trained if rl_model else False)}, "
+            f"totals={(totals_model.is_trained if totals_model else False)})"
+        )
+        return _no_odds_predictor[sport]
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"NO-ODDS PREDICT [{sport.upper()}]: setup failed: {exc}")
+        _no_odds_predictor_failed[sport] = True
+        return None
+
+
+def _predict_no_odds_game(sport: str, g: dict) -> dict | None:
+    """Run the model on one no-odds game.  Returns:
+        {ml_prob_home, ml_prob_away, rl_pick, rl_prob, rl_line,
+         totals_pred, totals_direction, totals_baseline}
+    or None when prediction fails (frontend falls back to the
+    "No Odds Available" notice in that case).
+
+    No edge / Kelly sizing -- there's no market to compare against.
+    Result is NOT recorded in any tracker file since there's nothing
+    to settle (no odds means no bet was ever placed)."""
+    sport = sport.lower()
+    pred = _ensure_no_odds_predictor(sport)
+    if pred is None:
+        return None
+    fb, ml_model, rl_model, totals_model = pred
+    if not ml_model or not getattr(ml_model, "is_trained", False):
+        return None
+
+    # Inject a neutral implied prob + zero spread so build_for_game
+    # doesn't penalize the no-odds game vs ones that came in with
+    # market signal.  The model's xgb_input_kind="market_free" head
+    # ignores these anyway; this just stops downstream code from
+    # KeyError'ing on the optional fields.
+    g_for_features = dict(g)
+    g_for_features.setdefault("home_implied_prob", 0.5)
+    g_for_features.setdefault("spread", 0.0)
+    try:
+        built = fb.build_for_game(g_for_features)
+    except Exception:                                                     # noqa: BLE001
+        return None
+    if built is None:
+        return None
+    feature_vec, meta = built
+
+    try:
+        ml = ml_model.predict(feature_vec, weights=None, game_meta=g_for_features)
+    except Exception:                                                     # noqa: BLE001
+        return None
+    home_prob = float(ml.get("home_win_prob") or 0.5)
+
+    out = {
+        "ml_prob_home": round(home_prob, 4),
+        "ml_prob_away": round(1.0 - home_prob, 4),
+    }
+
+    # Run line / spread -- neutral line so the model picks its favored side
+    # against a market-free baseline.  MLB: -1.5 (the standard run line).
+    # WNBA: -2.5 (a typical small spread).  The probability returned is
+    # P(home covers); pick_team flips for the underdog branch.
+    if rl_model and getattr(rl_model, "is_trained", False):
+        try:
+            g_rl = dict(g_for_features)
+            if sport == "mlb":
+                g_rl.setdefault("run_line_point", -1.5)
+            else:
+                g_rl.setdefault("spread", -2.5)
+            rl = rl_model.predict(
+                feature_vec, g_rl, weights=None,
+                ml_prob_home    = ml.get("xgb_prob"),
+                ml_lr_prob_home = ml.get("lr_prob"),
+                ml_nn_prob_home = ml.get("nn_prob"),
+            )
+            if rl:
+                out["rl_pick_team"] = rl.get("pick_team") or (
+                    g.get("home_team") if rl.get("side") == "home" else g.get("away_team")
+                )
+                out["rl_pick_side"] = rl.get("side")
+                out["rl_prob"]      = round(float(rl.get("pick_prob") or 0.0), 4)
+                out["rl_line"]      = -1.5 if sport == "mlb" else -2.5
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"NO-ODDS PREDICT [{sport.upper()}]: RL predict skipped: {exc}")
+
+    # Totals -- pass a baseline line so the totals model emits a direction
+    # (the actual displayed value is the projected raw total).
+    if totals_model and getattr(totals_model, "is_trained", False):
+        try:
+            g_tot = dict(g_for_features)
+            baseline = 9.0 if sport == "mlb" else 160.0
+            g_tot.setdefault("total_line", baseline)
+            g_tot.setdefault("over_odds",  -110)
+            g_tot.setdefault("under_odds", -110)
+            totals_vec = fb.build_totals_from_meta(meta) if hasattr(fb, "build_totals_from_meta") else None
+            if totals_vec is not None:
+                tot = totals_model.predict(totals_vec, g_tot, weights=None)
+                if tot:
+                    out["totals_projected"] = float(tot.get("predicted_total") or 0)
+                    out["totals_direction"] = (tot.get("direction") or "").lower()
+                    out["totals_baseline"]  = baseline
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"NO-ODDS PREDICT [{sport.upper()}]: totals predict skipped: {exc}")
+
+    return out
+
+
 @app.route("/api/schedule/<sport>", methods=["GET"])
 def schedule_for_date(sport: str):
     """Full slate for one sport on one ET date.
@@ -2728,8 +2919,14 @@ def schedule_for_date(sport: str):
                 pass
 
         # No model pick available for this game on this date.  Emit
-        # a sparse row -- the UI will render "No Odds Available" in
-        # place of bet boxes.
+        # a sparse row + try to attach model-only predictions so the
+        # UI can render Predicted Winner / Run Line Prediction /
+        # Projected Total instead of the bare "No Odds Available"
+        # notice.  Predictions are skipped for past dates -- the
+        # outcome is already known -- and for future dates where
+        # the model would just be guessing without any market
+        # signal anyway (the predictor needs current-season team
+        # stats which the GameStore only loads for dates in range).
         row = {
             "id":            gid,
             "game_id":       gid,
@@ -2745,6 +2942,15 @@ def schedule_for_date(sport: str):
             }
         if pick_entry and pick_entry.get("history_rows"):
             row["_settled_rows"] = pick_entry["history_rows"]
+        # Only attempt the no-odds predict for today + future (no point
+        # for past completed games -- the score is the answer).
+        if date_str >= _today_et():
+            try:
+                model_pred = _predict_no_odds_game(sport, g)
+                if model_pred is not None:
+                    row["_model_prediction"] = model_pred
+            except Exception as exc:                                       # noqa: BLE001
+                _eprint(f"schedule {sport} {gid}: no-odds predict skipped: {exc}")
         out_games.append(row)
 
     return jsonify({
