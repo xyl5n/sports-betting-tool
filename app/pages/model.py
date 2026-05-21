@@ -392,13 +392,16 @@ def _classifier_card(history: list[dict]) -> None:
     }
 
     # Best model by overall correct-call rate (minimum 10 settled predictions).
-    best = None
-    best_pct = 0.0
-    for m in models:
-        c, n = overall[m]
-        if n >= 10 and (c / n) > best_pct:
-            best_pct = c / n
-            best = m
+    # Identify the best AND worst qualifying classifiers (n >= 10).
+    # Best gets an emerald tint, worst a rose tint -- the palette
+    # redesign's "color-coded performance" requirement.  When only
+    # one model qualifies it's both -- skip the worst tint in that
+    # case so a single qualifying model doesn't render as the loser.
+    qualified = [(m, overall[m][0] / overall[m][1]) for m in models
+                 if overall[m][1] >= 10]
+    best  = max(qualified, key=lambda r: r[1])[0] if qualified else None
+    worst = (min(qualified, key=lambda r: r[1])[0]
+             if len(qualified) >= 2 else None)
 
     ui.label("CLASSIFIER ACCURACY").style(
         f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
@@ -412,18 +415,46 @@ def _classifier_card(history: list[dict]) -> None:
     )
     with ui.row().classes("w-full bet-boxes").style(f"gap: {t.SPACE_MD};"):
         for m in models:
-            _classifier_block(m, labels[m], overall[m], by_cat[m], m == best)
+            _classifier_block(
+                m, labels[m], overall[m], by_cat[m],
+                is_best=(m == best), is_worst=(m == worst),
+            )
 
 
-def _classifier_block(model: str, label: str, ov: list[int], by_cat: dict[str, list[int]], is_best: bool) -> None:
+def _classifier_block(
+    model: str, label: str, ov: list[int],
+    by_cat: dict[str, list[int]],
+    is_best: bool, is_worst: bool = False,
+) -> None:
     correct, total = ov
     pct = (correct / total * 100) if total else None
     pct_s = "—" if pct is None else f"{pct:.1f}%"
-    border = f"1px solid {t.POS}" if is_best else f"1px solid {t.BORDER}"
-    shadow = f"box-shadow: 0 0 12px rgba(34, 197, 94, .12);" if is_best else ""
+
+    # Color-coded backgrounds per palette redesign:
+    #   best  -> emerald (POS) tint + border
+    #   worst -> rose (NEG) tint + border
+    #   else  -> neutral CARD + BORDER
+    if is_best:
+        bg     = f"rgba({t.SECONDARY_R}, {t.SECONDARY_G}, {t.SECONDARY_B}, 0.10)"
+        border = f"1px solid {t.POS}"
+        shadow = (
+            f"box-shadow: 0 0 12px "
+            f"rgba({t.SECONDARY_R}, {t.SECONDARY_G}, {t.SECONDARY_B}, .18);"
+        )
+    elif is_worst:
+        bg     = f"rgba({t.NEG_R}, {t.NEG_G}, {t.NEG_B}, 0.10)"
+        border = f"1px solid {t.NEG}"
+        shadow = (
+            f"box-shadow: 0 0 12px "
+            f"rgba({t.NEG_R}, {t.NEG_G}, {t.NEG_B}, .14);"
+        )
+    else:
+        bg     = t.CARD
+        border = f"1px solid {t.BORDER}"
+        shadow = ""
 
     with ui.column().style(
-        f"flex: 1; background: {t.CARD}; border: {border}; "
+        f"flex: 1; background: {bg}; border: {border}; "
         f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: {t.SPACE_SM}; "
         f"{shadow}"
     ):
@@ -434,6 +465,12 @@ def _classifier_block(model: str, label: str, ov: list[int], by_cat: dict[str, l
             if is_best:
                 ui.label("BEST").style(
                     f"background: {t.POS}; color: {t.BG}; "
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"padding: 2px 6px; border-radius: 3px;"
+                )
+            elif is_worst:
+                ui.label("WORST").style(
+                    f"background: {t.NEG}; color: {t.BG}; "
                     f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
                     f"padding: 2px 6px; border-radius: 3px;"
                 )

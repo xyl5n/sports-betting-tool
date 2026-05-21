@@ -360,9 +360,15 @@ def _result_card_style(result: str) -> tuple[str, str]:
     settled result.  Mirrors PR #65's game-card bet-box treatment so
     the home-screen tints match the slate cards exactly."""
     if result == "win":
-        return ("rgba(34, 197, 94, 0.15)",  "1px solid rgb(34, 197, 94)")
+        return (
+            f"rgba({t.SECONDARY_R}, {t.SECONDARY_G}, {t.SECONDARY_B}, 0.15)",
+            f"1px solid {t.POS}",
+        )
     if result == "loss":
-        return ("rgba(239, 68, 68, 0.15)",  "1px solid rgb(239, 68, 68)")
+        return (
+            f"rgba({t.NEG_R}, {t.NEG_G}, {t.NEG_B}, 0.15)",
+            f"1px solid {t.NEG}",
+        )
     return (t.CARD, f"1px solid {t.BORDER}")
 
 

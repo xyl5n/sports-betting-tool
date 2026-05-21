@@ -261,11 +261,19 @@ def _tier_row(label: str, wl: Iterable[int]) -> None:
         t.POS if total and (w / total) >= 0.55 else
         t.NEG if total and (w / total) < 0.45 else t.TEXT_DIM
     )
+    # Tier label gets its own color now (per palette redesign spec):
+    #   Strong   -> emerald (POS)
+    #   Moderate -> amber (WARN)
+    #   Low      -> muted grey (TEXT_DIM2) -- explicitly NOT NEG so it
+    #               doesn't read as a loss.
+    tier_color = t.TIER_COLOR.get(label.lower(), t.TEXT_DIM)
+    pretty = {"strong": "Strong Pick", "moderate": "Moderate Pick",
+              "low": "Low Confidence"}.get(label.lower(), label.title())
     with ui.row().classes("items-center w-full justify-between").style(
         f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT};"
     ):
-        ui.label(label.title()).style(
-            f"font-size: 12px; color: {t.TEXT_DIM};"
+        ui.label(pretty).style(
+            f"font-size: 12px; font-weight: 700; color: {tier_color};"
         )
         ui.label(f"{w}-{l}  ({pct})").style(
             f"font-size: 12px; color: {pct_color}; font-family: monospace;"

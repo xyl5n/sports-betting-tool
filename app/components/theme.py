@@ -16,30 +16,49 @@ Color palette is the OLED-black spec from the migration brief:
 from __future__ import annotations
 
 # ── Colors ──────────────────────────────────────────────────────────────────
-# Palette is tuned for OLED panels: BG is true #000 so unlit pixels stay
-# off, and elevated surfaces are kept as close to black as possible while
-# still being distinguishable from the page background.  Borders carry a
-# faint cool tint that pairs with the blue accent glow added below; on
-# IPS / LCD this reads as a clean dark theme, on OLED the cards almost
-# float against the (off) background.
+# Palette redesign: OLED black base + vibrant purple-to-emerald accent
+# gradient.  Purple (PRIMARY) carries every active / selected / CTA
+# affordance; emerald (POS) carries every win / confirmation / "good"
+# semantic; amber (WARN) for edge picks + cautions; rose (NEG) for
+# losses.  The two accent hues are chosen to read distinctly against
+# pure-black backgrounds while still working as a gradient pair on
+# hover borders (see card-glow CSS below).
 BG          = "#000000"          # pure black -- OLED unlit
-CARD        = "#050507"          # elevated panel (was #0d0d0d -- darker for OLED)
-CARD_HI     = "#0c0d12"          # nested elevation / hover (was #161616)
-BORDER      = "#1a2030"          # subtle blue-tinted line (was neutral #1f1f1f)
-BORDER_SOFT = "#0a0c12"          # almost-invisible separator (was #141414)
-PRIMARY     = "#3b82f6"          # blue accent (active tab, ML pick, CTA)
-PRIMARY_HI  = "#60a5fa"          # primary hover / lighter
+CARD        = "#111111"          # elevated panel
+CARD_HI     = "#1a1a1a"          # nested elevation / hover
+BORDER      = "#262232"          # subtle purple-tinted line
+BORDER_SOFT = "#161420"          # almost-invisible separator
+PRIMARY     = "#7c3aed"          # vibrant purple -- active tab, ML pick, CTA
+PRIMARY_HI  = "#a855f7"          # lighter purple -- hover / gradient tail
+SECONDARY   = "#10b981"          # emerald -- positive accent pair to purple
 TEXT        = "#ffffff"          # primary text
 TEXT_DIM    = "#a0a0a0"          # secondary text
 TEXT_DIM2   = "#6b7280"          # caption / footnote
-POS         = "#22c55e"          # win, profit, value
-NEG         = "#ef4444"          # loss, deficit
-WARN        = "#fbbf24"          # push, void, warning
-CYAN        = "#22d3ee"          # legacy accent (charts, links)
+POS         = "#10b981"          # win, profit, value (aliased to SECONDARY)
+NEG         = "#f43f5e"          # rose -- loss, deficit
+WARN        = "#f59e0b"          # amber -- push, void, edge picks
+CYAN        = "#22d3ee"          # legacy accent (charts, links) -- unchanged
 
-# RGB components of PRIMARY so CSS can build rgba() shadows + tints
-# without hard-coding them in three places.
-PRIMARY_R, PRIMARY_G, PRIMARY_B = 59, 130, 246
+# RGB components of PRIMARY + SECONDARY so the CSS layer can build
+# rgba() tints + gradients without hard-coding the same hue more than
+# once.  Updating one of these here flows through every card glow,
+# button gradient, and nav-tab halo on the next render.
+PRIMARY_R,   PRIMARY_G,   PRIMARY_B   = 124,  58, 237   # #7c3aed
+PRIMARY_HI_R, PRIMARY_HI_G, PRIMARY_HI_B = 168, 85, 247  # #a855f7
+SECONDARY_R, SECONDARY_G, SECONDARY_B =  16, 185, 129   # #10b981
+NEG_R,       NEG_G,       NEG_B       = 244,  63,  94   # #f43f5e
+WARN_R,      WARN_G,      WARN_B      = 245, 158,  11   # #f59e0b
+
+# Confidence tier color map -- consumed by sidebar._tier_row + any
+# other display that wants the same semantic.  Strong uses emerald
+# (most-confident == best == green), Moderate uses amber (the user's
+# "yellow zone"), Low uses a muted grey rather than red so it doesn't
+# read as a loss.
+TIER_COLOR  = {
+    "strong":   POS,        # emerald
+    "moderate": WARN,       # amber
+    "low":      TEXT_DIM2,  # muted grey (not NEG -- low confidence != loss)
+}
 
 # ── Spacing ─────────────────────────────────────────────────────────────────
 SPACE_XS    = "4px"
@@ -111,8 +130,8 @@ def page_head_css() -> str:
         padding: {SPACE_MD};
         box-shadow:
           inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.05),
-          0 1px 0 rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.04),
-          0 6px 18px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.06);
+          0 1px 0 rgba({SECONDARY_R}, {SECONDARY_G}, {SECONDARY_B}, 0.03),
+          0 6px 18px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.05);
       }}
       .theme-card-hi {{ background: {CARD_HI}; }}
 
@@ -123,34 +142,65 @@ def page_head_css() -> str:
          the f-string `border: 1px solid {{t.BORDER}}` which produces a
          predictable substring we can target.
 
-         The shadow stack:
-           inset 1px ring at 6% PRIMARY -- the "tinted highlight" ring
-           outer soft bloom at 6%       -- the subtle blue glow that
-                                            reads as "lifted off" on OLED
-         Both layers are intentionally weak; together they nudge cards
-         away from the pure-black background without competing with
-         active/selected states (which use higher opacities). */
+         The shadow stack carries the purple/emerald accent pair:
+           inset 1px purple ring    -- the "tinted highlight"
+           outer 1px emerald halo   -- pairs with the inset for the
+                                       gradient feel the spec asks for
+           outer purple bloom       -- subtle lift off the OLED background
+         All three layers are weak at rest; hover bumps them and adds
+         a second emerald bloom so the card visibly "warms up" without
+         shifting its layout. */
       [style*="border: 1px solid {BORDER}"] {{
         box-shadow:
           inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.06),
-          0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.02),
+          0 0 0 1px rgba({SECONDARY_R}, {SECONDARY_G}, {SECONDARY_B}, 0.04),
           0 6px 20px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.06);
         transition: box-shadow 180ms ease-out, border-color 180ms ease-out;
       }}
-      /* Stronger glow on hover -- gives interactive cards a tactile
-         affordance without changing the layout (no border-width swap,
-         no padding shift). */
+      /* Hover: gradient feel via two outer rings (purple inset, emerald
+         outer) + a dual bloom.  Matches the spec's "subtle gradient
+         border from purple to emerald on hover". */
       [style*="border: 1px solid {BORDER}"]:hover {{
         box-shadow:
-          inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.12),
-          0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.08),
-          0 10px 28px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.10);
+          inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.18),
+          0 0 0 1px rgba({SECONDARY_R}, {SECONDARY_G}, {SECONDARY_B}, 0.14),
+          0 8px 22px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.15),
+          0 4px 18px rgba({SECONDARY_R}, {SECONDARY_G}, {SECONDARY_B}, 0.10);
       }}
       /* Dashed borders (used by NO MODEL PICK chips, EV banners) shouldn't
-         pick up the blue ring -- the dashed visual is the affordance. */
+         pick up the purple ring -- the dashed visual is the affordance. */
       [style*="border: 1px dashed {BORDER}"] {{
         box-shadow: none !important;
       }}
+
+      /* Active navbar tab -- gets a soft purple halo so it's visibly
+         distinct from inactive tabs even before the user reads the
+         color cue.  The underline border-bottom from navbar.py stays
+         the primary affordance; this just adds a glow.
+         Selector targets the link whose color is the PRIMARY value
+         (set inline by navbar._nav_link when is_active=True). */
+      a[style*="color: {PRIMARY}"]:not(.q-btn) {{
+        text-shadow: 0 0 8px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.55),
+                     0 0 14px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.25);
+      }}
+
+      /* Primary buttons -- Quasar's q-btn with color="primary" picks
+         t.PRIMARY from ui_app.py's ui.colors() call.  Layer a
+         purple -> lighter-purple linear gradient on top so the
+         button reads as "live" rather than flat.  Hover deepens the
+         gradient.  Quasar's own ripple + flat/dense modifiers are
+         preserved by the `:not()` guards. */
+      .q-btn.bg-primary,
+      .q-btn[style*="background: {PRIMARY}"] {{
+        background: linear-gradient(135deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
+        transition: background 200ms ease-out, box-shadow 200ms ease-out;
+      }}
+      .q-btn.bg-primary:hover,
+      .q-btn[style*="background: {PRIMARY}"]:hover {{
+        background: linear-gradient(135deg, {PRIMARY_HI} 0%, {PRIMARY} 100%) !important;
+        box-shadow: 0 4px 14px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.4);
+      }}
+
       .theme-chip {{
         display: inline-block;
         padding: 2px 8px;
