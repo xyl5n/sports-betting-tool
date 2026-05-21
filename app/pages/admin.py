@@ -23,6 +23,7 @@ button shows a spinner while the work runs.  Destructive actions
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -309,6 +310,9 @@ def _cache_aware_run_button(
     btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
 
     async def _click():
+        print(f"[ADMIN-BTN] _cache_aware_run_button click: {label!r}  "
+              f"sport={sport_key}  path={path}",
+              flush=True, file=sys.stderr)
         btn.props("loading"); btn.disable()
         try:
             # 1) Cache freshness check -- free, no upstream traffic.
@@ -380,9 +384,17 @@ def _cache_aware_run_button(
                 f"Open Home or Sports to see fresh picks.",
                 type="positive", multi_line=True,
             )
+            print(f"[ADMIN-BTN] OK: {label!r} -> {n_games} games",
+                  flush=True, file=sys.stderr)
         except Exception as exc:                                          # noqa: BLE001
-            ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
-                      type="negative", multi_line=True)
+            import traceback as _tb
+            print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
+                  f"{_tb.format_exc()}", flush=True, file=sys.stderr)
+            try:
+                ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
+                          type="negative", multi_line=True)
+            except Exception:                                              # noqa: BLE001
+                pass
         finally:
             btn.props(remove="loading"); btn.enable()
 
@@ -622,6 +634,25 @@ def _section_model_bets(backend, refresh) -> None:
             backend, "Reset Model Bankroll...",
             which="model",
             done_msg="Model bankroll reset.",
+            refresh_status=refresh,
+        )
+
+        # Force Settlement -- runs the auto-settle job NOW, bypassing
+        # the 11 AM-2 AM ET time gate that the scheduled version uses.
+        # Useful for manually closing open bets after a slate finishes.
+        ui.label("Settlement").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2}; margin-top: 10px;"
+        )
+        _async_button(
+            backend, "Force Settlement",
+            "POST", "/api/admin/settle_now",
+            spinner_msg="Running settlement now...",
+            done_msg=lambda d: (
+                f"Settled {d.get('settled', 0)} bet(s) "
+                f"({d.get('wins', 0)}W / {d.get('losses', 0)}L) "
+                f"+ voided {d.get('voided', 0)} postponed."
+            ),
             refresh_status=refresh,
         )
 
@@ -1432,6 +1463,11 @@ def _async_button(
     btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
 
     async def _click():
+        # Entry-point print -- always emits to stderr regardless of
+        # whether ui.notify succeeds.  If this line is missing from
+        # Railway logs after a click, the button isn't wired at all.
+        print(f"[ADMIN-BTN] _async_button click: {label!r}  path={path}  body={body}",
+              flush=True, file=sys.stderr)
         btn.props("loading")
         btn.disable()
         try:
@@ -1439,12 +1475,27 @@ def _async_button(
             ok, data, _ = await asyncio.to_thread(_call, backend, method, path, body)
             if ok:
                 msg = done_msg(data) if callable(done_msg) else (done_msg or "Done.")
+                print(f"[ADMIN-BTN] OK: {label!r} -> {msg!r}",
+                      flush=True, file=sys.stderr)
                 ui.notify(msg, type="positive")
                 if refresh_status:
                     refresh_status()
             else:
-                ui.notify(f"{label} failed: {data.get('error') or 'unknown error'}",
+                err = data.get('error') or 'unknown error'
+                print(f"[ADMIN-BTN] FAIL: {label!r} -> {err!r}",
+                      flush=True, file=sys.stderr)
+                ui.notify(f"{label} failed: {err}",
                           type="negative", multi_line=True)
+        except Exception as exc:                                          # noqa: BLE001
+            import traceback as _tb
+            tb_str = _tb.format_exc()
+            print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
+                  f"{tb_str}", flush=True, file=sys.stderr)
+            try:
+                ui.notify(f"{label} crashed: {type(exc).__name__}: {exc}",
+                          type="negative", multi_line=True)
+            except Exception:                                              # noqa: BLE001
+                pass
         finally:
             btn.props(remove="loading")
             btn.enable()
@@ -1463,20 +1514,50 @@ def _confirm_button(
     btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
 
     async def _click():
-        confirmed = await _confirm_dialog(prompt)
+        print(f"[ADMIN-BTN] _confirm_button click: {label!r}  path={path}  body={body}",
+              flush=True, file=sys.stderr)
+        try:
+            confirmed = await _confirm_dialog(prompt)
+        except Exception as exc:                                          # noqa: BLE001
+            import traceback as _tb
+            print(f"[ADMIN-BTN] CRASH (confirm dialog): {label!r}  "
+                  f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}",
+                  flush=True, file=sys.stderr)
+            try:
+                ui.notify(f"{label}: confirm dialog crashed: {exc}",
+                          type="negative", multi_line=True)
+            except Exception:                                              # noqa: BLE001
+                pass
+            return
         if not confirmed:
+            print(f"[ADMIN-BTN] {label!r}: confirm cancelled",
+                  flush=True, file=sys.stderr)
             return
         btn.props("loading"); btn.disable()
         try:
             ok, data, _ = await asyncio.to_thread(_call, backend, method, path, body)
             if ok:
                 msg = done_msg(data) if callable(done_msg) else (done_msg or "Done.")
+                print(f"[ADMIN-BTN] OK: {label!r} -> {msg!r}",
+                      flush=True, file=sys.stderr)
                 ui.notify(msg, type="positive")
                 if refresh_status:
                     refresh_status()
             else:
-                ui.notify(f"{label} failed: {data.get('error') or 'unknown'}",
+                err = data.get('error') or 'unknown'
+                print(f"[ADMIN-BTN] FAIL: {label!r} -> {err!r}",
+                      flush=True, file=sys.stderr)
+                ui.notify(f"{label} failed: {err}",
                           type="negative", multi_line=True)
+        except Exception as exc:                                          # noqa: BLE001
+            import traceback as _tb
+            print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
+                  f"{_tb.format_exc()}", flush=True, file=sys.stderr)
+            try:
+                ui.notify(f"{label} crashed: {type(exc).__name__}: {exc}",
+                          type="negative", multi_line=True)
+            except Exception:                                              # noqa: BLE001
+                pass
         finally:
             btn.props(remove="loading"); btn.enable()
 
@@ -1498,11 +1579,27 @@ def _bankroll_button(
     btn = ui.button(label).props("no-caps unelevated").style(_btn_style("default"))
 
     async def _click():
-        value = await _number_dialog(
-            title=label.rstrip("."),
-            placeholder="e.g. 1000",
-        )
+        print(f"[ADMIN-BTN] _bankroll_button click: {label!r}  which={which}  path={path}",
+              flush=True, file=sys.stderr)
+        try:
+            value = await _number_dialog(
+                title=label.rstrip("."),
+                placeholder="e.g. 1000",
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            import traceback as _tb
+            print(f"[ADMIN-BTN] CRASH (number dialog): {label!r}  "
+                  f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}",
+                  flush=True, file=sys.stderr)
+            try:
+                ui.notify(f"{label}: number dialog crashed: {exc}",
+                          type="negative", multi_line=True)
+            except Exception:                                              # noqa: BLE001
+                pass
+            return
         if value is None:
+            print(f"[ADMIN-BTN] {label!r}: number dialog cancelled",
+                  flush=True, file=sys.stderr)
             return
         if value <= 0:
             ui.notify("Bankroll must be greater than 0.", type="warning")
@@ -1512,12 +1609,26 @@ def _bankroll_button(
             ok, data, _ = await asyncio.to_thread(
                 _call, backend, "POST", path, {"bankroll": value})
             if ok:
+                print(f"[ADMIN-BTN] OK: {label!r} -> bankroll={value}",
+                      flush=True, file=sys.stderr)
                 ui.notify(done_msg, type="positive")
                 if refresh_status:
                     refresh_status()
             else:
-                ui.notify(f"Failed: {data.get('error') or 'unknown'}",
+                err = data.get('error') or 'unknown'
+                print(f"[ADMIN-BTN] FAIL: {label!r} -> {err!r}",
+                      flush=True, file=sys.stderr)
+                ui.notify(f"Failed: {err}",
                           type="negative", multi_line=True)
+        except Exception as exc:                                          # noqa: BLE001
+            import traceback as _tb
+            print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
+                  f"{_tb.format_exc()}", flush=True, file=sys.stderr)
+            try:
+                ui.notify(f"{label} crashed: {type(exc).__name__}: {exc}",
+                          type="negative", multi_line=True)
+            except Exception:                                              # noqa: BLE001
+                pass
         finally:
             btn.props(remove="loading"); btn.enable()
 
