@@ -124,6 +124,66 @@ _PARK: dict[str, tuple[float, float]] = {
 _NEUTRAL = (1.000, 1.000)
 
 
+# Each MLB club -> the official home ballpark name.  Used by the
+# matchup-detail Venue section so the user sees "Coors Field" rather
+# than just "1.38".  Kept in sync with _PARK above by the same comment
+# trail; if a team relocates / renames the park, update both.
+_VENUE_NAME: dict[str, str] = {
+    "Colorado Rockies":       "Coors Field",
+    "Cincinnati Reds":        "Great American Ball Park",
+    "Boston Red Sox":         "Fenway Park",
+    "Chicago Cubs":           "Wrigley Field",
+    "Texas Rangers":          "Globe Life Field",
+    "Houston Astros":         "Minute Maid Park",
+    "Atlanta Braves":         "Truist Park",
+    "Milwaukee Brewers":      "American Family Field",
+    "New York Yankees":       "Yankee Stadium",
+    "Philadelphia Phillies":  "Citizens Bank Park",
+    "Baltimore Orioles":      "Oriole Park at Camden Yards",
+    "Chicago White Sox":      "Guaranteed Rate Field",
+    "Cleveland Guardians":    "Progressive Field",
+    "Los Angeles Angels":     "Angel Stadium",
+    "Arizona Diamondbacks":   "Chase Field",
+    "Washington Nationals":   "Nationals Park",
+    "Los Angeles Dodgers":    "Dodger Stadium",
+    "New York Mets":          "Citi Field",
+    "St. Louis Cardinals":    "Busch Stadium",
+    "Pittsburgh Pirates":     "PNC Park",
+    "Minnesota Twins":        "Target Field",
+    "Detroit Tigers":         "Comerica Park",
+    "Seattle Mariners":       "T-Mobile Park",
+    "Oakland Athletics":      "Oakland Coliseum",
+    "Tampa Bay Rays":         "Tropicana Field",
+    "Toronto Blue Jays":      "Rogers Centre",
+    "Kansas City Royals":     "Kauffman Stadium",
+    "Miami Marlins":          "loanDepot Park",
+    "San Diego Padres":       "Petco Park",
+    "San Francisco Giants":   "Oracle Park",
+}
+
+
+def get_venue_name(home_team: str) -> str:
+    """Return the home ballpark name for `home_team`, "" when unknown.
+    Uses the same exact / substring / token-overlap fuzzy match as
+    get_park_factors so MLB statsapi team names and Odds API team
+    names both resolve."""
+    if not home_team:
+        return ""
+    if home_team in _VENUE_NAME:
+        return _VENUE_NAME[home_team]
+    home_lower = home_team.lower()
+    for team, name in _VENUE_NAME.items():
+        if team.lower() in home_lower or home_lower in team.lower():
+            return name
+    tokens = set(home_lower.split())
+    best, best_n = "", 0
+    for team, name in _VENUE_NAME.items():
+        n = len(tokens & set(team.lower().split()))
+        if n > best_n:
+            best, best_n = name, n
+    return best
+
+
 def _lookup_in_table(
     home_team: str,
     table: dict[str, tuple[float, float]],

@@ -1511,10 +1511,13 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
             # 100 itself -- the prior `* 100` here double-converted
             # and produced "2140%" instead of "21.4%".
             "k_rate":    round(float(home_sp.get("k_rate", 0.215)), 4),
+            "k_per_9":   round(float(home_sp.get("k_per_9", 8.50)), 2),
             "bb9":       round(float(home_sp.get("bb9", 3.30)), 2),
             "era_home":  round(float(home_sp.get("era_home", home_sp.get("era", 4.5))), 2),
             "era_away":  round(float(home_sp.get("era_away", home_sp.get("era", 4.5))), 2),
             "last3_era": round(float(home_sp.get("last3_era", home_sp.get("era", 4.5))), 2),
+            "wins":      int(home_sp.get("wins")   or 0),
+            "losses":    int(home_sp.get("losses") or 0),
             "hand":      "LHP" if home_sp.get("hand") == 1 else "RHP",
             "rest":      int(home_sp.get("rest", 4)),
         }
@@ -1523,10 +1526,13 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
             "era":       round(float(away_sp.get("era", 4.5)), 2),
             "whip":      round(float(away_sp.get("whip", 1.3)), 2),
             "k_rate":    round(float(away_sp.get("k_rate", 0.215)), 4),
+            "k_per_9":   round(float(away_sp.get("k_per_9", 8.50)), 2),
             "bb9":       round(float(away_sp.get("bb9", 3.30)), 2),
             "era_home":  round(float(away_sp.get("era_home", away_sp.get("era", 4.5))), 2),
             "era_away":  round(float(away_sp.get("era_away", away_sp.get("era", 4.5))), 2),
             "last3_era": round(float(away_sp.get("last3_era", away_sp.get("era", 4.5))), 2),
+            "wins":      int(away_sp.get("wins")   or 0),
+            "losses":    int(away_sp.get("losses") or 0),
             "hand":      "LHP" if away_sp.get("hand") == 1 else "RHP",
             "rest":      int(away_sp.get("rest", 4)),
         }
@@ -1544,6 +1550,16 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
             out["park_run_factor"] = int(round(float(park_run) * 100))
         except (TypeError, ValueError):
             out["park_run_factor"] = 100
+    # Home ballpark name -- pull from the static venue map keyed by
+    # team name.  The matchup-detail Venue section uses this to label
+    # the park-factor number (e.g. "Coors Field  142 (Hitter Friendly)").
+    try:
+        from src.park_factors import get_venue_name
+        venue = get_venue_name(game.get("home_team", ""))
+        if venue:
+            out["venue_name"] = venue
+    except Exception:                                                     # noqa: BLE001
+        pass
     wx = meta.get("weather") or {}
     if wx:
         out["weather"] = {
