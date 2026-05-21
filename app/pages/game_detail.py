@@ -51,8 +51,7 @@ _ET = ZoneInfo("America/New_York")
 
 
 def register(backend) -> None:
-    @ui.page("/game/{sport}/{game_id}")
-    def game_detail_page(sport: str, game_id: str):
+    def _render_detail(sport: str, game_id: str):
         # Re-read today's analysis cache into the in-memory state so
         # _lookup_game below sees the freshest picks on disk, not
         # whatever was hydrated at boot.
@@ -71,18 +70,35 @@ def register(backend) -> None:
         ):
             _back_button(sport)
             raw, serialized = _lookup_game(backend, sport, game_id)
-            if not raw:
-                _not_found(sport, game_id)
-            else:
-                _section_header(backend, raw, serialized, sport)
+            if serialized:
+                # Renders correctly whether `raw` is the full analysis
+                # dict, the cache passthrough, or just a schedule stub.
+                # When `_no_odds` is set the betting-lines section
+                # swaps in Model Prediction probabilities instead of
+                # the actual odds table.
+                _section_header(backend, raw or serialized, serialized, sport)
                 _section_betting_lines(serialized, sport)
-                _section_model_picks(backend, raw, serialized, sport, game_id)
+                if raw:
+                    _section_model_picks(backend, raw, serialized, sport, game_id)
                 _section_pitching_or_lineup(serialized, sport)
                 _section_lineups_placeholder(sport)
                 _section_team_context_placeholder()
                 _section_game_context(serialized)
                 _section_upset_factor(serialized)
+            else:
+                _not_found(sport, game_id)
         bottom_nav.render(active=t.TAB_SPORTS)
+
+    @ui.page("/game/{sport}/{game_id}")
+    def game_detail_page(sport: str, game_id: str):
+        _render_detail(sport, game_id)
+
+    # Matchup route alias -- per user spec the spelling is /matchup/...
+    # for the new in-card "Matchup" pill.  Both routes point at the
+    # same handler so existing links keep working.
+    @ui.page("/matchup/{sport}/{game_id}")
+    def matchup_page(sport: str, game_id: str):
+        _render_detail(sport, game_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,7 +135,20 @@ def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict |
         None,
     )
     if entry is None:
-        return None, None
+        # Schedule fallback -- schedule-only games (no odds yet, or
+        # past/future dates outside the analysis window) won't be in
+        # _analysis_state but ARE returned by /api/schedule.  Without
+        # this fallback the detail page reports "not found" for every
+        # card with _no_odds=True even though the card itself rendered
+        # fine on the slate.
+        sched_entry = _lookup_in_schedule(backend, sport, game_id)
+        if sched_entry is None:
+            return None, None
+        # Schedule rows are already in serialized shape; raw=None so
+        # the caller knows it can't render the SHAP-dependent picks
+        # section.  The Model Prediction block in _section_betting_lines
+        # picks up the slack via the _no_odds + _model_prediction keys.
+        return None, sched_entry
 
     # Pre-serialized passthrough: skip the serialize call entirely (it
     # would KeyError on r["game"]) and use the cache entry as both
@@ -143,6 +172,35 @@ def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict |
     except Exception:                                                     # noqa: BLE001
         ser = {}
     return raw, ser
+
+
+def _lookup_in_schedule(backend, sport: str, game_id: str) -> dict | None:
+    """Fall back to /api/schedule/<sport> for a game id not present in
+    the in-memory analysis cache.  Returns the serialized schedule row
+    (the same shape game_card.render reads) or None.
+
+    Walks today's schedule first, then yesterday's and tomorrow's --
+    the matchup link in the slate may have been opened across a midnight
+    boundary, and the schedule cache is keyed by date.
+    """
+    from datetime import datetime, timedelta
+    try:
+        client = backend.app.test_client()
+        today = datetime.now(_ET).date()
+        for offset in (0, -1, 1):
+            d = (today + timedelta(days=offset)).isoformat()
+            try:
+                resp = client.get(f"/api/schedule/{sport}?date={d}")
+                data = resp.get_json(force=True, silent=True) or {}
+            except Exception:                                              # noqa: BLE001
+                continue
+            for g in (data.get("games") or []):
+                gid = g.get("game_id") or g.get("id")
+                if str(gid) == str(game_id):
+                    return g
+    except Exception:                                                     # noqa: BLE001
+        return None
+    return None
 
 
 def _not_found(sport: str, game_id: str) -> None:
@@ -176,13 +234,28 @@ def _back_button(sport: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _section_header(backend, raw: dict, ser: dict, sport: str) -> None:
+    # Tolerate two shapes:
+    #   - raw analysis dict: nested {game: {away_team, home_team, ...}}
+    #   - serialized / schedule passthrough: flat top-level keys
+    # When the nested "game" key is missing fall back to the flat
+    # values on `ser` so schedule-only matchup pages still show team
+    # names + start time + venue instead of em-dashes.
     game = raw.get("game") or {}
     upset = raw.get("upset") or {}
-    away_full = game.get("away_team", "—") or "—"
-    home_full = game.get("home_team", "—") or "—"
-    when = _fmt_when(game.get("commence_time", ""))
-    venue = (game.get("venue") or {}).get("name") if isinstance(game.get("venue"), dict) \
-        else game.get("venue_name") or "—"
+    away_full = game.get("away_team") or ser.get("away_team") or "—"
+    home_full = game.get("home_team") or ser.get("home_team") or "—"
+    when = _fmt_when(
+        game.get("commence_time") or ser.get("commence_time", "")
+    )
+    if isinstance(game.get("venue"), dict):
+        venue = (game.get("venue") or {}).get("name") or "—"
+    else:
+        venue = (
+            game.get("venue_name")
+            or ser.get("venue_name")
+            or ser.get("venue")
+            or "—"
+        )
     sgn = upset.get("series_game_number")
     series_ctx = f"Game {sgn} of series" if sgn else None
 
@@ -253,6 +326,17 @@ def _section_header(backend, raw: dict, ser: dict, sport: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _section_betting_lines(ser: dict, sport: str) -> None:
+    # Schedule-only games (no Odds API entry) get the Model Prediction
+    # block instead of the empty odds table.  Per user spec: "if no odds
+    # available show Model Prediction instead with the raw probability
+    # percentages."
+    if ser.get("_no_odds"):
+        _section_card(
+            "MODEL PREDICTION",
+            rows_renderer=lambda: _model_prediction_rows(ser),
+        )
+        return
+
     is_mlb = sport == "mlb"
     rl_pick = ser.get("run_line") or ser.get("spread_pick") or {}
     tot     = ser.get("totals") or {}
@@ -283,6 +367,90 @@ def _section_betting_lines(ser: dict, sport: str) -> None:
         rows.append(("Total (Under)", f"U {ln}", _odds_str(tot.get("under_odds"))))
 
     _section_card("BETTING LINES", rows_renderer=lambda: _odds_table(rows))
+
+
+def _model_prediction_rows(ser: dict) -> None:
+    """Render the model's raw probability estimates for moneyline,
+    run-line/spread, and totals when no sportsbook lines are
+    available.  Data comes from the schedule endpoint's
+    _model_prediction sub-dict (set by app.py when the schedule
+    short-circuits the no-odds path).  Missing keys render '—'."""
+    pred = ser.get("_model_prediction") or {}
+    home_team = ser.get("home_team", "Home")
+    away_team = ser.get("away_team", "Away")
+
+    rows: list[tuple[str, str]] = []
+
+    # Moneyline -- both sides as raw % from the model.
+    ml_h = pred.get("ml_prob_home")
+    ml_a = pred.get("ml_prob_away")
+    rows.append((
+        f"Moneyline ({away_team})",
+        f"{float(ml_a) * 100:.1f}%" if isinstance(ml_a, (int, float)) else "—",
+    ))
+    rows.append((
+        f"Moneyline ({home_team})",
+        f"{float(ml_h) * 100:.1f}%" if isinstance(ml_h, (int, float)) else "—",
+    ))
+
+    # Run-line / spread
+    rl_team = pred.get("rl_pick_team")
+    rl_prob = pred.get("rl_prob")
+    rl_line = pred.get("rl_line")
+    if rl_team and isinstance(rl_prob, (int, float)):
+        line_s = f" {float(rl_line):+g}" if isinstance(rl_line, (int, float)) else ""
+        rows.append((
+            "Run Line" if sport_default_is_mlb(ser) else "Spread",
+            f"{rl_team}{line_s}: {float(rl_prob) * 100:.1f}%",
+        ))
+
+    # Totals -- projected total + over/under direction relative to baseline.
+    proj = pred.get("totals_projected")
+    baseline = pred.get("totals_baseline")
+    if isinstance(proj, (int, float)):
+        base = float(baseline) if isinstance(baseline, (int, float)) else 9.0
+        direction = "Over" if proj > base else ("Under" if proj < base else "Even")
+        rows.append((
+            "Projected Total",
+            f"{float(proj):.1f}  ({direction} vs {base:g})",
+        ))
+
+    if not rows:
+        ui.label("Model has no prediction for this matchup yet.").style(
+            f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic;"
+        )
+        return
+
+    with ui.column().classes("w-full").style("gap: 0;"):
+        for label, value in rows:
+            with ui.row().classes("items-center w-full").style(
+                f"padding: 8px 0; gap: 12px; "
+                f"border-bottom: 1px solid {t.BORDER_SOFT};"
+            ):
+                ui.label(label).style(
+                    f"flex: 0 0 40%; font-size: 12px; color: {t.TEXT_DIM};"
+                )
+                ui.label(value).style(
+                    f"flex: 1; font-size: 13px; color: {t.TEXT}; "
+                    f"font-weight: 600; font-family: monospace;"
+                )
+    ui.label(
+        "Estimates only — no sportsbook lines available."
+    ).style(
+        f"font-size: 11px; color: {t.TEXT_DIM2}; font-style: italic; "
+        f"margin-top: 6px;"
+    )
+
+
+def sport_default_is_mlb(ser: dict) -> bool:
+    """Heuristic used by the Model Prediction block to label the
+    spread line.  MLB games carry park / pitcher fields; WNBA games
+    don't.  Defaults to MLB when neither hint is present."""
+    if ser.get("home_sp") or ser.get("away_sp") or ser.get("park_run_factor"):
+        return True
+    if ser.get("_sport") == "wnba":
+        return False
+    return True
 
 
 def _odds_table(rows: list[tuple[str, str, str]]) -> None:

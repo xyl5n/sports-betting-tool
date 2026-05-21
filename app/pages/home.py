@@ -123,6 +123,17 @@ def register(backend) -> None:
           new MutationObserver(function() {
             document.querySelectorAll('.carousel-scroller').forEach(bindWheel);
           }).observe(document.body, { childList: true, subtree: true });
+
+          // Stop click propagation from .track-stop wrappers (Track
+          // button area on EV / Confidence cards) so pressing Track
+          // doesn't ALSO trigger the card-level navigate-to-matchup
+          // handler.  Capture phase so we run before NiceGUI's own
+          // click delegation.
+          document.addEventListener('click', function(e) {
+            if (e.target && e.target.closest && e.target.closest('.track-stop')) {
+              e.stopPropagation();
+            }
+          }, true);
         })();
         </script>
         """)
@@ -445,20 +456,31 @@ def _ev_card(backend, r: dict, result_index: dict | None = None) -> None:
     Width is set via CSS class .ev-card so the breakpoint-aware
     calc() in theme.page_head_css can control it without per-card
     inline math.
+
+    Per user spec the whole card is clickable -- clicking anywhere
+    except the Track button navigates to /matchup/<sport>/<gid>.
+    Track button has its own click handler with stopPropagation so
+    pressing Track doesn't also navigate away.
     """
     edge_pct = float(r.get("edge") or 0) * 100
     edge_s   = f"+{edge_pct:.1f}% Edge"
     sport_r  = r.get("sport", "mlb")
+    gid      = r.get("game_id")
     result, pnl, stake = _result_for_row(r, result_index or {})
     bg, border = _result_card_style(result)
     settled = result in ("win", "loss")
-    with ui.column().classes("ev-card").style(
+    cursor_css = "cursor: pointer;" if gid else ""
+    card = ui.column().classes("ev-card").style(
         f"background: {bg}; border: {border}; "
         f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; "
         f"gap: 6px; "
         f"flex-shrink: 0; "
-        f"scroll-snap-align: start;"
-    ):
+        f"scroll-snap-align: start; "
+        f"{cursor_css}"
+    )
+    if gid:
+        card.on("click", lambda: ui.navigate.to(f"/matchup/{sport_r}/{gid}"))
+    with card:
         with ui.row().classes("items-center").style("gap: 4px;"):
             team_logo.render(r.get("away_full", ""), sport=sport_r, size=20)
             team_logo.render(r.get("home_full", ""), sport=sport_r, size=20)
@@ -480,7 +502,11 @@ def _ev_card(backend, r: dict, result_index: dict | None = None) -> None:
             # Pending: keep the Track button so the user can record
             # the bet.  Settled cards drop it -- the bet is already
             # past the trackable window.
-            with ui.row().classes("w-full").style("margin-top: 4px;"):
+            # The wrapper carries .track-stop so the body-html script
+            # in home_page() can stopPropagation on clicks here and
+            # prevent the card-level navigate.to from firing when
+            # the user actually meant to track the bet.
+            with ui.row().classes("w-full track-stop").style("margin-top: 4px;"):
                 if r.get("game_id"):
                     track_button.render(
                         backend, game_id=r["game_id"], sport=sport_r,
@@ -541,6 +567,7 @@ def _confidence_card(r: dict, result_index: dict | None = None) -> None:
     edge_pct = float(r.get("edge") or 0) * 100
     prob_pct = float(r.get("prob") or 0) * 100
     sport_r  = r.get("sport", "mlb")
+    gid      = r.get("game_id")
     result, pnl, stake = _result_for_row(r, result_index or {})
     bg, border = _result_card_style(result)
     # _result_card_style returns CARD-default; this card historically
@@ -548,12 +575,17 @@ def _confidence_card(r: dict, result_index: dict | None = None) -> None:
     # color applies.
     if result not in ("win", "loss"):
         bg = t.CARD_HI
-    with ui.column().style(
+    cursor_css = "cursor: pointer;" if gid else ""
+    card = ui.column().style(
         f"background: {bg}; border: {border}; "
         f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; "
         f"min-width: 200px; max-width: 200px; flex-shrink: 0; gap: 4px; "
-        f"scroll-snap-align: start;"
-    ):
+        f"scroll-snap-align: start; "
+        f"{cursor_css}"
+    )
+    if gid:
+        card.on("click", lambda: ui.navigate.to(f"/matchup/{sport_r}/{gid}"))
+    with card:
         with ui.row().style("gap: 4px; align-items: center;"):
             team_logo.render(r.get("away_full", ""), sport=sport_r, size=22)
             team_logo.render(r.get("home_full", ""), sport=sport_r, size=22)

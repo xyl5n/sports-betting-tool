@@ -290,6 +290,7 @@ def _model_prediction_block(g: dict, pred: dict) -> None:
 
 def _meta_row(g: dict, sport: str, state: str = "scheduled") -> None:
     when = _fmt_et(g.get("commence_time", ""))
+    gid  = g.get("game_id") or g.get("id")
     with ui.row().classes("items-center w-full").style("gap: 8px;"):
         ui.label(sport.upper()).style(
             f"background: {t.CARD_HI}; color: {t.TEXT}; "
@@ -297,6 +298,21 @@ def _meta_row(g: dict, sport: str, state: str = "scheduled") -> None:
             f"padding: 2px 7px; border-radius: {t.RADIUS_PILL};"
         )
         ui.label(when).style(f"font-size: 12px; color: {t.TEXT_DIM};")
+        # Matchup pill -- per user spec: "add a Matchup button on every
+        # game card in the Full Slate page on the same line as the game
+        # time and date, positioned near the VS or score area in the
+        # center of the card. The button should be small and unobtrusive,
+        # styled as a subtle pill or chip labeled Matchup."  Sits in the
+        # middle of the meta row (between time on the left and the
+        # LIVE/FINAL chip on the right) via no margin overrides.
+        if gid:
+            ui.link("Matchup", f"/matchup/{sport}/{gid}").style(
+                f"background: {t.CARD_HI}; color: {t.PRIMARY}; "
+                f"border: 1px solid {t.BORDER}; "
+                f"font-size: 10px; font-weight: 700; letter-spacing: .3px; "
+                f"padding: 2px 9px; border-radius: {t.RADIUS_PILL}; "
+                f"text-decoration: none; line-height: 1.4;"
+            )
         # LIVE indicator: pulsing dot + label.  Pushes to the right side
         # of the meta row via margin-left:auto so the time stays adjacent
         # to the sport chip.
