@@ -7346,6 +7346,186 @@ def _model_cache_boot_inventory() -> None:
 
 _model_cache_boot_inventory()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Boot Health Report -- one-glance OK/FAIL per subsystem, printed last so
+# the user's eye lands here when scrolling Railway logs.  All checks are
+# read-only (no mutations, no remote calls beyond a tiny db status read);
+# safe to run on every boot.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _next_run_iso(sched, job_id: str) -> str | None:
+    """Look up a scheduled job's next-fire time as an ISO-8601 string."""
+    if sched is None:
+        return None
+    try:
+        job = sched.get_job(job_id)
+        if job is None or job.next_run_time is None:
+            return None
+        return job.next_run_time.isoformat()
+    except Exception:                                                     # noqa: BLE001
+        return None
+
+
+def _boot_health_report() -> None:
+    lines: list[str] = []
+
+    def _row(label: str, ok: bool, detail: str = "") -> None:
+        tag = "OK  " if ok else "FAIL"
+        lines.append(f"  [{tag}] {label:<28s} {detail}")
+
+    # ── 1. Python / scheduler runtime
+    try:
+        import apscheduler                                                # noqa: F401
+        _row("APScheduler available", True, "")
+    except Exception as exc:                                              # noqa: BLE001
+        _row("APScheduler available", False, f"{type(exc).__name__}: {exc}")
+
+    sched = getattr(nightly_retrain, "_scheduler", None)
+    _row(
+        "Scheduler started",
+        sched is not None,
+        "BackgroundScheduler running" if sched is not None
+        else "nightly_retrain.start() returned None",
+    )
+
+    # ── 2. Supabase connectivity
+    try:
+        from src import db as _db
+        sb_on = _db.is_supabase()
+        sb_status = _db.status() if hasattr(_db, "status") else {}
+    except Exception as exc:                                              # noqa: BLE001
+        sb_on = False
+        sb_status = {"error": f"{type(exc).__name__}: {exc}"}
+    _row(
+        "Supabase connection",
+        sb_on,
+        f"mode={'supabase' if sb_on else 'json-only'}  "
+        f"client_ok={sb_status.get('supabase', False)}",
+    )
+
+    # ── 3. Odds API key
+    odds_key_set = bool(os.getenv("ODDS_API_KEY")) and os.getenv("ODDS_API_KEY") != "your_odds_api_key_here"
+    _row(
+        "Odds API key",
+        odds_key_set,
+        "configured" if odds_key_set else "ODDS_API_KEY env var missing or placeholder",
+    )
+
+    # ── 4. Scheduler job inventory + next run times
+    expected_jobs = (
+        ("auto_analysis_morning", "8 AM analysis"),
+        ("auto_analysis_noon",    "12 PM refresh"),
+        ("auto_settlement",       "30-min settlement"),
+        ("midnight_reset",        "midnight reset"),
+        ("nightly_retrain",       "2 AM model retrain"),
+    )
+    if sched is not None:
+        for job_id, friendly in expected_jobs:
+            nxt = _next_run_iso(sched, job_id)
+            _row(
+                f"Job {friendly}",
+                nxt is not None,
+                f"id={job_id}  next={nxt or 'NOT SCHEDULED'}",
+            )
+    else:
+        _row("Job schedule",     False, "scheduler not running -- jobs not inspectable")
+
+    # ── 5. Ensemble picks file (today)
+    try:
+        if _ENSEMBLE_PICKS_FILE.exists():
+            payload = json.loads(_ENSEMBLE_PICKS_FILE.read_text(encoding="utf-8"))
+            date_in_file = payload.get("date")
+            n_mlb  = len((payload.get("picks") or {}).get("mlb")  or [])
+            n_wnba = len((payload.get("picks") or {}).get("wnba") or [])
+            stale = date_in_file != _today_et()
+            _row(
+                "Ensemble picks file",
+                not stale,
+                f"path={_ENSEMBLE_PICKS_FILE}  date={date_in_file}  "
+                f"mlb={n_mlb} wnba={n_wnba}  "
+                f"{'STALE -- will reset on next analyze' if stale else 'fresh'}",
+            )
+        else:
+            _row(
+                "Ensemble picks file",
+                False,
+                f"path={_ENSEMBLE_PICKS_FILE}  (not yet created -- normal on cold boot)",
+            )
+    except Exception as exc:                                              # noqa: BLE001
+        _row("Ensemble picks file", False, f"read error: {type(exc).__name__}: {exc}")
+
+    # ── 6. Per-classifier tracker files
+    for tracker in _PICKS_HISTORY_FILES:
+        try:
+            if tracker.exists():
+                payload = json.loads(tracker.read_text(encoding="utf-8"))
+                n_picks = len(payload.get("picks") or [])
+                _row(
+                    f"Tracker {tracker.name}",
+                    True,
+                    f"path={tracker}  size={tracker.stat().st_size:,}B  picks={n_picks}",
+                )
+            else:
+                _row(
+                    f"Tracker {tracker.name}",
+                    True,    # absent is OK on cold boot; analyze will create
+                    f"path={tracker}  (not yet created)",
+                )
+        except Exception as exc:                                          # noqa: BLE001
+            _row(f"Tracker {tracker.name}", False, f"{type(exc).__name__}: {exc}")
+
+    # ── 7. Ledger files + bankroll sanity
+    for path, sport in (
+        (Path("data/ledger.json"),      "mlb"),
+        (Path("data/wnba_ledger.json"), "wnba"),
+    ):
+        if not path.exists():
+            _row(f"Ledger {sport}", True, f"path={path}  (not yet created)")
+            continue
+        try:
+            led = json.loads(path.read_text(encoding="utf-8"))
+            mb  = float(led.get("model_bankroll", 0) or 0)
+            pb  = float(led.get("personal_bankroll", 0) or 0)
+            ob  = len(led.get("open_bets") or [])
+            hi  = len(led.get("history")   or [])
+            _row(
+                f"Ledger {sport}",
+                True,
+                f"model=${mb:,.2f}  personal=${pb:,.2f}  open={ob}  history={hi}",
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            _row(f"Ledger {sport}", False, f"{type(exc).__name__}: {exc}")
+
+    # ── 8. Persistent cache restored
+    for ckey, path in (
+        (_CACHE_KEY_SNAPSHOT,      _DAILY_SNAPSHOT_FILE),
+        (_CACHE_KEY_ANALYSIS_MLB,  _ANALYSIS_CACHE_FILE),
+        (_CACHE_KEY_ANALYSIS_WNBA, _WNBA_ANALYSIS_CACHE_FILE),
+    ):
+        _row(
+            f"Cache {ckey}",
+            True,
+            f"local={'present' if path.exists() else 'missing'}  "
+            f"({path.name})",
+        )
+
+    # Header + body in one stderr write so log readers see them
+    # as one contiguous block instead of interleaved with other
+    # boot prints.
+    border = "=" * 78
+    sys.stderr.write(
+        "\n" + border + "\n"
+        + "BOOT HEALTH REPORT\n"
+        + border + "\n"
+        + "\n".join(lines)
+        + "\n" + border + "\n"
+    )
+    sys.stderr.flush()
+
+
+_boot_health_report()
+
 print("STARTUP: app ready", flush=True, file=sys.stderr)
 
 
