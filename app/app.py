@@ -5300,27 +5300,47 @@ def admin_wipe_ledger():
     """
     Per-sport ledger wipe used by the Admin sub-page.
     Body: {"sport": "mlb" | "wnba" | "both"}.
+
     Clears open_bets + history for the chosen sport(s) and resets both
-    bankrolls to their starting values.  Model files / analysis caches /
-    API settings are untouched.  Returns {"success": true, "wiped": [...]}.
+    bankrolls to their starting values, across THREE storage layers:
+
+      Local JSON         data/ledger.json + data/wnba_ledger.json
+      Supabase           bets table (per sport) + bankroll table row
+      In-memory          _analysis_state / _wnba_analysis_state parlays
+
+    Model files / analysis caches / API settings are untouched -- this
+    is the ledger wipe, not the picks wipe.  For the picks wipe use
+    /api/admin/model/reset.
+
+    Returns the same per-layer audit shape the Reset Model Picks route
+    uses so the inline status message on /admin reads consistently.
     """
+    print("[ADMIN-ROUTE] /api/admin/wipe_ledger invoked  body="
+          f"{request.json!r}", flush=True, file=sys.stderr)
+    audit: list[str] = []
     try:
         sport = (request.json or {}).get("sport", "").strip().lower()
         if sport not in ("mlb", "wnba", "both"):
-            return jsonify({"success": False, "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
+            return jsonify({"success": False,
+                            "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
 
         sports = ["mlb", "wnba"] if sport == "both" else [sport]
         paths  = {
             "mlb":  Path("data/ledger.json"),
             "wnba": Path("data/wnba_ledger.json"),
         }
-        wiped = []
+        wiped: list[str] = []
+        per_sport_counts: dict[str, dict] = {}
+
+        # ── Layer 1: local JSON file ─────────────────────────────────────
         for s in sports:
             path = paths[s]
             try:
                 data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            except Exception:
+            except Exception:                                              # noqa: BLE001
                 data = {}
+            n_open  = len(data.get("open_bets") or [])
+            n_hist  = len(data.get("history") or [])
             model_start    = float(data.get("model_starting_bankroll",    1000.0))
             personal_start = float(data.get("personal_starting_bankroll", 1000.0))
             clean = {
@@ -5334,8 +5354,136 @@ def admin_wipe_ledger():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(clean, indent=2), encoding="utf-8")
             wiped.append(s)
-        return jsonify({"success": True, "wiped": wiped})
-    except Exception as exc:
+            per_sport_counts[s] = {
+                "open_bets_dropped": n_open,
+                "history_dropped":   n_hist,
+                "model_start":       model_start,
+                "personal_start":    personal_start,
+            }
+            audit.append(
+                f"local {s} ledger.json: dropped {n_open} open + {n_hist} history "
+                f"row(s); bankrolls -> model=${model_start:.2f}, "
+                f"personal=${personal_start:.2f}"
+            )
+            _eprint(
+                f"WIPE-LEDGER [{s.upper()}] local file cleared: "
+                f"{n_open} open + {n_hist} history bets dropped, "
+                f"model_bankroll=${model_start:.2f}, "
+                f"personal_bankroll=${personal_start:.2f}"
+            )
+
+        # ── Layer 2: Supabase bets + bankroll per sport ──────────────────
+        supabase_bets_by_sport: dict[str, int] = {}
+        try:
+            from src import db as _db
+            if _db.is_supabase():
+                for s in sports:
+                    # Delete EVERY bet for this sport (both confirmed and
+                    # unconfirmed) -- this is the total ledger wipe.
+                    try:
+                        n_bets = int(_db.delete_bets_bulk(sport=s) or 0)
+                    except Exception as bx:                                # noqa: BLE001
+                        n_bets = 0
+                        audit.append(
+                            f"supabase bets {s}: error "
+                            f"{type(bx).__name__}: {bx}"
+                        )
+                        _eprint(
+                            f"WIPE-LEDGER [{s.upper()}] supabase bets FAILED: "
+                            f"{type(bx).__name__}: {bx}"
+                        )
+                    supabase_bets_by_sport[s] = n_bets
+                    if n_bets >= 0:
+                        audit.append(
+                            f"supabase bets {s}: deleted {n_bets} row(s)"
+                        )
+                        _eprint(
+                            f"WIPE-LEDGER [{s.upper()}] supabase bets table: "
+                            f"deleted {n_bets} row(s)"
+                        )
+
+                    # Reset the bankroll row to starting values.  Without
+                    # this Supabase still reports the pre-wipe balance.
+                    try:
+                        d = per_sport_counts.get(s, {})
+                        ms = float(d.get("model_start", 1000.0))
+                        ps = float(d.get("personal_start", 1000.0))
+                        _db.upsert_bankroll(s, {
+                            "model_bankroll":             ms,
+                            "model_starting_bankroll":    ms,
+                            "personal_bankroll":          ps,
+                            "personal_starting_bankroll": ps,
+                        })
+                        audit.append(
+                            f"supabase bankroll {s}: reset to "
+                            f"model=${ms:.2f}, personal=${ps:.2f}"
+                        )
+                        _eprint(
+                            f"WIPE-LEDGER [{s.upper()}] supabase bankroll: "
+                            f"reset to model=${ms:.2f}, personal=${ps:.2f}"
+                        )
+                    except Exception as br:                                # noqa: BLE001
+                        audit.append(
+                            f"supabase bankroll {s}: error "
+                            f"{type(br).__name__}: {br}"
+                        )
+                        _eprint(
+                            f"WIPE-LEDGER [{s.upper()}] supabase bankroll "
+                            f"FAILED: {type(br).__name__}: {br}"
+                        )
+            else:
+                audit.append("supabase: OFF -- bets + bankroll skipped")
+                _eprint(
+                    "WIPE-LEDGER supabase: OFF -- bets + bankroll sync skipped"
+                )
+        except Exception as sb_exc:                                       # noqa: BLE001
+            audit.append(
+                f"supabase block: error {type(sb_exc).__name__}: {sb_exc}"
+            )
+            _eprint(
+                f"WIPE-LEDGER supabase block FAILED: "
+                f"{type(sb_exc).__name__}: {sb_exc}"
+            )
+
+        # ── Layer 3: in-memory state -- parlays only.  Results stay so
+        # the slate / matchup pages still render today's analyzed games;
+        # the wipe is about BETS, not picks. ─────────────────────────────
+        try:
+            if "mlb" in sports:
+                _analysis_state["parlays"] = {}
+                audit.append("in-memory: cleared _analysis_state['parlays']")
+                _eprint("WIPE-LEDGER in-memory: cleared _analysis_state['parlays']")
+            if "wnba" in sports:
+                _wnba_analysis_state["parlays"] = {}
+                audit.append("in-memory: cleared _wnba_analysis_state['parlays']")
+                _eprint(
+                    "WIPE-LEDGER in-memory: cleared _wnba_analysis_state['parlays']"
+                )
+        except Exception as mem_exc:                                       # noqa: BLE001
+            audit.append(
+                f"in-memory clear FAILED: "
+                f"{type(mem_exc).__name__}: {mem_exc}"
+            )
+            _eprint(
+                f"WIPE-LEDGER in-memory FAILED: "
+                f"{type(mem_exc).__name__}: {mem_exc}"
+            )
+
+        message = "; ".join(audit)
+        _eprint(f"WIPE-LEDGER COMPLETE [{sport}]: {message}")
+        return jsonify({
+            "success":                True,
+            "wiped":                  wiped,
+            "per_sport_counts":       per_sport_counts,
+            "supabase_bets_by_sport": supabase_bets_by_sport,
+            "message":                message,
+            "audit_log":              audit,
+        })
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(
+            f"WIPE-LEDGER FATAL: {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
@@ -5523,6 +5671,32 @@ def admin_reset_model_record():
             if _db.is_supabase():
                 n_rows = _db.delete_records(sport=None)
                 audit.append(f"supabase records: deleted {n_rows} row(s)")
+                _eprint(f"RESET[model_record] supabase records: deleted {n_rows} row(s)")
+
+                # Supabase model_history table -- the actual mirror of
+                # the xgb / lr / nn picks history files.  delete_model_history
+                # with no filters drops every row across all classifiers /
+                # sports, matching the "wipe all model record" intent.
+                try:
+                    n_mh = _db.delete_model_history()
+                    audit.append(
+                        f"supabase model_history: deleted {n_mh} row(s) "
+                        f"(xgb + lr + nn picks history)"
+                    )
+                    _eprint(
+                        f"RESET[model_record] supabase model_history: "
+                        f"deleted {n_mh} row(s) across xgb / lr / nn"
+                    )
+                except Exception as mh_exc:                                # noqa: BLE001
+                    audit.append(
+                        f"supabase model_history: error "
+                        f"{type(mh_exc).__name__}: {mh_exc}"
+                    )
+                    _eprint(
+                        f"RESET[model_record] supabase model_history FAILED: "
+                        f"{type(mh_exc).__name__}: {mh_exc}"
+                    )
+
                 # Also delete Supabase bets table rows with confirmed=false
                 # so the Supabase view of model history is wiped too --
                 # otherwise list_bets(confirmed=False) would still return
@@ -5532,10 +5706,51 @@ def admin_reset_model_record():
                 audit.append(
                     f"supabase bets (confirmed=false): deleted {n_bets} row(s)"
                 )
+                _eprint(
+                    f"RESET[model_record] supabase bets (confirmed=false): "
+                    f"deleted {n_bets} row(s)"
+                )
+
+                # app_cache wildcard delete for any picks-history-style
+                # key the rest of the pipeline may have written.
+                # cache_delete_keys_like is the helper added in PR #95;
+                # this call adds picks_history / model_history matches
+                # on top of the picks/snapshot/analysis sweep used by
+                # /api/admin/model/reset.
+                try:
+                    n_cache, matched_keys = _db.cache_delete_keys_like(
+                        ["picks_history", "model_history"],
+                    )
+                    audit.append(
+                        f"supabase app_cache (picks_history/model_history): "
+                        f"deleted {n_cache} row(s)"
+                    )
+                    _eprint(
+                        f"RESET[model_record] supabase app_cache pattern delete: "
+                        f"removed {n_cache} row(s)"
+                        + (f" -- keys: {', '.join(matched_keys[:10])}"
+                           + (" ..." if len(matched_keys) > 10 else "")
+                           if matched_keys else "")
+                    )
+                except Exception as kc_exc:                                # noqa: BLE001
+                    audit.append(
+                        f"supabase app_cache pattern delete: error "
+                        f"{type(kc_exc).__name__}: {kc_exc}"
+                    )
+                    _eprint(
+                        f"RESET[model_record] supabase app_cache pattern "
+                        f"delete FAILED: {type(kc_exc).__name__}: {kc_exc}"
+                    )
             else:
                 audit.append("supabase records: (Supabase off, skipped)")
+                _eprint("RESET[model_record] supabase: OFF -- skipped all "
+                        "supabase-side deletes")
         except Exception as exc:                                          # noqa: BLE001
             audit.append(f"supabase records: error {type(exc).__name__}: {exc}")
+            _eprint(
+                f"RESET[model_record] supabase block FAILED: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
         _audit_log("model_record", audit)
         return jsonify({

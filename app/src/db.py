@@ -301,6 +301,43 @@ def delete_records(sport: Optional[str] = None) -> int:
         return 0
 
 
+def delete_model_history(
+    sport: Optional[str] = None,
+    model: Optional[str] = None,
+) -> int:
+    """Clear rows from the `model_history` table -- the Supabase mirror
+    of .cache/xgb_picks_history.json, .cache/lr_picks_history.json, and
+    data/nn_picks_history.json.  Used by Reset Model Record so the
+    per-classifier history is wiped across local + Supabase.
+
+    Filters:
+      sport  optional 'mlb' / 'wnba' -- defaults to all sports
+      model  optional 'xgb' / 'lr' / 'nn' -- defaults to all classifiers
+
+    Returns the number of rows the call reports deleting (0 on Supabase
+    off / error).  Same tautology guard as delete_records so a no-filter
+    call still satisfies Supabase's required where-clause.
+    """
+    if not is_supabase():
+        return 0
+    try:
+        q = _client.table("model_history").delete()
+        if sport is not None:
+            q = q.eq("sport", sport.lower())
+        if model is not None:
+            q = q.eq("model", model.lower())
+        if sport is None and model is None:
+            q = q.neq("model", "__never__")
+        resp = q.execute()
+        return len(resp.data or [])
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning(
+            "supabase delete_model_history(sport=%s, model=%s) failed: %s",
+            sport, model, exc,
+        )
+        return 0
+
+
 def delete_bankroll(sport: str) -> bool:
     """Drop the bankroll row for `sport`.  Reset-bankroll re-upserts
     a fresh row after this; deleting first guarantees a clean slate
