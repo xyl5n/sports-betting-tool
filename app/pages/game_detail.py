@@ -51,6 +51,15 @@ from components import navbar, bottom_nav, team_logo, track_button, live_score
 _ET = ZoneInfo("America/New_York")
 
 
+def _log(msg: str) -> None:
+    """Tagged stderr diagnostic line.  Grep `[game_detail]` in Railway
+    logs to walk through a single matchup page render -- shows which
+    branch _lookup_game took and exactly what pitcher data made it
+    into _section_pitching_or_lineup."""
+    import sys as _sys
+    print(f"[game_detail] {msg}", flush=True, file=_sys.stderr)
+
+
 def register(backend) -> None:
     def _render_detail(sport: str, game_id: str):
         # Re-read today's analysis cache into the in-memory state so
@@ -112,6 +121,29 @@ def register(backend) -> None:
 #  Game lookup + not-found
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _norm_team_key(name) -> str:
+    """Aggressive team-name normalization for cross-API matching.
+    Lowercases and strips every non-alphanumeric so "LA Dodgers" and
+    "Los Angeles Dodgers" land on the same key.  Mirrors the helper
+    in pages/sport.py + the schedule endpoint's _team_key in app.py."""
+    if not name:
+        return ""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def _commence_et_date(commence_time) -> str:
+    """ISO commence_time -> ET calendar date string ("YYYY-MM-DD").
+    Returns "" on parse failure so unparseable rows don't collide on a
+    single empty-date bucket."""
+    if not commence_time:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        return dt.astimezone(_ET).date().isoformat()
+    except Exception:                                                     # noqa: BLE001
+        return ""
+
+
 def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict | None]:
     """Return (raw_analysis_dict, serialized_game_dict) or (None, None).
 
@@ -128,6 +160,11 @@ def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict |
     """
     state    = backend._wnba_analysis_state if sport == "wnba" else backend._analysis_state
     results  = state.get("results") or []
+    _log(
+        f"_lookup_game sport={sport} game_id={game_id!r} "
+        f"analysis_results={len(results)}"
+    )
+
     # Match both shapes: raw rows expose the id at r["game"]["id"];
     # serialized rows expose it as r["game_id"] (or fall back to
     # r["id"]).  Without this dual-key lookup the page reports "not
@@ -138,9 +175,29 @@ def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict |
             if (r.get("game") or {}).get("id") == game_id
             or r.get("game_id") == game_id
             or r.get("id") == game_id
+            or r.get("_schedule_id") == game_id
         ),
         None,
     )
+    if entry is not None:
+        _log(f"  matched by id -- entry has home_sp={bool(entry.get('home_sp'))} "
+             f"away_sp={bool(entry.get('away_sp'))}")
+    else:
+        # Team-name + ET-date fallback.  The matchup link is built from
+        # the slate's MLB statsapi gamePk (e.g. "824274") but the
+        # analysis pipeline keys results by Odds API id (e.g.
+        # "427339d860a9..."), so a pure id lookup always missed and
+        # the page fell into the schedule-stub branch below which has
+        # no pitcher data.  Walk the schedule for today (+/- 1 day) to
+        # resolve the gamePk -> (home, away, et_date), then find the
+        # analysis row that matches that composite key.
+        match = _resolve_via_team_date(backend, sport, game_id, results)
+        if match is not None:
+            entry = match
+            _log(f"  matched by team+date fallback -- entry has "
+                 f"home_sp={bool(entry.get('home_sp'))} "
+                 f"away_sp={bool(entry.get('away_sp'))}")
+
     if entry is None:
         # Schedule fallback -- schedule-only games (no odds yet, or
         # past/future dates outside the analysis window) won't be in
@@ -148,8 +205,10 @@ def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict |
         # this fallback the detail page reports "not found" for every
         # card with _no_odds=True even though the card itself rendered
         # fine on the slate.
+        _log(f"  no analysis match -- falling back to schedule stub")
         sched_entry = _lookup_in_schedule(backend, sport, game_id)
         if sched_entry is None:
+            _log(f"  schedule fallback also empty -- returning (None, None)")
             return None, None
         # Schedule rows are already in serialized shape; raw=None so
         # the caller knows it can't render the SHAP-dependent picks
@@ -179,6 +238,49 @@ def _lookup_game(backend, sport: str, game_id: str) -> tuple[dict | None, dict |
     except Exception:                                                     # noqa: BLE001
         ser = {}
     return raw, ser
+
+
+def _resolve_via_team_date(
+    backend, sport: str, game_id: str, results: list[dict],
+) -> dict | None:
+    """When the matchup URL carries a schedule gamePk that doesn't match
+    any analysis row's id (different API id systems), walk the schedule
+    to resolve gamePk -> (home_team, away_team, et_date), then scan
+    analysis results for a row with the same composite key.
+
+    Returns the matching analysis row or None.  Logs each step so
+    Railway makes the resolution path visible -- "schedule resolved
+    to LAD vs NYM 2026-05-21" vs "analysis row 0 LAD vs NYM matches".
+    """
+    sched_entry = _lookup_in_schedule(backend, sport, game_id)
+    if not sched_entry:
+        _log(f"  team+date: schedule lookup empty for game_id={game_id!r}")
+        return None
+    target_home = _norm_team_key(sched_entry.get("home_team"))
+    target_away = _norm_team_key(sched_entry.get("away_team"))
+    target_date = _commence_et_date(sched_entry.get("commence_time"))
+    _log(
+        f"  team+date target: home={target_home!r} away={target_away!r} "
+        f"et_date={target_date!r}"
+    )
+    if not (target_home and target_away):
+        return None
+
+    for r in results:
+        game = r.get("game") or {}
+        r_home = game.get("home_team") or r.get("home_team") or ""
+        r_away = game.get("away_team") or r.get("away_team") or ""
+        r_ct   = game.get("commence_time") or r.get("commence_time") or ""
+        r_date = _commence_et_date(r_ct)
+        if (
+            _norm_team_key(r_home) == target_home
+            and _norm_team_key(r_away) == target_away
+            and (not target_date or not r_date or r_date == target_date)
+        ):
+            _log(f"  team+date: matched analysis row {r_home} vs {r_away} {r_date}")
+            return r
+    _log(f"  team+date: no analysis row matched the composite key")
+    return None
 
 
 def _lookup_in_schedule(backend, sport: str, game_id: str) -> dict | None:
@@ -704,6 +806,18 @@ def _section_pitching_or_lineup(ser: dict, sport: str) -> None:
         return
     home_sp = ser.get("home_sp") or {}
     away_sp = ser.get("away_sp") or {}
+    # Diagnostic dump of what actually arrived at the UI.  The user
+    # reported pitcher_client fetching real data while the UI still
+    # showed TBD -- these two lines make it obvious which path the
+    # render took: full dict (analysis hit) vs empty dict (schedule
+    # stub or lookup miss).
+    _log(
+        f"PITCHING_DATA sport={sport}  "
+        f"home_team={ser.get('home_team')!r}  away_team={ser.get('away_team')!r}  "
+        f"_data_source={ser.get('_data_source')!r}"
+    )
+    _log(f"  HOME_SP keys={list(home_sp.keys())}  values={home_sp!r}")
+    _log(f"  AWAY_SP keys={list(away_sp.keys())}  values={away_sp!r}")
     _section_card(
         "PITCHING MATCHUP",
         rows_renderer=lambda: _pitching_table(away_sp, home_sp,
