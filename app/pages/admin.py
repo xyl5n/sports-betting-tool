@@ -198,16 +198,57 @@ def _section_analysis(backend, refresh) -> None:
         def _render_cache_info() -> None:
             cache_info_holder.clear()
             ok, data, _ = _call(backend, "GET", "/api/odds/cache_status?sport=both")
-            mlb_fresh  = bool((data.get("mlb")  or {}).get("fresh")) if ok else False
-            wnba_fresh = bool((data.get("wnba") or {}).get("fresh")) if ok else False
+            mlb  = (data.get("mlb")  or {}) if ok else {}
+            wnba = (data.get("wnba") or {}) if ok else {}
             with cache_info_holder:
                 ui.label("15-min cache:").style(
                     f"font-size: 11.5px; color: {t.TEXT_DIM2};"
                 )
-                for label, fresh in (("MLB", mlb_fresh), ("WNBA", wnba_fresh)):
+                for label, blob in (("MLB", mlb), ("WNBA", wnba)):
+                    fresh = bool(blob.get("fresh"))
                     color = t.POS if fresh else t.WARN
                     txt   = f"{label}: {'fresh' if fresh else 'stale'}"
                     ui.label(txt).style(
+                        f"font-size: 11.5px; font-weight: 700; color: {color}; "
+                        f"background: {t.CARD_HI}; padding: 2px 8px; "
+                        f"border-radius: {t.RADIUS_PILL};"
+                    )
+
+            # Odds Status indicator -- shows at-a-glance whether the
+            # last analyze actually wrote odds + when it ran.  Per
+            # user spec: "visible indicator in the settings menu
+            # showing the odds cache last updated timestamp and how
+            # many games currently have odds".
+            with cache_info_holder:
+                ui.label("Odds status:").style(
+                    f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
+                    f"margin-top: 4px;"
+                )
+                for label, blob in (("MLB", mlb), ("WNBA", wnba)):
+                    games_total = int(blob.get("games_total") or 0)
+                    games_odds  = int(blob.get("games_with_odds") or 0)
+                    last_ts     = blob.get("last_analyzed_at") or ""
+                    # Format the timestamp as HH:MM ET when present;
+                    # show "never" otherwise so the user can spot a
+                    # boot-fresh state immediately.
+                    if last_ts:
+                        try:
+                            from datetime import datetime as _dt
+                            from zoneinfo import ZoneInfo as _ZI
+                            _d = _dt.fromisoformat(last_ts.replace("Z", "+00:00"))
+                            last_pretty = _d.astimezone(_ZI("America/New_York")) \
+                                            .strftime("%-I:%M %p ET")
+                        except Exception:                                  # noqa: BLE001
+                            last_pretty = last_ts[:16]
+                    else:
+                        last_pretty = "never"
+
+                    has_any = games_odds > 0
+                    color   = t.POS if has_any else (t.WARN if games_total > 0 else t.NEG)
+                    ui.label(
+                        f"{label}: {games_odds}/{games_total} games w/odds  "
+                        f"(last {last_pretty})"
+                    ).style(
                         f"font-size: 11.5px; font-weight: 700; color: {color}; "
                         f"background: {t.CARD_HI}; padding: 2px 8px; "
                         f"border-radius: {t.RADIUS_PILL};"

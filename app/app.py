@@ -488,7 +488,18 @@ def _purge_stale_caches_on_boot() -> None:
         # the backstop in that case.
         return
 
-    for path in (_ANALYSIS_CACHE_FILE, _WNBA_ANALYSIS_CACHE_FILE, _DAILY_SNAPSHOT_FILE):
+    # Track whether the daily snapshot got purged -- if so we also nuke
+    # today's odds cache below.  Stale snapshot is a reliable signal
+    # that "the last analyze run was on a previous ET day", which means
+    # any in-memory / on-disk odds payload from that run is also stale
+    # and should NOT be reused by the next analyze.
+    snapshot_was_stale = False
+
+    purge_paths = (
+        _ANALYSIS_CACHE_FILE, _WNBA_ANALYSIS_CACHE_FILE,
+        _DAILY_SNAPSHOT_FILE, _ENSEMBLE_PICKS_FILE,
+    )
+    for path in purge_paths:
         try:
             if not path.exists():
                 continue
@@ -503,6 +514,32 @@ def _purge_stale_caches_on_boot() -> None:
                       f"(date={file_date}, today={today})",
                       flush=True, file=sys.stderr)
                 path.unlink(missing_ok=True)
+                if path == _DAILY_SNAPSHOT_FILE:
+                    snapshot_was_stale = True
+                # Rewrite empty ensemble file immediately so the boot
+                # health report's "Ensemble picks file" check doesn't
+                # flag it FAIL until the next analyze runs.
+                if path == _ENSEMBLE_PICKS_FILE:
+                    try:
+                        _ENSEMBLE_PICKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                        _ENSEMBLE_PICKS_FILE.write_text(
+                            json.dumps(
+                                {"date": today, "picks": {"mlb": [], "wnba": []}},
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                        print(
+                            f"STARTUP: created empty {_ENSEMBLE_PICKS_FILE.name} "
+                            f"for {today} (next analyze will populate)",
+                            flush=True, file=sys.stderr,
+                        )
+                    except Exception as exc:                              # noqa: BLE001
+                        print(
+                            f"STARTUP WARNING: could not create empty "
+                            f"{_ENSEMBLE_PICKS_FILE.name}: {exc}",
+                            flush=True, file=sys.stderr,
+                        )
         except Exception as exc:                                          # noqa: BLE001
             # Don't fail boot over a corrupt cache file -- just nuke it
             # and let the next analysis run recreate it.
@@ -511,6 +548,37 @@ def _purge_stale_caches_on_boot() -> None:
             except Exception:
                 pass
             print(f"STARTUP WARNING: removed unreadable {path.name}: {exc}",
+                  flush=True, file=sys.stderr)
+
+    # If the daily snapshot was from a prior ET day, the in-process
+    # _cache layer also holds stale odds payloads from that run.
+    # Wipe the odds-cache keys so the next analyze hits The Odds API
+    # for fresh lines instead of recycling yesterday's.  Same matchup
+    # patterns _run_midnight_reset uses, so the behavior matches a
+    # real midnight cron firing.
+    if snapshot_was_stale:
+        try:
+            # Glob the .cache/ dir for every "odds_*.json" file -- the
+            # real cache keys include commence_from + commence_to UTC
+            # timestamps (see src.odds_client._odds_cache_key) so the
+            # short-string invalidate() call we used to make here never
+            # matched anything.  Wiping by prefix is what actually
+            # clears yesterday's odds before the next analyze fires.
+            from pathlib import Path as _P
+            _wiped = 0
+            for _f in _P(".cache").glob("odds_*.json"):
+                try:
+                    _f.unlink()
+                    _wiped += 1
+                except Exception:                                          # noqa: BLE001
+                    pass
+            print(
+                f"STARTUP: snapshot was stale -- wiped {_wiped} odds "
+                f"cache file(s) so the next analyze fetches fresh lines",
+                flush=True, file=sys.stderr,
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            print(f"STARTUP WARNING: odds-cache clear failed: {exc}",
                   flush=True, file=sys.stderr)
 
     # Best-effort Supabase cleanup -- silent if Supabase isn't connected.
@@ -2703,6 +2771,25 @@ def _ensure_no_odds_predictor(sport: str):
         return _no_odds_predictor[sport]
     if _no_odds_predictor_failed.get(sport):
         return None
+
+    # WNBA short-circuit: src.game_store talks to API-Sports for season
+    # data which requires a paid 2025+ plan.  Without it, store.load
+    # crashes deep inside the analyze pipeline and the warmup keeps
+    # retrying.  Until the no-odds predictor is migrated to use
+    # ESPN's free scoreboard + the wehoop pip package for historical
+    # WNBA data, just skip cleanly -- WNBA no-odds cards will render
+    # the "No Odds Available" fallback notice instead of model
+    # predictions.  Log once + flip the failure flag so the warmup
+    # retry loop doesn't keep re-attempting.
+    if sport == "wnba":
+        _eprint(
+            "NO-ODDS PREDICT [WNBA]: schedule data unavailable using "
+            "free sources -- skipping (API-Sports requires paid plan; "
+            "ESPN + wehoop integration is a follow-up)"
+        )
+        _no_odds_predictor_failed[sport] = True
+        return None
+
     try:
         cfg = SPORTS.get(sport)
         if cfg is None:
@@ -4245,6 +4332,19 @@ def analyze():
         except Exception as _es:
             _eprint(f"ANALYZE [MLB] ensemble_store.save failed: {type(_es).__name__}: {_es}")
         _step(f"DONE: {len(serialized)} games serialized and saved")
+
+        # ANALYZE COMPLETE summary -- counts games WITH odds (have a
+        # pick_team) vs games that fell into the no-odds bucket.  Makes
+        # it instantly obvious from Railway logs whether the Odds API
+        # actually returned lines or every game ended up no-odds (which
+        # is what the user was hitting).
+        _with_odds = sum(1 for r in serialized if r.get("pick_team"))
+        _no_odds   = len(serialized) - _with_odds
+        _eprint(
+            f"ANALYZE COMPLETE [MLB]: {len(serialized)} games total -- "
+            f"{_with_odds} with odds, {_no_odds} no_odds"
+        )
+
         return jsonify({
             "success":         True,
             "cached":          False,
@@ -5532,20 +5632,49 @@ def odds_usage_endpoint():
         }), 200
 
 
+def _odds_health_for_sport(sport: str) -> dict:
+    """Bundle freshness + games-with-odds + last-analyzed timestamp for
+    one sport into a single dict.  Used by both /api/odds/cache_status
+    (extra fields appended) and the admin "Odds Status" indicator.
+
+    games_with_odds  -- count of in-memory results that carry a
+                         pick_team (i.e. The Odds API returned a line
+                         the model could attach a pick to).  When this
+                         is zero on a day with a non-empty schedule,
+                         analyze ran but the Odds API came back empty
+                         OR the response landed somewhere the renderer
+                         can't see.
+    last_analyzed_at -- ISO string from _analysis_state, or None when
+                         analyze hasn't run since the last reset.
+    """
+    sport = sport.lower()
+    state = _wnba_analysis_state if sport == "wnba" else _analysis_state
+    results = state.get("results") or []
+    with_odds = sum(1 for r in results if r.get("pick_team"))
+    last = state.get("last_analyzed_at")
+    return {
+        "games_total":      len(results),
+        "games_with_odds":  with_odds,
+        "games_no_odds":    len(results) - with_odds,
+        "last_analyzed_at": last.isoformat() if hasattr(last, "isoformat") else (last or None),
+    }
+
+
 @app.route("/api/odds/cache_status", methods=["GET"])
 def odds_cache_status_endpoint():
     """Return whether the 15-min Odds API cache has fresh data for the
-    given sport.  No HTTP call to the-odds-api.com, no quota burn.
+    given sport, PLUS per-sport game counts + last-analyzed timestamp.
 
-    Used by the admin Run buttons to decide whether to show the
-    "Pull fresh odds?" confirmation dialog before calling /api/analyze.
+    Used by the admin Run buttons (for the "Pull fresh odds?"
+    confirmation dialog) AND by the admin Odds Status indicator
+    (for the games-with-odds + last-updated display).
 
     Query:
       sport=mlb|wnba|both   (default 'both' -> returns both sports)
 
-    Returns:
-      single sport  -> {sport, fresh, ttl_sec}
-      both          -> {mlb: {fresh, ttl_sec}, wnba: {fresh, ttl_sec}}
+    Returns (per sport):
+      {fresh, ttl_sec, sport_key,
+       games_total, games_with_odds, games_no_odds, last_analyzed_at}
     """
     try:
         from src.odds_client import cache_status as _cache_status
@@ -5554,12 +5683,14 @@ def odds_cache_status_endpoint():
             "mlb":  "baseball_mlb",
             "wnba": "basketball_wnba",
         }
+        def _bundle(s: str) -> dict:
+            return {**_cache_status(_cache, sport_keys[s]), **_odds_health_for_sport(s)}
+
         if sport in sport_keys:
-            return jsonify(_cache_status(_cache, sport_keys[sport]))
-        # 'both' (or anything else) -> aggregate response.
+            return jsonify(_bundle(sport))
         return jsonify({
-            "mlb":  _cache_status(_cache, sport_keys["mlb"]),
-            "wnba": _cache_status(_cache, sport_keys["wnba"]),
+            "mlb":  _bundle("mlb"),
+            "wnba": _bundle("wnba"),
         })
     except Exception as exc:                                              # noqa: BLE001
         return jsonify({
@@ -7215,6 +7346,15 @@ def analyze_wnba():
             _eprint(f"ANALYZE [WNBA] ensemble_store.save failed: {type(_es).__name__}: {_es}")
         _step(f"DONE: {len(serialized)} games serialized and saved")
 
+        # ANALYZE COMPLETE summary -- same shape as the MLB log above
+        # so a single grep "ANALYZE COMPLETE" finds both sports.
+        _with_odds = sum(1 for r in serialized if r.get("pick_team"))
+        _no_odds   = len(serialized) - _with_odds
+        _eprint(
+            f"ANALYZE COMPLETE [WNBA]: {len(serialized)} games total -- "
+            f"{_with_odds} with odds, {_no_odds} no_odds"
+        )
+
         return jsonify({
             "success":        True,
             "cached":         False,
@@ -7589,15 +7729,25 @@ def _run_midnight_reset() -> None:
         _wnba_analysis_state["parlays"]          = {}
         _wnba_analysis_state["last_analyzed_at"] = None
         _wnba_analysis_state["last_analysis_meta"] = {}
-        # Evict odds API cache so fresh data is fetched on the next run
-        for _odds_key in (
-            "odds_baseball_mlb_h2h,spreads,totals_us",
-            "odds_basketball_wnba_h2h,spreads,totals_us",
-        ):
-            try:
-                _cache.invalidate(_odds_key)
-            except Exception:
-                pass
+        # Evict odds API cache so fresh data is fetched on the next run.
+        # Actual cache keys include commence_from + commence_to UTC
+        # timestamps (see src.odds_client._odds_cache_key), so we glob
+        # the .cache/ directory for every file that starts with "odds_"
+        # and includes the sport key.  The previous short-key
+        # invalidate() calls never matched anything -- this is what
+        # was leaving yesterday's odds cached into the new ET day.
+        try:
+            from pathlib import Path as _P
+            _odds_wiped = 0
+            for _f in _P(".cache").glob("odds_*.json"):
+                try:
+                    _f.unlink()
+                    _odds_wiped += 1
+                except Exception:                                          # noqa: BLE001
+                    pass
+            _eprint(f"MIDNIGHT-RESET: wiped {_odds_wiped} odds cache file(s)")
+        except Exception as _e:                                            # noqa: BLE001
+            _eprint(f"MIDNIGHT-RESET: odds cache wipe error: {_e}")
         # Issue 4: also wipe the Supabase mirror so a redeploy after
         # midnight doesn't restore yesterday's data from cache.
         for _ckey in (_CACHE_KEY_SNAPSHOT, _CACHE_KEY_ANALYSIS_MLB, _CACHE_KEY_ANALYSIS_WNBA):
