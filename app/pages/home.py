@@ -25,7 +25,7 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar, bottom_nav
+from components import navbar, bottom_nav
 from components import track_button, team_logo
 from pages import home_stats as hs
 
@@ -129,21 +129,22 @@ def register(backend) -> None:
 
 
 def _layout(backend) -> None:
-    with ui.row().classes("no-wrap w-full").style("gap: 0;"):
-        _guarded_section("sidebar", lambda: sidebar.render(backend))
-        with ui.column().classes("page-content").style(
-            f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
-            f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
-        ):
-            _guarded_section("chips", lambda: _section_chips(backend))
-            _guarded_section("top_plays_mobile",
-                             lambda: sidebar.render_top_plays_only(backend))
-            _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
-            _guarded_section("confidence_carousel",
-                             lambda: _section_confidence_carousel(backend))
-            _guarded_section("ai_banner", _ai_banner)
-            _guarded_section("model_performance",
-                             lambda: _section_model_performance(backend))
+    """Sidebar (Top 5 Plays + Confidence Performance) was removed from
+    the home page per user spec -- the Highest Confidence + EV Scan
+    carousels below already surface the same picks with richer
+    per-card detail.  Content column now spans the full content width
+    centered via margin: 0 auto."""
+    with ui.column().classes("page-content w-full").style(
+        f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; "
+        f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
+    ):
+        _guarded_section("chips", lambda: _section_chips(backend))
+        _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
+        _guarded_section("confidence_carousel",
+                         lambda: _section_confidence_carousel(backend))
+        _guarded_section("ai_banner", _ai_banner)
+        _guarded_section("model_performance",
+                         lambda: _section_model_performance(backend))
 
 
 def _guarded_section(label: str, render_fn) -> None:

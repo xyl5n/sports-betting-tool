@@ -173,21 +173,23 @@ def _refreshable_grid(backend, sport: str, state: dict) -> None:
 
 
 def _date_nav(state: dict) -> None:
-    """Top-of-slate date navigation: Yesterday / Today / Tomorrow pills
-    + left/right arrow buttons.  Mutates state['date'] then refreshes
-    the grid.
+    """Top-of-slate date navigation: < arrow | date label + calendar
+    icon | > arrow.  Calendar icon opens a ui.menu containing a
+    ui.date picker so users can jump to any date in one click instead
+    of arrowing through one day at a time.
 
-    Tap targets are sized 44px+ on mobile via the global rule in
-    components/theme.py."""
+    Tap targets sized 36px+ here, bumped to 44px on mobile via the
+    global rule in components/theme.py."""
     from datetime import date as _date, timedelta as _td
 
     today_str = state["today"]
-    today  = _date.fromisoformat(today_str)
-    yest   = (today - _td(days=1)).isoformat()
-    tomo   = (today + _td(days=1)).isoformat()
 
     def _set_date(d: str) -> None:
-        state["date"] = d
+        if not d:
+            return
+        # ui.date returns the value as either str or datetime depending
+        # on Quasar version; coerce to ISO string for consistency.
+        state["date"] = str(d)[:10]
         _refreshable_grid.refresh()
 
     def _step(delta_days: int) -> None:
@@ -195,68 +197,71 @@ def _date_nav(state: dict) -> None:
         _set_date((cur + _td(days=delta_days)).isoformat())
 
     current = state["date"]
-    # Pretty-print the selected date (e.g. "Tue, May 21").  When the
-    # date is one of the three pill dates we surface a friendlier
-    # name; otherwise show the calendar header.
-    pretty = _pretty_date(current, today_str, yest, tomo)
+    pretty  = _pretty_date(current, today_str)
 
     with ui.row().classes("items-center w-full no-wrap").style(
         f"gap: 8px; background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_MD}; padding: 8px 10px;"
+        f"border-radius: {t.RADIUS_MD}; padding: 8px 12px; "
+        f"justify-content: center;"
     ):
-        # Left arrow
-        ui.button("‹", on_click=lambda: _step(-1)).props("flat dense").style(
-            f"min-width: 36px; min-height: 36px; "
+        # Left arrow -- one day back
+        ui.button(icon="chevron_left", on_click=lambda: _step(-1)).props(
+            "flat dense round"
+        ).style(
             f"background: {t.CARD_HI}; color: {t.TEXT}; "
-            f"border-radius: {t.RADIUS_SM}; "
-            f"font-size: 18px; font-weight: 800; padding: 0;"
-        )
-        with ui.row().classes("items-center").style("gap: 6px; flex: 1; justify-content: center;"):
-            _day_pill("Yesterday", yest, current, _set_date)
-            _day_pill("Today",     today_str, current, _set_date)
-            _day_pill("Tomorrow",  tomo, current, _set_date)
-        # Right arrow
-        ui.button("›", on_click=lambda: _step(+1)).props("flat dense").style(
-            f"min-width: 36px; min-height: 36px; "
+            f"min-width: 36px; min-height: 36px;"
+        ).tooltip("Previous day")
+
+        # Date label + calendar icon (icon opens the picker menu)
+        with ui.row().classes("items-center").style("gap: 8px;"):
+            ui.label(pretty).style(
+                f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
+                f"letter-spacing: .2px;"
+            )
+            calendar_btn = ui.button(icon="calendar_month").props(
+                "flat dense round"
+            ).style(
+                f"background: {t.CARD_HI}; color: {t.PRIMARY}; "
+                f"min-width: 36px; min-height: 36px;"
+            ).tooltip("Pick any date")
+            with calendar_btn:
+                with ui.menu() as menu:
+                    # ui.date is the Quasar QDate wrapper.  on_change
+                    # fires with e.value as a 'YYYY-MM-DD' string.
+                    # Close the menu after a pick so the next nav
+                    # interaction doesn't need an extra click.
+                    def _on_pick(e):
+                        _set_date(e.value)
+                        try:
+                            menu.close()
+                        except Exception:                                  # noqa: BLE001
+                            pass
+                    ui.date(value=current, on_change=_on_pick).props(
+                        "color=primary"
+                    )
+
+        # Right arrow -- one day forward
+        ui.button(icon="chevron_right", on_click=lambda: _step(+1)).props(
+            "flat dense round"
+        ).style(
             f"background: {t.CARD_HI}; color: {t.TEXT}; "
-            f"border-radius: {t.RADIUS_SM}; "
-            f"font-size: 18px; font-weight: 800; padding: 0;"
-        )
-
-    # Selected-date label (below the nav row so the row itself stays
-    # tight even with long pretty names).
-    ui.label(pretty).style(
-        f"font-size: 12px; color: {t.TEXT_DIM}; "
-        f"font-family: monospace; text-align: center; width: 100%;"
-    )
+            f"min-width: 36px; min-height: 36px;"
+        ).tooltip("Next day")
 
 
-def _day_pill(label: str, date: str, current: str, on_click) -> None:
-    is_active = (date == current)
-    bg     = t.PRIMARY if is_active else t.CARD_HI
-    color  = t.BG      if is_active else t.TEXT_DIM
-    weight = "800"     if is_active else "600"
-    ui.button(label, on_click=lambda: on_click(date)).props("flat no-caps").style(
-        f"background: {bg}; color: {color}; font-weight: {weight}; "
-        f"font-size: 12px; letter-spacing: .3px; "
-        f"padding: 8px 14px; border-radius: {t.RADIUS_PILL}; "
-        f"min-height: 36px;"
-    )
-
-
-def _pretty_date(current: str, today: str, yest: str, tomo: str) -> str:
+def _pretty_date(current: str, today: str) -> str:
+    """Format the date label.  Per spec: 'Tuesday May 21' when the
+    selected date is the current year; year shown only when crossing
+    a year boundary so the label stays compact day-to-day."""
     from datetime import date as _date
     try:
         d = _date.fromisoformat(current)
+        td = _date.fromisoformat(today)
     except Exception:                                                      # noqa: BLE001
         return current
-    name = (
-        "Today"     if current == today else
-        "Yesterday" if current == yest  else
-        "Tomorrow"  if current == tomo  else
-        d.strftime("%a")
-    )
-    return f"{name} -- {d.strftime('%A, %B %-d, %Y')}"
+    if d.year == td.year:
+        return d.strftime("%A %B %-d")
+    return d.strftime("%A %B %-d, %Y")
 
 
 def _header(sport: str) -> None:
@@ -319,21 +324,26 @@ def _game_grid(backend, sport: str, state: dict) -> None:
         )
         return
 
-    for i, g in enumerate(games):
-        gid = g.get("game_id") or g.get("id") or "?"
-        away = g.get("away_team", "?")
-        home = g.get("home_team", "?")
-        _dbg(f"_game_grid CARD[{i}] gid={gid} {away} @ {home} no_odds={g.get('_no_odds')}")
-        try:
-            # game_card.render handles _no_odds via the existing
-            # _no_model code path (with a different label below).
-            game_card.render(g, sport=sport, backend=backend)
-        except Exception as exc:                                           # noqa: BLE001
-            import traceback as _tb
-            _dbg(
-                f"_game_grid CARD[{i}] RENDER FAILED: "
-                f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}"
-            )
+    # Two-column CSS grid on desktop, single column on mobile.  The
+    # `.game-grid` class is defined in components/theme.py with a
+    # 768px media query so the layout flips automatically without
+    # any JS.  Cards fill left-to-right top-to-bottom -- when an odd
+    # game count lands the final card occupies the left column only,
+    # which is what CSS grid does by default.
+    with ui.element("div").classes("game-grid w-full"):
+        for i, g in enumerate(games):
+            gid = g.get("game_id") or g.get("id") or "?"
+            away = g.get("away_team", "?")
+            home = g.get("home_team", "?")
+            _dbg(f"_game_grid CARD[{i}] gid={gid} {away} @ {home} no_odds={g.get('_no_odds')}")
+            try:
+                game_card.render(g, sport=sport, backend=backend)
+            except Exception as exc:                                       # noqa: BLE001
+                import traceback as _tb
+                _dbg(
+                    f"_game_grid CARD[{i}] RENDER FAILED: "
+                    f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}"
+                )
 
 
 def _serialized_games(backend, sport: str) -> list[dict]:
