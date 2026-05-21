@@ -76,6 +76,85 @@ CATEGORY_CONFIG: list[dict] = [
 CATEGORIES = tuple(c["key"] for c in CATEGORY_CONFIG)
 
 
+# ── Row shape normalization ──────────────────────────────────────────────────
+# Analysis results arrive in two shapes:
+#   * raw nested -- {"game": {...}, "prediction": {...}, "rl_pred": ..., ...}
+#     produced freshly by build_for_game during /api/analyze
+#   * flat passthrough -- {"home_team": ..., "pick_team": ..., "run_line": ...,
+#     "totals": ..., ...} produced by _serialize and hydrated from the daily
+#     snapshot on container boot
+#
+# _collect_mlb / _collect_wnba below crashed with KeyError('game') whenever
+# they were handed a flat passthrough (post-restart repick path).  Rather
+# than rewrite the picker to read flat keys everywhere, _row_as_nested
+# returns a (game, prediction) pair regardless of input shape -- raw rows
+# pass through untouched; flat rows get a synthesized minimal nested view.
+
+def _american_to_prob(american) -> float:
+    """American moneyline -> raw implied probability (0-1).  Returns
+    0.5 for unparseable input so the implied-prob field doesn't poison
+    edge math when odds are missing."""
+    try:
+        v = int(american)
+    except (TypeError, ValueError):
+        return 0.5
+    if v > 0:
+        return 100.0 / (v + 100.0)
+    return abs(v) / (abs(v) + 100.0)
+
+
+def _row_as_nested(r: dict) -> tuple[dict, dict] | None:
+    """Return (game, prediction) for *r* regardless of whether it's a
+    raw nested dict or a flat serialized passthrough.  None for
+    malformed input -- the caller skips that row.
+    """
+    if isinstance(r.get("game"), dict) and isinstance(r.get("prediction"), dict):
+        return r["game"], r["prediction"]
+
+    # Flat passthrough -- synthesize the minimal sub-dicts the rest of
+    # _collect_* reads.  Field names mirror what _serialize writes.
+    home_team = r.get("home_team")
+    away_team = r.get("away_team")
+    if not (home_team and away_team):
+        return None
+    home_odds = r.get("home_odds")
+    away_odds = r.get("away_odds")
+    home_implied = r.get("home_implied_prob")
+    if home_implied is None and home_odds is not None and away_odds is not None:
+        ho = _american_to_prob(home_odds)
+        ao = _american_to_prob(away_odds)
+        home_implied = ho / (ho + ao) if (ho + ao) > 0 else 0.5
+    if home_implied is None:
+        home_implied = 0.5
+    g = {
+        "id":                r.get("game_id") or r.get("id"),
+        "home_team":         home_team,
+        "away_team":         away_team,
+        "commence_time":     r.get("commence_time", ""),
+        "h2h_home_odds":     home_odds,
+        "h2h_away_odds":     away_odds,
+        "home_implied_prob": float(home_implied),
+    }
+    # Derive home_win_prob from pick_team + pick_prob so the moneyline
+    # branch in _collect_* doesn't get a guaranteed 50/50 split.  No
+    # per-model breakdown is available from a flat row so xgb_prob /
+    # lr_prob / nn_prob fall back to the same value -- model agreement
+    # check downstream treats this as "models agree".
+    pick_team = r.get("pick_team")
+    pick_prob = r.get("pick_prob")
+    if isinstance(pick_prob, (int, float)) and pick_team:
+        hp = float(pick_prob) if pick_team == home_team else 1.0 - float(pick_prob)
+    else:
+        hp = 0.5
+    pred = {
+        "home_win_prob": hp,
+        "xgb_prob":      hp,
+        "lr_prob":       hp,
+        "nn_prob":       hp,
+    }
+    return g, pred
+
+
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 def _score(pick_prob: float, edge: float) -> float:
@@ -142,8 +221,13 @@ def _collect_mlb(results: list[dict], now_utc: datetime, ledger: "Ledger") -> di
     cands: dict[str, list] = {c: [] for c in CATEGORIES}
 
     for r in results:
-        g    = r["game"]
-        pred = r["prediction"]
+        # Tolerate both raw nested and flat passthrough rows -- see
+        # _row_as_nested up top.  Malformed rows are silently skipped
+        # rather than crashing the whole repick.
+        normalized = _row_as_nested(r)
+        if normalized is None:
+            continue
+        g, pred = normalized
 
         try:
             ct = datetime.fromisoformat(g.get("commence_time", "").replace("Z", "+00:00"))
@@ -258,8 +342,12 @@ def _collect_wnba(results: list[dict], now_utc: datetime, ledger: "Ledger") -> d
     cands: dict[str, list] = {c: [] for c in CATEGORIES}
 
     for r in results:
-        g    = r["game"]
-        pred = r["prediction"]
+        # Tolerate both raw nested and flat passthrough rows.  See
+        # _row_as_nested up top for the synth path.
+        normalized = _row_as_nested(r)
+        if normalized is None:
+            continue
+        g, pred = normalized
 
         try:
             ct = datetime.fromisoformat(g.get("commence_time", "").replace("Z", "+00:00"))
