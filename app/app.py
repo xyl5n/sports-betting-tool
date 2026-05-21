@@ -7600,11 +7600,23 @@ def ai_pick_analysis():
         return jsonify({"error": f"context build failed: {_redact(str(exc))}"}), 500
 
     system = (
-        "You are a professional sports analyst. Output EXACTLY 3 to 4 "
-        "plain-text sentences (no markdown, no asterisks, no bullet "
-        "points, no headers) covering: (1) why the model made this "
-        "specific pick, (2) the key risk factors, and (3) whether the "
-        "edge is strong or marginal.  Be direct and confident.\n\n"
+        "You are a sharp professional sports analyst with this complete "
+        "data card in front of you.  Write 4 to 6 plain-text sentences "
+        "(no markdown, no asterisks, no bullet points, no headers) that:\n"
+        "  1. Reference both pitchers by name + team abbreviation and "
+        "cite at least one specific number from each (ERA, K/9, BB/9, "
+        "Home/Away ERA, or Last 3 ERA).\n"
+        "  2. State which model -- XGB, LR, or NN -- is most confident "
+        "and call out if the three disagree.\n"
+        "  3. Explain WHY the model favors one side using the SHAP "
+        "factors (cite the actual feature name + direction).\n"
+        "  4. Translate the edge over market into plain English (sharp "
+        "vs marginal vs trap) and reference the moneyline / run line / "
+        "totals lines as appropriate to the bet type asked about.\n"
+        "  5. Give a concrete recommendation: bet it at the Kelly size, "
+        "fade it, or pass.  No hedging language like 'might' or "
+        "'could be' -- be opinionated.\n"
+        "Always ground claims in the numbers below.  Never invent stats.\n\n"
         + ctx
     )
 
@@ -7616,7 +7628,7 @@ def ai_pick_analysis():
         client = _anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=350,
+            max_tokens=500,
             system=system,
             messages=[{
                 "role":    "user",
@@ -7636,89 +7648,267 @@ def ai_pick_analysis():
     })
 
 
-def _build_pick_analysis_context(raw: dict, bet_type: str, sport: str) -> str:
-    """Build the per-pick context string fed to the Analyze button.
+def _fmt_odds(o) -> str:
+    """+150 / -110 style.  '?' when missing / unparseable."""
+    if o is None or o == "":
+        return "?"
+    try:
+        n = int(o)
+    except (TypeError, ValueError):
+        return str(o)
+    return f"+{n}" if n > 0 else str(n)
 
-    Pulls from the raw analysis dict (game / prediction / shap / meta)
-    rather than the serialized output so SHAP factors are available with
-    their plain-English labels (via _FEATURE_LABELS).
+
+def _fmt_pct(p) -> str:
+    try:
+        return f"{float(p) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _pitcher_block_for_ai(sp: dict, side: str) -> str:
+    """One pitcher's stat lines for the AI context.  Tolerant of the
+    pitcher_client output shape (full_name / team_abbrev / era / whip /
+    k_per_9 / bb9 / era_home / era_away / last3_era / wins / losses /
+    rest / hand).  Missing fields render '?'."""
+    if not isinstance(sp, dict) or not sp:
+        return f"{side} SP: (no probable starter)"
+    def _f(key, fmt: str) -> str:
+        v = sp.get(key)
+        if v is None or v == "":
+            return "?"
+        try:
+            return fmt.format(float(v))
+        except (TypeError, ValueError):
+            return str(v)
+    name = (sp.get("full_name") or "TBD").strip()
+    team = (sp.get("team_abbrev") or "?").strip().upper()
+    hand = sp.get("hand")
+    hand_s = (
+        "LHP" if hand == 1 or str(hand).upper() == "LHP"
+        else "RHP" if hand == 0 or str(hand).upper() == "RHP"
+        else "?"
+    )
+    wins   = int(sp.get("wins")   or 0)
+    losses = int(sp.get("losses") or 0)
+    record = f"{wins}-{losses}" if (wins or losses) else "?"
+    return (
+        f"{side} SP: {name} ({team}, {hand_s}, {record})  "
+        f"ERA {_f('era', '{:.2f}')}  "
+        f"WHIP {_f('whip', '{:.2f}')}  "
+        f"K/9 {_f('k_per_9', '{:.1f}')}  "
+        f"BB/9 {_f('bb9', '{:.1f}')}  "
+        f"Home ERA {_f('era_home', '{:.2f}')}  "
+        f"Away ERA {_f('era_away', '{:.2f}')}  "
+        f"Last 3 ERA {_f('last3_era', '{:.2f}')}  "
+        f"Rest {_f('rest', '{:.0f}')}d"
+    )
+
+
+def _resolve_pitcher_data_for_ai(raw: dict, sport: str) -> tuple[dict, dict]:
+    """Best-effort pitcher dict resolution for the AI payload.
+    Preference order: raw meta -> serialized passthrough top-level ->
+    direct pitcher_client fetch (snapshot-hydrated path, MLB only).
+    Returns (home_sp, away_sp) -- empty dicts when nothing resolves."""
+    meta = raw.get("meta") or {}
+    home_sp = meta.get("home_sp") or raw.get("home_sp") or {}
+    away_sp = meta.get("away_sp") or raw.get("away_sp") or {}
+    if (home_sp and away_sp) or sport != "mlb":
+        return home_sp, away_sp
+    # Fall back to pitcher_client direct fetch -- same path the matchup
+    # page uses (PR #88) for snapshot-hydrated rows that lack meta.
+    game = raw.get("game") or {}
+    home = game.get("home_team") or raw.get("home_team") or ""
+    away = game.get("away_team") or raw.get("away_team") or ""
+    commence = game.get("commence_time") or raw.get("commence_time") or ""
+    if not (home and away):
+        return home_sp, away_sp
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _Z
+        game_date = ""
+        if commence:
+            try:
+                dt = _dt.fromisoformat(str(commence).replace("Z", "+00:00"))
+                game_date = dt.astimezone(_Z("America/New_York")).date().isoformat()
+            except Exception:                                              # noqa: BLE001
+                pass
+        from src.pitcher_client import get_pitcher_client
+        data = get_pitcher_client().get_starters_for_game(home, away, game_date)
+        return (
+            (data or {}).get("home") or home_sp,
+            (data or {}).get("away") or away_sp,
+        )
+    except Exception:                                                     # noqa: BLE001
+        return home_sp, away_sp
+
+
+def _build_pick_analysis_context(raw: dict, bet_type: str, sport: str) -> str:
+    """Build the rich per-pick context fed to the Analyze button.
+
+    The AI now sees a full data card: matchup + lines, both pitchers'
+    stats and splits, all three model picks (ML / RL or Spread / Totals),
+    per-model probabilities (XGB / LR / NN), the requested bet's edge
+    + Kelly size + top SHAP factors with their actual numeric values,
+    and the upset risk score.  Designed to support specific, opinionated
+    output rather than generic "the model favors the home team" copy.
     """
     game = raw.get("game") or {}
     pred = raw.get("prediction") or {}
     meta = raw.get("meta") or {}
     away = game.get("away_team", "Away")
     home = game.get("home_team", "Home")
+    commence_time = game.get("commence_time", "") or raw.get("commence_time", "")
 
-    # Per-bet-type pick + probability + edge + odds.  Falls back to the
-    # moneyline numbers when the requested bet type isn't in the raw dict.
-    if bet_type in ("moneyline", "single", "ml"):
-        bt_label = "Moneyline"
-        hp       = float(pred.get("home_win_prob") or 0.5)
-        market_p = float(game.get("home_implied_prob") or 0.5)
-        if hp >= 0.5:
-            pick_team = home; pick_prob = hp;     edge = hp - market_p
-            odds = game.get("h2h_home_odds")
-        else:
-            pick_team = away; pick_prob = 1 - hp; edge = (1 - hp) - (1 - market_p)
-            odds = game.get("h2h_away_odds")
-        agree = bool(pred.get("models_agree", True))
-        shap  = pred.get("shap") or []
-    elif bet_type in ("run_line", "spread"):
-        rl       = raw.get("rl_pred") or raw.get("spread_pred") or {}
-        bt_label = "Run Line" if bet_type == "run_line" else "Spread"
-        pick_team = rl.get("pick_team") or "?"
-        pick_prob = float(rl.get("pick_prob") or 0)
-        edge      = float(rl.get("edge") or 0)
-        odds      = rl.get("pick_odds")
-        agree     = bool(rl.get("models_agree", True))
-        shap      = rl.get("shap") or []
-    elif bet_type == "totals":
-        tot       = raw.get("totals_pred") or {}
-        bt_label  = "Totals"
-        direction = (tot.get("direction") or "over").title()
-        line      = tot.get("total_line", "?")
-        pick_team = f"{direction} {line}"
-        pick_prob = float(tot.get("pick_prob") or 0)
-        edge      = float(tot.get("edge") or 0)
-        odds      = (
-            tot.get("over_odds") if direction.lower() == "over"
-            else tot.get("under_odds")
-        )
-        agree = bool(tot.get("models_agree", True))
-        shap  = tot.get("shap") or []
+    # ── Market lines (h2h moneyline + run line / spread + totals) ─────
+    ml_home_odds = game.get("h2h_home_odds")
+    ml_away_odds = game.get("h2h_away_odds")
+    rl_pred      = raw.get("rl_pred") or raw.get("spread_pred") or {}
+    totals_pred  = raw.get("totals_pred") or {}
+    rl_line      = rl_pred.get("run_line_point") or rl_pred.get("spread_line")
+    totals_line  = totals_pred.get("total_line")
+
+    # ── All three picks (ML / RL or Spread / Totals) with confidences ─
+    hp = float(pred.get("home_win_prob") or 0.5)
+    market_p = float(game.get("home_implied_prob") or 0.5)
+    if hp >= 0.5:
+        ml_pick_team, ml_pick_prob, ml_edge = home, hp, hp - market_p
+        ml_pick_odds = ml_home_odds
     else:
-        bt_label = bet_type.title()
-        pick_team = "?"; pick_prob = 0.0; edge = 0.0; odds = None
-        agree = True; shap = []
+        ml_pick_team, ml_pick_prob, ml_edge = away, 1 - hp, (1 - hp) - (1 - market_p)
+        ml_pick_odds = ml_away_odds
 
-    # Top 3 SHAP factors in human-readable form.  _FEATURE_LABELS turns
-    # raw feature names ("sp_era_diff") into plain English ("SP ERA
-    # advantage").  Defensive against missing keys.
+    rl_pick_team = rl_pred.get("pick_team") or "?"
+    rl_pick_prob = float(rl_pred.get("pick_prob") or 0)
+    rl_edge      = float(rl_pred.get("edge") or 0)
+    rl_pick_odds = rl_pred.get("pick_odds")
+
+    tot_dir   = (totals_pred.get("direction") or "over").title()
+    tot_pick  = f"{tot_dir} {totals_line}" if totals_line is not None else "?"
+    tot_prob  = float(totals_pred.get("pick_prob") or 0)
+    tot_edge  = float(totals_pred.get("edge") or 0)
+    tot_odds  = (
+        totals_pred.get("over_odds") if tot_dir.lower() == "over"
+        else totals_pred.get("under_odds")
+    )
+
+    # ── Per-model probabilities (XGB / LR / NN) ───────────────────────
+    xgb_p = pred.get("xgb_prob")
+    lr_p  = pred.get("lr_prob")
+    nn_p  = pred.get("nn_prob")
+    models_agree = bool(pred.get("models_agree", True))
+
+    # ── Which bet did the user click Analyze on?  Mark it + pull SHAP ─
+    if bet_type in ("moneyline", "single", "ml"):
+        focus_label = "Moneyline"
+        focus_pick  = ml_pick_team
+        focus_prob  = ml_pick_prob
+        focus_edge  = ml_edge
+        focus_odds  = ml_pick_odds
+        focus_shap  = pred.get("shap") or []
+    elif bet_type in ("run_line", "spread"):
+        focus_label = "Run Line" if sport == "mlb" else "Spread"
+        line_s = f" {float(rl_line):+g}" if isinstance(rl_line, (int, float)) else ""
+        focus_pick = f"{rl_pick_team}{line_s}"
+        focus_prob = rl_pick_prob
+        focus_edge = rl_edge
+        focus_odds = rl_pick_odds
+        focus_shap = rl_pred.get("shap") or []
+    elif bet_type == "totals":
+        focus_label = "Totals"
+        focus_pick  = tot_pick
+        focus_prob  = tot_prob
+        focus_edge  = tot_edge
+        focus_odds  = tot_odds
+        focus_shap  = totals_pred.get("shap") or []
+    else:
+        focus_label = bet_type.title()
+        focus_pick  = "?"
+        focus_prob  = 0.0
+        focus_edge  = 0.0
+        focus_odds  = None
+        focus_shap  = []
+
+    # ── SHAP top 5 with actual numeric values ─────────────────────────
     shap_lines: list[str] = []
-    for s in (shap or [])[:3]:
+    for s in (focus_shap or [])[:5]:
         try:
-            label = (s.get("label")
-                     or _FEATURE_LABELS.get(s.get("feature", ""), s.get("feature", "factor")))
+            label = (
+                s.get("label")
+                or _FEATURE_LABELS.get(s.get("feature", ""), s.get("feature", "factor"))
+            )
             shap_val = float(s.get("shap_value") or 0)
-            direction = "supports the pick" if shap_val > 0 else "argues against the pick"
-            shap_lines.append(f"  - {label} ({direction})")
+            direction = "+" if shap_val >= 0 else ""
+            shap_lines.append(
+                f"  - {label}: {direction}{shap_val:.3f} "
+                f"({'supports' if shap_val >= 0 else 'argues against'} the pick)"
+            )
         except Exception:                                                 # noqa: BLE001
             continue
     shap_block = "\n".join(shap_lines) if shap_lines else "  (none recorded)"
 
-    odds_s = (f"{odds:+d}" if isinstance(odds, (int, float)) and odds > 0
-              else (str(int(odds)) if isinstance(odds, (int, float)) else "?"))
-    edge_s = f"{edge * 100:+.1f}%"
+    # ── Kelly / bet sizing -- pull from whichever shape carried it ────
+    kelly = (
+        meta.get("model_amount")
+        or raw.get("bet_dollars")
+        or (rl_pred.get("bet_dollars") if bet_type in ("run_line", "spread") else None)
+        or (totals_pred.get("bet_dollars") if bet_type == "totals" else None)
+    )
+    kelly_s = f"${float(kelly):.2f}" if isinstance(kelly, (int, float)) else "?"
+
+    # ── Upset risk ────────────────────────────────────────────────────
+    upset = raw.get("upset") or {}
+    upset_score = upset.get("score")
+    upset_s = f"{float(upset_score):.0f}/10" if isinstance(upset_score, (int, float)) else "?"
+
+    # ── Pitchers (MLB only; WNBA falls through to "no SP data") ───────
+    if sport == "mlb":
+        home_sp, away_sp = _resolve_pitcher_data_for_ai(raw, sport)
+        pitching_block = (
+            f"{_pitcher_block_for_ai(away_sp, 'AWAY')}\n"
+            f"{_pitcher_block_for_ai(home_sp, 'HOME')}"
+        )
+    else:
+        pitching_block = "(WNBA -- no starting pitcher data)"
+
+    rl_line_s = f"{float(rl_line):+g}" if isinstance(rl_line, (int, float)) else "?"
 
     return (
-        f"SPORT: {sport.upper()}\n"
-        f"MATCHUP: {away} @ {home}\n"
-        f"BET TYPE: {bt_label}\n"
-        f"MODEL PICK: {pick_team} at {odds_s}\n"
-        f"MODEL CONFIDENCE: {pick_prob * 100:.1f}%\n"
-        f"EDGE OVER MARKET: {edge_s}\n"
-        f"MODELS AGREE: {'yes' if agree else 'NO -- ensemble split'}\n"
-        f"TOP 3 SHAP FACTORS:\n{shap_block}"
+        f"=== MATCHUP ===\n"
+        f"Sport: {sport.upper()}\n"
+        f"Game: {away} @ {home}\n"
+        f"Start: {commence_time or '?'}\n"
+        f"\n=== STARTING PITCHERS ===\n"
+        f"{pitching_block}\n"
+        f"\n=== MARKET LINES ===\n"
+        f"Moneyline: {away} {_fmt_odds(ml_away_odds)} / {home} {_fmt_odds(ml_home_odds)}\n"
+        f"Run Line: home {rl_line_s} at {_fmt_odds(rl_pred.get('run_line_home_odds') or rl_pred.get('pick_odds'))}, "
+        f"away {(-float(rl_line)) if isinstance(rl_line, (int, float)) else '?'} "
+        f"at {_fmt_odds(rl_pred.get('run_line_away_odds') or rl_pred.get('pick_odds'))}\n"
+        f"Totals: O {totals_line if totals_line is not None else '?'} "
+        f"at {_fmt_odds(totals_pred.get('over_odds'))} / "
+        f"U {totals_line if totals_line is not None else '?'} "
+        f"at {_fmt_odds(totals_pred.get('under_odds'))}\n"
+        f"\n=== ALL MODEL PICKS ===\n"
+        f"Moneyline: {ml_pick_team} @ {_fmt_odds(ml_pick_odds)}  "
+        f"conf={_fmt_pct(ml_pick_prob)}  edge={ml_edge * 100:+.1f}%\n"
+        f"Run Line/Spread: {rl_pick_team} {rl_line_s} @ {_fmt_odds(rl_pick_odds)}  "
+        f"conf={_fmt_pct(rl_pick_prob)}  edge={rl_edge * 100:+.1f}%\n"
+        f"Totals: {tot_pick} @ {_fmt_odds(tot_odds)}  "
+        f"conf={_fmt_pct(tot_prob)}  edge={tot_edge * 100:+.1f}%\n"
+        f"\n=== PER-MODEL HOME WIN PROBABILITY ===\n"
+        f"XGB: {_fmt_pct(xgb_p)}   LR: {_fmt_pct(lr_p)}   NN: {_fmt_pct(nn_p)}\n"
+        f"Models agree: {'YES' if models_agree else 'NO -- ensemble split'}\n"
+        f"\n=== FOCUS BET (user clicked Analyze on this) ===\n"
+        f"Type: {focus_label}\n"
+        f"Pick: {focus_pick} @ {_fmt_odds(focus_odds)}\n"
+        f"Confidence: {_fmt_pct(focus_prob)}\n"
+        f"Edge over market: {focus_edge * 100:+.1f}%\n"
+        f"Half-Kelly bet size: {kelly_s}\n"
+        f"\n=== TOP SHAP FACTORS (with values) ===\n"
+        f"{shap_block}\n"
+        f"\n=== UPSET / CHAOS SCORE ===\n"
+        f"{upset_s} (higher = more unpredictable matchup)"
     )
 
 
