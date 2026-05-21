@@ -1499,42 +1499,53 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
         out["away_stats"] = {k: float(v) for k, v in a.items()
                              if isinstance(v, (int, float, np.floating, np.integer))}
 
-    # Starting pitcher details
+    # Starting pitcher details -- carry the full set of fields the
+    # matchup page needs in one shot.  The pitcher_client pipeline
+    # (statsapi.mlb.com season / homeAndAway / gameLog / people /
+    # teams) populates every field below; missing values use neutral
+    # defaults and the matchup page applies its own sanity bounds on
+    # top before rendering.
     home_sp = meta.get("home_sp") or {}
     away_sp = meta.get("away_sp") or {}
     if home_sp:
         out["home_sp"] = {
-            "era":       round(float(home_sp.get("era", 4.5)), 2),
-            "whip":      round(float(home_sp.get("whip", 1.3)), 2),
-            # k_rate stays as a fraction (e.g. 0.214 = 21.4%).  The
-            # matchup page formats it with {:.1%} which multiplies by
-            # 100 itself -- the prior `* 100` here double-converted
-            # and produced "2140%" instead of "21.4%".
-            "k_rate":    round(float(home_sp.get("k_rate", 0.215)), 4),
-            "k_per_9":   round(float(home_sp.get("k_per_9", 8.50)), 2),
-            "bb9":       round(float(home_sp.get("bb9", 3.30)), 2),
-            "era_home":  round(float(home_sp.get("era_home", home_sp.get("era", 4.5))), 2),
-            "era_away":  round(float(home_sp.get("era_away", home_sp.get("era", 4.5))), 2),
-            "last3_era": round(float(home_sp.get("last3_era", home_sp.get("era", 4.5))), 2),
-            "wins":      int(home_sp.get("wins")   or 0),
-            "losses":    int(home_sp.get("losses") or 0),
-            "hand":      "LHP" if home_sp.get("hand") == 1 else "RHP",
-            "rest":      int(home_sp.get("rest", 4)),
+            "era":         round(float(home_sp.get("era", 4.5)), 2),
+            "whip":        round(float(home_sp.get("whip", 1.3)), 2),
+            # k_rate stays as a fraction (0.214 = 21.4%).  The display
+            # layer multiplies by 100 via {:.1%} -- the old `* 100`
+            # here double-converted into "2140%".
+            "k_rate":      round(float(home_sp.get("k_rate", 0.215)), 4),
+            "k_per_9":     round(float(home_sp.get("k_per_9", 8.50)), 2),
+            "bb9":         round(float(home_sp.get("bb9", 3.30)), 2),
+            "era_home":    round(float(home_sp.get("era_home", home_sp.get("era", 4.5))), 2),
+            "era_away":    round(float(home_sp.get("era_away", home_sp.get("era", 4.5))), 2),
+            "last3_era":   round(float(home_sp.get("last3_era", home_sp.get("era", 4.5))), 2),
+            "wins":        int(home_sp.get("wins")   or 0),
+            "losses":      int(home_sp.get("losses") or 0),
+            "hand":        "LHP" if home_sp.get("hand") == 1 else "RHP",
+            "rest":        int(home_sp.get("rest", 4)),
+            # Identity fields straight from pitcher_client's new
+            # /people + /teams fetches.  Empty strings flag TBD on
+            # the matchup page.
+            "full_name":   str(home_sp.get("full_name") or "").strip(),
+            "team_abbrev": str(home_sp.get("team_abbrev") or "").strip().upper(),
         }
     if away_sp:
         out["away_sp"] = {
-            "era":       round(float(away_sp.get("era", 4.5)), 2),
-            "whip":      round(float(away_sp.get("whip", 1.3)), 2),
-            "k_rate":    round(float(away_sp.get("k_rate", 0.215)), 4),
-            "k_per_9":   round(float(away_sp.get("k_per_9", 8.50)), 2),
-            "bb9":       round(float(away_sp.get("bb9", 3.30)), 2),
-            "era_home":  round(float(away_sp.get("era_home", away_sp.get("era", 4.5))), 2),
-            "era_away":  round(float(away_sp.get("era_away", away_sp.get("era", 4.5))), 2),
-            "last3_era": round(float(away_sp.get("last3_era", away_sp.get("era", 4.5))), 2),
-            "wins":      int(away_sp.get("wins")   or 0),
-            "losses":    int(away_sp.get("losses") or 0),
-            "hand":      "LHP" if away_sp.get("hand") == 1 else "RHP",
-            "rest":      int(away_sp.get("rest", 4)),
+            "era":         round(float(away_sp.get("era", 4.5)), 2),
+            "whip":        round(float(away_sp.get("whip", 1.3)), 2),
+            "k_rate":      round(float(away_sp.get("k_rate", 0.215)), 4),
+            "k_per_9":     round(float(away_sp.get("k_per_9", 8.50)), 2),
+            "bb9":         round(float(away_sp.get("bb9", 3.30)), 2),
+            "era_home":    round(float(away_sp.get("era_home", away_sp.get("era", 4.5))), 2),
+            "era_away":    round(float(away_sp.get("era_away", away_sp.get("era", 4.5))), 2),
+            "last3_era":   round(float(away_sp.get("last3_era", away_sp.get("era", 4.5))), 2),
+            "wins":        int(away_sp.get("wins")   or 0),
+            "losses":      int(away_sp.get("losses") or 0),
+            "hand":        "LHP" if away_sp.get("hand") == 1 else "RHP",
+            "rest":        int(away_sp.get("rest", 4)),
+            "full_name":   str(away_sp.get("full_name") or "").strip(),
+            "team_abbrev": str(away_sp.get("team_abbrev") or "").strip().upper(),
         }
 
     # Ballpark & weather
