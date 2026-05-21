@@ -275,10 +275,16 @@ def _section_ev_compact(backend) -> None:
         left_arrow_html.content  = _arrow_html("left")
         right_arrow_html.content = _arrow_html("right")
 
-        # Inline JS: wire scroll → dot indicator + arrow clicks → scrollBy.
-        # Lives inside ui.html so the script runs on page load and only
-        # touches DOM nodes that exist by then.
-        ui.html(f"""
+        # Inline JS: wire scroll -> dot indicator + arrow clicks -> scrollBy.
+        # Must use ui.add_body_html (NOT ui.html) -- NiceGUI 2.x rejects
+        # <script> tags inside ui.html with:
+        #   ValueError: HTML elements must not contain script tags.
+        #                 Use ui.add_body_html() instead.
+        # add_body_html injects into THIS page's <body> after the
+        # carousel DOM is rendered, so getElementById() resolves cleanly.
+        # The IIFE guards on (!scroller || !dotsBox) so re-renders that
+        # don't ship the carousel are no-ops.
+        ui.add_body_html(f"""
         <script>
         (function() {{
           const scroller = document.getElementById({scroller_id!r});
