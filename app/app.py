@@ -6183,6 +6183,99 @@ def refresh_picks():
                         "detail": _redact(traceback.format_exc())}), 500
 
 
+def _match_result_id(r: dict, game_id: str) -> bool:
+    """True when *r* identifies the analysis result for *game_id*,
+    regardless of whether it's a raw nested dict (r["game"]["id"]) or
+    a flat serialized passthrough (r["game_id"] / r["id"] /
+    r["_schedule_id"]).  Centralized so every /api/ledger/* +
+    /api/ai/pick_analysis route can match the same way -- the bare
+    r["game"]["id"] form raised KeyError("game") whenever results were
+    hydrated from the daily snapshot's flat shape.
+    """
+    if not isinstance(r, dict):
+        return False
+    g_id = (r.get("game") or {}).get("id") if isinstance(r.get("game"), dict) else None
+    return (
+        g_id == game_id
+        or r.get("game_id") == game_id
+        or r.get("id") == game_id
+        or r.get("_schedule_id") == game_id
+    )
+
+
+def _find_analysis_row(state: dict, game_id: str) -> dict | None:
+    """Locate the analysis row for *game_id* in *state* and return it
+    normalized to the nested shape downstream routes expect.
+
+    When the matched row is already nested (has r["game"] and
+    r["prediction"]) we return it untouched.  When it's a flat
+    serialized passthrough (snapshot hydration path) we synthesize
+    minimal `game` and `prediction` sub-dicts from the flat fields so
+    code that does `raw["game"]["home_team"]` keeps working.  Without
+    this, every /api/ledger/* call on a snapshot-hydrated worker
+    crashed with KeyError('game').
+    """
+    results = (state or {}).get("results") or []
+    raw = next((r for r in results if _match_result_id(r, game_id)), None)
+    if raw is None:
+        return None
+    # Already in the nested raw shape -- pass through untouched.
+    if isinstance(raw.get("game"), dict) and isinstance(raw.get("prediction"), dict):
+        return raw
+    # Flat passthrough: rebuild the minimal nested view from top-level
+    # serialized fields so the rest of the route can continue.  Copy
+    # rather than mutate so we don't poison the in-memory cache for
+    # other readers.
+    out = dict(raw)
+    if not isinstance(out.get("game"), dict):
+        # Re-derive home_implied_prob from the away_odds + home_odds
+        # pair when we have them; the route uses it for edge math.
+        home_odds = raw.get("home_odds")
+        away_odds = raw.get("away_odds")
+        implied = raw.get("home_implied_prob")
+        if implied is None and isinstance(home_odds, (int, float)) \
+                and isinstance(away_odds, (int, float)):
+            try:
+                ho = _american_to_prob(int(home_odds))
+                ao = _american_to_prob(int(away_odds))
+                if ho + ao > 0:
+                    implied = ho / (ho + ao)
+            except Exception:                                              # noqa: BLE001
+                implied = None
+        out["game"] = {
+            "id":                raw.get("game_id") or raw.get("id"),
+            "home_team":         raw.get("home_team"),
+            "away_team":         raw.get("away_team"),
+            "commence_time":     raw.get("commence_time"),
+            "h2h_home_odds":     home_odds,
+            "h2h_away_odds":     away_odds,
+            "home_implied_prob": implied if implied is not None else 0.5,
+            "total_line":        (raw.get("totals") or {}).get("total_line"),
+        }
+    if not isinstance(out.get("prediction"), dict):
+        # Best-effort: derive home_win_prob from the moneyline pick
+        # fields the serializer left at the top level.
+        pick_team  = raw.get("pick_team")
+        pick_prob  = raw.get("pick_prob")
+        home_team  = raw.get("home_team")
+        if isinstance(pick_prob, (int, float)) and pick_team and home_team:
+            picked_home = pick_team == home_team
+            home_win = float(pick_prob) if picked_home else 1.0 - float(pick_prob)
+        else:
+            home_win = 0.5
+        out["prediction"] = {"home_win_prob": home_win}
+    return out
+
+
+def _american_to_prob(american: int) -> float:
+    """American moneyline -> raw implied probability (0-1).  Local mirror
+    of odds_client._american_to_prob so the helper above doesn't need
+    to import the larger module."""
+    if american > 0:
+        return 100.0 / (american + 100.0)
+    return abs(american) / (abs(american) + 100.0)
+
+
 @app.route("/api/ledger/confirm/<game_id>", methods=["POST"])
 def confirm_bet(game_id: str):
     """Mark a model-tracked bet as user-confirmed, or add it fresh if missing."""
@@ -6209,8 +6302,11 @@ def confirm_bet(game_id: str):
             ledger.save()
             return jsonify({"success": True, "confirmed_amount": conf_amt})
 
-    # Not yet in ledger — pull from analysis cache and add as full bet
-    raw = next((r for r in _analysis_state["results"] if r["game"]["id"] == game_id), None)
+    # Not yet in ledger — pull from analysis cache and add as full bet.
+    # _find_analysis_row handles both the raw nested shape AND the flat
+    # serialized passthrough shape (snapshot hydration path) so we
+    # never crash with KeyError('game') here.
+    raw = _find_analysis_row(_analysis_state, game_id)
     if raw is None:
         return jsonify({"error": "Game not found in current analysis"}), 404
 
@@ -6274,11 +6370,7 @@ def confirm_bet_wnba(game_id: str):
             ledger.save()
             return jsonify({"success": True, "confirmed_amount": conf_amt})
 
-    raw = next(
-        (r for r in _wnba_analysis_state["results"]
-         if r.get("game", {}).get("id") == game_id),
-        None,
-    )
+    raw = _find_analysis_row(_wnba_analysis_state, game_id)
     if raw is None:
         return jsonify({"error": "Game not found in current WNBA analysis"}), 404
 
@@ -6338,7 +6430,7 @@ def log_parlay():
 
     for leg in legs:
         game_id = leg["game_id"]
-        raw = next((r for r in _analysis_state["results"] if r["game"]["id"] == game_id), None)
+        raw = _find_analysis_row(_analysis_state, game_id)
         if raw is None:
             continue
 
@@ -6380,7 +6472,7 @@ def track_prop():
     sport     = _analysis_state.get("sport") or "mlb"
     sport_cfg = SPORTS[sport]
 
-    raw = next((r for r in _analysis_state["results"] if r["game"]["id"] == game_id), None)
+    raw = _find_analysis_row(_analysis_state, game_id)
     if raw is None:
         return jsonify({"error": "Game not found in current analysis"}), 404
 
@@ -6985,9 +7077,9 @@ def ai_pick_analysis():
         }), 429
 
     # Locate the raw analysis result (carries prediction + shap + meta).
+    # _find_analysis_row tolerates both nested and flat shapes.
     state = _wnba_analysis_state if sport == "wnba" else _analysis_state
-    raw = next((r for r in (state.get("results") or [])
-                if (r.get("game") or {}).get("id") == game_id), None)
+    raw = _find_analysis_row(state, game_id)
     if raw is None:
         return jsonify({
             "error": f"Game {game_id!r} not found in {sport.upper()} analysis cache.",
