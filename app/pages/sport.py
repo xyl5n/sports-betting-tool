@@ -19,6 +19,8 @@ label, scheduled games show the matchup row with VS between names.
 """
 from __future__ import annotations
 
+import sys
+
 from nicegui import ui
 
 from components import theme as t
@@ -26,6 +28,12 @@ from components import navbar, sidebar, game_card, bottom_nav, live_score
 
 
 _LIVE_POLL_INTERVAL = 60.0   # seconds between live-score refresh ticks
+
+
+def _dbg(msg: str) -> None:
+    """Diagnostic print -- always flushes to stderr so the Railway log
+    stream picks it up.  Tagged so it's grep-able in production."""
+    print(f"[RENDER] {msg}", flush=True, file=sys.stderr)
 
 
 def register(backend) -> None:
@@ -44,14 +52,34 @@ def register(backend) -> None:
 
 
 def _render_sport(backend, sport: str) -> None:
+    _dbg(f"_render_sport ENTER sport={sport!r}")
     # Re-read today's analysis cache into the in-memory state dict so
     # this render sees the newest picks on disk.  Without this, a Run
     # Analysis triggered elsewhere (admin, scheduler) only becomes
     # visible after a container restart.
     try:
-        backend.hydrate_state()
-    except Exception:                                                      # noqa: BLE001
-        pass
+        mlb_n, wnba_n = backend.hydrate_state()
+        _dbg(f"_render_sport hydrate_state returned mlb={mlb_n} wnba={wnba_n}")
+    except Exception as exc:                                               # noqa: BLE001
+        _dbg(f"_render_sport hydrate_state FAILED: {type(exc).__name__}: {exc}")
+
+    # State sanity check -- prove the dict the renderer is about to read
+    # actually has the games hydrate just wrote.  If the keys here are
+    # 0 even though hydrate returned non-zero, the issue is a state
+    # reference mismatch (different module imported under a different
+    # path, or _analysis_state rebound somewhere).
+    try:
+        state = backend._analysis_state if sport == "mlb" else backend._wnba_analysis_state
+        n_results = len(state.get("results") or [])
+        _dbg(
+            f"_render_sport STATE_CHECK sport={sport} "
+            f"results={n_results} "
+            f"bankroll={state.get('bankroll')!r} "
+            f"keys={list(state.keys())}"
+        )
+    except Exception as exc:                                               # noqa: BLE001
+        _dbg(f"_render_sport STATE_CHECK FAILED: {type(exc).__name__}: {exc}")
+
     ui.add_head_html(t.page_head_css())
     navbar.render(active=t.TAB_SPORTS)
 
@@ -158,8 +186,11 @@ def _pill(label: str, href: str, active: bool) -> None:
 
 
 def _game_grid(backend, sport: str) -> None:
+    _dbg(f"_game_grid ENTER sport={sport}")
     games = _serialized_games(backend, sport)
+    _dbg(f"_game_grid RENDER {sport.upper()} SLATE: {len(games)} games")
     if not games:
+        _dbg(f"_game_grid SHOWING EMPTY-STATE for {sport} (no serialized games)")
         ui.label(
             f"No {sport.upper()} games loaded yet -- run analysis to populate."
         ).style(
@@ -169,15 +200,27 @@ def _game_grid(backend, sport: str) -> None:
         )
         return
 
-    for g in games:
+    for i, g in enumerate(games):
+        gid = g.get("game_id") or g.get("id") or "?"
+        away = g.get("away_team", "?")
+        home = g.get("home_team", "?")
+        _dbg(f"_game_grid CARD[{i}] gid={gid} {away} @ {home}")
         # backend=backend so each card renders a Track button wired to
         # /api/{sport}/ledger/confirm/<game_id> via the Flask test client.
-        game_card.render(g, sport=sport, backend=backend)
+        try:
+            game_card.render(g, sport=sport, backend=backend)
+        except Exception as exc:                                           # noqa: BLE001
+            import traceback as _tb
+            _dbg(
+                f"_game_grid CARD[{i}] RENDER FAILED: "
+                f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}"
+            )
 
 
 def _serialized_games(backend, sport: str) -> list[dict]:
     """Pull the cached results for *sport* and serialize them via the
     same _serialize / _serialize_wnba functions the Flask UI used."""
+    _dbg(f"_serialized_games ENTER sport={sport}")
     try:
         if sport == "mlb":
             state    = backend._analysis_state
@@ -187,22 +230,45 @@ def _serialized_games(backend, sport: str) -> list[dict]:
             state    = backend._wnba_analysis_state
             ser_fn   = backend._serialize_wnba
             ledg     = backend.Ledger(path="data/wnba_ledger.json", starting_bankroll=1000)
-    except Exception:                                                     # noqa: BLE001
+    except Exception as exc:                                              # noqa: BLE001
+        _dbg(
+            f"_serialized_games SETUP FAILED sport={sport}: "
+            f"{type(exc).__name__}: {exc}"
+        )
         return []
 
     bankroll = float(state.get("bankroll") or 250)
     s_bank   = ledg.data.get("personal_starting_bankroll", bankroll)
     results  = state.get("results") or []
+    _dbg(
+        f"_serialized_games sport={sport} "
+        f"results_in_state={len(results)} bankroll={bankroll} s_bank={s_bank}"
+    )
     out: list[dict] = []
-    for r in results:
+    failures = 0
+    first_err: str | None = None
+    for i, r in enumerate(results):
         try:
             if sport == "mlb":
                 g = ser_fn(r, bankroll, "mlb", s_bank)
             else:
                 g = ser_fn(r, bankroll, s_bank)
             out.append(g)
-        except Exception:                                                 # noqa: BLE001
+        except Exception as exc:                                          # noqa: BLE001
+            failures += 1
+            if first_err is None:
+                import traceback as _tb
+                first_err = f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}"
+                _dbg(
+                    f"_serialized_games sport={sport} "
+                    f"FIRST SERIALIZE FAILURE on game[{i}]: {first_err}"
+                )
             continue
+    if failures:
+        _dbg(
+            f"_serialized_games sport={sport} {failures} of {len(results)} "
+            f"games failed to serialize"
+        )
 
     # Append no-model stubs for games the model couldn't predict (e.g.
     # 2026 WNBA expansion teams without training data).  WNBA only --
