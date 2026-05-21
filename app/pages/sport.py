@@ -97,15 +97,19 @@ def _render_sport(backend, sport: str) -> None:
     # column width.  `margin: 0 auto` centers it within the wider
     # viewport since the row no longer has a sidebar-occupied left
     # column to push against.
+    # Closure dict so the date-nav click handlers + refreshable grid
+    # can read + write the currently-selected date without prop drilling.
+    today_str = backend._today_et()
+    state = {"date": today_str, "today": today_str}
+
     with ui.column().classes("page-content w-full").style(
         f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; "
         f"gap: {t.SPACE_MD}; padding: {t.SPACE_LG}; min-width: 0;"
     ):
         _header(sport)
         _odds_quota_banner(backend)
-        # First render of the refreshable grid -- args are captured so
-        # `.refresh()` on tick re-uses the same backend + sport.
-        _refreshable_grid(backend, sport)
+        _date_nav(state)
+        _refreshable_grid(backend, sport, state)
 
         def _tick() -> None:
             live_score.fetch_live(backend, sport)
@@ -158,10 +162,101 @@ def _odds_quota_banner(backend) -> None:
 
 
 @ui.refreshable
-def _refreshable_grid(backend, sport: str) -> None:
+def _refreshable_grid(backend, sport: str, state: dict) -> None:
     """Wrapper so the timer can call `.refresh()` on tick.  Re-runs
-    _game_grid which re-reads live_score's cache on every render."""
-    _game_grid(backend, sport)
+    _game_grid which re-reads live_score's cache on every render.
+
+    `state["date"]` is the currently-selected ET date string -- mutated
+    by the date-nav click handlers and read by _game_grid to pick the
+    right schedule slice."""
+    _game_grid(backend, sport, state)
+
+
+def _date_nav(state: dict) -> None:
+    """Top-of-slate date navigation: Yesterday / Today / Tomorrow pills
+    + left/right arrow buttons.  Mutates state['date'] then refreshes
+    the grid.
+
+    Tap targets are sized 44px+ on mobile via the global rule in
+    components/theme.py."""
+    from datetime import date as _date, timedelta as _td
+
+    today_str = state["today"]
+    today  = _date.fromisoformat(today_str)
+    yest   = (today - _td(days=1)).isoformat()
+    tomo   = (today + _td(days=1)).isoformat()
+
+    def _set_date(d: str) -> None:
+        state["date"] = d
+        _refreshable_grid.refresh()
+
+    def _step(delta_days: int) -> None:
+        cur = _date.fromisoformat(state["date"])
+        _set_date((cur + _td(days=delta_days)).isoformat())
+
+    current = state["date"]
+    # Pretty-print the selected date (e.g. "Tue, May 21").  When the
+    # date is one of the three pill dates we surface a friendlier
+    # name; otherwise show the calendar header.
+    pretty = _pretty_date(current, today_str, yest, tomo)
+
+    with ui.row().classes("items-center w-full no-wrap").style(
+        f"gap: 8px; background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 8px 10px;"
+    ):
+        # Left arrow
+        ui.button("‹", on_click=lambda: _step(-1)).props("flat dense").style(
+            f"min-width: 36px; min-height: 36px; "
+            f"background: {t.CARD_HI}; color: {t.TEXT}; "
+            f"border-radius: {t.RADIUS_SM}; "
+            f"font-size: 18px; font-weight: 800; padding: 0;"
+        )
+        with ui.row().classes("items-center").style("gap: 6px; flex: 1; justify-content: center;"):
+            _day_pill("Yesterday", yest, current, _set_date)
+            _day_pill("Today",     today_str, current, _set_date)
+            _day_pill("Tomorrow",  tomo, current, _set_date)
+        # Right arrow
+        ui.button("›", on_click=lambda: _step(+1)).props("flat dense").style(
+            f"min-width: 36px; min-height: 36px; "
+            f"background: {t.CARD_HI}; color: {t.TEXT}; "
+            f"border-radius: {t.RADIUS_SM}; "
+            f"font-size: 18px; font-weight: 800; padding: 0;"
+        )
+
+    # Selected-date label (below the nav row so the row itself stays
+    # tight even with long pretty names).
+    ui.label(pretty).style(
+        f"font-size: 12px; color: {t.TEXT_DIM}; "
+        f"font-family: monospace; text-align: center; width: 100%;"
+    )
+
+
+def _day_pill(label: str, date: str, current: str, on_click) -> None:
+    is_active = (date == current)
+    bg     = t.PRIMARY if is_active else t.CARD_HI
+    color  = t.BG      if is_active else t.TEXT_DIM
+    weight = "800"     if is_active else "600"
+    ui.button(label, on_click=lambda: on_click(date)).props("flat no-caps").style(
+        f"background: {bg}; color: {color}; font-weight: {weight}; "
+        f"font-size: 12px; letter-spacing: .3px; "
+        f"padding: 8px 14px; border-radius: {t.RADIUS_PILL}; "
+        f"min-height: 36px;"
+    )
+
+
+def _pretty_date(current: str, today: str, yest: str, tomo: str) -> str:
+    from datetime import date as _date
+    try:
+        d = _date.fromisoformat(current)
+    except Exception:                                                      # noqa: BLE001
+        return current
+    name = (
+        "Today"     if current == today else
+        "Yesterday" if current == yest  else
+        "Tomorrow"  if current == tomo  else
+        d.strftime("%a")
+    )
+    return f"{name} -- {d.strftime('%A, %B %-d, %Y')}"
 
 
 def _header(sport: str) -> None:
@@ -190,14 +285,33 @@ def _pill(label: str, href: str, active: bool) -> None:
         )
 
 
-def _game_grid(backend, sport: str) -> None:
-    _dbg(f"_game_grid ENTER sport={sport}")
-    games = _serialized_games(backend, sport)
-    _dbg(f"_game_grid RENDER {sport.upper()} SLATE: {len(games)} games")
+def _game_grid(backend, sport: str, state: dict) -> None:
+    """Render every game from the schedule for the currently-selected
+    date.  Games with model picks get the full bet-box card; games
+    without odds get a 'No Odds Available' placeholder.
+
+    Source of truth is /api/schedule/<sport>?date=...  -- joins the
+    free MLB Stats / ESPN feed with whatever picks live in
+    _analysis_state (today) or the ledger history (past dates).
+    Cached per-date in Supabase by the backend so repeated visits
+    don't burn live API calls.
+    """
+    date_str = state["date"]
+    _dbg(f"_game_grid ENTER sport={sport} date={date_str}")
+
+    try:
+        client = backend.app.test_client()
+        resp   = client.get(f"/api/schedule/{sport}?date={date_str}")
+        data   = resp.get_json(force=True, silent=True) or {}
+    except Exception as exc:                                              # noqa: BLE001
+        _dbg(f"_game_grid schedule fetch FAILED: {type(exc).__name__}: {exc}")
+        data = {}
+    games = data.get("games") or []
+    _dbg(f"_game_grid RENDER {sport.upper()} SLATE: {len(games)} games for {date_str}")
+
     if not games:
-        _dbg(f"_game_grid SHOWING EMPTY-STATE for {sport} (no serialized games)")
         ui.label(
-            f"No {sport.upper()} games loaded yet -- run analysis to populate."
+            f"No {sport.upper()} games scheduled for {date_str}."
         ).style(
             f"color: {t.TEXT_DIM}; font-size: 12px; "
             f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
@@ -209,10 +323,10 @@ def _game_grid(backend, sport: str) -> None:
         gid = g.get("game_id") or g.get("id") or "?"
         away = g.get("away_team", "?")
         home = g.get("home_team", "?")
-        _dbg(f"_game_grid CARD[{i}] gid={gid} {away} @ {home}")
-        # backend=backend so each card renders a Track button wired to
-        # /api/{sport}/ledger/confirm/<game_id> via the Flask test client.
+        _dbg(f"_game_grid CARD[{i}] gid={gid} {away} @ {home} no_odds={g.get('_no_odds')}")
         try:
+            # game_card.render handles _no_odds via the existing
+            # _no_model code path (with a different label below).
             game_card.render(g, sport=sport, backend=backend)
         except Exception as exc:                                           # noqa: BLE001
             import traceback as _tb

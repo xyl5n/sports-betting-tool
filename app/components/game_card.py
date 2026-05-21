@@ -72,14 +72,20 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
         # the score block entirely so the layout stays compact.
         if state in ("live", "final") and live is not None:
             live_score.render_score_block(live, sport)
-        if g.get("_no_model"):
+        if g.get("_no_odds"):
+            # Schedule-driven slate: game exists upstream (MLB Stats /
+            # ESPN) but The Odds API has no lines for it yet (or the
+            # date is past the odds window).  Show the matchup +
+            # commence time with a "No Odds Available" notice.
+            _no_odds_row(g)
+        elif g.get("_no_model"):
             _no_model_row(g)
         else:
             # Pass live so _bet_boxes can compute per-market W/L tints
             # for FINAL games.  Pre-game and live (in-progress) cards
             # get None back from _final_scores -> neutral boxes.
             _bet_boxes(g, is_mlb, live=live if state == "final" else None)
-        if backend is not None:
+        if backend is not None and not g.get("_no_odds"):
             _track_row(backend, g, sport)
 
 
@@ -133,6 +139,37 @@ def _no_model_row(g: dict) -> None:
             f"padding: 2px 7px; border-radius: 3px;"
         )
         ui.label(reason).style(
+            f"font-size: 12px; color: {t.TEXT_DIM}; "
+            f"flex: 1; line-height: 1.4;"
+        )
+
+
+def _no_odds_row(g: dict) -> None:
+    """Inline notice for games on the schedule but missing from The
+    Odds API.  Replaces both the bet boxes AND the Track button --
+    there's nothing to bet on yet.  For past dates with a final score
+    the same notice shows that no odds were ever recorded for the
+    game (so picks couldn't be made), but the score block above still
+    renders so the user can see the final.
+    """
+    with ui.row().classes("w-full").style(
+        f"background: {t.CARD_HI}; "
+        f"border: 1px dashed {t.BORDER}; "
+        f"border-radius: {t.RADIUS_SM}; "
+        f"padding: 10px 12px; gap: 10px; align-items: center;"
+    ):
+        ui.label("NO ODDS AVAILABLE").style(
+            f"flex-shrink: 0; "
+            f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+            f"color: {t.TEXT_DIM2}; "
+            f"background: {t.CARD}; "
+            f"padding: 2px 7px; border-radius: 3px; "
+            f"border: 1px solid {t.BORDER};"
+        )
+        ui.label(
+            "Game scheduled but no betting lines have been posted by "
+            "the sportsbooks yet."
+        ).style(
             f"font-size: 12px; color: {t.TEXT_DIM}; "
             f"flex: 1; line-height: 1.4;"
         )
