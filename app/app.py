@@ -5975,27 +5975,194 @@ def admin_model_settings_post():
 @app.route("/api/admin/model/reset", methods=["POST"])
 def admin_model_reset():
     """
-    Wipe today's non-confirmed model picks for the chosen sport(s) and
-    refund their stakes to model_bankroll.  Confirmed (personal) bets and
-    settled history are untouched.  Body: {sport: "mlb"|"wnba"|"both"}.
+    Wipe today's non-confirmed model picks across every storage layer.
+
+    Clears, in this order:
+      1. open model bets (non-confirmed) for each requested sport's ledger,
+         refunding their stakes to model_bankroll
+      2. data/ensemble_picks_today.json   -- replaced with an empty
+         structure dated today so the next ensemble_store.save / load
+         starts fresh
+      3. data/daily_snapshot.json         -- deleted (next analyze run
+         repopulates it)
+      4. Supabase app_cache rows for daily_snapshot + analysis_cache:mlb +
+         analysis_cache:wnba so a worker restart can't restore yesterday's
+         picks from Supabase
+
+    Body: {sport: "mlb"|"wnba"|"both"}.  The local files + Supabase rows
+    are cross-sport so they always get cleared regardless of the body --
+    only the ledger reset is sport-scoped.
+
+    Returns a detailed summary the admin toast surfaces verbatim:
+      "MLB ledger cleared 15 open bets, ensemble picks wiped, snapshot
+       cleared, Supabase rows deleted: 3"
     """
+    print("[ADMIN-ROUTE] /api/admin/model/reset invoked  body="
+          f"{request.json!r}", flush=True, file=sys.stderr)
     try:
         from src.daily_picks import reset_today_model_bets
         sport = (request.json or {}).get("sport", "").strip().lower()
         if sport not in ("mlb", "wnba", "both"):
-            return jsonify({"success": False, "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
+            return jsonify({"success": False,
+                            "error": "sport must be 'mlb', 'wnba', or 'both'"}), 400
         sports = ["mlb", "wnba"] if sport == "both" else [sport]
         paths = {"mlb": "data/ledger.json", "wnba": "data/wnba_ledger.json"}
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        audit: list[str] = []
         removed_by_sport: dict[str, int] = {}
+        total_removed = 0
+
+        # ── 1) Per-sport ledger reset ────────────────────────────────────
         for s in sports:
-            led = Ledger(path=paths[s], starting_bankroll=1000.0)
-            n = reset_today_model_bets(led, today_str)
-            led.save()
-            removed_by_sport[s] = n
-        return jsonify({"success": True, "removed": removed_by_sport})
+            try:
+                led = Ledger(path=paths[s], starting_bankroll=1000.0)
+                n_open_before = len(led.data.get("open_bets") or [])
+                n = reset_today_model_bets(led, today_str)
+                led.save()
+                removed_by_sport[s] = n
+                total_removed += n
+                audit.append(
+                    f"{s.upper()} ledger cleared {n} open bet(s) "
+                    f"(of {n_open_before} total open)"
+                )
+                _eprint(
+                    f"RESET-MODEL [{s.upper()}]: removed {n} open bets "
+                    f"(from {n_open_before} total)"
+                )
+            except Exception as ledger_exc:                                # noqa: BLE001
+                removed_by_sport[s] = 0
+                audit.append(f"{s.upper()} ledger reset FAILED: "
+                             f"{type(ledger_exc).__name__}: {ledger_exc}")
+                _eprint(
+                    f"RESET-MODEL [{s.upper()}] LEDGER FAILED: "
+                    f"{type(ledger_exc).__name__}: {ledger_exc}\n"
+                    f"{traceback.format_exc()}"
+                )
+
+        # ── 2) ensemble_picks_today.json -> fresh empty for today ────────
+        ensemble_cleared = 0
+        try:
+            existing = {}
+            try:
+                if _ENSEMBLE_PICKS_FILE.exists():
+                    existing = json.loads(
+                        _ENSEMBLE_PICKS_FILE.read_text(encoding="utf-8")
+                    )
+            except Exception:                                              # noqa: BLE001
+                existing = {}
+            for s in ("mlb", "wnba"):
+                ensemble_cleared += len(
+                    ((existing.get("picks") or {}).get(s) or [])
+                )
+            today_et_str = _today_et()
+            _ENSEMBLE_PICKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _ENSEMBLE_PICKS_FILE.write_text(
+                json.dumps(
+                    {"date": today_et_str, "picks": {"mlb": [], "wnba": []}},
+                    ensure_ascii=False, indent=2,
+                ),
+                encoding="utf-8",
+            )
+            total_removed += ensemble_cleared
+            audit.append(
+                f"ensemble picks wiped ({ensemble_cleared} pick(s) removed)"
+            )
+            _eprint(
+                f"RESET-MODEL: ensemble_picks_today.json reset for "
+                f"{today_et_str}  (was {ensemble_cleared} pick(s))"
+            )
+        except Exception as ens_exc:                                       # noqa: BLE001
+            audit.append(
+                f"ensemble picks wipe FAILED: "
+                f"{type(ens_exc).__name__}: {ens_exc}"
+            )
+            _eprint(
+                f"RESET-MODEL ENSEMBLE FAILED: "
+                f"{type(ens_exc).__name__}: {ens_exc}\n"
+                f"{traceback.format_exc()}"
+            )
+
+        # ── 3) daily_snapshot.json -> delete on disk ─────────────────────
+        try:
+            if _DAILY_SNAPSHOT_FILE.exists():
+                _DAILY_SNAPSHOT_FILE.unlink(missing_ok=True)
+                audit.append("snapshot cleared (local file deleted)")
+                _eprint(f"RESET-MODEL: deleted {_DAILY_SNAPSHOT_FILE}")
+            else:
+                audit.append("snapshot cleared (local file already absent)")
+        except Exception as snap_exc:                                      # noqa: BLE001
+            audit.append(
+                f"snapshot clear FAILED: "
+                f"{type(snap_exc).__name__}: {snap_exc}"
+            )
+            _eprint(
+                f"RESET-MODEL SNAPSHOT FAILED: "
+                f"{type(snap_exc).__name__}: {snap_exc}\n"
+                f"{traceback.format_exc()}"
+            )
+
+        # ── 4) Supabase app_cache: synchronous delete with counts ────────
+        # cache_delete returns True / False per key, not a row count, so
+        # the "deleted" tally counts successful Supabase responses per
+        # key.  Railway's container won't get to restore yesterday's
+        # snapshot from Supabase once these rows are gone.
+        supabase_deleted = 0
+        supabase_keys = [
+            _CACHE_KEY_SNAPSHOT,
+            _CACHE_KEY_ANALYSIS_MLB,
+            _CACHE_KEY_ANALYSIS_WNBA,
+        ]
+        for ckey in supabase_keys:
+            try:
+                from src import db as _db
+                ok = bool(_db.cache_delete(ckey))
+                if ok:
+                    supabase_deleted += 1
+                    _eprint(f"RESET-MODEL: Supabase app_cache row '{ckey}' deleted")
+                else:
+                    _eprint(f"RESET-MODEL: Supabase app_cache row '{ckey}' "
+                            f"not deleted (offline or missing)")
+            except Exception as sb_exc:                                    # noqa: BLE001
+                _eprint(
+                    f"RESET-MODEL Supabase delete({ckey}) failed: "
+                    f"{type(sb_exc).__name__}: {sb_exc}"
+                )
+        audit.append(f"Supabase rows deleted: {supabase_deleted}")
+        total_removed += supabase_deleted
+
+        # ── 5) Reset in-memory state so the next read doesn't restore --
+        # values from the snapshot we just deleted ───────────────────────
+        try:
+            _analysis_state["results"] = []
+            _analysis_state["parlays"] = {}
+            _wnba_analysis_state["results"] = []
+            _wnba_analysis_state["parlays"] = {}
+            audit.append("in-memory analysis state cleared")
+        except Exception as mem_exc:                                       # noqa: BLE001
+            audit.append(
+                f"in-memory clear FAILED: "
+                f"{type(mem_exc).__name__}: {mem_exc}"
+            )
+
+        message = ", ".join(audit)
+        _eprint(f"RESET-MODEL COMPLETE: {message}  total_removed={total_removed}")
+        return jsonify({
+            "success":          True,
+            "removed":          removed_by_sport,
+            "total_removed":    total_removed,
+            "ensemble_cleared": ensemble_cleared,
+            "supabase_deleted": supabase_deleted,
+            "message":          message,
+            "audit":            audit,
+        })
     except Exception as exc:                                              # noqa: BLE001
-        return jsonify({"success": False, "error": _redact(str(exc)), "detail": _redact(traceback.format_exc())}), 500
+        _eprint(
+            f"RESET-MODEL FAILED: {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
+        return jsonify({"success": False,
+                        "error": _redact(str(exc)),
+                        "detail": _redact(traceback.format_exc())}), 500
 
 
 @app.route("/api/admin/model/repick", methods=["POST"])

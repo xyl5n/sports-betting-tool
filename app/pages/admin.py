@@ -598,11 +598,24 @@ def _section_model_bets(backend, refresh) -> None:
             f"color: {t.TEXT_DIM2}; margin-top: 10px;"
         )
         with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
+            # done_msg surfaces the backend's "audit trail" string -- one
+            # comma-separated line per storage layer that got cleared.
+            # Falls back to the per-sport removed count when the backend
+            # is older and doesn't return a message field.
+            def _reset_done_msg(d):
+                if d.get("message"):
+                    return d["message"]
+                rem = d.get("removed") or {}
+                return (
+                    f"Reset. MLB removed: {rem.get('mlb', 0)}, "
+                    f"WNBA removed: {rem.get('wnba', 0)}."
+                )
+
             _confirm_button(
                 backend, "Reset MLB",
                 "Wipe today's MLB model picks and refund their stakes?",
                 "POST", "/api/admin/model/reset", body={"sport": "mlb"},
-                done_msg=lambda d: f"MLB picks reset. Removed: {(d.get('removed') or {}).get('mlb', 0)}.",
+                done_msg=_reset_done_msg,
                 refresh_status=refresh,
                 style="warn",
             )
@@ -610,7 +623,7 @@ def _section_model_bets(backend, refresh) -> None:
                 backend, "Reset WNBA",
                 "Wipe today's WNBA model picks and refund their stakes?",
                 "POST", "/api/admin/model/reset", body={"sport": "wnba"},
-                done_msg=lambda d: f"WNBA picks reset. Removed: {(d.get('removed') or {}).get('wnba', 0)}.",
+                done_msg=_reset_done_msg,
                 refresh_status=refresh,
                 style="warn",
             )
@@ -618,10 +631,7 @@ def _section_model_bets(backend, refresh) -> None:
                 backend, "Reset Both",
                 "Wipe today's MLB + WNBA model picks and refund all stakes?",
                 "POST", "/api/admin/model/reset", body={"sport": "both"},
-                done_msg=lambda d: (
-                    f"Reset. MLB removed: {(d.get('removed') or {}).get('mlb', 0)}, "
-                    f"WNBA removed: {(d.get('removed') or {}).get('wnba', 0)}."
-                ),
+                done_msg=_reset_done_msg,
                 refresh_status=refresh,
                 style="danger",
             )
