@@ -757,106 +757,139 @@ def _fmt_stat(value, key: str, fmt: str) -> str:
 
 
 def _pitching_table(away_sp: dict, home_sp: dict, away_team: str, home_team: str) -> None:
-    """Side-by-side pitcher comparison: away on the left, home on the
-    right.  Each column stacks ERA / Home ERA / Away ERA / Last 3 GS /
-    WHIP / K per 9 / BB per 9 / Days Rest / Season W-L.  Every numeric
-    value passes _fmt_stat which clamps to the plausible band per
-    _STAT_BOUNDS and renders N/A for anything outside.
+    """Side-by-side pitcher cards.  Each card opens with the pitcher's
+    full name + a team-abbrev chip; the stat list below stacks
+    vertically inside the card.  Both cards live inside .game-grid so
+    they sit on one row at >768px and stack on mobile.
     """
-    # The fields list drives the row order in both columns -- keep them
-    # in lockstep so the labels in the middle gutter line up with each
-    # pair of values.  (label, key, fmt) per the existing _fmt helper.
-    fields = [
-        ("ERA",          "era",       "{:.2f}"),
-        ("Home ERA",     "era_home",  "{:.2f}"),
-        ("Away ERA",     "era_away",  "{:.2f}"),
-        ("Last 3 GS",    "last3_era", "{:.2f}"),
-        ("WHIP",         "whip",      "{:.2f}"),
-        ("K/9",          "k_per_9",   "{:.1f} K/9"),
-        ("BB/9",         "bb9",       "{:.1f} BB/9"),
-        ("Days Rest",    "rest",      "{:.0f}"),
+    # .game-grid is the existing two-col -> one-col responsive grid
+    # used by the slate page (theme.page_head_css).  Reusing it keeps
+    # the breakpoint identical to the rest of the app.
+    with ui.element("div").classes("game-grid w-full"):
+        _pitcher_card(away_sp, side_label="AWAY", fallback_team=away_team)
+        _pitcher_card(home_sp, side_label="HOME", fallback_team=home_team)
+
+
+def _pitcher_card(sp: dict, side_label: str, fallback_team: str) -> None:
+    """One pitcher's column: name + team-abbrev chip header on top,
+    vertical stat list below.  Empty `sp` (no probable announced
+    yet) renders TBD + N/A stats per spec."""
+    sp = sp or {}
+    pitcher_name = (sp.get("full_name") or "").strip()
+    team_abbrev  = (sp.get("team_abbrev") or "").strip().upper()
+    has_pitcher  = bool(pitcher_name)
+
+    rows = [
+        ("Season ERA",  "era"),
+        ("Home ERA",    "era_home"),
+        ("Away ERA",    "era_away"),
+        ("Last 3 GS",   "last3_era"),
+        ("WHIP",        "whip"),
+        ("K/9",         "k_per_9"),
+        ("BB/9",        "bb9"),
+        ("Record",      "_record"),
+        ("Days Rest",   "rest"),
     ]
 
-    # Top: pitcher column headers.  Show team name as the heading; the
-    # "Away" / "Home" tag below disambiguates which slot is which.
-    with ui.row().classes("items-center w-full").style(
-        f"padding: 8px 0 10px; gap: 12px; "
-        f"border-bottom: 1px solid {t.BORDER};"
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 14px 16px; gap: 10px; "
+        f"min-width: 0;"
     ):
-        with ui.column().style("flex: 1; min-width: 0; gap: 2px;"):
-            ui.label(away_team).style(
-                f"font-size: 13px; font-weight: 800; color: {t.TEXT}; "
-                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-            )
-            ui.label(f"Away SP · {away_sp.get('hand') or '—'}").style(
-                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                f"letter-spacing: .3px;"
-            )
-        ui.label("").style(f"flex: 0 0 95px; text-align: center;")
-        with ui.column().style(
-            "flex: 1; min-width: 0; gap: 2px; "
-            "align-items: flex-end; text-align: right;"
-        ):
-            ui.label(home_team).style(
-                f"font-size: 13px; font-weight: 800; color: {t.TEXT}; "
-                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-            )
-            ui.label(f"Home SP · {home_sp.get('hand') or '—'}").style(
-                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                f"letter-spacing: .3px;"
-            )
+        # Side label -- AWAY / HOME, small + muted so the pitcher name
+        # is the visual anchor of the card.
+        ui.label(side_label + " STARTER").style(
+            f"font-size: 9.5px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2};"
+        )
 
-    # Stat rows: away value | label | home value.  Center-aligned label
-    # column keeps everything visually anchored without a separate
-    # divider line.
-    for label, key, fmt in fields:
-        av_raw = away_sp.get(key)
-        hv_raw = home_sp.get(key)
-        av_txt = _fmt_stat(av_raw, key, fmt)
-        hv_txt = _fmt_stat(hv_raw, key, fmt)
+        # Header: pitcher name (large) + team abbrev (small muted chip).
+        # Falls back to "TBD" when the probable starter isn't yet
+        # announced -- mirror the major sportsbooks' convention.
         with ui.row().classes("items-center w-full").style(
-            f"padding: 7px 0; gap: 12px; "
-            f"border-bottom: 1px solid {t.BORDER_SOFT};"
+            "gap: 8px; flex-wrap: wrap;"
         ):
-            ui.label(av_txt).style(
-                f"flex: 1; font-size: 13px; color: {t.TEXT}; "
-                f"font-family: monospace; font-weight: 600; "
-                f"text-align: left;"
+            if has_pitcher:
+                ui.label(pitcher_name).style(
+                    f"font-size: 17px; font-weight: 800; color: {t.TEXT}; "
+                    f"letter-spacing: -.1px; min-width: 0;"
+                )
+            else:
+                ui.label("TBD").style(
+                    f"font-size: 17px; font-weight: 800; color: {t.TEXT_DIM}; "
+                    f"letter-spacing: -.1px;"
+                )
+            chip_text = team_abbrev or (_short_abbrev(fallback_team) or "—")
+            ui.label(chip_text).style(
+                f"font-size: 10.5px; font-weight: 800; letter-spacing: .8px; "
+                f"color: {t.TEXT_DIM}; "
+                f"background: {t.CARD}; "
+                f"border: 1px solid {t.BORDER}; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
             )
-            ui.label(label).style(
-                f"flex: 0 0 95px; font-size: 10.5px; color: {t.TEXT_DIM}; "
-                f"letter-spacing: .4px; text-align: center; font-weight: 700;"
-            )
-            ui.label(hv_txt).style(
-                f"flex: 1; font-size: 13px; color: {t.TEXT}; "
-                f"font-family: monospace; font-weight: 600; "
-                f"text-align: right;"
-            )
+            # Handedness pill (LHP / RHP).  Hidden when missing so the
+            # chip row stays tight.
+            hand = sp.get("hand")
+            if hand in ("LHP", "RHP"):
+                ui.label(hand).style(
+                    f"font-size: 10px; font-weight: 700; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2}; margin-left: 2px;"
+                )
 
-    # Season record row: W-L as a string, no sanity bounds (any
-    # integer pair makes sense).  Rendered separate from the
-    # numeric-bounded rows so the format stays "W-L".
-    a_w = int(away_sp.get("wins")   or 0)
-    a_l = int(away_sp.get("losses") or 0)
-    h_w = int(home_sp.get("wins")   or 0)
-    h_l = int(home_sp.get("losses") or 0)
-    a_record = f"{a_w}-{a_l}" if (a_w or a_l) else "N/A"
-    h_record = f"{h_w}-{h_l}" if (h_w or h_l) else "N/A"
-    with ui.row().classes("items-center w-full").style(
-        f"padding: 7px 0; gap: 12px;"
-    ):
-        ui.label(a_record).style(
-            f"flex: 1; font-size: 13px; color: {t.TEXT}; "
-            f"font-family: monospace; font-weight: 700; text-align: left;"
-        )
-        ui.label("Season W-L").style(
-            f"flex: 0 0 95px; font-size: 10.5px; color: {t.TEXT_DIM}; "
-            f"letter-spacing: .4px; text-align: center; font-weight: 700;"
-        )
-        ui.label(h_record).style(
-            f"flex: 1; font-size: 13px; color: {t.TEXT}; "
-            f"font-family: monospace; font-weight: 700; text-align: right;"
-        )
+        # Stat list -- vertical, one row per stat.  All values pass
+        # _fmt_stat / record helper so missing or out-of-band data
+        # renders "N/A".
+        with ui.column().classes("w-full").style("gap: 0; margin-top: 4px;"):
+            for label, key in rows:
+                if not has_pitcher:
+                    value_str = "N/A"
+                elif key == "_record":
+                    value_str = _format_record(sp)
+                elif key == "rest":
+                    value_str = _fmt_stat(sp.get(key), key, "{:.0f}")
+                elif key == "k_per_9":
+                    value_str = _fmt_stat(sp.get(key), key, "{:.1f} K/9")
+                elif key == "bb9":
+                    value_str = _fmt_stat(sp.get(key), key, "{:.1f} BB/9")
+                else:
+                    value_str = _fmt_stat(sp.get(key), key, "{:.2f}")
+                with ui.row().classes("items-center w-full").style(
+                    f"padding: 7px 0; gap: 10px; "
+                    f"border-bottom: 1px solid {t.BORDER_SOFT};"
+                ):
+                    ui.label(label).style(
+                        f"flex: 1; font-size: 12px; color: {t.TEXT_DIM};"
+                    )
+                    ui.label(value_str).style(
+                        f"font-size: 13px; color: {t.TEXT}; "
+                        f"font-family: monospace; font-weight: 700;"
+                    )
+
+
+def _format_record(sp: dict) -> str:
+    """Season W-L formatted as "4-2".  Returns "N/A" when neither value
+    is present (a true 0-0 record falls through to "0-0" instead of
+    N/A so opening-day starters still render correctly)."""
+    w = sp.get("wins")
+    l = sp.get("losses")
+    if w is None and l is None:
+        return "N/A"
+    try:
+        return f"{int(w or 0)}-{int(l or 0)}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _short_abbrev(team_name: str) -> str:
+    """Best-effort fallback abbreviation when the pitcher pipeline
+    didn't return one (e.g. /teams/{id} failed).  Builds initials
+    from the leading-uppercase words ("Los Angeles Dodgers" -> "LAD").
+    Returns "" so the caller can render an em-dash instead."""
+    if not team_name:
+        return ""
+    parts = [p for p in str(team_name).split() if p]
+    initials = "".join(p[0] for p in parts if p and p[0].isalpha())
+    return initials[:3].upper() if initials else ""
 
 
 def _section_venue(ser: dict) -> None:
