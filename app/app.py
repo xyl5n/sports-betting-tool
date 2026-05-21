@@ -2733,6 +2733,15 @@ def _ensure_no_odds_predictor(sport: str):
             from src.wnba_features import WNBAFeatureBuilder
             fb = WNBAFeatureBuilder(store)
 
+        # BettingModel + RunLineModel + TotalsModel are imported lazily
+        # inside the existing analyze routes (lines ~3941 + ~4305).  We
+        # need the same imports here -- the warmup thread + on-demand
+        # predict path run BEFORE those routes have ever executed, so
+        # without these the call site below raises NameError.
+        from src.model           import BettingModel
+        from src.run_line_model  import RunLineModel
+        from src.totals_model    import TotalsModel
+
         ml_model = BettingModel(cfg)
         ml_model.train_or_load(stats_client=store, feature_builder=fb,
                                season=season, force_retrain=False)
@@ -8366,12 +8375,22 @@ def _boot_predictions_warmup() -> None:
 
     Each sport's prefetch is wrapped so one slow / failing sport
     doesn't block the other (e.g. ESPN slowness shouldn't keep MLB
-    predictions stuck)."""
+    predictions stuck).
+
+    Retries up to 3 times with a 30 s gap between attempts so the
+    warmup eventually succeeds once the model joblib cache restore
+    finishes and the predictor stack can build cleanly -- the
+    previous one-shot version permanently gave up if the first
+    attempt landed before MODEL CACHE INVENTORY had pre-downloaded
+    the joblibs."""
     import threading as _th
     import time as _time
 
+    _MAX_ATTEMPTS = 3
+    _RETRY_DELAY  = 30  # seconds
+
     def _run() -> None:
-        # Tiny pause so the [BOOT HEALTH REPORT] block finishes printing
+        # Tiny pause so the BOOT HEALTH REPORT block finishes printing
         # before the prefetch log lines start interleaving.
         _time.sleep(2)
 
@@ -8387,38 +8406,87 @@ def _boot_predictions_warmup() -> None:
             f"(supabase_on={sb_on})..."
         )
 
+        # Track which sports still need a successful prefetch so the
+        # retry loop only re-tries the failures, not the ones that
+        # already wrote to cache.
+        pending: set[str] = set()
         for sport in ("mlb", "wnba"):
+            cached = {}
             try:
                 cached = _read_no_odds_predictions(sport, today)
-                if cached:
-                    _eprint(
-                        f"BOOT WARMUP [{sport.upper()}]: {len(cached)} "
-                        f"cached prediction(s) found -- skipping prefetch"
-                    )
-                    continue
+            except Exception:                                              # noqa: BLE001
+                pass
+            if cached:
                 _eprint(
-                    f"BOOT WARMUP [{sport.upper()}]: cache empty for "
-                    f"{today}; running on-boot prefetch..."
+                    f"BOOT WARMUP [{sport.upper()}]: {len(cached)} "
+                    f"cached prediction(s) found -- skipping prefetch"
                 )
-                preds = _prefetch_no_odds_predictions(sport, today)
-                _eprint(
-                    f"BOOT WARMUP [{sport.upper()}]: prefetched "
-                    f"{len(preds)} prediction(s)"
-                )
-            except Exception as exc:                                       # noqa: BLE001
-                _eprint(
-                    f"BOOT WARMUP [{sport.upper()}]: failed -- "
-                    f"{type(exc).__name__}: {exc}"
-                )
+            else:
+                pending.add(sport)
 
-        # Belt-and-suspenders: clear the negative-cache so any
-        # transient failure during the warmup doesn't pin the
-        # predictor as permanently unavailable for the rest of the
-        # container's life.  Subsequent /api/schedule requests will
-        # try again on demand if the warmup didn't populate the
-        # Supabase cache.
-        for sport in ("mlb", "wnba"):
-            _no_odds_predictor_failed[sport] = False
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            if not pending:
+                break
+            for sport in list(pending):
+                try:
+                    preds = _prefetch_no_odds_predictions(sport, today)
+                    if preds:
+                        _eprint(
+                            f"BOOT WARMUP [{sport.upper()}]: attempt "
+                            f"{attempt}/{_MAX_ATTEMPTS} -- prefetched "
+                            f"{len(preds)} prediction(s)"
+                        )
+                        pending.discard(sport)
+                        # Reset the negative cache so subsequent on-demand
+                        # predicts in the schedule endpoint can use the
+                        # now-loaded predictor.
+                        _no_odds_predictor_failed[sport] = False
+                    else:
+                        _eprint(
+                            f"BOOT WARMUP [{sport.upper()}]: attempt "
+                            f"{attempt}/{_MAX_ATTEMPTS} returned 0 "
+                            f"predictions -- model not yet available, "
+                            f"retrying in {_RETRY_DELAY}s"
+                        )
+                        # Clear the failure flag so the next attempt
+                        # actually re-tries instead of short-circuiting
+                        # on the cached failure.
+                        _no_odds_predictor_failed[sport] = False
+                        # Drop the cached predictor so the next attempt
+                        # rebuilds it (the cached one may have a half-
+                        # loaded GameStore from the previous attempt).
+                        _no_odds_predictor[sport] = None
+                except (ImportError, NameError) as exc:
+                    # Specifically the user-spec'd cases -- model module
+                    # didn't load (likely still hydrating from the
+                    # joblib cache restore that runs earlier in boot).
+                    _eprint(
+                        f"BOOT WARMUP [{sport.upper()}]: attempt "
+                        f"{attempt}/{_MAX_ATTEMPTS} -- model not yet "
+                        f"available, retrying in {_RETRY_DELAY}s "
+                        f"({type(exc).__name__}: {exc})"
+                    )
+                    _no_odds_predictor_failed[sport] = False
+                    _no_odds_predictor[sport] = None
+                except Exception as exc:                                   # noqa: BLE001
+                    _eprint(
+                        f"BOOT WARMUP [{sport.upper()}]: attempt "
+                        f"{attempt}/{_MAX_ATTEMPTS} FAILED -- "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    _no_odds_predictor_failed[sport] = False
+                    _no_odds_predictor[sport] = None
+            if pending and attempt < _MAX_ATTEMPTS:
+                _time.sleep(_RETRY_DELAY)
+
+        if pending:
+            _eprint(
+                f"BOOT WARMUP: gave up on {sorted(pending)} after "
+                f"{_MAX_ATTEMPTS} attempts -- schedule endpoint will "
+                f"keep retrying on-demand for individual game requests"
+            )
+        else:
+            _eprint("BOOT WARMUP: all sports warmed successfully")
 
     _th.Thread(target=_run, name="boot-pred-warmup", daemon=True).start()
     _eprint(
