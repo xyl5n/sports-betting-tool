@@ -2772,23 +2772,12 @@ def _ensure_no_odds_predictor(sport: str):
     if _no_odds_predictor_failed.get(sport):
         return None
 
-    # WNBA short-circuit: src.game_store talks to API-Sports for season
-    # data which requires a paid 2025+ plan.  Without it, store.load
-    # crashes deep inside the analyze pipeline and the warmup keeps
-    # retrying.  Until the no-odds predictor is migrated to use
-    # ESPN's free scoreboard + the wehoop pip package for historical
-    # WNBA data, just skip cleanly -- WNBA no-odds cards will render
-    # the "No Odds Available" fallback notice instead of model
-    # predictions.  Log once + flip the failure flag so the warmup
-    # retry loop doesn't keep re-attempting.
-    if sport == "wnba":
-        _eprint(
-            "NO-ODDS PREDICT [WNBA]: schedule data unavailable using "
-            "free sources -- skipping (API-Sports requires paid plan; "
-            "ESPN + wehoop integration is a follow-up)"
-        )
-        _no_odds_predictor_failed[sport] = True
-        return None
+    # WNBA: API-Sports requires a paid 2025+ plan, so GameStore.load
+    # now falls back to sportsdataverse (Python port of the R wehoop
+    # package) and then ESPN's keyless scoreboard endpoint -- both
+    # implemented in src/game_store.py.  No special-cased short-circuit
+    # here anymore: the load call below will succeed via the fallback
+    # chain on free hosts and log which source was used.
 
     try:
         cfg = SPORTS.get(sport)
@@ -2806,12 +2795,33 @@ def _ensure_no_odds_predictor(sport: str):
             sport_tag=sport,
             cache=_cache,
         )
+        _eprint(
+            f"NO-ODDS PREDICT [{sport.upper()}]: loading season={season} "
+            f"via GameStore (API-Sports primary; WNBA falls back to "
+            f"sportsdataverse / ESPN automatically)"
+        )
         try:
-            store.load(season)
+            n_loaded = store.load(season)
         except Exception as exc:                                          # noqa: BLE001
             _eprint(f"NO-ODDS PREDICT [{sport.upper()}]: GameStore.load failed: {exc}")
             _no_odds_predictor_failed[sport] = True
             return None
+        # If every fallback returned [] we still continue (the cached
+        # joblib models may load fine and produce predictions for live
+        # games whose teams happen to be in the saved team index), but
+        # log the source-exhausted state so the deploy log makes the
+        # cause obvious when no predictions come back.
+        if n_loaded == 0:
+            _eprint(
+                f"NO-ODDS PREDICT [{sport.upper()}]: GameStore.load "
+                f"returned 0 games -- all data sources exhausted; "
+                f"predictor will rely on cached joblib weights only"
+            )
+        else:
+            _eprint(
+                f"NO-ODDS PREDICT [{sport.upper()}]: loaded {n_loaded} "
+                f"completed games for season {season}"
+            )
 
         if sport == "mlb":
             from src.mlb_features import MLBFeatureBuilder
@@ -4085,12 +4095,22 @@ def analyze():
         # Step 4 — odds (baseball_mlb only)
         _step(f"Step 4: fetching odds from Odds API  sport_key={sport_cfg.odds_key!r}")
         odds_client = OddsClient(odds_key, _cache)
+        # ODDS FETCH STARTING / COMPLETE: top-level markers (grep'able
+        # in Railway logs) bracketing the get_odds call so it's
+        # trivially visible from the deploy log whether the call ran
+        # at all and how many games came back -- the user's symptom
+        # was every game showing no_odds=True even though analysis
+        # supposedly completed.
+        _eprint(f"ODDS FETCH STARTING [MLB] sport_key={sport_cfg.odds_key!r} "
+                f"force_refresh={force_refresh}")
         # force_refresh threads from the /api/analyze request body all the
         # way down to bypass the daily Supabase cache when the user explicitly
         # asks for a fresh fetch from the admin Force Refresh button.
         games_pre_filter = odds_client.get_odds(
             sport_key=sport_cfg.odds_key, force_refresh=force_refresh,
         )
+        _eprint(f"ODDS FETCH COMPLETE [MLB] returned {len(games_pre_filter)} "
+                f"parsed games (pre stale-date filter)")
         _step(f"Step 4: get_odds returned {len(games_pre_filter)} parsed games "
               f"(before stale-date filter)")
         # Drop yesterday's games before any processing.  `_filter_stale_games`
@@ -7106,9 +7126,13 @@ def analyze_wnba():
         # Step 4 — odds from The Odds API
         _step("Step 4: fetching odds from Odds API  sport_key='basketball_wnba'")
         odds_client = OddsClient(odds_key, _cache)
+        _eprint(f"ODDS FETCH STARTING [WNBA] sport_key='basketball_wnba' "
+                f"force_refresh={force_refresh}")
         games_pre_filter = odds_client.get_odds(
             sport_key="basketball_wnba", force_refresh=force_refresh,
         )
+        _eprint(f"ODDS FETCH COMPLETE [WNBA] returned {len(games_pre_filter)} "
+                f"parsed games (pre stale-date filter)")
         _step(f"Step 4: get_odds returned {len(games_pre_filter)} parsed games "
               f"(before stale-date filter)")
         today_et = _today_et()
