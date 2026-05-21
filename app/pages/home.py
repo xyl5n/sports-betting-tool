@@ -21,8 +21,27 @@ All data comes from `backend._analysis_state` / `_wnba_analysis_state`
 from __future__ import annotations
 
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from nicegui import ui
+
+_ET = ZoneInfo("America/New_York")
+
+# Schedule status strings that mean "game has started or finished" --
+# anything matching these in g["_status"] / g["_detailed_status"] /
+# g["status"] disqualifies the game from the home page pick lists.
+# Sourced from the MLB Stats API (abstractGameState / detailedState):
+# https://statsapi.mlb.com/api/v1/schedule -- and the ESPN WNBA
+# scoreboard which uses similar tokens ("Final", "In Progress").
+_STARTED_STATUS_TOKENS: frozenset[str] = frozenset(
+    s.lower() for s in (
+        "Final", "Live", "In Progress", "In_Progress",
+        "Game Over", "Postponed", "Suspended", "Completed Early",
+        "Final: Tied", "Manager Challenge", "Delayed",
+        "Suspended: Rain", "Suspended Rain",
+    )
+)
 
 from components import theme as t
 from components import navbar, bottom_nav
@@ -300,8 +319,12 @@ def _section_ev_compact(backend) -> None:
     carousel; an inline JS listener updates the active dot as the
     user scrolls.  All wiring runs against element.html_id so it
     survives NiceGUI id-format changes.
+
+    Only games that haven't started yet make it into the EV scan.  The
+    full slate (on /sports) still shows everything; the home page lists
+    are forward-looking only.
     """
-    games = _all_serialized_games(backend)
+    games = _filter_upcoming(_all_serialized_games(backend), label="ev_compact")
     rows  = hs.enumerate_value_picks(games, min_edge=0.03)
     rows.sort(key=lambda r: float(r.get("edge") or 0), reverse=True)
 
@@ -519,7 +542,10 @@ def _ev_card(backend, r: dict, result_index: dict | None = None) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _section_confidence_carousel(backend) -> None:
-    games = _all_serialized_games(backend)
+    # Same pre-filter as the EV scan: home page lists are forward-
+    # looking; started / completed games drop out so the user sees
+    # actionable picks only.
+    games = _filter_upcoming(_all_serialized_games(backend), label="confidence_carousel")
     rows  = hs.enumerate_value_picks(games, min_edge=0.0001)   # any positive edge
     rows.sort(key=lambda r: float(r.get("prob") or 0), reverse=True)
     rows = rows[:10]
@@ -723,6 +749,83 @@ def _perf_stat(label: str, value: str, color: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Shared helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _has_started(g: dict, now_et: datetime) -> bool:
+    """True when game *g* has already kicked off or finished.  Used by
+    _filter_upcoming below to drop completed / in-progress games from
+    the home page pick lists.
+
+    Detection order (cheapest first):
+      1. _final_score on the row -- only set when the game ended
+      2. _status / status / detailed_status string matches one of the
+         "started" tokens (Final, Live, In Progress, Postponed, ...).
+         Tokens are matched case-insensitively against the full status
+         AND against each whitespace-separated word so "Final/Tied"
+         and "FINAL" both register.
+      3. commence_time has already passed (in ET).  This is the
+         schedule-only fallback used for rows that came from
+         /api/schedule before live linescore polling kicked in.
+    """
+    if g.get("_final_score"):
+        return True
+
+    for key in ("_status", "status", "_detailed_status", "detailed_status"):
+        raw = g.get(key)
+        if not raw:
+            continue
+        s = str(raw).strip().lower()
+        if not s:
+            continue
+        if s in _STARTED_STATUS_TOKENS:
+            return True
+        # Multi-word forms like "Final: Tied" or "In Progress, 5th".
+        if any(tok and tok in _STARTED_STATUS_TOKENS for tok in s.replace(",", " ").split()):
+            return True
+
+    # Schedule-only games carry commence_time as ISO.  If it's already
+    # past, treat the game as started even when no status string came
+    # through (the per-page live poller hadn't run yet, etc.).
+    ct = g.get("commence_time") or ""
+    if ct:
+        try:
+            dt = datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
+            if dt.astimezone(_ET) <= now_et:
+                return True
+        except Exception:                                                 # noqa: BLE001
+            pass
+    return False
+
+
+def _filter_upcoming(games: list[dict], *, label: str = "") -> list[dict]:
+    """Drop games that have already started / finished.  Used by the
+    home page pick lists (EV scan, Highest Confidence carousel) so the
+    user only sees actionable picks.  The full slate on /sports keeps
+    everything -- this filter never touches that pipeline.
+
+    Logs one [HOME-FILTER] line per call with the input + kept + dropped
+    counts so Railway captures the impact of the filter on every render.
+    """
+    if not games:
+        return games
+    now_et = datetime.now(_ET)
+    upcoming: list[dict] = []
+    dropped: list[str] = []
+    for g in games:
+        if _has_started(g, now_et):
+            label_str = f"{g.get('away_team')} @ {g.get('home_team')}"
+            dropped.append(label_str)
+            continue
+        upcoming.append(g)
+    _dbg(
+        f"[HOME-FILTER] {label or 'unspecified'}: "
+        f"input={len(games)}  kept={len(upcoming)}  dropped={len(dropped)}"
+    )
+    if dropped:
+        _dbg(f"[HOME-FILTER] {label or 'unspecified'} dropped games: "
+             f"{', '.join(dropped[:10])}"
+             f"{' ...' if len(dropped) > 10 else ''}")
+    return upcoming
+
 
 def _all_serialized_games(backend) -> list[dict]:
     """Pull serialized games from both sport caches.  Each result is the
