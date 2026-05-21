@@ -37,11 +37,24 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
     button is rendered -- the card still works, just without tracking.
     """
     import sys as _sys
+    # _data_source is stamped by /api/schedule -- one of:
+    #   analysis_id              -- joined to analysis result via Odds API id
+    #   analysis_team_date       -- joined via (home, away, et_date) fallback
+    #   schedule_stub            -- schedule game with no analysis match
+    #                               (this is the bug-symptom case)
+    #   no_odds_cached_prediction  -- schedule game + pre-computed prediction
+    #   no_odds_live_prediction    -- schedule game + on-demand prediction
+    #   unknown                  -- card built outside the schedule endpoint
+    # If you see schedule_stub for cards you expected to have odds, the
+    # schedule->analysis merge missed -- check the SCHEDULE JOIN log in
+    # app.py / the analyze route's ODDS FETCH COMPLETE log.
     print(
         f"[RENDER] game_card.render ENTER sport={sport} "
         f"game_id={g.get('game_id') or g.get('id')!r} "
         f"away={g.get('away_team')!r} home={g.get('home_team')!r} "
-        f"no_model={bool(g.get('_no_model'))}",
+        f"no_odds={bool(g.get('_no_odds'))} "
+        f"no_model={bool(g.get('_no_model'))} "
+        f"data_source={g.get('_data_source') or 'unknown'!r}",
         flush=True, file=_sys.stderr,
     )
     sport = (sport or g.get("_sport") or "mlb").lower()
