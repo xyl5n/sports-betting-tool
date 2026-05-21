@@ -24,7 +24,7 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar, game_card, bottom_nav, live_score
+from components import navbar, game_card, bottom_nav, live_score
 
 
 _LIVE_POLL_INTERVAL = 60.0   # seconds between live-score refresh ticks
@@ -90,23 +90,28 @@ def _render_sport(backend, sport: str) -> None:
     # without any per-card binding gymnastics.
     live_score.fetch_live(backend, sport)
 
-    with ui.row().classes("no-wrap w-full").style("gap: 0;"):
-        sidebar.render(backend)
-        with ui.column().classes("page-content").style(
-            f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
-            f"gap: {t.SPACE_MD}; padding: {t.SPACE_LG}; min-width: 0;"
-        ):
-            _header(sport)
-            _odds_quota_banner(backend)
-            # First render of the refreshable grid -- args are captured so
-            # `.refresh()` on tick re-uses the same backend + sport.
-            _refreshable_grid(backend, sport)
+    # Sidebar (Top 5 Plays + Confidence Performance) is intentionally
+    # NOT rendered on the slate page -- the home screen already shows
+    # the highest-confidence picks + the EV scan, so duplicating them
+    # here was pure noise.  Game cards now get the full content
+    # column width.  `margin: 0 auto` centers it within the wider
+    # viewport since the row no longer has a sidebar-occupied left
+    # column to push against.
+    with ui.column().classes("page-content w-full").style(
+        f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; "
+        f"gap: {t.SPACE_MD}; padding: {t.SPACE_LG}; min-width: 0;"
+    ):
+        _header(sport)
+        _odds_quota_banner(backend)
+        # First render of the refreshable grid -- args are captured so
+        # `.refresh()` on tick re-uses the same backend + sport.
+        _refreshable_grid(backend, sport)
 
-            def _tick() -> None:
-                live_score.fetch_live(backend, sport)
-                _refreshable_grid.refresh()
+        def _tick() -> None:
+            live_score.fetch_live(backend, sport)
+            _refreshable_grid.refresh()
 
-            ui.timer(_LIVE_POLL_INTERVAL, _tick)
+        ui.timer(_LIVE_POLL_INTERVAL, _tick)
 
     bottom_nav.render(active=t.TAB_SPORTS)
 

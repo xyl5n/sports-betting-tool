@@ -39,12 +39,33 @@ def register(backend) -> None:
                 f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
-                history = _all_model_history(backend)
-                _bankroll_card(backend, history)
-                _type_records_card(history)
-                _picks_card(backend)
-                _classifier_card(history)
+                # Refreshable wrapper so the 30-minute auto-settlement
+                # job's freshly-written history can land in the
+                # bankroll / records / classifier cards without a
+                # manual page reload.  The 60-second timer below
+                # refresh()s this on a fixed cadence -- well under the
+                # 30-min settlement cron interval so any settled bet is
+                # visible within a minute of being written.
+                _refreshable_model_sections(backend)
+
+                def _tick() -> None:
+                    _refreshable_model_sections.refresh()
+
+                ui.timer(60.0, _tick)
         bottom_nav.render(active=t.TAB_MODEL)
+
+
+@ui.refreshable
+def _refreshable_model_sections(backend) -> None:
+    """The mutable content of /model -- everything between sidebar +
+    bottom_nav.  Wrapping in @ui.refreshable lets the page poll the
+    fresh ledger / tracker state every 60 s without rerendering the
+    navbar or sidebar."""
+    history = _all_model_history(backend)
+    _bankroll_card(backend, history)
+    _type_records_card(history)
+    _picks_card(backend)
+    _classifier_card(history)
 
 
 # ── Data helpers ────────────────────────────────────────────────────────────
@@ -81,8 +102,15 @@ def _bankroll_card(backend, history: list[dict]) -> None:
         start, current, at_risk = 1000.0, 1000.0, 0.0
 
     pnl = current - start
-    w = sum(1 for h in history if h.get("result") == "win")
-    l = sum(1 for h in history if h.get("result") == "loss")
+    # W/L comes from the tracker-files aggregate so this number matches
+    # the home OVERALL chip + the RECORDS BY BET TYPE totals by
+    # construction.  The `history` ledger view was top-5-only and
+    # disagreed with the per-classifier accuracy card -- the user's
+    # data-consistency complaint.
+    from pages import home_stats as hs
+    _trk = hs.tracker_records()["overall"]
+    w = _trk["wins"]
+    l = _trk["losses"]
     total = w + l
     pct = f"{(w / total * 100):.1f}%" if total else "—"
 
@@ -128,12 +156,20 @@ def _stat(label: str, value: str, color: str) -> None:
 # ── Section: Records by bet type ────────────────────────────────────────────
 
 def _type_records_card(history: list[dict]) -> None:
+    """Render per-bet-type W/L from the per-classifier tracker files.
+
+    `history` arg is preserved for back-compat with the call site but
+    no longer consulted -- the data comes from
+    home_stats.tracker_records(), the same source the home OVERALL +
+    BEST BET TYPE chips read so the numbers always agree.
+    """
+    from pages import home_stats as hs
+    by_cat = hs.tracker_records()["by_bet_type"]
+
     rows: list[tuple[str, int, int]] = []
-    for _, label, aliases in _CATS:
-        sub = [h for h in history if (h.get("bet_type") or "single") in aliases]
-        w = sum(1 for h in sub if h.get("result") == "win")
-        l = sum(1 for h in sub if h.get("result") == "loss")
-        rows.append((label, w, l))
+    for cat_key, label, _aliases in _CATS:
+        counts = by_cat.get(cat_key) or {"wins": 0, "losses": 0}
+        rows.append((label, counts["wins"], counts["losses"]))
 
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
@@ -143,6 +179,10 @@ def _type_records_card(history: list[dict]) -> None:
             f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
+        ui.label(
+            "Across every settled pick in xgb / lr / nn picks history "
+            "(union across all three classifiers, all three bet types)."
+        ).style(f"font-size: 10.5px; color: {t.TEXT_DIM2}; margin-top: -4px;")
         for label, w, l in rows:
             total = w + l
             pct = f"{(w / total * 100):.1f}%" if total else "—"
@@ -352,13 +392,16 @@ def _classifier_card(history: list[dict]) -> None:
     }
 
     # Best model by overall correct-call rate (minimum 10 settled predictions).
-    best = None
-    best_pct = 0.0
-    for m in models:
-        c, n = overall[m]
-        if n >= 10 and (c / n) > best_pct:
-            best_pct = c / n
-            best = m
+    # Identify the best AND worst qualifying classifiers (n >= 10).
+    # Best gets an emerald tint, worst a rose tint -- the palette
+    # redesign's "color-coded performance" requirement.  When only
+    # one model qualifies it's both -- skip the worst tint in that
+    # case so a single qualifying model doesn't render as the loser.
+    qualified = [(m, overall[m][0] / overall[m][1]) for m in models
+                 if overall[m][1] >= 10]
+    best  = max(qualified, key=lambda r: r[1])[0] if qualified else None
+    worst = (min(qualified, key=lambda r: r[1])[0]
+             if len(qualified) >= 2 else None)
 
     ui.label("CLASSIFIER ACCURACY").style(
         f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
@@ -372,18 +415,46 @@ def _classifier_card(history: list[dict]) -> None:
     )
     with ui.row().classes("w-full bet-boxes").style(f"gap: {t.SPACE_MD};"):
         for m in models:
-            _classifier_block(m, labels[m], overall[m], by_cat[m], m == best)
+            _classifier_block(
+                m, labels[m], overall[m], by_cat[m],
+                is_best=(m == best), is_worst=(m == worst),
+            )
 
 
-def _classifier_block(model: str, label: str, ov: list[int], by_cat: dict[str, list[int]], is_best: bool) -> None:
+def _classifier_block(
+    model: str, label: str, ov: list[int],
+    by_cat: dict[str, list[int]],
+    is_best: bool, is_worst: bool = False,
+) -> None:
     correct, total = ov
     pct = (correct / total * 100) if total else None
     pct_s = "—" if pct is None else f"{pct:.1f}%"
-    border = f"1px solid {t.POS}" if is_best else f"1px solid {t.BORDER}"
-    shadow = f"box-shadow: 0 0 12px rgba(34, 197, 94, .12);" if is_best else ""
+
+    # Color-coded backgrounds per palette redesign:
+    #   best  -> emerald (POS) tint + border
+    #   worst -> rose (NEG) tint + border
+    #   else  -> neutral CARD + BORDER
+    if is_best:
+        bg     = f"rgba({t.SECONDARY_R}, {t.SECONDARY_G}, {t.SECONDARY_B}, 0.10)"
+        border = f"1px solid {t.POS}"
+        shadow = (
+            f"box-shadow: 0 0 12px "
+            f"rgba({t.SECONDARY_R}, {t.SECONDARY_G}, {t.SECONDARY_B}, .18);"
+        )
+    elif is_worst:
+        bg     = f"rgba({t.NEG_R}, {t.NEG_G}, {t.NEG_B}, 0.10)"
+        border = f"1px solid {t.NEG}"
+        shadow = (
+            f"box-shadow: 0 0 12px "
+            f"rgba({t.NEG_R}, {t.NEG_G}, {t.NEG_B}, .14);"
+        )
+    else:
+        bg     = t.CARD
+        border = f"1px solid {t.BORDER}"
+        shadow = ""
 
     with ui.column().style(
-        f"flex: 1; background: {t.CARD}; border: {border}; "
+        f"flex: 1; background: {bg}; border: {border}; "
         f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: {t.SPACE_SM}; "
         f"{shadow}"
     ):
@@ -394,6 +465,12 @@ def _classifier_block(model: str, label: str, ov: list[int], by_cat: dict[str, l
             if is_best:
                 ui.label("BEST").style(
                     f"background: {t.POS}; color: {t.BG}; "
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"padding: 2px 6px; border-radius: 3px;"
+                )
+            elif is_worst:
+                ui.label("WORST").style(
+                    f"background: {t.NEG}; color: {t.BG}; "
                     f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
                     f"padding: 2px 6px; border-radius: 3px;"
                 )

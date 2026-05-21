@@ -55,12 +55,12 @@ def render(
     # of the same hue at full opacity so the tint reads on OLED
     # without competing with the card-glow + global theme.
     if result == "win":
-        bg          = "rgba(34, 197, 94, 0.15)"   # green tint
-        border_left = "3px solid rgb(34, 197, 94)"
+        bg          = f"rgba({t.SECONDARY_R}, {t.SECONDARY_G}, {t.SECONDARY_B}, 0.15)"
+        border_left = f"3px solid {t.POS}"
         border_rest = f"1px solid {t.BORDER}"
     elif result == "loss":
-        bg          = "rgba(239, 68, 68, 0.15)"   # red tint
-        border_left = "3px solid rgb(239, 68, 68)"
+        bg          = f"rgba({t.NEG_R}, {t.NEG_G}, {t.NEG_B}, 0.15)"
+        border_left = f"3px solid {t.NEG}"
         border_rest = f"1px solid {t.BORDER}"
     else:
         # Includes "push" and the default pre-game / in-progress

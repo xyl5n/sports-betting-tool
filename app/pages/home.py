@@ -64,6 +64,36 @@ def register(backend) -> None:
         navbar.render(active=t.TAB_HOME)
         _layout(backend)
         bottom_nav.render(active=t.TAB_HOME)
+        # Wheel-to-horizontal-scroll handler for every .carousel-scroller
+        # on the page.  Vertical wheel input on a carousel translates to
+        # horizontal scroll; horizontal wheel input passes through
+        # untouched.  Lives in add_body_html so the script tag runs
+        # AFTER the page DOM is rendered.  Idempotent: the dataset
+        # marker on each scroller prevents double-binding when the
+        # page re-renders.
+        ui.add_body_html("""
+        <script>
+        (function() {
+          function bindWheel(el) {
+            if (el.dataset.wheelBound === '1') return;
+            el.dataset.wheelBound = '1';
+            el.addEventListener('wheel', function(e) {
+              // Pass through pure-horizontal wheel input (trackpads,
+              // some mice).  Convert vertical wheel to horizontal.
+              if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+              e.preventDefault();
+              el.scrollBy({ left: e.deltaY, behavior: 'auto' });
+            }, { passive: false });
+          }
+          document.querySelectorAll('.carousel-scroller').forEach(bindWheel);
+          // Re-scan after any DOM mutation so refreshable wrappers that
+          // recreate the scrollers still bind the wheel handler.
+          new MutationObserver(function() {
+            document.querySelectorAll('.carousel-scroller').forEach(bindWheel);
+          }).observe(document.body, { childList: true, subtree: true });
+        })();
+        </script>
+        """)
 
 
 def _layout(backend) -> None:
@@ -224,112 +254,125 @@ def _section_ev_compact(backend) -> None:
             )
             return
 
-        # Carousel row.  Left arrow (desktop) | scroller | right arrow.
-        with ui.row().classes("items-center w-full no-wrap").style("gap: 6px;"):
-            left_arrow_html  = ui.html("")
-            scroller = ui.row().classes("ev-scroller").style(
-                f"flex: 1; min-width: 0; "
+        # Carousel: same overlay-arrow pattern as the Highest Confidence
+        # carousel (below).  Wrap the scroller in a relative div so the
+        # < / > overlays can be absolutely positioned over its edges.
+        # The dot-indicator + inline-script-with-data-target approach
+        # has been removed -- user spec asked to drop the slider/scrollbar
+        # below the carousel and unify arrow behavior with the
+        # confidence carousel.
+        with ui.element("div").style("position: relative; width: 100%;"):
+            scroller = ui.row().classes("ev-scroller carousel-scroller").style(
+                f"width: 100%; "
                 f"overflow-x: auto; overflow-y: hidden; "
                 f"gap: 8px; padding: 4px 2px; "
-                f"scroll-snap-type: x mandatory; flex-wrap: nowrap; "
-                f"scrollbar-width: thin;"
+                f"scroll-snap-type: x mandatory; flex-wrap: nowrap;"
             )
+            result_index = _pick_result_index(backend)
             with scroller:
                 for r in rows:
-                    _ev_card(backend, r)
-            right_arrow_html = ui.html("")
+                    _ev_card(backend, r, result_index)
 
-        # Dot indicator below the carousel.  Container holds one dot per
-        # row; the inline JS toggles `data-active` via the carousel's
-        # scroll listener.  Always centered horizontally.
-        dots_row = ui.row().classes("ev-dots items-center justify-center w-full").style(
-            f"gap: 6px; margin-top: 4px;"
-        )
-        with dots_row:
-            for i in range(len(rows)):
-                ui.html(
-                    f'<span class="ev-dot" data-idx="{i}" '
-                    f'style="display:inline-block;width:7px;height:7px;'
-                    f'border-radius:50%;background:{t.TEXT_DIM2};'
-                    f'transition:background .15s ease,transform .15s ease;"></span>'
-                )
+            # Scroll arrows: same overlay buttons as _section_confidence_carousel.
+            _carousel_arrow(scroller, direction="left")
+            _carousel_arrow(scroller, direction="right")
 
-        # Arrow buttons -- desktop only.  Filled into the placeholder
-        # ui.html shells above so they're positioned alongside the
-        # scroller (outside it).  CSS handles desktop-only visibility.
-        scroller_id = scroller.html_id
-        dots_id     = dots_row.html_id
-        _arrow_html = (
-            lambda direction: (
-                f'<button class="ev-arrow desktop-only" '
-                f'data-dir="{direction}" data-target="{scroller_id}" '
-                f'style="background:{t.CARD};border:1px solid {t.BORDER};'
-                f'color:{t.TEXT};width:34px;height:34px;border-radius:50%;'
-                f'padding:0;font-size:18px;font-weight:800;line-height:1;'
-                f'cursor:pointer;flex-shrink:0;display:flex;'
-                f'align-items:center;justify-content:center;">'
-                f'{"&lsaquo;" if direction == "left" else "&rsaquo;"}'
-                f'</button>'
+
+def _pick_result_index(backend) -> dict[tuple[str, str], dict]:
+    """Walk both ledger history lists and return
+    {(game_id, bet_type): history_row} -- shared by _ev_card and
+    _confidence_card so settlement state is visible on every home
+    card without re-reading the ledger per card.  Same shape as
+    pages/model._build_result_index but lives here to avoid a
+    cross-page import.  Empty dict on any read error."""
+    out: dict[tuple[str, str], dict] = {}
+    for path in ("data/ledger.json", "data/wnba_ledger.json"):
+        try:
+            led = backend.Ledger(path=path, starting_bankroll=1000.0)
+        except Exception:                                                 # noqa: BLE001
+            continue
+        for h in (led.data.get("history") or []):
+            gid = h.get("game_id")
+            bt  = h.get("bet_type") or "single"
+            if not gid:
+                continue
+            out[(str(gid), str(bt))] = h
+    return out
+
+
+def _result_for_row(r: dict, result_index: dict) -> tuple[str, float, float]:
+    """Look up settlement result for an EV / Confidence row.
+
+    Returns (result, pnl, stake) where:
+      result -- "win" / "loss" / "push" / ""  (empty for not-yet-settled)
+      pnl    -- ledger.model_pnl (signed; positive for wins, negative for
+                losses, zero for push)
+      stake  -- ledger.model_amount (used for the "-$<stake>" loss
+                display)
+
+    Picks that didn't make the daily-picks selector's top-5 (so no
+    ledger row) return ("", 0.0, 0.0) -- the card stays neutral.
+    """
+    gid = str(r.get("game_id") or "")
+    if not gid:
+        return ("", 0.0, 0.0)
+    bt = (r.get("bet_type") or "single").lower()
+    hist = result_index.get((gid, bt))
+    if hist is None:
+        return ("", 0.0, 0.0)
+    return (
+        (hist.get("result") or "").lower(),
+        float(hist.get("model_pnl") or 0.0),
+        float(hist.get("model_amount") or 0.0),
+    )
+
+
+def _settled_badge(result: str, pnl: float, stake: float) -> None:
+    """Inline WIN / LOST chip + signed P/L for a settled card.  No-op
+    when result is empty / push (pending stays neutral, push has no
+    clear color convention)."""
+    if result == "win":
+        with ui.row().classes("items-center w-full").style("gap: 6px;"):
+            ui.label("WIN").style(
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+                f"background: {t.POS}; color: {t.BG}; "
+                f"padding: 2px 7px; border-radius: 3px;"
             )
+            ui.label(f"+${pnl:.2f}").style(
+                f"font-size: 12px; font-weight: 800; color: {t.POS}; "
+                f"font-family: monospace;"
+            )
+    elif result == "loss":
+        with ui.row().classes("items-center w-full").style("gap: 6px;"):
+            ui.label("LOST").style(
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+                f"background: {t.NEG}; color: {t.BG}; "
+                f"padding: 2px 7px; border-radius: 3px;"
+            )
+            ui.label(f"-${stake:.2f}").style(
+                f"font-size: 12px; font-weight: 800; color: {t.NEG}; "
+                f"font-family: monospace;"
+            )
+
+
+def _result_card_style(result: str) -> tuple[str, str]:
+    """Return (background, border) CSS values for a card based on its
+    settled result.  Mirrors PR #65's game-card bet-box treatment so
+    the home-screen tints match the slate cards exactly."""
+    if result == "win":
+        return (
+            f"rgba({t.SECONDARY_R}, {t.SECONDARY_G}, {t.SECONDARY_B}, 0.15)",
+            f"1px solid {t.POS}",
         )
-        left_arrow_html.content  = _arrow_html("left")
-        right_arrow_html.content = _arrow_html("right")
-
-        # Inline JS: wire scroll -> dot indicator + arrow clicks -> scrollBy.
-        # Must use ui.add_body_html (NOT ui.html) -- NiceGUI 2.x rejects
-        # <script> tags inside ui.html with:
-        #   ValueError: HTML elements must not contain script tags.
-        #                 Use ui.add_body_html() instead.
-        # add_body_html injects into THIS page's <body> after the
-        # carousel DOM is rendered, so getElementById() resolves cleanly.
-        # The IIFE guards on (!scroller || !dotsBox) so re-renders that
-        # don't ship the carousel are no-ops.
-        ui.add_body_html(f"""
-        <script>
-        (function() {{
-          const scroller = document.getElementById({scroller_id!r});
-          const dotsBox  = document.getElementById({dots_id!r});
-          if (!scroller || !dotsBox) return;
-          const dots = Array.from(dotsBox.querySelectorAll('.ev-dot'));
-          if (!dots.length) return;
-
-          const cards = Array.from(scroller.querySelectorAll('.ev-card'));
-          const gap   = 8;     // matches the gap: 8px on the scroller row
-
-          function activeIdx() {{
-            if (!cards.length) return 0;
-            const cw = cards[0].offsetWidth + gap;
-            return Math.min(cards.length - 1, Math.max(0,
-              Math.round(scroller.scrollLeft / cw)
-            ));
-          }}
-          function paintDots() {{
-            const idx = activeIdx();
-            dots.forEach((d, i) => {{
-              d.style.background = (i === idx) ? {t.PRIMARY!r} : {t.TEXT_DIM2!r};
-              d.style.transform  = (i === idx) ? 'scale(1.4)' : 'scale(1)';
-            }});
-          }}
-          paintDots();
-          scroller.addEventListener('scroll', paintDots, {{passive: true}});
-
-          // Hook the < / > arrow buttons.  Each carries data-target = id
-          // of its scroller so we can serve multiple carousels with the
-          // same handler if we add another later.
-          document.querySelectorAll('.ev-arrow').forEach(btn => {{
-            if (btn.dataset.target !== {scroller_id!r}) return;
-            btn.addEventListener('click', () => {{
-              const cw = cards[0].offsetWidth + gap;
-              const dir = btn.dataset.dir === 'left' ? -1 : 1;
-              scroller.scrollBy({{left: dir * cw, behavior: 'smooth'}});
-            }});
-          }});
-        }})();
-        </script>
-        """)
+    if result == "loss":
+        return (
+            f"rgba({t.NEG_R}, {t.NEG_G}, {t.NEG_B}, 0.15)",
+            f"1px solid {t.NEG}",
+        )
+    return (t.CARD, f"1px solid {t.BORDER}")
 
 
-def _ev_card(backend, r: dict) -> None:
+def _ev_card(backend, r: dict, result_index: dict | None = None) -> None:
     """One EV-scan card in the carousel.
 
     Width is set via CSS class .ev-card so the breakpoint-aware
@@ -339,19 +382,16 @@ def _ev_card(backend, r: dict) -> None:
     edge_pct = float(r.get("edge") or 0) * 100
     edge_s   = f"+{edge_pct:.1f}% Edge"
     sport_r  = r.get("sport", "mlb")
+    result, pnl, stake = _result_for_row(r, result_index or {})
+    bg, border = _result_card_style(result)
+    settled = result in ("win", "loss")
     with ui.column().classes("ev-card").style(
-        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"background: {bg}; border: {border}; "
         f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; "
         f"gap: 6px; "
-        # min-width:0 lets the card shrink past its content (we rely on
-        # the calc() width in theme.css); flex-shrink: 0 prevents the
-        # scroller from squashing cards when their combined width
-        # exceeds the container, which is what makes them scroll.
         f"flex-shrink: 0; "
         f"scroll-snap-align: start;"
     ):
-        # Logo + matchup row -- logos sit above the matchup name so the
-        # card height stays consistent regardless of name length.
         with ui.row().classes("items-center").style("gap: 4px;"):
             team_logo.render(r.get("away_full", ""), sport=sport_r, size=20)
             team_logo.render(r.get("home_full", ""), sport=sport_r, size=20)
@@ -367,16 +407,18 @@ def _ev_card(backend, r: dict) -> None:
             f"font-size: 12.5px; font-weight: 800; color: {t.POS}; "
             f"font-family: monospace;"
         )
-        # Track button at the bottom; full-width so it's easy to tap on
-        # mobile.  Uses the existing track_button component so click
-        # behavior + 'Tracked ✓' state are identical to the game-card
-        # Track buttons elsewhere in the app.
-        with ui.row().classes("w-full").style("margin-top: 4px;"):
-            if r.get("game_id"):
-                track_button.render(
-                    backend, game_id=r["game_id"], sport=sport_r,
-                    size="sm", label="Track",
-                )
+        if settled:
+            _settled_badge(result, pnl, stake)
+        else:
+            # Pending: keep the Track button so the user can record
+            # the bet.  Settled cards drop it -- the bet is already
+            # past the trackable window.
+            with ui.row().classes("w-full").style("margin-top: 4px;"):
+                if r.get("game_id"):
+                    track_button.render(
+                        backend, game_id=r["game_id"], sport=sport_r,
+                        size="sm", label="Track",
+                    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -411,37 +453,40 @@ def _section_confidence_carousel(backend) -> None:
         with ui.element("div").style(
             "position: relative; width: 100%;"
         ):
-            scroller = ui.row().style(
+            scroller = ui.row().classes("carousel-scroller").style(
                 f"width: 100%; "
                 f"overflow-x: auto; overflow-y: hidden; "
                 f"gap: {t.SPACE_SM}; padding: 4px 2px; "
-                f"scroll-snap-type: x mandatory; "
-                f"scrollbar-width: thin; flex-wrap: nowrap;"
+                f"scroll-snap-type: x mandatory; flex-wrap: nowrap;"
             )
+            result_index = _pick_result_index(backend)
             with scroller:
                 for r in rows:
-                    _confidence_card(r)
+                    _confidence_card(r, result_index)
 
-            # Scroll arrows -- thin overlay buttons on left/right.  Each
-            # calls scrollBy on the parent row.  Hidden on touch devices
-            # via the @media (hover: none) rule the runtime ignores --
-            # native swipe/scroll still works there anyway.
+            # Scroll arrows -- overlay buttons positioned just outside
+            # the card area.  Native swipe still works on touch.
             _carousel_arrow(scroller, direction="left")
             _carousel_arrow(scroller, direction="right")
 
 
-def _confidence_card(r: dict) -> None:
+def _confidence_card(r: dict, result_index: dict | None = None) -> None:
     edge_pct = float(r.get("edge") or 0) * 100
     prob_pct = float(r.get("prob") or 0) * 100
     sport_r  = r.get("sport", "mlb")
+    result, pnl, stake = _result_for_row(r, result_index or {})
+    bg, border = _result_card_style(result)
+    # _result_card_style returns CARD-default; this card historically
+    # uses CARD_HI for the surface so override only when no settlement
+    # color applies.
+    if result not in ("win", "loss"):
+        bg = t.CARD_HI
     with ui.column().style(
-        f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
+        f"background: {bg}; border: {border}; "
         f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; "
         f"min-width: 200px; max-width: 200px; flex-shrink: 0; gap: 4px; "
         f"scroll-snap-align: start;"
     ):
-        # Logo row: two small (22px) logos above the matchup label so the
-        # card is identifiable at a glance.
         with ui.row().style("gap: 4px; align-items: center;"):
             team_logo.render(r.get("away_full", ""), sport=sport_r, size=22)
             team_logo.render(r.get("home_full", ""), sport=sport_r, size=22)
@@ -464,33 +509,41 @@ def _confidence_card(r: dict) -> None:
             f"font-size: 10.5px; font-weight: 600; color: {t.POS}; "
             f"font-family: monospace;"
         )
+        if result in ("win", "loss"):
+            _settled_badge(result, pnl, stake)
 
 
 def _carousel_arrow(scroller, direction: str) -> None:
-    """Tiny < / > button absolutely positioned over the scroller's edge.
+    """< / > overlay button for a carousel scroller.
 
-    Uses ui.run_javascript via the button's on_click to call scrollBy on
-    the DOM node.  Native touch swipe still works regardless -- this is
-    a desktop / pointer affordance.
+    Positioned just OUTSIDE the scroller's horizontal bounds (left: -14px
+    or right: -14px) so the button never sits on top of card content --
+    user spec explicitly requires "outside the card area without
+    overlapping any card content or text".  The relative-positioned
+    parent container's overflow defaults to visible so the negative
+    offset paints into the surrounding gap.
+
+    Hidden on touch screens via the desktop-only class -- native swipe
+    + the wheel handler in the carousel-scroller injected JS keep the
+    scroller usable on phones.
     """
     is_left = direction == "left"
     arrow   = "‹" if is_left else "›"
-    side    = "left: 2px;" if is_left else "right: 2px;"
+    side    = "left: -14px;" if is_left else "right: -14px;"
 
-    btn = ui.button(arrow).props("flat dense").style(
+    btn = ui.button(arrow).classes("desktop-only").props("flat dense").style(
         f"position: absolute; top: 50%; {side} "
         f"transform: translateY(-50%); "
-        f"background: {t.CARD}cc; color: {t.TEXT}; "
-        f"width: 28px; height: 28px; min-height: 0; "
+        f"background: {t.CARD}; color: {t.TEXT}; "
+        f"width: 32px; height: 32px; min-height: 0; "
         f"font-size: 18px; font-weight: 800; "
         f"border: 1px solid {t.BORDER}; "
         f"border-radius: 50%; padding: 0; line-height: 1; "
+        f"box-shadow: 0 2px 6px rgba(0,0,0,0.4); "
         f"z-index: 2;"
     )
     delta = -240 if is_left else 240
 
-    # NiceGUI exposes the DOM id as element.html_id (typically "c<int>").
-    # Use that directly so we don't depend on the internal id format.
     dom_id = getattr(scroller, "html_id", f"c{scroller.id}")
 
     async def _click():
@@ -500,8 +553,6 @@ def _carousel_arrow(scroller, direction: str) -> None:
                 f".scrollBy({{left: {delta}, behavior: 'smooth'}})"
             )
         except Exception:                                                 # noqa: BLE001
-            # run_javascript may not be available in all NiceGUI builds; the
-            # scroller still works via native swipe / wheel.
             pass
 
     btn.on("click", _click)
