@@ -75,7 +75,10 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
         if g.get("_no_model"):
             _no_model_row(g)
         else:
-            _bet_boxes(g, is_mlb)
+            # Pass live so _bet_boxes can compute per-market W/L tints
+            # for FINAL games.  Pre-game and live (in-progress) cards
+            # get None back from _final_scores -> neutral boxes.
+            _bet_boxes(g, is_mlb, live=live if state == "final" else None)
         if backend is not None:
             _track_row(backend, g, sport)
 
@@ -210,9 +213,88 @@ def _matchup_row(g: dict, sport: str, state: str = "scheduled") -> None:
         team_logo.render(home_full, sport=sport, size=36)
 
 
-def _bet_boxes(g: dict, is_mlb: bool) -> None:
+def _final_scores(live: dict | None) -> tuple[int, int] | None:
+    """Pull (home_runs, away_runs) from a FINAL linescore.  Returns None
+    if live data is missing or doesn't have both teams' totals."""
+    if not live:
+        return None
+    ls = live.get("linescore") or {}
+    teams_ls = ls.get("teams") or {}
+    h = (teams_ls.get("home") or {}).get("runs")
+    a = (teams_ls.get("away") or {}).get("runs")
+    if h is None or a is None:
+        return None
+    try:
+        return int(h), int(a)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ml_result(g: dict, scores: tuple[int, int] | None) -> str | None:
+    """Moneyline win/loss for the picked team given the final score."""
+    if scores is None:
+        return None
+    home_runs, away_runs = scores
+    if home_runs == away_runs:
+        # Baseball / basketball don't end in ties, but defend against
+        # a partial / corrupted linescore by treating it as push.
+        return "push"
+    pick_team = g.get("pick_team")
+    if not pick_team:
+        return None
+    home_won = home_runs > away_runs
+    picked_home = pick_team == g.get("home_team")
+    return "win" if (picked_home == home_won) else "loss"
+
+
+def _spread_result(rl: dict, scores: tuple[int, int] | None) -> str | None:
+    """Run-line / spread result.  Uses the same convention Ledger.settle()
+    follows: prop_line is from the home team's perspective, margin =
+    home_runs - away_runs, and `side` is "home" or "away" for the pick."""
+    if scores is None:
+        return None
+    home_runs, away_runs = scores
+    line = rl.get("run_line_point", rl.get("spread_line"))
+    if line is None:
+        return None
+    try:
+        prop_line = float(line)
+    except (TypeError, ValueError):
+        return None
+    side = rl.get("side")
+    margin = home_runs - away_runs
+    if   margin >  prop_line: return "win"  if side == "home" else "loss"
+    elif margin <  prop_line: return "loss" if side == "home" else "win"
+    else:                     return "push"
+
+
+def _totals_result(totals: dict, scores: tuple[int, int] | None) -> str | None:
+    """Over/under result against the final combined score."""
+    if scores is None:
+        return None
+    home_runs, away_runs = scores
+    line = totals.get("total_line")
+    if line is None:
+        return None
+    try:
+        prop_line = float(line)
+    except (TypeError, ValueError):
+        return None
+    direction = (totals.get("direction") or "over").lower()
+    total = home_runs + away_runs
+    if   total >  prop_line: return "win"  if direction == "over" else "loss"
+    elif total <  prop_line: return "loss" if direction == "over" else "win"
+    else:                    return "push"
+
+
+def _bet_boxes(g: dict, is_mlb: bool, live: dict | None = None) -> None:
     rl = g.get("run_line") if is_mlb else g.get("spread_pick")
     totals = g.get("totals") or {}
+
+    # FINAL games only -- pre-game and in-progress games pass live=None
+    # (or a non-final live row) so every result resolves to None below
+    # and the boxes render with the default neutral tint.
+    scores = _final_scores(live)
 
     with ui.row().classes("w-full bet-boxes").style("gap: 6px;"):
         # Moneyline -- always present
@@ -223,6 +305,7 @@ def _bet_boxes(g: dict, is_mlb: bool) -> None:
             edge=g.get("pick_edge"),
             odds=g.get("pick_odds"),
             is_value=bool(g.get("value_pick")),
+            result=_ml_result(g, scores),
         )
 
         # Run Line (MLB) / Spread (WNBA)
@@ -242,6 +325,7 @@ def _bet_boxes(g: dict, is_mlb: bool) -> None:
                 edge=rl.get("edge"),
                 odds=rl.get("pick_odds"),
                 is_value=bool(rl.get("value_bet")),
+                result=_spread_result(rl, scores),
             )
         else:
             bet_box.render(
@@ -264,6 +348,7 @@ def _bet_boxes(g: dict, is_mlb: bool) -> None:
                 edge=totals.get("edge"),
                 odds=odds,
                 is_value=bool(totals.get("value_bet")),
+                result=_totals_result(totals, scores),
             )
         else:
             bet_box.render(

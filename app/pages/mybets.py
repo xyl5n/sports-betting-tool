@@ -146,8 +146,28 @@ def _bet_row(b: dict, settled: bool) -> None:
     odds_s = f"+{odds}" if isinstance(odds, (int, float)) and odds > 0 else f"{odds}"
     amount = float(b.get("confirmed_amount") or 0)
     pnl = float(b.get("confirmed_pnl") or 0) if settled else 0.0
-    pnl_color = t.POS if pnl >= 0 else t.NEG
-    pnl_sign  = "+" if pnl >= 0 else "−"
+
+    # Color treatment per user spec:
+    #   win   -> pick text green, dollar column shows net profit (e.g. +$30.00) in green
+    #   loss  -> pick text red,   dollar column shows stake as negative (e.g. -$20.00) in red
+    #   push  -> neutral team text, dollar column shows $0.00 (stake returned)
+    #   pending / void -> neutral white text, dollar column shows the stake as-is
+    if settled and result == "win":
+        team_color  = t.POS
+        amount_text = f"+${pnl:.2f}"
+        amount_color = t.POS
+    elif settled and result == "loss":
+        team_color  = t.NEG
+        amount_text = f"-${amount:.2f}"
+        amount_color = t.NEG
+    elif settled and result == "push":
+        team_color  = t.TEXT
+        amount_text = "$0.00"
+        amount_color = t.TEXT_DIM
+    else:
+        team_color  = t.TEXT
+        amount_text = f"${amount:.2f}"
+        amount_color = t.TEXT
 
     border = f"1px solid {result_color}" if settled and result in ("win", "loss", "push") \
         else f"1px solid {t.BORDER}"
@@ -163,19 +183,21 @@ def _bet_row(b: dict, settled: bool) -> None:
         )
         with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
             ui.label(team).style(
-                f"font-size: 13px; font-weight: 700; color: {t.TEXT}; "
+                f"font-size: 13px; font-weight: 700; color: {team_color}; "
                 f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
             ui.label(f"{bet_type} · {odds_s}").style(
                 f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
             )
         with ui.column().style("gap: 2px; text-align: right; align-items: flex-end;"):
-            ui.label(f"${amount:.2f}").style(
-                f"font-size: 13px; font-weight: 700; color: {t.TEXT}; font-family: monospace;"
+            ui.label(amount_text).style(
+                f"font-size: 13px; font-weight: 700; "
+                f"color: {amount_color}; font-family: monospace;"
             )
             if settled:
-                ui.label(f"{result.upper()}  {pnl_sign}${abs(pnl):.2f}").style(
-                    f"font-size: 11px; color: {pnl_color}; font-family: monospace;"
+                ui.label(result.upper()).style(
+                    f"font-size: 10.5px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {result_color};"
                 )
             else:
                 ui.label("PENDING").style(

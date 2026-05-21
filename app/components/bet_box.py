@@ -40,11 +40,42 @@ def render(
     edge: float | None,
     odds: int | None,
     is_value: bool = False,
+    result: str | None = None,
 ) -> None:
-    """One bet box.  All numeric fields tolerate None (renders as —)."""
+    """One bet box.  All numeric fields tolerate None (renders as —).
+
+    `result` is "win" / "loss" / "push" / None.  Drives a subtle box
+    tint + left border accent so a finished game's bet boxes show
+    their per-market outcome at a glance (caller wires this up from
+    the live-score feed -- pre-game / in-progress cards always pass
+    None so they stay neutral).
+    """
+    # Background + left-border accent based on settled result.  rgba()
+    # values match the user spec; left border is a thicker 3px slab
+    # of the same hue at full opacity so the tint reads on OLED
+    # without competing with the card-glow + global theme.
+    if result == "win":
+        bg          = "rgba(34, 197, 94, 0.15)"   # green tint
+        border_left = "3px solid rgb(34, 197, 94)"
+        border_rest = f"1px solid {t.BORDER}"
+    elif result == "loss":
+        bg          = "rgba(239, 68, 68, 0.15)"   # red tint
+        border_left = "3px solid rgb(239, 68, 68)"
+        border_rest = f"1px solid {t.BORDER}"
+    else:
+        # Includes "push" and the default pre-game / in-progress
+        # case.  Push is intentionally neutral -- there's no clear
+        # color convention for it and tinting it the same as a win
+        # would be misleading.
+        bg          = t.CARD_HI
+        border_left = f"1px solid {t.BORDER}"
+        border_rest = f"1px solid {t.BORDER}"
     with ui.column().style(
-        f"background: {t.CARD_HI}; "
-        f"border: 1px solid {t.BORDER}; "
+        f"background: {bg}; "
+        f"border-top: {border_rest}; "
+        f"border-right: {border_rest}; "
+        f"border-bottom: {border_rest}; "
+        f"border-left: {border_left}; "
         f"border-radius: {t.RADIUS_SM}; "
         f"padding: 8px 10px; "
         f"min-width: 0; gap: 4px; flex: 1;"
