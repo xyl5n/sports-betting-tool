@@ -2944,13 +2944,27 @@ def schedule_for_date(sport: str):
             row["_settled_rows"] = pick_entry["history_rows"]
         # Only attempt the no-odds predict for today + future (no point
         # for past completed games -- the score is the answer).
+        # Order: cached pre-prediction (from midnight prefetch) first,
+        # then on-demand live predict if the cache misses.  Writes the
+        # on-demand result back to the cache so subsequent requests hit
+        # the fast path.
         if date_str >= _today_et():
-            try:
-                model_pred = _predict_no_odds_game(sport, g)
-                if model_pred is not None:
-                    row["_model_prediction"] = model_pred
-            except Exception as exc:                                       # noqa: BLE001
-                _eprint(f"schedule {sport} {gid}: no-odds predict skipped: {exc}")
+            cached_preds_for_date = _read_no_odds_predictions(sport, date_str)
+            cached_pred = cached_preds_for_date.get(gid) if cached_preds_for_date else None
+            if cached_pred:
+                row["_model_prediction"] = cached_pred
+            else:
+                try:
+                    model_pred = _predict_no_odds_game(sport, g)
+                    if model_pred is not None:
+                        row["_model_prediction"] = model_pred
+                        # Write back to cache so the next request hits
+                        # the fast path (uses fresh cached_preds_for_date
+                        # so we don't double-read on a busy endpoint).
+                        cached_preds_for_date[gid] = model_pred
+                        _write_no_odds_predictions(sport, date_str, cached_preds_for_date)
+                except Exception as exc:                                       # noqa: BLE001
+                    _eprint(f"schedule {sport} {gid}: no-odds predict skipped: {exc}")
         out_games.append(row)
 
     return jsonify({
@@ -2982,6 +2996,105 @@ def _prefetch_schedules_next_n_days(n: int = 7) -> dict:
             except Exception as exc:                                      # noqa: BLE001
                 summary[sport][d] = f"ERR: {type(exc).__name__}"
     return summary
+
+
+# ── No-odds predictions cache ────────────────────────────────────────────────
+# Per-game model predictions for the no-odds path, persisted in Supabase
+# app_cache so they survive Railway restarts AND so the schedule endpoint
+# can serve them without re-running the (slow) GameStore + model load on
+# every request.  Midnight reset pre-populates this for the new ET day's
+# entire slate; the schedule endpoint also writes back on-demand for any
+# game it predicts that isn't in the cache yet.
+
+def _no_odds_predictions_cache_key(sport: str, date_str: str) -> str:
+    return f"no_odds_predictions:{sport}:{date_str}"
+
+
+def _read_no_odds_predictions(sport: str, date_str: str) -> dict[str, dict]:
+    """Return the cached {game_id: prediction} dict for one date.
+    Empty dict if not cached / read fails."""
+    try:
+        from src import db as _db
+        row = _db.cache_get(_no_odds_predictions_cache_key(sport, date_str))
+        if row and isinstance(row.get("data"), dict):
+            preds = row["data"].get("predictions")
+            if isinstance(preds, dict):
+                return preds
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return {}
+
+
+def _write_no_odds_predictions(sport: str, date_str: str,
+                                preds: dict[str, dict]) -> bool:
+    """Persist {game_id: prediction} for one date to Supabase.
+
+    Uses the "no_odds" date sentinel so cache_delete_stale (which
+    prunes rows where date != today_et) leaves this row alone --
+    future-date predictions stay valid as the calendar advances."""
+    try:
+        from src import db as _db
+        if not _db.is_supabase():
+            return False
+        return bool(_db.cache_set(
+            _no_odds_predictions_cache_key(sport, date_str),
+            sport, "no_odds",
+            {"date": date_str, "predictions": preds},
+        ))
+    except Exception:                                                     # noqa: BLE001
+        return False
+
+
+def _prefetch_no_odds_predictions(sport: str, date_str: str) -> dict:
+    """Run _predict_no_odds_game on every game in the sport's schedule
+    for date_str, then persist the {game_id: prediction} map.
+
+    Called from _run_midnight_reset so the new ET day boots with
+    predictions ready for every scheduled game -- the first page
+    load doesn't have to wait on the GameStore + model load before
+    seeing cards with Predicted Winner / Run Line / Projected Total.
+
+    Per-game failures are skipped (logged with the matchup).  An
+    empty schedule returns {} without writing to Supabase."""
+    games = _fetch_raw_schedule(sport, date_str)
+    if not games:
+        return {}
+
+    out: dict[str, dict] = {}
+    skipped = 0
+    for g in games:
+        gid = str(g.get("id") or "")
+        if not gid:
+            skipped += 1
+            continue
+        try:
+            pred = _predict_no_odds_game(sport, g)
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(
+                f"NO-ODDS PREFETCH [{sport.upper()}] {g.get('away_team','?')} "
+                f"@ {g.get('home_team','?')}: {type(exc).__name__}: {exc}"
+            )
+            skipped += 1
+            continue
+        if pred is None:
+            skipped += 1
+            continue
+        out[gid] = pred
+
+    if out:
+        wrote = _write_no_odds_predictions(sport, date_str, out)
+        _eprint(
+            f"NO-ODDS PREFETCH [{sport.upper()}] {date_str}: "
+            f"predicted {len(out)} game(s), skipped {skipped}, "
+            f"supabase_write={wrote}"
+        )
+    else:
+        _eprint(
+            f"NO-ODDS PREFETCH [{sport.upper()}] {date_str}: "
+            f"0 predictions (skipped {skipped}; predictor may not "
+            f"be loadable yet)"
+        )
+    return out
 
 
 # ── Live-score debug system ────────────────────────────────────────────────────
@@ -7498,6 +7611,33 @@ def _run_midnight_reset() -> None:
                 )
         except Exception as _pre:                                         # noqa: BLE001
             _eprint(f"MIDNIGHT-RESET: prefetch error: {_pre}")
+
+        # Pre-compute model-only predictions for every game on today's
+        # schedule (both sports).  This runs AFTER the schedule
+        # prefetch above so the predictor walks the freshly-cached
+        # game list.  Stored in Supabase under the "no_odds" date
+        # sentinel so the daily cleaner leaves them alone and they
+        # persist across Railway restarts.  Net effect: when anyone
+        # opens /sports/* during the morning -- even before the 8 AM
+        # analyze runs -- every card on the slate already has
+        # Predicted Winner / Run Line / Projected Total numbers.
+        try:
+            _eprint("MIDNIGHT-RESET: pre-computing no-odds predictions for today's slate...")
+            _today_str = _today_et()
+            for _sport in ("mlb", "wnba"):
+                try:
+                    _preds = _prefetch_no_odds_predictions(_sport, _today_str)
+                    _eprint(
+                        f"MIDNIGHT-RESET: no-odds predictions {_sport}: "
+                        f"{len(_preds)} game(s) cached"
+                    )
+                except Exception as _e:                                   # noqa: BLE001
+                    _eprint(
+                        f"MIDNIGHT-RESET: no-odds predictions {_sport} FAILED: "
+                        f"{type(_e).__name__}: {_e}"
+                    )
+        except Exception as _pe:                                          # noqa: BLE001
+            _eprint(f"MIDNIGHT-RESET: no-odds predict block error: {_pe}")
 
         _eprint("MIDNIGHT-RESET: complete -- new day ready")
     except Exception as _mre:
