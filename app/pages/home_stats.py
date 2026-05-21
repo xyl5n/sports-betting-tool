@@ -57,16 +57,18 @@ def _all_history(backend) -> list[dict]:
 def overall_record(backend) -> dict:
     """Return {'wins': N, 'losses': N, 'pct': float | None}.
 
-    Push / void results are excluded -- they don't move the W/L ratio.
+    Reads from the per-classifier tracker files via tracker_records()
+    so the chip matches the Model page's MODEL BANKROLL Record line +
+    CLASSIFIER ACCURACY card by construction.  Tracker files have an
+    entry per analyzed game per bet_type per classifier; this aggregate
+    counts the union across all three classifiers + all three bet
+    types.  See tracker_records() docstring for the counting rule.
     """
-    history = _all_history(backend)
-    w = sum(1 for h in history if (h.get("result") or "").lower() == "win")
-    l = sum(1 for h in history if (h.get("result") or "").lower() == "loss")
-    total = w + l
+    overall = tracker_records()["overall"]
     return {
-        "wins":   w,
-        "losses": l,
-        "pct":    (w / total) if total else None,
+        "wins":   overall["wins"],
+        "losses": overall["losses"],
+        "pct":    overall["pct"],
     }
 
 
@@ -78,26 +80,31 @@ def model_performance(backend) -> dict:
     Shape:
         {wins: N, losses: N, pct: float | None, units: float}
 
-    `units` is a bankroll-independent P/L computed with flat 1U-per-bet
-    sizing (i.e. the unit-tracking convention sports cappers use):
+    W/L counts come from tracker_records() (the same source the home
+    OVERALL chip + Model tab MODEL BANKROLL Record + RECORDS BY BET
+    TYPE all use).  `units` still comes from the ledger -- it's the
+    flat 1U-per-bet P/L of bets the daily-picks selector actually
+    placed, which is a betting-record metric that the tracker files
+    don't have the stake/odds data to compute.
 
+    `units` rule (unchanged):
         win at +N        ->  +N/100  units
         win at -N        ->  +100/N  units
         loss             ->  -1      units
         push / void      ->   0      units (no W/L change either)
-
-    Missing american_odds default to -110 (the most common line) so a
-    pre-migration ledger entry without the field doesn't get silently
-    omitted from the unit calc.  Push / void / no-result rows skip the
-    P/L update entirely.
     """
+    overall = tracker_records()["overall"]
+    wins   = overall["wins"]
+    losses = overall["losses"]
+    pct    = overall["pct"]
+
+    # Units P/L stays ledger-derived -- tracker entries don't have
+    # american_odds or stake fields.
     history = _all_history(backend)
-    wins = losses = 0
     units = 0.0
     for h in history:
         result = (h.get("result") or "").lower()
         if result == "win":
-            wins += 1
             odds = h.get("american_odds")
             if not isinstance(odds, (int, float)):
                 odds = -110                                               # default
@@ -106,14 +113,12 @@ def model_performance(backend) -> dict:
             elif odds < 0:
                 units += 100.0 / abs(odds)
         elif result == "loss":
-            losses += 1
             units -= 1.0
         # push / void: no change to either counter
-    total = wins + losses
     return {
         "wins":   wins,
         "losses": losses,
-        "pct":    (wins / total) if total else None,
+        "pct":    pct,
         "units":  round(units, 2),
     }
 
@@ -129,42 +134,52 @@ _TRACKER_PATHS = {
     "nn":  _Path("data/nn_picks_history.json"),
 }
 
+# Bet-type categories shared across helpers in this module.
+_TRACKER_CATS = {
+    "moneyline":       ("moneyline", "single"),
+    "run_line_spread": ("run_line", "spread"),
+    "totals":          ("totals",),
+}
 
-def classifier_accuracy_from_trackers() -> dict:
-    """Aggregate per-classifier correct/total from the three picks-history
-    files (xgb_picks_history.json, lr_picks_history.json,
+
+def tracker_records() -> dict:
+    """Aggregate the union of settled picks across all three model
+    history files (xgb_picks_history.json, lr_picks_history.json,
     nn_picks_history.json).
 
-    These files carry one entry PER ANALYZED GAME per bet_type -- the
-    full slate, not just the top-5 picks the daily-picks selector
-    placed bets on.  Reading them here gives the user a true model
-    accuracy across the full prediction surface (which is what they
-    want to see on the Model page + Home chip; the ledger history
-    only ever covered top-5).
+    Single source of truth for every W/L display in the app:
+      - Home OVERALL chip
+      - Home BEST BET TYPE chip
+      - Home bottom Model Performance section
+      - Model tab MODEL BANKROLL Record line
+      - Model tab RECORDS BY BET TYPE
+      - Model tab CLASSIFIER ACCURACY (per-model breakdown)
+
+    Settled = entry's `correct` field is True or False (None means the
+    game hasn't finished yet -- skipped).  Each (model, game, bet_type)
+    entry counts independently: if all 3 classifiers picked a winning
+    moneyline that's 3 wins toward the aggregate; if XGB + LR were right
+    and NN was wrong on the same game, that's 2 wins + 1 loss.
 
     Returns:
-        {
-          "xgb": {"overall": [correct, total],
-                  "moneyline": [c, t], "run_line_spread": [c, t],
-                  "totals": [c, t]},
+      {
+        "overall":     {"wins": N, "losses": N, "pct": float | None},
+        "by_bet_type": {
+          "moneyline":       {"wins": N, "losses": N, "pct": float | None},
+          "run_line_spread": {...},
+          "totals":          {...},
+        },
+        "by_model": {
+          "xgb": {"overall": [c, t], "moneyline": [c, t], ...},
           "lr":  {...},
           "nn":  {...},
-        }
-
-    Each entry's `correct` field is True/False/None (None when the game
-    hasn't settled yet).  None rows don't count toward either side.
-    Silent fallback to zeros on missing / corrupted files so the page
-    always renders.
+        },
+      }
     """
-    # bet_type categories -- align with pages/model.py::_CATS
-    _CATS = {
-        "moneyline":       ("moneyline", "single"),
-        "run_line_spread": ("run_line", "spread"),
-        "totals":          ("totals",),
-    }
-
-    out: dict[str, dict[str, list[int]]] = {
-        m: {"overall": [0, 0], **{c: [0, 0] for c in _CATS}}
+    overall_w = overall_l = 0
+    by_cat: dict[str, list[int]] = {k: [0, 0] for k in _TRACKER_CATS}
+    by_model: dict[str, dict[str, list[int]]] = {
+        m: {"overall": [0, 0], **{k: [0, 0] for k in _TRACKER_CATS}}
         for m in _TRACKER_PATHS
     }
 
@@ -173,7 +188,7 @@ def classifier_accuracy_from_trackers() -> dict:
             continue
         try:
             payload = _json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception:                                                 # noqa: BLE001
             continue
         for entry in (payload.get("picks") or []):
             correct = entry.get("correct")
@@ -181,16 +196,43 @@ def classifier_accuracy_from_trackers() -> dict:
                 continue
             bt = (entry.get("bet_type") or "moneyline").lower()
             cat = next(
-                (k for k, aliases in _CATS.items() if bt in aliases),
+                (k for k, aliases in _TRACKER_CATS.items() if bt in aliases),
                 None,
             )
             if cat is None:
                 continue
-            out[model_key][cat][1] += 1
-            out[model_key][cat][0] += int(bool(correct))
-            out[model_key]["overall"][1] += 1
-            out[model_key]["overall"][0] += int(bool(correct))
-    return out
+            won = bool(correct)
+            if won:
+                overall_w += 1
+                by_cat[cat][0] += 1
+            else:
+                overall_l += 1
+                by_cat[cat][1] += 1
+            by_model[model_key]["overall"][1] += 1
+            by_model[model_key]["overall"][0] += int(won)
+            by_model[model_key][cat][1] += 1
+            by_model[model_key][cat][0] += int(won)
+
+    def _pct(w: int, l: int) -> float | None:
+        return (w / (w + l)) if (w + l) else None
+
+    return {
+        "overall":     {"wins": overall_w, "losses": overall_l,
+                        "pct": _pct(overall_w, overall_l)},
+        "by_bet_type": {
+            cat: {"wins": w, "losses": l, "pct": _pct(w, l)}
+            for cat, (w, l) in by_cat.items()
+        },
+        "by_model":    by_model,
+    }
+
+
+def classifier_accuracy_from_trackers() -> dict:
+    """Per-classifier accuracy breakdown from the three picks-history
+    files.  Thin wrapper over tracker_records()["by_model"] kept for
+    backward compatibility with existing call sites (pages/model and
+    home best_classifier).  See tracker_records() for the counting rule."""
+    return tracker_records()["by_model"]
 
 
 # ── Chip #2 -- best classifier (XGB / LR / NN) ─────────────────────────────
@@ -231,25 +273,24 @@ def best_classifier(backend) -> dict | None:
 def best_bet_type(backend) -> dict | None:
     """Return {'label': str, 'wins': N, 'losses': N, 'pct': float} for the
     bet type with the highest W/(W+L) rate, or None if no bet type has
-    at least 5 settled bets.
+    at least 5 settled picks across all three tracker files.
 
-    Aggregates across both sports.  Bet types come from bet['bet_type']:
-        'single' (moneyline) / 'run_line' / 'spread' / 'totals'.
+    Source: tracker_records()["by_bet_type"] -- same aggregation rule
+    every other Model-page card uses, so the chip pct here lines up
+    with the Model tab's RECORDS BY BET TYPE row.
     """
-    history = _all_history(backend)
-    counts: dict[str, list[int]] = {}     # label -> [W, L]
-    for bet in history:
-        result = (bet.get("result") or "").lower()
-        if result not in ("win", "loss"):
-            continue
-        label = _bet_type_label(bet.get("bet_type"))
-        counts.setdefault(label, [0, 0])
-        if result == "win":  counts[label][0] += 1
-        else:                counts[label][1] += 1
+    by_cat = tracker_records()["by_bet_type"]
 
+    # Friendly label per bet_type category key.
+    _LABEL = {
+        "moneyline":       "Moneyline",
+        "run_line_spread": "Run Line / Spread",
+        "totals":          "Totals",
+    }
     qualified = [
-        (label, w, l) for label, (w, l) in counts.items()
-        if (w + l) >= 5
+        (_LABEL.get(cat, cat.title()), counts["wins"], counts["losses"])
+        for cat, counts in by_cat.items()
+        if (counts["wins"] + counts["losses"]) >= 5
     ]
     if not qualified:
         return None

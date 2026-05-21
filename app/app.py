@@ -606,7 +606,15 @@ def _read_analysis_timestamps() -> dict:
 
 
 def _write_analysis_timestamp(sport: str, ts: datetime) -> None:
-    """Persist a single sport's analysis timestamp.  Best-effort; never raises."""
+    """Persist a single sport's analysis timestamp.  Writes the local
+    timestamps file AND mirrors to Supabase app_cache so Railway
+    redeploys don't lose the field.  Best-effort; never raises.
+
+    Closes a gap where the admin panel's "Last analyzed" line went
+    stale after a redeploy because this file was wiped but the
+    snapshot/cache mirrors were either also wiped (analysis_cache)
+    or write-once (snapshot, pre-fix).
+    """
     try:
         Path("data").mkdir(exist_ok=True)
         data = _read_analysis_timestamps()
@@ -617,8 +625,14 @@ def _write_analysis_timestamp(sport: str, ts: datetime) -> None:
         _ANALYSIS_TIMESTAMPS_FILE.write_text(
             json.dumps(data, indent=2), encoding="utf-8"
         )
-    except Exception:
-        pass
+        # Mirror to Supabase under a stable key so reset-aware admin
+        # views can read it even after the local file is wiped.
+        _supabase_cache_set(
+            "analysis_timestamps", None, ts.date().isoformat(), data,
+        )
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"TIMESTAMP write error (ignored): {exc}",
+              flush=True, file=sys.stderr)
 
 
 def _today_et() -> str:
@@ -746,10 +760,20 @@ def hydrate_state() -> tuple[int, int]:
 
 def _write_daily_snapshot(sport: str, payload: dict, ts: datetime) -> None:
     """
-    Persist sport's analysis into the daily snapshot file.  Write-once per day
-    per sport — if an entry already exists for today's ET date this is a no-op.
-    Uses an atomic temp-file + rename so the file is never partially written.
-    Thread-safe via _snapshot_lock.
+    Persist sport's analysis into the daily snapshot file.
+
+    Always overwrites the sport entry's `analyzed_at` timestamp + payload
+    so a force-refresh / manual re-analyze actually updates what the
+    admin panel reads.  (The previous write-once-per-day guard left the
+    snapshot stuck at the first analyze's timestamp, which is why the
+    Admin "Last analyzed" display went stale after re-runs.)  The
+    analyze route's own snapshot guard at /api/analyze still prevents
+    the heavy pipeline from running redundantly within a day, so a
+    second run only happens with explicit force_refresh=True -- a
+    deliberate user-intent signal that the snapshot SHOULD update.
+
+    Uses an atomic temp-file + rename so the file is never partially
+    written.  Thread-safe via _snapshot_lock.
     """
     if not _SNAPSHOT_ENABLED:
         return
@@ -766,21 +790,25 @@ def _write_daily_snapshot(sport: str, payload: dict, ts: datetime) -> None:
                         snap = json.loads(raw)
             except Exception:
                 snap = {}
-            # Fresh day → start clean
+            # Fresh day -> start clean
             if snap.get("date") != today:
                 snap = {"date": today}
-            # Write-once: never overwrite an existing entry for this sport
-            if snap.get(sport):
-                return
+            # Always overwrite this sport's entry with the freshest data +
+            # the freshest analyzed_at timestamp.  The other sport (if
+            # present) is preserved untouched.
             snap[sport] = {"analyzed_at": ts.isoformat(), **payload}
-            # Step 4: atomic write — temp file then rename so the live file is
+            # Step 4: atomic write -- temp file then rename so the live file is
             # never in a partially-written state.
             raw_out = json.dumps(snap, indent=2, default=str)
             _DAILY_SNAPSHOT_TMP.write_text(raw_out, encoding="utf-8")
             _DAILY_SNAPSHOT_TMP.replace(_DAILY_SNAPSHOT_FILE)
-            # Issue 4: also mirror to Supabase app_cache so the snapshot
-            # survives Railway redeploys.  Best-effort -- silent on failure.
+            # Mirror to Supabase app_cache so the snapshot survives Railway
+            # redeploys.  Best-effort -- silent on failure.
             _supabase_cache_set(_CACHE_KEY_SNAPSHOT, None, today, snap)
+            _eprint(
+                f"SNAPSHOT [{sport.upper()}]: updated analyzed_at="
+                f"{ts.isoformat()} -> local + Supabase"
+            )
         except Exception as _e:
             print(f"SNAPSHOT write error (ignored): {_e}", flush=True, file=sys.stderr)
             try:
@@ -4442,6 +4470,8 @@ _PICKS_HISTORY_FILES = (
     Path("data/nn_picks_history.json"),
 )
 _ENSEMBLE_PICKS_FILE = Path("data/ensemble_picks_today.json")
+_DAILY_PICKS_FILE    = Path("data/daily_picks.json")
+_BET_HISTORY_ARCHIVE = Path("data/bet_history_archive.json")
 
 
 def _truncate_picks_history(path: Path) -> bool:
@@ -4526,11 +4556,67 @@ def admin_reset_model_record():
         else:
             audit.append(f"file: {_ENSEMBLE_PICKS_FILE} (not present, skipped)")
 
+        # data/daily_picks.json -- previously left behind, which is why
+        # the Model tab's TODAY'S MODEL PICKS section kept showing stale
+        # picks after a Reset Model Record click.  Clear it explicitly.
+        if _delete_file(_DAILY_PICKS_FILE):
+            audit.append(f"file: deleted {_DAILY_PICKS_FILE}")
+        else:
+            audit.append(f"file: {_DAILY_PICKS_FILE} (not present, skipped)")
+
+        # data/bet_history_archive.json -- permanent archive that
+        # Ledger.settle appends to.  Reset Model Record is the
+        # "wipe model records" button, so the archive's model entries
+        # are also in-scope.  We keep personal-confirmed entries by
+        # filtering rather than deleting the file.
+        try:
+            if _BET_HISTORY_ARCHIVE.exists():
+                raw  = json.loads(_BET_HISTORY_ARCHIVE.read_text(encoding="utf-8"))
+                bets = raw.get("bets") if isinstance(raw, dict) else raw
+                if isinstance(bets, list):
+                    before = len(bets)
+                    kept   = [b for b in bets if b.get("confirmed")]
+                    after  = len(kept)
+                    _BET_HISTORY_ARCHIVE.write_text(
+                        json.dumps({"bets": kept}, indent=2),
+                        encoding="utf-8",
+                    )
+                    audit.append(
+                        f"file: {_BET_HISTORY_ARCHIVE} -- pruned {before - after} "
+                        f"model row(s), kept {after} confirmed row(s)"
+                    )
+        except Exception as exc:                                          # noqa: BLE001
+            audit.append(f"file: {_BET_HISTORY_ARCHIVE} prune error: {exc}")
+
+        # In-memory state -- the analyze pipeline writes results +
+        # last_analysis_meta into _analysis_state / _wnba_analysis_state.
+        # Without clearing these the home + sport pages render against
+        # the previous run's data until the next analyze fires.
+        for _state, _label in (
+            (_analysis_state,      "mlb"),
+            (_wnba_analysis_state, "wnba"),
+        ):
+            _state["results"]            = []
+            _state["last_analysis_meta"] = {}
+            audit.append(
+                f"in-memory: cleared _analysis_state[{_label}].results + "
+                f"last_analysis_meta"
+            )
+
         try:
             from src import db as _db
             if _db.is_supabase():
                 n_rows = _db.delete_records(sport=None)
                 audit.append(f"supabase records: deleted {n_rows} row(s)")
+                # Also delete Supabase bets table rows with confirmed=false
+                # so the Supabase view of model history is wiped too --
+                # otherwise list_bets(confirmed=False) would still return
+                # the pre-reset model bets, which any future export /
+                # diagnostic call would surface as stale data.
+                n_bets = _db.delete_bets_bulk(confirmed=False)
+                audit.append(
+                    f"supabase bets (confirmed=false): deleted {n_bets} row(s)"
+                )
             else:
                 audit.append("supabase records: (Supabase off, skipped)")
         except Exception as exc:                                          # noqa: BLE001
@@ -4720,6 +4806,30 @@ def admin_reset_my_bets_record():
                 f"history + {d.get('open_bets', 0)} confirmed open_bet(s), "
                 f"personal_bankroll -> ${d.get('bankroll_to', 0):.2f}"
             )
+
+        # Prune personal-confirmed rows from the permanent archive too.
+        # Mirrors what Reset Model Record does for the model side --
+        # without this, the archive keeps the user's old confirmed bets
+        # forever and any future export / diagnostic that walks the
+        # archive would surface them as still-present.
+        try:
+            if _BET_HISTORY_ARCHIVE.exists():
+                raw  = json.loads(_BET_HISTORY_ARCHIVE.read_text(encoding="utf-8"))
+                bets = raw.get("bets") if isinstance(raw, dict) else raw
+                if isinstance(bets, list):
+                    before = len(bets)
+                    kept   = [b for b in bets if not b.get("confirmed")]
+                    after  = len(kept)
+                    _BET_HISTORY_ARCHIVE.write_text(
+                        json.dumps({"bets": kept}, indent=2),
+                        encoding="utf-8",
+                    )
+                    audit.append(
+                        f"file: {_BET_HISTORY_ARCHIVE} -- pruned {before - after} "
+                        f"confirmed row(s), kept {after} model row(s)"
+                    )
+        except Exception as exc:                                          # noqa: BLE001
+            audit.append(f"file: {_BET_HISTORY_ARCHIVE} prune error: {exc}")
 
         try:
             from src import db as _db

@@ -39,12 +39,33 @@ def register(backend) -> None:
                 f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
-                history = _all_model_history(backend)
-                _bankroll_card(backend, history)
-                _type_records_card(history)
-                _picks_card(backend)
-                _classifier_card(history)
+                # Refreshable wrapper so the 30-minute auto-settlement
+                # job's freshly-written history can land in the
+                # bankroll / records / classifier cards without a
+                # manual page reload.  The 60-second timer below
+                # refresh()s this on a fixed cadence -- well under the
+                # 30-min settlement cron interval so any settled bet is
+                # visible within a minute of being written.
+                _refreshable_model_sections(backend)
+
+                def _tick() -> None:
+                    _refreshable_model_sections.refresh()
+
+                ui.timer(60.0, _tick)
         bottom_nav.render(active=t.TAB_MODEL)
+
+
+@ui.refreshable
+def _refreshable_model_sections(backend) -> None:
+    """The mutable content of /model -- everything between sidebar +
+    bottom_nav.  Wrapping in @ui.refreshable lets the page poll the
+    fresh ledger / tracker state every 60 s without rerendering the
+    navbar or sidebar."""
+    history = _all_model_history(backend)
+    _bankroll_card(backend, history)
+    _type_records_card(history)
+    _picks_card(backend)
+    _classifier_card(history)
 
 
 # ── Data helpers ────────────────────────────────────────────────────────────
@@ -81,8 +102,15 @@ def _bankroll_card(backend, history: list[dict]) -> None:
         start, current, at_risk = 1000.0, 1000.0, 0.0
 
     pnl = current - start
-    w = sum(1 for h in history if h.get("result") == "win")
-    l = sum(1 for h in history if h.get("result") == "loss")
+    # W/L comes from the tracker-files aggregate so this number matches
+    # the home OVERALL chip + the RECORDS BY BET TYPE totals by
+    # construction.  The `history` ledger view was top-5-only and
+    # disagreed with the per-classifier accuracy card -- the user's
+    # data-consistency complaint.
+    from pages import home_stats as hs
+    _trk = hs.tracker_records()["overall"]
+    w = _trk["wins"]
+    l = _trk["losses"]
     total = w + l
     pct = f"{(w / total * 100):.1f}%" if total else "—"
 
@@ -128,12 +156,20 @@ def _stat(label: str, value: str, color: str) -> None:
 # ── Section: Records by bet type ────────────────────────────────────────────
 
 def _type_records_card(history: list[dict]) -> None:
+    """Render per-bet-type W/L from the per-classifier tracker files.
+
+    `history` arg is preserved for back-compat with the call site but
+    no longer consulted -- the data comes from
+    home_stats.tracker_records(), the same source the home OVERALL +
+    BEST BET TYPE chips read so the numbers always agree.
+    """
+    from pages import home_stats as hs
+    by_cat = hs.tracker_records()["by_bet_type"]
+
     rows: list[tuple[str, int, int]] = []
-    for _, label, aliases in _CATS:
-        sub = [h for h in history if (h.get("bet_type") or "single") in aliases]
-        w = sum(1 for h in sub if h.get("result") == "win")
-        l = sum(1 for h in sub if h.get("result") == "loss")
-        rows.append((label, w, l))
+    for cat_key, label, _aliases in _CATS:
+        counts = by_cat.get(cat_key) or {"wins": 0, "losses": 0}
+        rows.append((label, counts["wins"], counts["losses"]))
 
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
@@ -143,6 +179,10 @@ def _type_records_card(history: list[dict]) -> None:
             f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
+        ui.label(
+            "Across every settled pick in xgb / lr / nn picks history "
+            "(union across all three classifiers, all three bet types)."
+        ).style(f"font-size: 10.5px; color: {t.TEXT_DIM2}; margin-top: -4px;")
         for label, w, l in rows:
             total = w + l
             pct = f"{(w / total * 100):.1f}%" if total else "—"
