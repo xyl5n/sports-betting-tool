@@ -4527,6 +4527,18 @@ def analyze():
             f"{_with_odds} with odds, {_no_odds} no_odds"
         )
 
+        # Tier 2 player-props refresh -- once per analyze run, gated to
+        # the MLB analyze path because props_client is MLB-only.  Same
+        # fire-and-forget pattern as the existing daily-picks selector
+        # so a props fetch failure can't take down the main analyze
+        # response.
+        try:
+            from src.props_client import run_tier_2_refresh as _props_tier_2
+            _props_tier_2()
+        except Exception as _pe:                                          # noqa: BLE001
+            _eprint(f"ANALYZE [MLB] tier-2 props fetch failed (non-fatal): "
+                    f"{type(_pe).__name__}: {_pe}")
+
         # Force a fresh re-read of today's snapshot back into the
         # in-memory _analysis_state.  The route already mutates that
         # dict in-process (line ~4279), so this is mostly a belt-and-
@@ -8993,6 +9005,35 @@ if not _in_debug_mode or _werkzeug_main:
                 print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET", flush=True, file=sys.stderr)
                 print("STARTUP: auto-settlement job scheduled — every 30 min during 11 AM–2 AM ET window", flush=True, file=sys.stderr)
                 print("STARTUP: midnight reset job scheduled — 12:00 AM ET", flush=True, file=sys.stderr)
+
+                # Player-props Tier 1 refresh -- every 15 min during game
+                # hours (11 AM-11 PM ET).  Tier 1 covers the four high-
+                # volume markets (pitcher_strikeouts, pitcher_outs,
+                # batter_hits, batter_total_bases).  Tier 2 fires once
+                # per day from inside /api/analyze; Tier 3 is on-demand
+                # only.  See src/props_client.py for the full tier
+                # taxonomy + The Odds API quota math.
+                try:
+                    from src.props_client import run_tier_1_refresh as _props_tier_1
+                    _sched.add_job(
+                        _props_tier_1,
+                        _CronTrigger(hour="11-23", minute="0,15,30,45",
+                                     timezone=_ET),
+                        id="auto_props_refresh",
+                        replace_existing=True,
+                        misfire_grace_time=600,
+                        max_instances=1,
+                    )
+                    print(
+                        "STARTUP: auto_props_refresh job scheduled — "
+                        "every 15 min during 11 AM–11 PM ET (Tier 1 markets)",
+                        flush=True, file=sys.stderr,
+                    )
+                except Exception as _pe:
+                    print(
+                        f"STARTUP WARNING: could not add auto_props_refresh: {_pe}",
+                        flush=True, file=sys.stderr,
+                    )
             except Exception as _ae:
                 print(f"STARTUP WARNING: could not add auto-analysis jobs: {_ae}", flush=True, file=sys.stderr)
             print("STARTUP: nightly retrain scheduler running — fires 2 AM ET", flush=True, file=sys.stderr)
@@ -9471,6 +9512,34 @@ def _boot_predictions_warmup() -> None:
 
 
 _boot_predictions_warmup()
+
+# Props subsystem boot sync.  Two pieces:
+#   1. Restore the per-day props payload from Supabase if the local
+#      .cache/props_mlb_YYYY-MM-DD.json was wiped by a Railway redeploy.
+#   2. Restore the pitcher / batter props joblib models from Supabase
+#      same way -- the runtime predictor falls back to a market-only
+#      heuristic when the joblibs are missing, so this is best-effort.
+try:
+    from src.props_client import restore_from_supabase_if_missing as _props_boot
+    _props_boot_did = _props_boot()
+    print(
+        f"STARTUP: props boot sync -- "
+        f"{'restored from Supabase' if _props_boot_did else 'local cache OK'}",
+        flush=True, file=sys.stderr,
+    )
+except Exception as _pe:
+    print(f"STARTUP WARNING: props boot sync failed: {_pe}",
+          flush=True, file=sys.stderr)
+try:
+    from src.props_model import restore_models_from_supabase as _props_models_boot
+    _props_models_status = _props_models_boot()
+    print(
+        f"STARTUP: props joblib restore -- {_props_models_status}",
+        flush=True, file=sys.stderr,
+    )
+except Exception as _pe:
+    print(f"STARTUP WARNING: props joblib restore failed: {_pe}",
+          flush=True, file=sys.stderr)
 
 print("STARTUP: app ready", flush=True, file=sys.stderr)
 

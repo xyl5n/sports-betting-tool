@@ -29,6 +29,7 @@ from . import theme as t
 _NAV_LINKS = (
     ("Home",         t.TAB_HOME,    "/"),
     ("Sports",       t.TAB_SPORTS,  "/sports/mlb"),
+    ("Props",        t.TAB_PROPS,   "/props"),
     ("AI Breakdown", t.TAB_AI,      "/ai"),
     ("Model",        t.TAB_MODEL,   "/model"),
     ("My Bets",      t.TAB_MYBETS,  "/mybets"),
