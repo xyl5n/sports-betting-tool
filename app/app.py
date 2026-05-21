@@ -7337,11 +7337,58 @@ def _model_cache_boot_inventory() -> None:
             continue
         if _persist.try_download(Path(r["path"])):
             n_downloaded += 1
+
+    # Pre-upload every file that exists locally but is MISSING from
+    # Supabase.  PR #67 wired upload() into _train so newly-trained
+    # models always land in Supabase, BUT for any model file that was
+    # already on disk when #67 first deployed, train_or_load took the
+    # LOAD path (model_path.exists() == True) and never invoked the
+    # upload helper.  That left those files stuck local-only -- a
+    # Railway redeploy wipes them and the next boot has to retrain
+    # from scratch.  This loop closes the gap by force-uploading any
+    # local file that doesn't have a Supabase counterpart.  Idempotent:
+    # once a file is in Supabase, the inventory check skips it next
+    # boot.
+    n_uploaded = 0
+    for r in rows:
+        if not r["exists_locally"]:
+            continue
+        if r["supabase_present"]:
+            continue
+        if not r["supabase_on"]:
+            continue
+        if _persist.upload(Path(r["path"])):
+            n_uploaded += 1
+
     print(
         f"MODEL CACHE INVENTORY: pre-downloaded {n_downloaded} "
-        f"file(s) from Supabase",
+        f"file(s) from Supabase, pre-uploaded {n_uploaded} "
+        f"file(s) to Supabase",
         flush=True, file=sys.stderr,
     )
+
+    # If we did anything mutative, print a fresh inventory so the user
+    # can confirm local + supabase columns now agree.  Skipped on
+    # steady-state boots where nothing was transferred.
+    if n_downloaded or n_uploaded:
+        print(
+            "MODEL CACHE INVENTORY: post-sync view",
+            flush=True, file=sys.stderr,
+        )
+        for r in _persist.inventory(model_paths):
+            local_s = (
+                f"local={r['local_size_bytes']:,}B"
+                if r["exists_locally"] else "local=MISSING"
+            )
+            if r["supabase_on"]:
+                sb_s = (
+                    f"supabase={r['supabase_size']:,}B"
+                    if r["supabase_present"] else "supabase=MISSING"
+                )
+            else:
+                sb_s = "supabase=OFF"
+            print(f"  MODEL CACHE: {r['path']}  {local_s}  {sb_s}",
+                  flush=True, file=sys.stderr)
 
 
 _model_cache_boot_inventory()
