@@ -164,6 +164,14 @@ def _picks_card(backend) -> None:
     except Exception:                                                     # noqa: BLE001
         picks = {}
 
+    # Build a result index keyed by (game_id, bet_type) -> ledger history
+    # row.  Lets _pick_row look up the settled outcome + P&L without
+    # reloading both ledgers per row.  We accept that a pick in
+    # daily_picks.json without a matching settled bet (e.g. not yet
+    # tracked, or in open_bets) just won't get a result -- it stays
+    # neutral.
+    result_index = _build_result_index(backend)
+
     ui.label("TODAY'S MODEL PICKS").style(
         f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
         f"color: {t.TEXT_DIM2};"
@@ -189,7 +197,26 @@ def _picks_card(backend) -> None:
                     f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
                 )
             for p in arr:
-                _pick_row(p, cat_key)
+                _pick_row(p, cat_key, result_index)
+
+
+def _build_result_index(backend) -> dict[tuple[str, str], dict]:
+    """Walk both ledger history lists and return {(game_id, bet_type): bet}
+    so _pick_row can look up the settled result + P&L for each daily
+    pick.  Empty dict on any read error -- picks just won't get colored."""
+    out: dict[tuple[str, str], dict] = {}
+    for path in ("data/ledger.json", "data/wnba_ledger.json"):
+        try:
+            led = backend.Ledger(path=path, starting_bankroll=1000.0)
+        except Exception:                                                 # noqa: BLE001
+            continue
+        for h in (led.data.get("history") or []):
+            gid = h.get("game_id")
+            bt  = h.get("bet_type") or "single"
+            if not gid:
+                continue
+            out[(str(gid), str(bt))] = h
+    return out
 
     if not any_rendered:
         with ui.column().classes("w-full").style(
@@ -201,7 +228,9 @@ def _picks_card(backend) -> None:
             )
 
 
-def _pick_row(p: dict, cat_key: str) -> None:
+def _pick_row(
+    p: dict, cat_key: str, result_index: dict[tuple[str, str], dict] | None = None,
+) -> None:
     rank   = p.get("rank", "·")
     team   = p.get("team", "—")
     sport  = (p.get("sport_label") or p.get("sport") or "").upper()
@@ -209,7 +238,6 @@ def _pick_row(p: dict, cat_key: str) -> None:
     odds   = p.get("odds")
     odds_s = f"+{odds}" if isinstance(odds, (int, float)) and odds > 0 else f"{odds}"
     amt    = p.get("model_amount")
-    amt_s  = f"${float(amt):.0f}" if amt is not None else "—"
     line   = p.get("prop_line")
     line_s = ""
     if cat_key == "run_line_spread" and line is not None:
@@ -220,6 +248,47 @@ def _pick_row(p: dict, cat_key: str) -> None:
             line_s = ""
     below = p.get("below_threshold")
 
+    # Resolve settled result from the ledger-history index built once
+    # in _picks_card.  daily_picks rows expose bet_type via category
+    # aliases (single / run_line+spread / totals); we use the first
+    # alias each lookup tries, then fall back to "single" so a row
+    # without an explicit bet_type still matches the moneyline path.
+    aliases = next((a for k, _, a in _CATS if k == cat_key), ("single",))
+    gid     = str(p.get("game_id") or p.get("id") or "")
+    hist    = None
+    if gid and result_index:
+        for bt in aliases:
+            hist = result_index.get((gid, bt))
+            if hist is not None:
+                break
+    result = (hist or {}).get("result", "").lower() if hist else ""
+
+    # Color treatment per user spec, mirroring _bet_row in mybets.py:
+    #   win   -> team text + amount column green; amount column shows
+    #            net profit from ledger's model_pnl (e.g. +$30.00).
+    #   loss  -> team text + amount column red; amount column shows
+    #            stake as negative (e.g. -$20.00).
+    #   push  -> neutral text, amount $0.00.
+    #   pending (no result row in history) -> default neutral.
+    stake = float(hist.get("model_amount") if hist else (amt or 0)) or 0.0
+    pnl   = float((hist or {}).get("model_pnl") or 0)
+    if result == "win":
+        team_color   = t.POS
+        amount_color = t.POS
+        amount_text  = f"+${pnl:.2f}"
+    elif result == "loss":
+        team_color   = t.NEG
+        amount_color = t.NEG
+        amount_text  = f"-${stake:.2f}"
+    elif result == "push":
+        team_color   = t.TEXT
+        amount_color = t.TEXT_DIM
+        amount_text  = "$0.00"
+    else:
+        team_color   = t.TEXT
+        amount_color = t.TEXT
+        amount_text  = f"${float(amt):.0f}" if amt is not None else "—"
+
     with ui.row().classes("items-center w-full").style(
         f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT}; gap: 10px;"
     ):
@@ -229,7 +298,7 @@ def _pick_row(p: dict, cat_key: str) -> None:
         )
         with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
             ui.label(f"{team}{line_s}").style(
-                f"font-size: 13px; font-weight: 700; color: {t.TEXT}; "
+                f"font-size: 13px; font-weight: 700; color: {team_color}; "
                 f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
             if below:
@@ -247,7 +316,9 @@ def _pick_row(p: dict, cat_key: str) -> None:
                 f"font-size: 12px; font-weight: 700; color: {t.PRIMARY};"
             )
             ui.label(odds_s).style(f"font-size: 11px; color: {t.TEXT_DIM};")
-            ui.label(amt_s).style(f"font-size: 12px; font-weight: 700; color: {t.TEXT};")
+            ui.label(amount_text).style(
+                f"font-size: 12px; font-weight: 700; color: {amount_color};"
+            )
 
 
 # ── Section: Per-classifier accuracy ────────────────────────────────────────
