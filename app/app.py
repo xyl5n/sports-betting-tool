@@ -8338,6 +8338,98 @@ def _boot_health_report() -> None:
 
 _boot_health_report()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Boot-time no-odds prediction warmup
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Midnight reset pre-computes a full slate of no-odds predictions and
+# persists them to Supabase under the "no_odds" date sentinel.  Two cases
+# leave the cache empty and the user sees blank prediction cards on
+# launch:
+#
+#   1.  Fresh Railway deploy that happens between two midnight runs --
+#       the container started AFTER the last midnight job and won't see
+#       a fresh prefetch until the next 00:00 ET.
+#   2.  Supabase outage during the last midnight run -- the cache row
+#       never landed.
+#
+# This boot hook fixes both: spawn a daemon thread that, after the rest
+# of boot finishes, checks today's cache and triggers a prefetch when
+# it's missing.  Runs in the background so we don't block uvicorn
+# accepting the first HTTP request -- the predictions land 30-90s
+# later, by which time most users haven't navigated past /home yet.
+
+def _boot_predictions_warmup() -> None:
+    """Background-thread entry point: ensures today's no-odds predictions
+    exist in Supabase for both sports on every boot, not just midnight.
+
+    Each sport's prefetch is wrapped so one slow / failing sport
+    doesn't block the other (e.g. ESPN slowness shouldn't keep MLB
+    predictions stuck)."""
+    import threading as _th
+    import time as _time
+
+    def _run() -> None:
+        # Tiny pause so the [BOOT HEALTH REPORT] block finishes printing
+        # before the prefetch log lines start interleaving.
+        _time.sleep(2)
+
+        today = _today_et()
+        try:
+            from src import db as _db
+            sb_on = _db.is_supabase()
+        except Exception:                                                  # noqa: BLE001
+            sb_on = False
+
+        _eprint(
+            f"BOOT WARMUP: checking no-odds predictions for {today} "
+            f"(supabase_on={sb_on})..."
+        )
+
+        for sport in ("mlb", "wnba"):
+            try:
+                cached = _read_no_odds_predictions(sport, today)
+                if cached:
+                    _eprint(
+                        f"BOOT WARMUP [{sport.upper()}]: {len(cached)} "
+                        f"cached prediction(s) found -- skipping prefetch"
+                    )
+                    continue
+                _eprint(
+                    f"BOOT WARMUP [{sport.upper()}]: cache empty for "
+                    f"{today}; running on-boot prefetch..."
+                )
+                preds = _prefetch_no_odds_predictions(sport, today)
+                _eprint(
+                    f"BOOT WARMUP [{sport.upper()}]: prefetched "
+                    f"{len(preds)} prediction(s)"
+                )
+            except Exception as exc:                                       # noqa: BLE001
+                _eprint(
+                    f"BOOT WARMUP [{sport.upper()}]: failed -- "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        # Belt-and-suspenders: clear the negative-cache so any
+        # transient failure during the warmup doesn't pin the
+        # predictor as permanently unavailable for the rest of the
+        # container's life.  Subsequent /api/schedule requests will
+        # try again on demand if the warmup didn't populate the
+        # Supabase cache.
+        for sport in ("mlb", "wnba"):
+            _no_odds_predictor_failed[sport] = False
+
+    _th.Thread(target=_run, name="boot-pred-warmup", daemon=True).start()
+    _eprint(
+        "BOOT WARMUP: prediction-warmup thread started (predictions "
+        "will land in 30-90s; UI shows cached predictions immediately "
+        "if Supabase has them)."
+    )
+
+
+_boot_predictions_warmup()
+
 print("STARTUP: app ready", flush=True, file=sys.stderr)
 
 
