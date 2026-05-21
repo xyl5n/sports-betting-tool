@@ -470,6 +470,57 @@ class Ledger:
                 won = (margin > 0) == (side == "home")
                 result = "win" if won else "loss"
 
+            # ── Per-bet audit log: prints the inputs and the computed result
+            #    to stderr so every settled bet leaves a verifiable trail.
+            #    Reads like:
+            #       SETTLEMENT-AUDIT [MLB]: ML home Yankees | Yankees 6 - 3 Red Sox
+            #                              | margin=+3 -> WIN
+            #       SETTLEMENT-AUDIT [MLB]: RL home Yankees | line=-1.5
+            #                              | margin=+3 vs +1.5 -> WIN
+            #       SETTLEMENT-AUDIT [MLB]: TOT over | line=8.5
+            #                              | total=9 -> WIN
+            try:
+                import sys as _audit_sys
+                _short_bt = {
+                    "single":   "ML",
+                    "run_line": "RL",
+                    "spread":   "SPR",
+                    "totals":   "TOT",
+                }.get(bet_type, bet_type.upper())
+                _sport_tag = (
+                    "WNBA" if (bet.get("sport_key") or "").startswith("basketball")
+                    else "MLB"
+                )
+                _away = bet.get("away_team", "?")
+                _home = bet.get("home_team", "?")
+                _team = bet.get("bet_team", "?")
+                if bet_type == "totals":
+                    _audit_sys.stderr.write(
+                        f"SETTLEMENT-AUDIT [{_sport_tag}]: TOT {side} | "
+                        f"line={bet.get('prop_line', 8.5)} | "
+                        f"{_away} {away_runs} - {home_runs} {_home} "
+                        f"total={home_runs + away_runs} -> {result.upper()}\n"
+                    )
+                elif bet_type in ("run_line", "spread"):
+                    _line = bet.get("prop_line", 1.5)
+                    _audit_sys.stderr.write(
+                        f"SETTLEMENT-AUDIT [{_sport_tag}]: {_short_bt} "
+                        f"{side} {_team} | line={'+' if _line >= 0 else ''}{_line} | "
+                        f"{_away} {away_runs} - {home_runs} {_home}  "
+                        f"margin={'+' if margin >= 0 else ''}{margin} "
+                        f"vs {'+' if _line >= 0 else ''}{_line} -> {result.upper()}\n"
+                    )
+                else:
+                    _audit_sys.stderr.write(
+                        f"SETTLEMENT-AUDIT [{_sport_tag}]: ML {side} {_team} | "
+                        f"{_away} {away_runs} - {home_runs} {_home}  "
+                        f"margin={'+' if margin >= 0 else ''}{margin} -> "
+                        f"{result.upper()}\n"
+                    )
+                _audit_sys.stderr.flush()
+            except Exception:                                              # noqa: BLE001
+                pass  # audit log must never break settlement
+
             decimal   = american_to_decimal(bet["american_odds"])
             model_amt = bet.get("model_amount", 0.0)
             conf_amt  = bet.get("confirmed_amount", 0.0)
