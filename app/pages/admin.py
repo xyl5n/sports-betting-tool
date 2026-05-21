@@ -78,6 +78,72 @@ def register(backend) -> None:
 
 
 # ───────────────────────────────────────────────────────────────────────────
+#  Inline status helper -- mobile-friendly replacement for ui.notify.
+#
+#  Every button on /admin renders a sibling status holder right below it.
+#  Calling _show_inline_status(holder, text, kind) fills the holder with
+#  a colored label and schedules a 4 s ui.timer to clear it.  Nothing
+#  overlays the page so other buttons stay tappable on mobile.
+# ───────────────────────────────────────────────────────────────────────────
+
+# Color map shared by every wrapper -- mirrors the ui.notify type names
+# the old code used so existing call sites only need a search-and-replace.
+_STATUS_COLORS: dict[str, str] = {
+    "success":  t.POS,
+    "positive": t.POS,
+    "error":    t.NEG,
+    "negative": t.NEG,
+    "warning":  t.WARN,
+    "ongoing":  t.TEXT_DIM,
+    "info":     t.TEXT_DIM,
+}
+
+
+def _make_status_holder() -> "ui.row":
+    """Return a fresh row used as the per-button status slot.  min-height
+    keeps the surrounding layout stable so the page doesn't reflow when
+    a message appears or fades out."""
+    return ui.row().classes("w-full").style(
+        "min-height: 18px; padding: 2px 0 0 0; gap: 6px; align-items: center;"
+    )
+
+
+def _show_inline_status(holder, text: str, kind: str = "info") -> None:
+    """Render *text* inside *holder* with a color picked from
+    _STATUS_COLORS and schedule a 4-second ui.timer to clear it.
+
+    Replaces ui.notify across the admin page so status messages appear
+    inline next to the button that fired them (mobile-friendly: never
+    overlays other buttons / the navbar).  Each call cancels any
+    previous in-flight timer for the same holder by clearing first.
+    """
+    color = _STATUS_COLORS.get(kind, t.TEXT_DIM)
+    try:
+        holder.clear()
+    except Exception:                                                     # noqa: BLE001
+        pass
+    with holder:
+        ui.label(text).style(
+            f"font-size: 11.5px; line-height: 1.4; color: {color}; "
+            f"font-weight: 600; white-space: normal; word-break: break-word;"
+        )
+
+    def _clear() -> None:
+        try:
+            holder.clear()
+        except Exception:                                                 # noqa: BLE001
+            pass
+
+    try:
+        ui.timer(4.0, _clear, once=True)
+    except Exception:                                                     # noqa: BLE001
+        # ui.timer requires an active client context.  When the user
+        # has already navigated away, the message stays in the (now
+        # orphaned) holder -- harmless.
+        pass
+
+
+# ───────────────────────────────────────────────────────────────────────────
 #  Backend invocation helper -- Flask test client over the imported app
 # ───────────────────────────────────────────────────────────────────────────
 
@@ -164,28 +230,36 @@ def _section_analysis(backend, refresh) -> None:
                 # so the user can pre-emptively grant more even before the
                 # limit hits.  Re-renders the quota row after success so
                 # the new effective_limit is visible immediately.
-                async def _approve():
-                    ok2, data2, _ = await asyncio.to_thread(
-                        _call, backend, "POST",
-                        "/api/admin/odds/approve_additional",
-                    )
-                    if ok2:
-                        ui.notify(
-                            f"Approved +50.  New limit: "
-                            f"{data2.get('effective_limit')} "
-                            f"({data2.get('remaining')} remaining today).",
-                            type="positive",
+                with ui.column().classes("w-full").style(
+                    "gap: 2px; min-width: 0;"
+                ):
+                    approve_status = _make_status_holder()
+                    async def _approve():
+                        print("[ADMIN-BTN] _approve click",
+                              flush=True, file=sys.stderr)
+                        ok2, data2, _ = await asyncio.to_thread(
+                            _call, backend, "POST",
+                            "/api/admin/odds/approve_additional",
                         )
-                        _render_quota()
-                    else:
-                        ui.notify(
-                            f"Approve failed: {data2.get('error') or 'unknown'}",
-                            type="negative",
-                        )
-                ui.button("Approve Additional Odds Pull (+50)",
-                          on_click=_approve) \
-                    .props("no-caps unelevated dense") \
-                    .style(_btn_style("warn"))
+                        if ok2:
+                            _show_inline_status(
+                                approve_status,
+                                f"Approved +50.  New limit: "
+                                f"{data2.get('effective_limit')} "
+                                f"({data2.get('remaining')} remaining today).",
+                                "success",
+                            )
+                            _render_quota()
+                        else:
+                            _show_inline_status(
+                                approve_status,
+                                f"Approve failed: {data2.get('error') or 'unknown'}",
+                                "error",
+                            )
+                    ui.button("Approve Additional Odds Pull (+50)",
+                              on_click=_approve) \
+                        .props("no-caps unelevated dense") \
+                        .style(_btn_style("warn"))
 
         _render_quota()
 
@@ -307,7 +381,11 @@ def _cache_aware_run_button(
     `path` is the synchronous analyze route ("/api/analyze" or
     "/api/wnba/analyze").
     """
-    btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+    with ui.column().classes("w-full").style(
+        "gap: 2px; min-width: 0; flex: 1 1 auto;"
+    ):
+        btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+        status = _make_status_holder()
 
     async def _click():
         print(f"[ADMIN-BTN] _cache_aware_run_button click: {label!r}  "
@@ -337,52 +415,48 @@ def _cache_aware_run_button(
                     f"\n\nThis uses 1 daily quota request.{remaining_s}"
                 )
                 if not proceed:
-                    ui.notify(
+                    _show_inline_status(
+                        status,
                         f"{sport_key.upper()} analysis cancelled.  "
                         f"No API request made.",
-                        type="info",
+                        "info",
                     )
                     return  # finally re-enables the button
+
+            _show_inline_status(status, f"Running {sport_key.upper()} analysis...", "info")
 
             # 3) Run analysis synchronously.  asyncio.to_thread keeps the
             # NiceGUI event loop responsive (button stays in loading
             # state, other clients keep working) while the analyze
-            # pipeline runs on a worker thread.  reconnect_timeout=300
-            # in ui.run() covers WebSocket idle drops if the run is
-            # genuinely slow on a particular day.
+            # pipeline runs on a worker thread.
             ok_a, data_a, status_a = await asyncio.to_thread(
                 _call, backend, "POST", path, body,
             )
             if not ok_a:
-                ui.notify(
+                _show_inline_status(
+                    status,
                     f"{sport_key.upper()} analysis failed: "
                     f"{data_a.get('error') or f'HTTP {status_a}'}",
-                    type="negative", multi_line=True,
+                    "error",
                 )
                 return
 
             n_games = len(data_a.get("results") or [])
 
             # 4) Re-hydrate the in-memory state from disk + refresh the
-            # admin status widgets in place.  No page reload, no
-            # flicker -- the user stays on /admin and sees the cache
-            # pills flip stale->fresh + the last-analyzed timestamp
-            # update.  When they navigate to /home or /sports, those
-            # pages' own hydrate_state() call at render time picks up
-            # the fresh _analysis_state["results"] from disk.
+            # admin status widgets in place.
             try:
                 backend.hydrate_state()
             except Exception as exc:                                       # noqa: BLE001
-                # Don't fail the whole click -- the cache was still
-                # written, the user can manually navigate to see it.
                 print(f"admin: post-run hydrate failed: {exc}", flush=True)
             if refresh_status:
                 refresh_status()
 
-            ui.notify(
+            _show_inline_status(
+                status,
                 f"{sport_key.upper()}: analyzed {n_games} games.  "
                 f"Open Home or Sports to see fresh picks.",
-                type="positive", multi_line=True,
+                "success",
             )
             print(f"[ADMIN-BTN] OK: {label!r} -> {n_games} games",
                   flush=True, file=sys.stderr)
@@ -390,11 +464,9 @@ def _cache_aware_run_button(
             import traceback as _tb
             print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
                   f"{_tb.format_exc()}", flush=True, file=sys.stderr)
-            try:
-                ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
-                          type="negative", multi_line=True)
-            except Exception:                                              # noqa: BLE001
-                pass
+            _show_inline_status(
+                status, f"Click handler error: {type(exc).__name__}: {exc}", "error",
+            )
         finally:
             btn.props(remove="loading"); btn.enable()
 
@@ -406,12 +478,17 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
     MLB and WNBA analyses synchronously back-to-back and reload the
     page.  Same architecture as _cache_aware_run_button -- no
     background workers, no polling timer."""
-    btn = ui.button("Run Both").props("no-caps unelevated").style(
-        f"background: {t.PRIMARY}; color: {t.BG}; "
-        f"font-weight: 700; padding: 8px 16px; border-radius: {t.RADIUS_SM};"
-    )
+    with ui.column().classes("w-full").style(
+        "gap: 2px; min-width: 0; flex: 1 1 auto;"
+    ):
+        btn = ui.button("Run Both").props("no-caps unelevated").style(
+            f"background: {t.PRIMARY}; color: {t.BG}; "
+            f"font-weight: 700; padding: 8px 16px; border-radius: {t.RADIUS_SM};"
+        )
+        status = _make_status_holder()
 
     async def _click():
+        print("[ADMIN-BTN] _run_both_button click", flush=True, file=sys.stderr)
         btn.props("loading"); btn.disable()
         try:
             # Combined cache check.
@@ -437,13 +514,14 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
                     f"({rem} of {lim} remaining today)."
                 )
                 if not proceed:
-                    ui.notify("Run Both cancelled.  No API requests made.",
-                              type="info")
+                    _show_inline_status(
+                        status, "Run Both cancelled.  No API requests made.", "info",
+                    )
                     return
 
-            # Run both synchronously back-to-back.  Reload only after
-            # the second one returns so the page render sees both
-            # caches populated.
+            _show_inline_status(status, "Running MLB + WNBA analysis...", "info")
+
+            # Run both synchronously back-to-back.
             msgs: list[str] = []
             had_err = False
             for sport_key, sport_path, sport_body in (
@@ -463,9 +541,7 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
                         f"{data_a.get('error') or f'HTTP {status_a}'}"
                     )
 
-            # Re-hydrate + refresh admin widgets in place.  Same
-            # rationale as _cache_aware_run_button -- no flicker,
-            # other pages pick up the fresh state on next render.
+            # Re-hydrate + refresh admin widgets in place.
             try:
                 backend.hydrate_state()
             except Exception as exc:                                       # noqa: BLE001
@@ -474,14 +550,18 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
             if post_refresh:
                 post_refresh()
 
-            ui.notify(
+            _show_inline_status(
+                status,
                 " | ".join(msgs) + ".  Open Home or Sports to see fresh picks.",
-                type="warning" if had_err else "positive",
-                multi_line=True,
+                "error" if had_err else "success",
             )
         except Exception as exc:                                          # noqa: BLE001
-            ui.notify(f"Click handler error: {type(exc).__name__}: {exc}",
-                      type="negative", multi_line=True)
+            import traceback as _tb
+            print(f"[ADMIN-BTN] CRASH: Run Both  {type(exc).__name__}: {exc}\n"
+                  f"{_tb.format_exc()}", flush=True, file=sys.stderr)
+            _show_inline_status(
+                status, f"Click handler error: {type(exc).__name__}: {exc}", "error",
+            )
         finally:
             btn.props(remove="loading"); btn.enable()
 
@@ -892,25 +972,30 @@ def _sharpapi_probe_button(results_holder) -> None:
     """One-shot SharpAPI endpoint + auth-style probe.  Renders the result
     rows into the same `results_holder` the main diagnostics use, so the
     output sits in the user's existing field of view."""
-    btn = ui.button("Probe SharpAPI").props("no-caps unelevated") \
-        .style(_btn_style("default"))
+    with ui.column().classes("w-full").style("gap: 2px; min-width: 0;"):
+        btn = ui.button("Probe SharpAPI").props("no-caps unelevated") \
+            .style(_btn_style("default"))
+        status_holder = _make_status_holder()
 
     async def _click():
+        print("[ADMIN-BTN] _sharpapi_probe_button click",
+              flush=True, file=sys.stderr)
         btn.props("loading"); btn.disable()
         try:
             import os as _os
             key = (_os.environ.get("SHARPAPI_KEY") or "").strip()
             if not key:
-                ui.notify(
+                _show_inline_status(
+                    status_holder,
                     "SHARPAPI_KEY is not set in Railway -- nothing to probe.",
-                    type="warning",
+                    "warning",
                 )
                 return
 
-            ui.notify("Probing SharpAPI endpoints + auth styles...",
-                      type="ongoing")
+            _show_inline_status(
+                status_holder, "Probing SharpAPI endpoints + auth styles...", "info",
+            )
 
-            # Run in a thread so the event loop stays responsive
             def _do():
                 from src.odds_client import SharpApiClient
                 from src.cache import Cache
@@ -919,8 +1004,6 @@ def _sharpapi_probe_button(results_holder) -> None:
 
             rows = await asyncio.to_thread(_do)
 
-            # Render results inline.  Use the same diag-row format so the
-            # output flows directly under the existing diagnostics rows.
             results_holder.clear()
             with results_holder:
                 ui.label(f"SharpAPI probe: {len(rows)} endpoint/auth combos tried").style(
@@ -929,7 +1012,7 @@ def _sharpapi_probe_button(results_holder) -> None:
                 )
                 for r in rows:
                     label  = f"{r['endpoint']}  [{r['auth']}]"
-                    status = (
+                    diag_status = (
                         "ok"   if (r.get("ok") and r.get("status") == 200)
                         else "warn" if (r.get("status") in (200, 401, 403))
                         else "err"
@@ -939,19 +1022,24 @@ def _sharpapi_probe_button(results_holder) -> None:
                         f"status={r.get('status')}  bytes={r.get('bytes')}  "
                         f"body[:400]={sample}"
                     )
-                    _diag_row(label, status, detail)
+                    _diag_row(label, diag_status, detail)
 
-            ok_count  = sum(1 for r in rows if r.get("ok") and r.get("status") == 200)
-            ui.notify(
-                f"SharpAPI probe done: {ok_count}/{len(rows)} returned 200 OK. "
-                f"Look at the rows -- the body samples show what each endpoint "
-                f"actually returns.",
-                type="positive" if ok_count else "warning",
-                multi_line=True,
+            ok_count = sum(1 for r in rows if r.get("ok") and r.get("status") == 200)
+            _show_inline_status(
+                status_holder,
+                f"SharpAPI probe done: {ok_count}/{len(rows)} returned 200 OK.  "
+                f"Body samples below show what each endpoint returns.",
+                "success" if ok_count else "warning",
             )
         except Exception as exc:                                          # noqa: BLE001
-            ui.notify(f"SharpAPI probe failed: {type(exc).__name__}: {exc}",
-                      type="negative", multi_line=True)
+            import traceback as _tb
+            print(f"[ADMIN-BTN] CRASH: Probe SharpAPI  {type(exc).__name__}: {exc}\n"
+                  f"{_tb.format_exc()}", flush=True, file=sys.stderr)
+            _show_inline_status(
+                status_holder,
+                f"SharpAPI probe failed: {type(exc).__name__}: {exc}",
+                "error",
+            )
         finally:
             btn.props(remove="loading"); btn.enable()
 
@@ -1470,40 +1558,46 @@ def _async_button(
     refresh_status=None,
     style: str = "default",
 ) -> None:
-    btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+    # Wrap the button + status holder in a column so the inline message
+    # sits directly under the button and the column flows correctly
+    # whether the parent context is a row or a stack.
+    with ui.column().classes("w-full").style(
+        "gap: 2px; min-width: 0; flex: 1 1 auto;"
+    ):
+        btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+        status = _make_status_holder()
 
     async def _click():
-        # Entry-point print -- always emits to stderr regardless of
-        # whether ui.notify succeeds.  If this line is missing from
-        # Railway logs after a click, the button isn't wired at all.
         print(f"[ADMIN-BTN] _async_button click: {label!r}  path={path}  body={body}",
               flush=True, file=sys.stderr)
         btn.props("loading")
         btn.disable()
         try:
-            ui.notify(spinner_msg, type="ongoing")
+            _show_inline_status(status, spinner_msg, "info")
             ok, data, _ = await asyncio.to_thread(_call, backend, method, path, body)
             if ok:
                 msg = done_msg(data) if callable(done_msg) else (done_msg or "Done.")
                 print(f"[ADMIN-BTN] OK: {label!r} -> {msg!r}",
                       flush=True, file=sys.stderr)
-                ui.notify(msg, type="positive")
+                _show_inline_status(status, msg, "success")
                 if refresh_status:
                     refresh_status()
             else:
                 err = data.get('error') or 'unknown error'
                 print(f"[ADMIN-BTN] FAIL: {label!r} -> {err!r}",
                       flush=True, file=sys.stderr)
-                ui.notify(f"{label} failed: {err}",
-                          type="negative", multi_line=True)
+                _show_inline_status(status, f"{label} failed: {err}", "error")
         except Exception as exc:                                          # noqa: BLE001
             import traceback as _tb
             tb_str = _tb.format_exc()
             print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
                   f"{tb_str}", flush=True, file=sys.stderr)
             try:
-                ui.notify(f"{label} crashed: {type(exc).__name__}: {exc}",
-                          type="negative", multi_line=True)
+                _show_inline_status(
+                    status,
+                    f"{label} crashed: {type(exc).__name__}: {exc}",
+                    "error",
+                )
             except Exception:                                              # noqa: BLE001
                 pass
         finally:
@@ -1521,7 +1615,11 @@ def _confirm_button(
     style: str = "default",
 ) -> None:
     """Button that opens a confirm dialog before firing the request."""
-    btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+    with ui.column().classes("w-full").style(
+        "gap: 2px; min-width: 0; flex: 1 1 auto;"
+    ):
+        btn = ui.button(label).props("no-caps unelevated").style(_btn_style(style))
+        status = _make_status_holder()
 
     async def _click():
         print(f"[ADMIN-BTN] _confirm_button click: {label!r}  path={path}  body={body}",
@@ -1533,11 +1631,9 @@ def _confirm_button(
             print(f"[ADMIN-BTN] CRASH (confirm dialog): {label!r}  "
                   f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}",
                   flush=True, file=sys.stderr)
-            try:
-                ui.notify(f"{label}: confirm dialog crashed: {exc}",
-                          type="negative", multi_line=True)
-            except Exception:                                              # noqa: BLE001
-                pass
+            _show_inline_status(
+                status, f"{label}: confirm dialog crashed: {exc}", "error",
+            )
             return
         if not confirmed:
             print(f"[ADMIN-BTN] {label!r}: confirm cancelled",
@@ -1550,24 +1646,21 @@ def _confirm_button(
                 msg = done_msg(data) if callable(done_msg) else (done_msg or "Done.")
                 print(f"[ADMIN-BTN] OK: {label!r} -> {msg!r}",
                       flush=True, file=sys.stderr)
-                ui.notify(msg, type="positive")
+                _show_inline_status(status, msg, "success")
                 if refresh_status:
                     refresh_status()
             else:
                 err = data.get('error') or 'unknown'
                 print(f"[ADMIN-BTN] FAIL: {label!r} -> {err!r}",
                       flush=True, file=sys.stderr)
-                ui.notify(f"{label} failed: {err}",
-                          type="negative", multi_line=True)
+                _show_inline_status(status, f"{label} failed: {err}", "error")
         except Exception as exc:                                          # noqa: BLE001
             import traceback as _tb
             print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
                   f"{_tb.format_exc()}", flush=True, file=sys.stderr)
-            try:
-                ui.notify(f"{label} crashed: {type(exc).__name__}: {exc}",
-                          type="negative", multi_line=True)
-            except Exception:                                              # noqa: BLE001
-                pass
+            _show_inline_status(
+                status, f"{label} crashed: {type(exc).__name__}: {exc}", "error",
+            )
         finally:
             btn.props(remove="loading"); btn.enable()
 
@@ -1586,7 +1679,11 @@ def _bankroll_button(
         else "/api/ledger/set_bankroll"
     )
 
-    btn = ui.button(label).props("no-caps unelevated").style(_btn_style("default"))
+    with ui.column().classes("w-full").style(
+        "gap: 2px; min-width: 0; flex: 1 1 auto;"
+    ):
+        btn = ui.button(label).props("no-caps unelevated").style(_btn_style("default"))
+        status = _make_status_holder()
 
     async def _click():
         print(f"[ADMIN-BTN] _bankroll_button click: {label!r}  which={which}  path={path}",
@@ -1601,18 +1698,16 @@ def _bankroll_button(
             print(f"[ADMIN-BTN] CRASH (number dialog): {label!r}  "
                   f"{type(exc).__name__}: {exc}\n{_tb.format_exc()}",
                   flush=True, file=sys.stderr)
-            try:
-                ui.notify(f"{label}: number dialog crashed: {exc}",
-                          type="negative", multi_line=True)
-            except Exception:                                              # noqa: BLE001
-                pass
+            _show_inline_status(
+                status, f"{label}: number dialog crashed: {exc}", "error",
+            )
             return
         if value is None:
             print(f"[ADMIN-BTN] {label!r}: number dialog cancelled",
                   flush=True, file=sys.stderr)
             return
         if value <= 0:
-            ui.notify("Bankroll must be greater than 0.", type="warning")
+            _show_inline_status(status, "Bankroll must be greater than 0.", "warning")
             return
         btn.props("loading"); btn.disable()
         try:
@@ -1621,24 +1716,21 @@ def _bankroll_button(
             if ok:
                 print(f"[ADMIN-BTN] OK: {label!r} -> bankroll={value}",
                       flush=True, file=sys.stderr)
-                ui.notify(done_msg, type="positive")
+                _show_inline_status(status, done_msg, "success")
                 if refresh_status:
                     refresh_status()
             else:
                 err = data.get('error') or 'unknown'
                 print(f"[ADMIN-BTN] FAIL: {label!r} -> {err!r}",
                       flush=True, file=sys.stderr)
-                ui.notify(f"Failed: {err}",
-                          type="negative", multi_line=True)
+                _show_inline_status(status, f"Failed: {err}", "error")
         except Exception as exc:                                          # noqa: BLE001
             import traceback as _tb
             print(f"[ADMIN-BTN] CRASH: {label!r}  {type(exc).__name__}: {exc}\n"
                   f"{_tb.format_exc()}", flush=True, file=sys.stderr)
-            try:
-                ui.notify(f"{label} crashed: {type(exc).__name__}: {exc}",
-                          type="negative", multi_line=True)
-            except Exception:                                              # noqa: BLE001
-                pass
+            _show_inline_status(
+                status, f"{label} crashed: {type(exc).__name__}: {exc}", "error",
+            )
         finally:
             btn.props(remove="loading"); btn.enable()
 
@@ -1647,28 +1739,38 @@ def _bankroll_button(
 
 def _toggle_row(backend, label: str, sub: str, field: str, initial: bool) -> None:
     """Per-sport auto-pick toggle backed by /api/admin/model/settings."""
-    with ui.row().classes("items-center w-full justify-between").style(
-        f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT};"
+    with ui.column().classes("w-full").style(
+        f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT}; gap: 2px;"
     ):
-        with ui.column().style("gap: 2px;"):
-            ui.label(label).style(f"color: {t.TEXT}; font-size: 13px; font-weight: 600;")
-            ui.label(sub).style(f"color: {t.TEXT_DIM}; font-size: 11px;")
-        sw = ui.switch(value=initial)
+        with ui.row().classes("items-center w-full justify-between"):
+            with ui.column().style("gap: 2px;"):
+                ui.label(label).style(f"color: {t.TEXT}; font-size: 13px; font-weight: 600;")
+                ui.label(sub).style(f"color: {t.TEXT_DIM}; font-size: 11px;")
+            sw = ui.switch(value=initial)
+        status = _make_status_holder()
 
         async def _on_change(e):
+            print(f"[ADMIN-BTN] _toggle_row change: {label!r} -> {bool(e.value)}",
+                  flush=True, file=sys.stderr)
             try:
                 body = {field: bool(e.value)}
                 ok, data, _ = await asyncio.to_thread(
                     _call, backend, "POST", "/api/admin/model/settings", body)
                 if ok:
-                    ui.notify(f"{label} {'enabled' if e.value else 'disabled'}.",
-                              type="positive")
+                    _show_inline_status(
+                        status,
+                        f"{label} {'enabled' if e.value else 'disabled'}.",
+                        "success",
+                    )
                 else:
-                    ui.notify(f"Toggle failed: {data.get('error') or 'unknown'}",
-                              type="negative")
+                    _show_inline_status(
+                        status,
+                        f"Toggle failed: {data.get('error') or 'unknown'}",
+                        "error",
+                    )
                     sw.value = not e.value
             except Exception as exc:                                      # noqa: BLE001
-                ui.notify(f"Toggle failed: {exc}", type="negative")
+                _show_inline_status(status, f"Toggle failed: {exc}", "error")
                 sw.value = not e.value
 
         sw.on_value_change(_on_change)
@@ -1679,22 +1781,26 @@ def _number_row(backend, label: str, sub: str, field: str,
     """Persisted integer setting -- mirrors _toggle_row but for ints.
     Saves via the same /api/admin/model/settings endpoint; the backend's
     _save_model_settings preserves int type for any default that's int."""
-    with ui.row().classes("items-center w-full justify-between").style(
-        f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT};"
+    with ui.column().classes("w-full").style(
+        f"padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT}; gap: 2px;"
     ):
-        with ui.column().style("gap: 2px; min-width: 0; flex: 1;"):
-            ui.label(label).style(f"color: {t.TEXT}; font-size: 13px; font-weight: 600;")
-            ui.label(sub).style(
-                f"color: {t.TEXT_DIM}; font-size: 11px; "
-                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-            )
-        num = ui.number(
-            value=int(initial), min=min_value, max=max_value, step=1, format="%.0f",
-        ).style(
-            f"width: 110px; flex-shrink: 0;"
-        ).props("dense")
+        with ui.row().classes("items-center w-full justify-between"):
+            with ui.column().style("gap: 2px; min-width: 0; flex: 1;"):
+                ui.label(label).style(f"color: {t.TEXT}; font-size: 13px; font-weight: 600;")
+                ui.label(sub).style(
+                    f"color: {t.TEXT_DIM}; font-size: 11px; "
+                    f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+                )
+            num = ui.number(
+                value=int(initial), min=min_value, max=max_value, step=1, format="%.0f",
+            ).style(
+                f"width: 110px; flex-shrink: 0;"
+            ).props("dense")
+        status = _make_status_holder()
 
         async def _on_change(e):
+            print(f"[ADMIN-BTN] _number_row change: {label!r}",
+                  flush=True, file=sys.stderr)
             try:
                 v = int(e.value) if e.value is not None else initial
             except (TypeError, ValueError):
@@ -1705,12 +1811,15 @@ def _number_row(backend, label: str, sub: str, field: str,
                 ok, data, _ = await asyncio.to_thread(
                     _call, backend, "POST", "/api/admin/model/settings", body)
                 if ok:
-                    ui.notify(f"{label} set to {v}.", type="positive")
+                    _show_inline_status(status, f"{label} set to {v}.", "success")
                 else:
-                    ui.notify(f"Save failed: {data.get('error') or 'unknown'}",
-                              type="negative")
+                    _show_inline_status(
+                        status,
+                        f"Save failed: {data.get('error') or 'unknown'}",
+                        "error",
+                    )
             except Exception as exc:                                      # noqa: BLE001
-                ui.notify(f"Save failed: {exc}", type="negative")
+                _show_inline_status(status, f"Save failed: {exc}", "error")
 
         num.on_value_change(_on_change)
 
@@ -1759,12 +1868,19 @@ async def _number_dialog(title: str, placeholder: str) -> float | None:
         )
         amount = ui.number(label="Amount ($)", placeholder=placeholder,
                            min=0, step=1, format="%.2f").style("width: 100%;")
+        # Inline validation message -- ui.notify is banned on /admin so
+        # we render the warning under the input instead.
+        dialog_status = ui.label("").style(
+            f"font-size: 11.5px; font-weight: 600; color: {t.WARN}; "
+            f"min-height: 16px; line-height: 1.3;"
+        )
 
         def _save():
             v = amount.value
             if v is None:
-                ui.notify("Enter a number.", type="warning")
+                dialog_status.text = "Enter a number."
                 return
+            dialog_status.text = ""
             dlg.submit(float(v))
 
         with ui.row().classes("w-full justify-end").style("gap: 8px; margin-top: 8px;"):
