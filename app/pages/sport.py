@@ -117,6 +117,16 @@ def _render_sport(backend, sport: str) -> None:
 
         ui.timer(_LIVE_POLL_INTERVAL, _tick)
 
+        # Analysis-completion watcher.  Self-canceling: fires once when
+        # an analyze running ELSEWHERE (admin click in another tab,
+        # 8 AM scheduler, manual API call) writes a fresh completed_at
+        # to backend._analysis_progress, then refreshes the grid in
+        # place and cancels itself.  Avoids the "Timer cancelled because
+        # client is not connected" noise from long-running polling
+        # timers -- bounded by a 5-minute TTL so the watcher stops
+        # polling even if no analyze ever completes.
+        _completion_watcher(backend)
+
     bottom_nav.render(active=t.TAB_SPORTS)
 
 
@@ -159,6 +169,78 @@ def _odds_quota_banner(backend) -> None:
             ).style(
                 f"font-size: 11.5px; color: {t.TEXT_DIM};"
             )
+
+
+def _completion_watcher(backend) -> None:
+    """Self-canceling ui.timer that refreshes the game grid when an
+    analyze completes elsewhere.
+
+    Polls backend._analysis_progress (the module-level dict populated
+    by /api/analyze workers) every 2 s.  When any sport's completed_at
+    timestamp exceeds the page's mount_ts, refreshes the grid in place
+    and cancels itself -- one refresh per page session is enough.
+
+    Bounded by a 5-minute TTL (150 ticks at 2 s) so the timer always
+    stops eventually even when no analyze ever runs -- this is what
+    "short-lived" in the user spec means.  Without a TTL the timer
+    would keep firing the (cheap) callback forever and emit "Timer
+    cancelled because client is not connected" noise in Railway logs
+    every time someone navigates away from /sports/*.
+    """
+    import time as _time
+    mount_ts = _time.time()
+    state_ref: dict = {"timer": None, "ticks": 0, "fired": False}
+    _MAX_TICKS = 150   # 150 ticks * 2 s = 5 minutes
+
+    def _kill() -> None:
+        timer = state_ref.get("timer")
+        if timer is None:
+            return
+        try:
+            timer.deactivate()
+        except Exception:                                                  # noqa: BLE001
+            pass
+        try:
+            timer.delete()
+        except Exception:                                                  # noqa: BLE001
+            pass
+
+    def _tick() -> None:
+        if state_ref["fired"]:
+            return
+        state_ref["ticks"] += 1
+
+        # TTL bound -- stop polling after 5 minutes of no completion.
+        if state_ref["ticks"] >= _MAX_TICKS:
+            state_ref["fired"] = True
+            _kill()
+            return
+
+        try:
+            progress = getattr(backend, "_analysis_progress", None)
+        except Exception:                                                  # noqa: BLE001
+            return
+        if not isinstance(progress, dict):
+            return
+
+        for sport_key, row in progress.items():
+            ts = (row or {}).get("completed_at")
+            if not ts:
+                continue
+            try:
+                completed = float(ts)
+            except (TypeError, ValueError):
+                continue
+            if completed > mount_ts:
+                state_ref["fired"] = True
+                try:
+                    _refreshable_grid.refresh()
+                except Exception:                                          # noqa: BLE001
+                    pass
+                _kill()
+                return
+
+    state_ref["timer"] = ui.timer(2.0, _tick, active=True)
 
 
 @ui.refreshable
