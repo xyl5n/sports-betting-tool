@@ -391,6 +391,64 @@ def cache_delete_stale(today: str) -> int:
         return 0
 
 
+def cache_delete_keys_like(substrings: list[str]) -> tuple[int, list[str]]:
+    """Delete every app_cache row whose `key` contains any of the given
+    substrings (case-insensitive).  Returns (count, deleted_keys).
+
+    Used by /api/admin/model/reset to wipe stray pick / snapshot /
+    analysis cache rows whose exact keys we don't track centrally (e.g.
+    keys added by future code paths).  Two-step impl: list matching
+    keys first so we can return them for the audit log, then delete
+    each in turn.
+
+    Substring match uses ilike with `%foo%` wildcards.  Empty inputs
+    short-circuit to (0, []).
+    """
+    if _mode != "supabase" or _client is None:
+        return 0, []
+    cleaned = [s for s in (substrings or []) if isinstance(s, str) and s.strip()]
+    if not cleaned:
+        return 0, []
+
+    deleted_keys: list[str] = []
+    try:
+        # Two-pass: list keys (one query per substring, ORed together
+        # via Python set), then delete in one batched call.
+        seen: set[str] = set()
+        for sub in cleaned:
+            try:
+                resp = (
+                    _client.table("app_cache")
+                    .select("key")
+                    .ilike("key", f"%{sub}%")
+                    .execute()
+                )
+            except Exception as exc:                                       # noqa: BLE001
+                _logger.warning(
+                    "cache_delete_keys_like list(sub=%s) failed: %s", sub, exc,
+                )
+                continue
+            for row in (resp.data or []):
+                k = row.get("key")
+                if k:
+                    seen.add(str(k))
+        if not seen:
+            return 0, []
+        # Delete each key individually -- supabase-py doesn't expose a
+        # single batched delete-by-list across rows, and the row count
+        # is small enough that per-key delete stays under a second.
+        for k in sorted(seen):
+            try:
+                _client.table("app_cache").delete().eq("key", k).execute()
+                deleted_keys.append(k)
+            except Exception as exc:                                       # noqa: BLE001
+                _logger.warning("cache_delete_keys_like del(%s) failed: %s", k, exc)
+        return len(deleted_keys), deleted_keys
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("cache_delete_keys_like failed: %s", exc)
+        return len(deleted_keys), deleted_keys
+
+
 # ════════════════════════════════════════════════════════════════
 #  Serialization helpers
 # ════════════════════════════════════════════════════════════════
