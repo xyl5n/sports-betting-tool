@@ -187,6 +187,33 @@ def list_bets(
         return []
 
 
+def delete_bets_bulk(
+    sport:     Optional[str] = None,
+    confirmed: Optional[bool] = None,
+) -> int:
+    """Delete bets matching the given filters in one round-trip.  Used by
+    the /api/admin/reset/* endpoints to wipe the model or personal slate
+    out of Supabase to mirror the local ledger truncation.
+
+    Returns the number of rows deleted (0 on Supabase off / error)."""
+    if not is_supabase():
+        return 0
+    try:
+        q = _client.table("bets").delete()
+        if sport is not None:
+            q = q.eq("sport", sport.lower())
+        if confirmed is not None:
+            q = q.eq("confirmed", bool(confirmed))
+        resp = q.execute()
+        return len(resp.data or [])
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning(
+            "supabase delete_bets_bulk(sport=%s, confirmed=%s) failed: %s",
+            sport, confirmed, exc,
+        )
+        return 0
+
+
 # ════════════════════════════════════════════════════════════════
 #  bankroll
 # ════════════════════════════════════════════════════════════════
@@ -247,6 +274,45 @@ def list_records(sport: Optional[str] = None) -> list[dict]:
     except Exception as exc:                # noqa: BLE001
         _logger.warning("supabase list_records failed: %s", exc)
         return []
+
+
+def delete_records(sport: Optional[str] = None) -> int:
+    """Clear W/L tally rows from the `records` table.  Used by Reset
+    Model Record so the dashboard's per-(sport, bet_type) counters
+    go back to 0-0 across both local + Supabase.
+
+    Returns rows deleted (0 on Supabase off / error)."""
+    if not is_supabase():
+        return 0
+    try:
+        q = _client.table("records").delete()
+        if sport is not None:
+            q = q.eq("sport", sport.lower())
+        else:
+            # Supabase requires a where-clause on bulk deletes -- use
+            # a tautology that always matches.  Filtering by sport in
+            # the typed call above is the common path; this branch
+            # only runs for the cross-sport wipe.
+            q = q.neq("sport", "__never__")
+        resp = q.execute()
+        return len(resp.data or [])
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase delete_records(sport=%s) failed: %s", sport, exc)
+        return 0
+
+
+def delete_bankroll(sport: str) -> bool:
+    """Drop the bankroll row for `sport`.  Reset-bankroll re-upserts
+    a fresh row after this; deleting first guarantees a clean slate
+    even if the schema gains new columns later."""
+    if not is_supabase():
+        return False
+    try:
+        _client.table("bankroll").delete().eq("sport", (sport or "").lower()).execute()
+        return True
+    except Exception as exc:                # noqa: BLE001
+        _logger.warning("supabase delete_bankroll(%s) failed: %s", sport, exc)
+        return False
 
 
 # ════════════════════════════════════════════════════════════════

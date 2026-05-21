@@ -321,6 +321,25 @@ class TotalsModel:
         except Exception:
             pass
 
+        # ── Silent LR-only pick recorder for totals -- closes the gap where
+        #    LR was tracked for ML + RL but not totals.  Same .cache/lr_picks_history.json
+        #    file all three bet types write to; new entries get bet_type="totals"
+        #    and a "line" field that settle_lr_pick reads to compute O/U
+        #    correctness against (home+away).
+        try:
+            from .lr_picks_tracker import record_lr_pick_totals
+            record_lr_pick_totals(
+                sport            = "MLB",
+                home_team        = game.get("home_team", ""),
+                away_team        = game.get("away_team", ""),
+                game_date        = (game.get("commence_time") or "")[:10],
+                predicted_total  = pred_lr,
+                market_line      = line,
+                game_id          = game.get("id") or game.get("game_id"),
+            )
+        except Exception:
+            pass
+
         if nn_pred is not None:
             pred_nn = nn_pred * park_factor
             # ── NN-only pick logging (silent side-channel) ────────────────
