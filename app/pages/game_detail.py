@@ -819,10 +819,20 @@ def _game_context_rows(ser: dict) -> None:
     line_move = (ser.get("meta") or {}).get("line_movement")
 
     rows: list[tuple[str, str]] = []
-    rows.append((
-        "Ballpark run factor",
-        f"{float(park):.2f}" if isinstance(park, (int, float)) else "—",
-    ))
+    # park_run_factor is 100-base (>100 = hitter-friendly, <100 =
+    # pitcher-friendly).  Render as an integer with a hitter/pitcher
+    # tag so the number is meaningful at a glance.
+    if isinstance(park, (int, float)):
+        pv = int(round(float(park)))
+        if pv > 100:
+            park_label = f"{pv} (hitter-friendly)"
+        elif pv < 100:
+            park_label = f"{pv} (pitcher-friendly)"
+        else:
+            park_label = f"{pv} (neutral)"
+    else:
+        park_label = "—"
+    rows.append(("Ballpark run factor", park_label))
     if wx:
         temp = wx.get("temperature")
         wind = wx.get("wind_speed")

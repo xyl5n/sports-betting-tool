@@ -1504,25 +1504,46 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
     away_sp = meta.get("away_sp") or {}
     if home_sp:
         out["home_sp"] = {
-            "era":    round(float(home_sp.get("era", 4.5)), 2),
-            "whip":   round(float(home_sp.get("whip", 1.3)), 2),
-            "k_rate": round(float(home_sp.get("k_rate", 0.215)) * 100, 1),
-            "hand":   "LHP" if home_sp.get("hand") == 1 else "RHP",
-            "rest":   int(home_sp.get("rest", 4)),
+            "era":       round(float(home_sp.get("era", 4.5)), 2),
+            "whip":      round(float(home_sp.get("whip", 1.3)), 2),
+            # k_rate stays as a fraction (e.g. 0.214 = 21.4%).  The
+            # matchup page formats it with {:.1%} which multiplies by
+            # 100 itself -- the prior `* 100` here double-converted
+            # and produced "2140%" instead of "21.4%".
+            "k_rate":    round(float(home_sp.get("k_rate", 0.215)), 4),
+            "bb9":       round(float(home_sp.get("bb9", 3.30)), 2),
+            "era_home":  round(float(home_sp.get("era_home", home_sp.get("era", 4.5))), 2),
+            "era_away":  round(float(home_sp.get("era_away", home_sp.get("era", 4.5))), 2),
+            "last3_era": round(float(home_sp.get("last3_era", home_sp.get("era", 4.5))), 2),
+            "hand":      "LHP" if home_sp.get("hand") == 1 else "RHP",
+            "rest":      int(home_sp.get("rest", 4)),
         }
     if away_sp:
         out["away_sp"] = {
-            "era":    round(float(away_sp.get("era", 4.5)), 2),
-            "whip":   round(float(away_sp.get("whip", 1.3)), 2),
-            "k_rate": round(float(away_sp.get("k_rate", 0.215)) * 100, 1),
-            "hand":   "LHP" if away_sp.get("hand") == 1 else "RHP",
-            "rest":   int(away_sp.get("rest", 4)),
+            "era":       round(float(away_sp.get("era", 4.5)), 2),
+            "whip":      round(float(away_sp.get("whip", 1.3)), 2),
+            "k_rate":    round(float(away_sp.get("k_rate", 0.215)), 4),
+            "bb9":       round(float(away_sp.get("bb9", 3.30)), 2),
+            "era_home":  round(float(away_sp.get("era_home", away_sp.get("era", 4.5))), 2),
+            "era_away":  round(float(away_sp.get("era_away", away_sp.get("era", 4.5))), 2),
+            "last3_era": round(float(away_sp.get("last3_era", away_sp.get("era", 4.5))), 2),
+            "hand":      "LHP" if away_sp.get("hand") == 1 else "RHP",
+            "rest":      int(away_sp.get("rest", 4)),
         }
 
     # Ballpark & weather
+    # park_run_factor is stored 1.000-base in src/park_factors.py
+    # (1.000 = league average, used directly by the totals model as a
+    # multiplier).  The matchup page wants the FanGraphs / pybaseball
+    # convention: 100-base, where >100 = hitter-friendly and <100 =
+    # pitcher-friendly.  Convert here so the model input is unchanged
+    # but the displayed value reads like park factors anywhere else.
     park_run = meta.get("park_run_factor")
     if park_run is not None:
-        out["park_run_factor"] = round(float(park_run), 3)
+        try:
+            out["park_run_factor"] = int(round(float(park_run) * 100))
+        except (TypeError, ValueError):
+            out["park_run_factor"] = 100
     wx = meta.get("weather") or {}
     if wx:
         out["weather"] = {
