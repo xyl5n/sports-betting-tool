@@ -2488,6 +2488,296 @@ def wnba_schedule_proxy():
     return jsonify(data)
 
 
+# ── Full schedule view: arbitrary date, all games (with or without odds) ─────
+# Used by pages/sport.py's date-nav UI.  Returns a normalized envelope
+# joining the schedule fetch (MLB Stats API / ESPN scoreboard) with any
+# model picks the analyze pipeline produced for the same game.
+#
+# Cache strategy:
+#   - Local Cache  (file-backed, in-memory): 1-hour TTL same as the
+#     existing per-sport schedule proxies.
+#   - Supabase app_cache: 30-day TTL via the "schedule:<sport>:<date>"
+#     key.  The "date" column on app_cache is set to the literal
+#     "schedule" string (not the YYYY-MM-DD) so cache_delete_stale
+#     (which prunes rows where date != today_et) leaves these alone.
+#     Past-date schedules persist indefinitely so historical browsing
+#     stays available across Railway restarts.
+#
+# Picks join:
+#   - When date == today_et:  pull from in-memory _analysis_state /
+#     _wnba_analysis_state which carries the freshest model picks.
+#   - When date < today_et:   join against ledger history (settled
+#     bets) so the game card can show the result + P/L.
+#   - When date > today_et:   no picks (future-dated -- no analysis
+#     has run yet).
+
+def _normalize_mlb_schedule(raw: dict) -> list[dict]:
+    """Convert a raw MLB Stats API schedule response into the same
+    flat list the UI consumes for The Odds API games.  Each game gets
+    a stable id, home/away team names, commence_time ISO string, and
+    status flags.
+    """
+    out: list[dict] = []
+    for date_block in raw.get("dates") or []:
+        for g in date_block.get("games") or []:
+            teams = g.get("teams") or {}
+            home  = (teams.get("home") or {}).get("team") or {}
+            away  = (teams.get("away") or {}).get("team") or {}
+            status = g.get("status") or {}
+            ls     = g.get("linescore") or {}
+            home_runs = ((ls.get("teams") or {}).get("home") or {}).get("runs")
+            away_runs = ((ls.get("teams") or {}).get("away") or {}).get("runs")
+            out.append({
+                "id":             str(g.get("gamePk") or ""),
+                "home_team":      home.get("name") or "",
+                "away_team":      away.get("name") or "",
+                "commence_time":  g.get("gameDate") or "",
+                "status":         status.get("abstractGameState") or "Preview",
+                "detailed_status": status.get("detailedState") or "",
+                "home_score":     home_runs,
+                "away_score":     away_runs,
+            })
+    return out
+
+
+def _normalize_wnba_schedule(raw: dict) -> list[dict]:
+    """Same as _normalize_mlb_schedule but pulls from the
+    already-reshaped ESPN envelope written by
+    _normalize_espn_wnba_scoreboard."""
+    out: list[dict] = []
+    for date_block in raw.get("dates") or []:
+        for g in date_block.get("games") or []:
+            teams = g.get("teams") or {}
+            home  = (teams.get("home") or {}).get("team") or {}
+            away  = (teams.get("away") or {}).get("team") or {}
+            status = g.get("status") or {}
+            ls     = g.get("linescore") or {}
+            home_pts = ((ls.get("teams") or {}).get("home") or {}).get("runs")
+            away_pts = ((ls.get("teams") or {}).get("away") or {}).get("runs")
+            out.append({
+                "id":             str(g.get("gamePk") or ""),
+                "home_team":      home.get("name") or "",
+                "away_team":      away.get("name") or "",
+                "commence_time":  g.get("gameDate") or "",
+                "status":         status.get("abstractGameState") or "Preview",
+                "detailed_status": status.get("detailedState") or "",
+                "home_score":     home_pts,
+                "away_score":     away_pts,
+            })
+    return out
+
+
+def _schedule_cache_key(sport: str, date_str: str) -> str:
+    return f"schedule:{sport}:{date_str}"
+
+
+def _fetch_raw_schedule(sport: str, date_str: str) -> list[dict]:
+    """Live-fetch + normalize one sport's schedule for one ET date.
+
+    Falls back through three layers:
+      1. Local Cache (1 h TTL) -- short-circuit for repeat hits in
+         the same Railway boot.
+      2. Supabase app_cache (no TTL via the "schedule" date sentinel)
+         -- restored after Railway redeploys.
+      3. Live fetch from MLB Stats / ESPN -- last resort.
+
+    Returns the list of normalized game dicts (possibly empty)."""
+    import time as _time
+    import urllib.request as _urlreq
+    import urllib.error  as _urlerr
+
+    sport = sport.lower()
+    local_key = f"normalized_schedule_{sport}_{date_str}"
+
+    # 1) Local 1-hour memory cache
+    cached_local = _cache.get(local_key, ttl=3600)
+    if cached_local is not None:
+        return cached_local
+
+    # 2) Supabase app_cache
+    try:
+        from src import db as _db
+        row = _db.cache_get(_schedule_cache_key(sport, date_str))
+        if row and isinstance(row.get("data"), dict):
+            games = row["data"].get("games") or []
+            if isinstance(games, list):
+                _cache.set(local_key, games)
+                return games
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    # 3) Live fetch
+    if sport == "mlb":
+        url = f"{_MLB_STATS_BASE}/schedule?sportId=1&date={date_str}&hydrate=linescore"
+    elif sport == "wnba":
+        espn_date = date_str.replace("-", "")
+        url = f"{_ESPN_WNBA_BASE}/scoreboard?dates={espn_date}"
+    else:
+        return []
+
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "SportsBettingApp/1.0"})
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except (_urlerr.URLError, Exception) as exc:                          # noqa: BLE001
+        _logger.warning("schedule fetch %s %s failed: %s", sport, date_str, exc)
+        return []
+
+    if sport == "mlb":
+        games = _normalize_mlb_schedule(raw)
+    else:
+        games = _normalize_wnba_schedule(_normalize_espn_wnba_scoreboard(raw))
+
+    # Write back both caches.  Supabase write uses the "schedule" date
+    # sentinel so cache_delete_stale won't purge it on the daily reset.
+    try:
+        _cache.set(local_key, games)
+    except Exception:                                                     # noqa: BLE001
+        pass
+    try:
+        from src import db as _db
+        if _db.is_supabase():
+            _db.cache_set(
+                _schedule_cache_key(sport, date_str),
+                sport, "schedule",
+                {"date": date_str, "games": games},
+            )
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return games
+
+
+def _picks_index_for_today(sport: str) -> dict[str, dict]:
+    """When the user navigates to today's date the freshest model picks
+    live in the in-process _analysis_state.  Return {game_id: serialized}
+    so _api_schedule can graft each game's pick onto the schedule row."""
+    state = _wnba_analysis_state if sport == "wnba" else _analysis_state
+    out: dict[str, dict] = {}
+    for r in (state.get("results") or []):
+        gid = (r.get("game") or {}).get("id") or r.get("game_id") or r.get("id")
+        if gid:
+            out[str(gid)] = r
+    return out
+
+
+def _picks_index_for_historical(sport: str, date_str: str) -> dict[str, dict]:
+    """For past dates the picks live in the ledger history as settled
+    bets.  Build {game_id: list[history_row]} so multiple bet_types on
+    the same game survive the join."""
+    out: dict[str, list[dict]] = {}
+    path = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
+    try:
+        led = Ledger(path=path, starting_bankroll=1000.0)
+    except Exception:                                                     # noqa: BLE001
+        return {}
+    for h in (led.data.get("history") or []):
+        gid = str(h.get("game_id") or "")
+        ct  = (h.get("commence_time") or "")[:10]
+        if not gid or ct != date_str:
+            continue
+        out.setdefault(gid, []).append(h)
+    return {k: {"history_rows": v} for k, v in out.items()}
+
+
+@app.route("/api/schedule/<sport>", methods=["GET"])
+def schedule_for_date(sport: str):
+    """Full slate for one sport on one ET date.
+
+    Query params:
+      date  YYYY-MM-DD  defaults to today_et
+    """
+    sport = (sport or "mlb").lower()
+    if sport not in ("mlb", "wnba"):
+        return jsonify({"error": f"unknown sport: {sport}"}), 400
+    date_str = (request.args.get("date") or _today_et()).strip()
+
+    games = _fetch_raw_schedule(sport, date_str)
+
+    # Join with picks based on whether date is past / present / future.
+    is_today = (date_str == _today_et())
+    picks    = (
+        _picks_index_for_today(sport) if is_today
+        else _picks_index_for_historical(sport, date_str)
+    )
+
+    # For today, serialize so the frontend sees the same flat dict shape
+    # /api/analyze emits; for historical, leave history_rows inline so
+    # the UI can render WIN/LOST badges from the result + model_pnl.
+    out_games: list[dict] = []
+    for g in games:
+        gid = str(g.get("id") or "")
+        pick_entry = picks.get(gid)
+        if is_today and pick_entry:
+            try:
+                bankroll = float((
+                    _wnba_analysis_state if sport == "wnba"
+                    else _analysis_state
+                ).get("bankroll") or 1000.0)
+                if sport == "mlb":
+                    serialized = _serialize(pick_entry, bankroll, "mlb", bankroll)
+                else:
+                    serialized = _serialize_wnba(pick_entry, bankroll, bankroll)
+                # Carry the schedule status + final score so the UI's
+                # live-score lookups still work for in-progress / finished
+                # games on the same date.
+                serialized["_status"] = g.get("status")
+                serialized["_has_odds"] = True
+                out_games.append(serialized)
+                continue
+            except Exception:                                             # noqa: BLE001
+                pass
+
+        # No model pick available for this game on this date.  Emit
+        # a sparse row -- the UI will render "No Odds Available" in
+        # place of bet boxes.
+        row = {
+            "id":            gid,
+            "game_id":       gid,
+            "home_team":     g.get("home_team"),
+            "away_team":     g.get("away_team"),
+            "commence_time": g.get("commence_time"),
+            "_status":       g.get("status"),
+            "_no_odds":      True,
+        }
+        if g.get("home_score") is not None and g.get("away_score") is not None:
+            row["_final_score"] = {
+                "home": g["home_score"], "away": g["away_score"],
+            }
+        if pick_entry and pick_entry.get("history_rows"):
+            row["_settled_rows"] = pick_entry["history_rows"]
+        out_games.append(row)
+
+    return jsonify({
+        "sport":    sport,
+        "date":     date_str,
+        "is_today": is_today,
+        "games":    out_games,
+    })
+
+
+def _prefetch_schedules_next_n_days(n: int = 7) -> dict:
+    """Warm the schedule cache for today + the next n-1 days across
+    both sports.  Wired into _run_midnight_reset so every ET day boots
+    with the next week pre-cached -- subsequent user navigations to
+    those dates hit the cache instead of a live API call.
+
+    Returns a summary dict for logging.  Best-effort: per-date / per-
+    sport errors are caught and counted, never propagated."""
+    from datetime import date as _date, timedelta as _td
+
+    start = _date.fromisoformat(_today_et())
+    summary: dict[str, dict] = {"mlb": {}, "wnba": {}}
+    for sport in ("mlb", "wnba"):
+        for i in range(n):
+            d = (start + _td(days=i)).isoformat()
+            try:
+                games = _fetch_raw_schedule(sport, d)
+                summary[sport][d] = len(games)
+            except Exception as exc:                                      # noqa: BLE001
+                summary[sport][d] = f"ERR: {type(exc).__name__}"
+    return summary
+
+
 # ── Live-score debug system ────────────────────────────────────────────────────
 # Writes to stdout AND data/debug_live.log so output is readable whether
 # the user runs via 'python desktop.pyw' (terminal) or via launch.bat (log file).
@@ -6984,7 +7274,26 @@ def _run_midnight_reset() -> None:
         # midnight doesn't restore yesterday's data from cache.
         for _ckey in (_CACHE_KEY_SNAPSHOT, _CACHE_KEY_ANALYSIS_MLB, _CACHE_KEY_ANALYSIS_WNBA):
             _supabase_cache_delete(_ckey)
-        _eprint("MIDNIGHT-RESET: complete — new day ready")
+
+        # Pre-fetch the next 7 days of schedules for both sports so
+        # users browsing forward in the date nav hit the Supabase
+        # cache instead of triggering live MLB / ESPN calls.  Per-date
+        # entries use the "schedule" date sentinel so they survive
+        # the daily cleaner; past-date entries written by earlier
+        # views also persist indefinitely for the historical browse.
+        try:
+            _eprint("MIDNIGHT-RESET: pre-fetching next 7 days of schedules...")
+            summary = _prefetch_schedules_next_n_days(n=7)
+            for sport, days in summary.items():
+                got = sum(1 for v in days.values() if isinstance(v, int))
+                _eprint(
+                    f"MIDNIGHT-RESET: prefetch {sport}: {got}/{len(days)} days "
+                    f"-- {days}"
+                )
+        except Exception as _pre:                                         # noqa: BLE001
+            _eprint(f"MIDNIGHT-RESET: prefetch error: {_pre}")
+
+        _eprint("MIDNIGHT-RESET: complete -- new day ready")
     except Exception as _mre:
         _eprint(f"MIDNIGHT-RESET: unexpected error: {_mre}")
 
