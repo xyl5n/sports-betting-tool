@@ -8315,11 +8315,16 @@ def _settle_freshly_recorded_picks() -> dict:
     }
 
 
-def _run_auto_settlement_job() -> None:
+def _run_auto_settlement_job(force: bool = False) -> dict:
     """
     APScheduler callback: every 30 min.
-    Gated to 11 AM–2 AM ET (game hours). Settles completed bets via Odds API
-    scores; voids postponed MLB games via MLB Stats API. Logs summary to stderr.
+    Gated to 11 AM–2 AM ET (game hours) unless `force=True`. Settles
+    completed bets via Odds API scores; voids postponed MLB games via
+    MLB Stats API. Logs summary to stderr.
+
+    Returns a summary dict {settled, wins, losses, voided, skipped} so
+    /api/admin/settle_now can surface counts in the admin toast.  The
+    scheduler ignores the return.
     """
     # ── Gate: only run during game hours (11 AM through 2 AM ET) ────────────
     try:
@@ -8332,8 +8337,9 @@ def _run_auto_settlement_job() -> None:
     et_hour  = now_et.hour
     # Allow 11:00–23:59 and 00:00–02:59
     in_window = (et_hour >= 11) or (et_hour <= 2)
-    if not in_window:
-        return
+    if not in_window and not force:
+        return {"settled": 0, "wins": 0, "losses": 0,
+                "voided": 0, "skipped": "out of game-hours window"}
 
     odds_key = os.getenv("ODDS_API_KEY", "")
     if not odds_key or odds_key == "your_odds_api_key_here":
@@ -8406,6 +8412,37 @@ def _run_auto_settlement_job() -> None:
             "last_losses":  losses,
             "last_voided":  len(voided),
         })
+
+    return {
+        "settled": len(settled),
+        "wins":    wins,
+        "losses":  losses,
+        "voided":  len(voided),
+        "forced":  force,
+    }
+
+
+@app.route("/api/admin/settle_now", methods=["POST"])
+def admin_settle_now():
+    """Force the auto-settlement job to run immediately, bypassing the
+    11 AM-2 AM ET game-hours gate.  Powers the "Force Settlement"
+    admin button.  Returns the same summary dict the scheduler logs.
+    """
+    print("[ADMIN-ROUTE] /api/admin/settle_now invoked",
+          flush=True, file=sys.stderr)
+    try:
+        result = _run_auto_settlement_job(force=True) or {}
+        _eprint(
+            f"FORCE-SETTLE complete: settled={result.get('settled', 0)}  "
+            f"wins={result.get('wins', 0)}  losses={result.get('losses', 0)}  "
+            f"voided={result.get('voided', 0)}"
+        )
+        return jsonify({"success": True, **result})
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"FORCE-SETTLE FAILED: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}")
+        return jsonify({"success": False,
+                        "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
 # ── Nightly retrain scheduler ─────────────────────────────────────────────────

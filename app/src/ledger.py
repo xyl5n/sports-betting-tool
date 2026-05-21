@@ -395,6 +395,29 @@ class Ledger:
                 remaining.append(bet)
                 continue
 
+            # Defensive skip -- if a bet somehow lingered in open_bets
+            # after being settled (Supabase / disk sync race on Railway,
+            # bug elsewhere in the pipeline), don't re-settle it.  Move
+            # it straight to history with its existing result instead of
+            # re-paying the bankroll out a second time.
+            existing_result = (bet.get("result") or "").lower()
+            existing_status = (bet.get("status") or "").lower()
+            if existing_result in ("win", "loss", "push") or existing_status in (
+                "settled", "win", "loss", "push", "closed"
+            ):
+                _logger.warning(
+                    "settle: bet %s already has result=%r status=%r -- "
+                    "moving to history without re-settling",
+                    bet.get("id"), existing_result, existing_status,
+                )
+                # Mark it settled so the next pass sees it as closed
+                # even if something appended it back to open_bets again.
+                cleaned = dict(bet)
+                cleaned.setdefault("settled_at",
+                                   datetime.now(timezone.utc).isoformat())
+                self.data["history"].append(cleaned)
+                continue   # do NOT add to remaining (= drop from open_bets)
+
             score = score_map.get(bet["game_id"])
             if score is None:
                 # Fallback: same team pair on same date
@@ -572,9 +595,16 @@ class Ledger:
             # Propagate final scores to per-model history trackers
             _settle_model_trackers(bet["game_id"], home_runs, away_runs)
 
+        # Persist whenever open_bets shrank, not just when we newly
+        # settled.  The defensive-skip branch above moves already-
+        # settled rows out of open_bets without adding to newly_settled;
+        # without this save the next /settle call would re-read the
+        # stale list from disk and try to process them again.
+        open_bets_shrank = len(remaining) < len(self.data["open_bets"])
         self.data["open_bets"] = remaining
-        if newly_settled:
+        if newly_settled or open_bets_shrank:
             self.save()
+        if newly_settled:
             _append_to_archive(newly_settled)
         return newly_settled
 
