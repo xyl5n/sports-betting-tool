@@ -75,7 +75,12 @@ def _log(msg: str) -> None:
     print(f"[pitcher_client] {msg}", flush=True, file=sys.stderr)
 
 
-def _fetch_with_log(url: str, label: str, timeout: int = 8) -> dict:
+def _fetch_with_log(
+    url: str,
+    label: str,
+    timeout: int = 8,
+    dump_body: bool = False,
+) -> dict:
     """JSON GET with explicit failure logging.
 
     Returns {} on any error (so callers never need to handle exceptions),
@@ -83,6 +88,10 @@ def _fetch_with_log(url: str, label: str, timeout: int = 8) -> dict:
     blew up, how long it took, and what the underlying error was.  That
     was the silent-failure mode the user hit: every pitcher card shows
     N/A because every stats fetch returned {} and nothing said why.
+
+    dump_body=True logs the first ~2KB of the raw JSON response so we
+    can see exactly what MLB returned -- used by /schedule diagnostics
+    when the probablePitcher field is missing from every game.
     """
     started = time.monotonic()
     try:
@@ -95,6 +104,11 @@ def _fetch_with_log(url: str, label: str, timeout: int = 8) -> dict:
         ms = int((time.monotonic() - started) * 1000)
         if not data:
             _log(f"  {label}: HTTP 200 but empty body  url={url}  ({ms}ms)")
+        elif dump_body:
+            preview = body[:2000]
+            truncated = "" if len(body) <= 2000 else f"  (truncated, total={len(body)} chars)"
+            _log(f"  {label}: HTTP 200 ({ms}ms)  raw response preview:{truncated}")
+            _log(f"    {preview}")
         return data if isinstance(data, dict) else {}
     except urllib.error.HTTPError as exc:
         ms = int((time.monotonic() - started) * 1000)
@@ -238,34 +252,168 @@ class PitcherClient:
         """One /schedule call per ET date.  Pulls probable pitchers AND
         the team-side ids so we can later resolve each club's three-letter
         abbreviation.  Cached on disk so a refresh tick on the slate
-        page doesn't re-hit MLB."""
+        page doesn't re-hit MLB.
+
+        Diagnostic-heavy version: logs the exact URL, the raw response
+        shape, whether each game carries `probablePitcher`, and -- when
+        the standard hydrate string returns 0 probables -- retries with
+        the wider `hydrate=teams,probablePitcher,person` form so the
+        Railway logs make it obvious whether the API itself is dropping
+        the pitcher data or if our parsing is.
+        """
         cache_key = f"sched_{date_str}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        url = (
+        primary_url = (
             f"{_BASE}/schedule?sportId=1&date={date_str}"
             f"&hydrate=probablePitcher(note,pitchHand)"
         )
-        data = _fetch_with_log(url, label=f"schedule date={date_str}")
-        entries = []
+        _log(f"_get_schedule date={date_str}: PRIMARY URL = {primary_url}")
+        data = _fetch_with_log(
+            primary_url,
+            label=f"schedule date={date_str} (primary)",
+            dump_body=True,
+        )
 
-        for day in data.get("dates", []):
-            for game in day.get("games", []):
-                teams = game.get("teams", {})
-                home  = teams.get("home", {}) or {}
-                away  = teams.get("away", {}) or {}
+        # Top-level diagnostic dump: which keys came back, how many
+        # dates, how many games per date.  Helps catch the case where
+        # MLB returns an envelope without the `dates` array (e.g. an
+        # error envelope with `messageNumber`).
+        top_keys = list(data.keys()) if isinstance(data, dict) else []
+        dates_block = data.get("dates", []) if isinstance(data, dict) else []
+        n_games_total = sum(len(d.get("games") or []) for d in dates_block)
+        _log(
+            f"  primary response: top_keys={top_keys!r} "
+            f"dates_count={len(dates_block)} games_total={n_games_total}"
+        )
+
+        # Per-game audit: which games actually carry a probablePitcher
+        # object on each side.  This is the exact field the rest of the
+        # pipeline keys off.
+        entries = []
+        with_probable = 0
+        without_probable = 0
+        for day in dates_block:
+            for game in (day.get("games") or []):
+                teams      = game.get("teams") or {}
+                home       = teams.get("home") or {}
+                away       = teams.get("away") or {}
+                home_pp    = home.get("probablePitcher")
+                away_pp    = away.get("probablePitcher")
+                home_name  = (home.get("team") or {}).get("name", "")
+                away_name  = (away.get("team") or {}).get("name", "")
+                game_pk    = game.get("gamePk")
+                home_keys  = list(home.keys())
+                away_keys  = list(away.keys())
+                _log(
+                    f"    game_pk={game_pk}  {away_name} @ {home_name}  "
+                    f"home.probablePitcher={'YES' if home_pp else 'NO'}  "
+                    f"away.probablePitcher={'YES' if away_pp else 'NO'}  "
+                    f"home_keys={home_keys}  away_keys={away_keys}"
+                )
+                if home_pp:
+                    _log(
+                        f"      home.probablePitcher = "
+                        f"id={home_pp.get('id')!r}  "
+                        f"fullName={home_pp.get('fullName')!r}  "
+                        f"hand={(home_pp.get('pitchHand') or {}).get('code')!r}"
+                    )
+                if away_pp:
+                    _log(
+                        f"      away.probablePitcher = "
+                        f"id={away_pp.get('id')!r}  "
+                        f"fullName={away_pp.get('fullName')!r}  "
+                        f"hand={(away_pp.get('pitchHand') or {}).get('code')!r}"
+                    )
+                if home_pp:
+                    with_probable += 1
+                else:
+                    without_probable += 1
+                if away_pp:
+                    with_probable += 1
+                else:
+                    without_probable += 1
                 entries.append({
-                    "game_pk":      game.get("gamePk"),
-                    "home_name":    (home.get("team") or {}).get("name", ""),
-                    "away_name":    (away.get("team") or {}).get("name", ""),
+                    "game_pk":      game_pk,
+                    "home_name":    home_name,
+                    "away_name":    away_name,
                     "home_team_id": (home.get("team") or {}).get("id"),
                     "away_team_id": (away.get("team") or {}).get("id"),
-                    "home_pitcher": home.get("probablePitcher"),
-                    "away_pitcher": away.get("probablePitcher"),
+                    "home_pitcher": home_pp,
+                    "away_pitcher": away_pp,
                 })
 
-        _log(f"  schedule date={date_str}: parsed {len(entries)} games")
+        _log(
+            f"  primary parse: {len(entries)} games  "
+            f"with_probable_slots={with_probable} "
+            f"without_probable_slots={without_probable}"
+        )
+
+        # Fallback hydrate -- when the primary returned zero probable
+        # pitcher objects across the entire slate we retry with the
+        # wider `hydrate=teams,probablePitcher,person` form per spec.
+        # Same parse loop with the same diagnostic depth so we can tell
+        # which form (if either) MLB is actually responding to.
+        if entries and with_probable == 0:
+            fallback_url = (
+                f"{_BASE}/schedule?sportId=1&date={date_str}"
+                f"&hydrate=teams,probablePitcher,person"
+            )
+            _log(
+                f"  primary returned 0 probable pitchers -- retrying with "
+                f"FALLBACK URL = {fallback_url}"
+            )
+            fb_data = _fetch_with_log(
+                fallback_url,
+                label=f"schedule date={date_str} (fallback)",
+                dump_body=True,
+            )
+            fb_top = list(fb_data.keys()) if isinstance(fb_data, dict) else []
+            fb_dates = fb_data.get("dates", []) if isinstance(fb_data, dict) else []
+            _log(f"  fallback response: top_keys={fb_top!r} "
+                 f"dates_count={len(fb_dates)}")
+            fb_entries = []
+            fb_with_probable = 0
+            for day in fb_dates:
+                for game in (day.get("games") or []):
+                    teams = game.get("teams") or {}
+                    home  = teams.get("home") or {}
+                    away  = teams.get("away") or {}
+                    home_pp = home.get("probablePitcher")
+                    away_pp = away.get("probablePitcher")
+                    home_name = (home.get("team") or {}).get("name", "")
+                    away_name = (away.get("team") or {}).get("name", "")
+                    _log(
+                        f"    [fb] game_pk={game.get('gamePk')}  "
+                        f"{away_name} @ {home_name}  "
+                        f"home.pp={'YES' if home_pp else 'NO'}  "
+                        f"away.pp={'YES' if away_pp else 'NO'}"
+                    )
+                    if home_pp: fb_with_probable += 1
+                    if away_pp: fb_with_probable += 1
+                    fb_entries.append({
+                        "game_pk":      game.get("gamePk"),
+                        "home_name":    home_name,
+                        "away_name":    away_name,
+                        "home_team_id": (home.get("team") or {}).get("id"),
+                        "away_team_id": (away.get("team") or {}).get("id"),
+                        "home_pitcher": home_pp,
+                        "away_pitcher": away_pp,
+                    })
+            _log(
+                f"  fallback parse: {len(fb_entries)} games  "
+                f"with_probable_slots={fb_with_probable}"
+            )
+            # Only swap if the fallback actually produced probable
+            # objects -- otherwise the primary's entries (with their
+            # empty probable slots) are still the better data so the
+            # rest of the pipeline can at least pick up team names.
+            if fb_with_probable > 0:
+                _log("  using FALLBACK results -- replacing primary entries")
+                entries = fb_entries
+
+        _log(f"  schedule date={date_str}: returning {len(entries)} games")
         self._cache[cache_key] = entries
         self._dirty = True
         return entries
