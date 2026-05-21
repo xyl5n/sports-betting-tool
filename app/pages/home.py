@@ -40,30 +40,62 @@ def register(backend) -> None:
     @ui.page("/")
     def home_page():
         _dbg("home_page ENTER")
-        # Re-read today's analysis cache into the in-memory state dict
-        # so this render always sees the newest picks on disk, not
-        # whatever was hydrated at boot.  Cheap (JSON read + parse).
+        # Wrap the entire render in a try/except that prints the full
+        # traceback to stderr so NameErrors and similar runtime bugs
+        # surface in Railway logs instead of just returning a 500 with
+        # a one-line message.  Each section also gets its own guard so
+        # one broken card doesn't blank the rest of the page.
         try:
-            mlb_n, wnba_n = backend.hydrate_state()
-            _dbg(f"home_page hydrate_state returned mlb={mlb_n} wnba={wnba_n}")
+            try:
+                mlb_n, wnba_n = backend.hydrate_state()
+                _dbg(f"home_page hydrate_state returned mlb={mlb_n} wnba={wnba_n}")
+            except Exception as exc:                                       # noqa: BLE001
+                _dbg(f"home_page hydrate_state FAILED: {type(exc).__name__}: {exc}")
+            try:
+                mlb_state  = backend._analysis_state
+                wnba_state = backend._wnba_analysis_state
+                _dbg(
+                    f"home_page STATE_CHECK "
+                    f"mlb_results={len(mlb_state.get('results') or [])} "
+                    f"wnba_results={len(wnba_state.get('results') or [])} "
+                    f"mlb_keys={list(mlb_state.keys())} "
+                    f"wnba_keys={list(wnba_state.keys())}"
+                )
+            except Exception as exc:                                       # noqa: BLE001
+                _dbg(f"home_page STATE_CHECK FAILED: {type(exc).__name__}: {exc}")
+            ui.add_head_html(t.page_head_css())
+            navbar.render(active=t.TAB_HOME)
+            _layout(backend)
+            bottom_nav.render(active=t.TAB_HOME)
         except Exception as exc:                                           # noqa: BLE001
-            _dbg(f"home_page hydrate_state FAILED: {type(exc).__name__}: {exc}")
-        try:
-            mlb_state  = backend._analysis_state
-            wnba_state = backend._wnba_analysis_state
-            _dbg(
-                f"home_page STATE_CHECK "
-                f"mlb_results={len(mlb_state.get('results') or [])} "
-                f"wnba_results={len(wnba_state.get('results') or [])} "
-                f"mlb_keys={list(mlb_state.keys())} "
-                f"wnba_keys={list(wnba_state.keys())}"
+            import traceback as _tb, sys as _sys
+            _tb_str = _tb.format_exc()
+            print(
+                f"[HOME PAGE FATAL] {type(exc).__name__}: {exc}\n{_tb_str}",
+                flush=True, file=_sys.stderr,
             )
-        except Exception as exc:                                           # noqa: BLE001
-            _dbg(f"home_page STATE_CHECK FAILED: {type(exc).__name__}: {exc}")
-        ui.add_head_html(t.page_head_css())
-        navbar.render(active=t.TAB_HOME)
-        _layout(backend)
-        bottom_nav.render(active=t.TAB_HOME)
+            # Render an inline error banner instead of a 500 so the
+            # rest of the app stays reachable (the user can still
+            # click into Sports / Admin from the navbar).
+            ui.label("Home page render failed").style(
+                f"color: {t.NEG}; font-size: 16px; font-weight: 700; "
+                f"padding: {t.SPACE_LG};"
+            )
+            ui.label(f"{type(exc).__name__}: {exc}").style(
+                f"color: {t.TEXT_DIM}; font-family: monospace; "
+                f"font-size: 12px; padding: 0 {t.SPACE_LG};"
+            )
+            # Full traceback in a pre block so it can be copy-pasted
+            # straight from the page if Railway logs are unavailable.
+            ui.html(
+                f"<pre style='color: {t.TEXT_DIM}; font-size: 11px; "
+                f"padding: {t.SPACE_LG}; white-space: pre-wrap; "
+                f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                f"border-radius: 6px; margin: {t.SPACE_LG}; "
+                f"overflow-x: auto;'>"
+                f"{_tb_str.replace('<', '&lt;')}"
+                f"</pre>"
+            )
         # Wheel-to-horizontal-scroll handler for every .carousel-scroller
         # on the page.  Vertical wheel input on a carousel translates to
         # horizontal scroll; horizontal wheel input passes through
@@ -98,17 +130,51 @@ def register(backend) -> None:
 
 def _layout(backend) -> None:
     with ui.row().classes("no-wrap w-full").style("gap: 0;"):
-        sidebar.render(backend)
+        _guarded_section("sidebar", lambda: sidebar.render(backend))
         with ui.column().classes("page-content").style(
             f"flex: 1; max-width: {t.MAX_CONTENT_W}; "
             f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
         ):
-            _section_chips(backend)                  # Section 1
-            sidebar.render_top_plays_only(backend)   # mobile-only inline
-            _section_ev_compact(backend)             # Section 2
-            _section_confidence_carousel(backend)    # Section 3
-            _ai_banner()
-            _section_model_performance(backend)      # Section 5 (very bottom)
+            _guarded_section("chips", lambda: _section_chips(backend))
+            _guarded_section("top_plays_mobile",
+                             lambda: sidebar.render_top_plays_only(backend))
+            _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
+            _guarded_section("confidence_carousel",
+                             lambda: _section_confidence_carousel(backend))
+            _guarded_section("ai_banner", _ai_banner)
+            _guarded_section("model_performance",
+                             lambda: _section_model_performance(backend))
+
+
+def _guarded_section(label: str, render_fn) -> None:
+    """Render one section inside its own try/except so a single broken
+    card doesn't blank the rest of the home page.  Failures print a
+    full traceback to stderr (Railway logs) AND emit a small in-page
+    error stripe so the user sees which section failed without
+    scrolling the log.
+    """
+    try:
+        render_fn()
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback as _tb, sys as _sys
+        _tb_str = _tb.format_exc()
+        print(
+            f"[HOME SECTION {label!r} FAILED] "
+            f"{type(exc).__name__}: {exc}\n{_tb_str}",
+            flush=True, file=_sys.stderr,
+        )
+        with ui.row().classes("w-full").style(
+            f"background: {t.CARD}; border: 1px dashed {t.NEG}; "
+            f"border-radius: {t.RADIUS_MD}; padding: 10px 14px; "
+            f"gap: 8px; align-items: center;"
+        ):
+            ui.icon("error").style(f"font-size: 18px; color: {t.NEG};")
+            ui.label(
+                f"Section '{label}' failed: {type(exc).__name__}: {exc}"
+            ).style(
+                f"font-size: 12px; color: {t.NEG}; font-family: monospace; "
+                f"flex: 1;"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
