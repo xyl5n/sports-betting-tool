@@ -598,6 +598,35 @@ class RunLineModel:
             xgb_prob = ml_xgb_p * xgb_cond
             lr_prob  = ml_lr_p  * lr_cond if self.lr_is_trained else xgb_prob
 
+        # ── Invariant log: per-classifier P_rl <= P_ml ────────────────────────
+        # The math above is multiplicative + clipped at every step so this
+        # SHOULD always hold by construction.  Log when it doesn't so the
+        # audit trail captures any future numerical drift / refactor bug
+        # before it ends up biasing the served pick.  Threshold is 1e-9 to
+        # tolerate fp rounding noise.
+        try:
+            import sys as _sys
+            _ml_xgb_p = ml_xgb_p if not home_is_underdog else (1.0 - ml_xgb_p)
+            _ml_lr_p  = ml_lr_p  if not home_is_underdog else (1.0 - ml_lr_p)
+            if xgb_prob > _ml_xgb_p + 1e-9:
+                print(
+                    f"INVARIANT [run_line] XGB violation: "
+                    f"P_rl={xgb_prob:.6f} > P_ml={_ml_xgb_p:.6f} "
+                    f"(home_is_underdog={home_is_underdog}, "
+                    f"{game.get('away_team','?')} @ {game.get('home_team','?')})",
+                    flush=True, file=_sys.stderr,
+                )
+            if self.lr_is_trained and lr_prob > _ml_lr_p + 1e-9:
+                print(
+                    f"INVARIANT [run_line] LR violation: "
+                    f"P_rl={lr_prob:.6f} > P_ml={_ml_lr_p:.6f} "
+                    f"(home_is_underdog={home_is_underdog}, "
+                    f"{game.get('away_team','?')} @ {game.get('home_team','?')})",
+                    flush=True, file=_sys.stderr,
+                )
+        except Exception:                                                 # noqa: BLE001
+            pass  # invariant check itself must never fail the prediction
+
         # ── Silent LR-only pick recorder (does not affect ensemble output) ────
         if self.lr_is_trained:
             try:
