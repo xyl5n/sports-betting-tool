@@ -73,14 +73,25 @@ class WNBASpreadModel:
         was built with the current 17-feature schema.  Otherwise trains from
         scratch with recency weighting.  Returns a human-readable status string.
         """
+        try:
+            from . import model_cache_persist as _persist
+            _persist.try_download(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
+
+        import sys as _sys
         if not force_retrain and self.model_path.exists():
             try:
                 saved = joblib.load(self.model_path)
                 # Require 17 features and the updated target_type tag
-                scaler_ok = (
-                    "scaler" in saved
-                    and hasattr(saved["scaler"], "mean_")
-                    and len(saved["scaler"].mean_) == 17
+                n_feat = len(saved["scaler"].mean_) if (
+                    "scaler" in saved and hasattr(saved["scaler"], "mean_")
+                ) else None
+                scaler_ok = n_feat == 17
+                print(
+                    f"MODEL[spread_wnba]: cache feature count loaded={n_feat}  "
+                    f"expected=17  match={scaler_ok}",
+                    flush=True, file=_sys.stderr,
                 )
                 if saved.get("target_type") == "wnba_spread_v2" and "lr" in saved and scaler_ok:
                     self.xgb = saved["xgb"]
@@ -92,12 +103,22 @@ class WNBASpreadModel:
                     self.lr_is_trained = True
                     xgb_s = f"{self.xgb_rmse:.2f}" if self.xgb_rmse is not None else "N/A"
                     lr_s = f"{self.lr_rmse:.2f}" if self.lr_rmse is not None else "N/A"
+                    print(
+                        f"MODEL[spread_wnba]: LOADED FROM CACHE  features=17  "
+                        f"XGB_RMSE={xgb_s}  LR_RMSE={lr_s}",
+                        flush=True, file=_sys.stderr,
+                    )
                     return (
                         f"Loaded WNBA spread model (17-feat, recency-weighted) "
                         f"(XGB RMSE: {xgb_s} pts | LR RMSE: {lr_s} pts)"
                     )
-            except Exception:
-                pass  # Fall through to retrain if load fails
+            except Exception as exc:                                      # noqa: BLE001
+                print(f"MODEL[spread_wnba]: cache read failed ({type(exc).__name__}: {exc}) "
+                      f"-- RETRAINED FROM SCRATCH", flush=True, file=_sys.stderr)
+        else:
+            reason = "force_retrain=True" if force_retrain else "no cache file (local or Supabase)"
+            print(f"MODEL[spread_wnba]: RETRAINED FROM SCRATCH ({reason})",
+                  flush=True, file=_sys.stderr)
 
         return self._train(stats_client, feature_builder, season)
 
@@ -231,6 +252,12 @@ class WNBASpreadModel:
             },
             self.model_path,
         )
+
+        try:
+            from . import model_cache_persist as _persist
+            _persist.upload(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
 
         return (
             f"Spread: XGB RMSE {self.xgb_rmse:.2f} pts | "

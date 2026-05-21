@@ -93,23 +93,48 @@ class BettingModel:
         season: int,
         force_retrain: bool = False,
     ) -> str:
+        # Try to materialize the joblib snapshot from Supabase app_cache
+        # before checking disk -- Railway's filesystem is ephemeral so
+        # the local file is gone after every redeploy, and without this
+        # the model retrains from scratch on every restart.
+        try:
+            from . import model_cache_persist as _persist
+            _persist.try_download(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
+
         if not force_retrain and self.model_path.exists():
             saved = joblib.load(self.model_path)
             loaded_scaler = saved["scaler"]
             expected = len(self.sport.feature_names)
             actual   = getattr(loaded_scaler, "n_features_in_", expected)
 
+            # Always print the feature-count comparison so a match is
+            # visible too (not just the mismatch retrain branch below).
+            import sys as _sys
+            _sys.stderr.write(
+                f"MODEL[{self.sport.name}]: cache feature count "
+                f"loaded={actual}  expected={expected}  match={actual == expected}\n"
+            )
+            _sys.stderr.flush()
+
             if actual != expected:
-                print(f"  Feature count changed ({actual} → {expected}) — retraining.")
+                print(f"MODEL[{self.sport.name}]: feature count drift "
+                      f"({actual} -> {expected}) -- RETRAINED FROM SCRATCH",
+                      flush=True, file=_sys.stderr)
                 return self._train(stats_client, feature_builder, season)
 
             if "lr" not in saved:
-                print("  LR model missing from saved file — retraining.")
+                print(f"MODEL[{self.sport.name}]: LR missing from cache -- "
+                      f"RETRAINED FROM SCRATCH",
+                      flush=True, file=_sys.stderr)
                 return self._train(stats_client, feature_builder, season)
 
             # For MLB: retrain if the NN hasn't been added yet
             if self.sport.odds_key == _MLB_ODDS_KEY and "nn_scaler" not in saved:
-                print("  Neural network not in saved model — retraining to add it.")
+                print(f"MODEL[{self.sport.name}]: NN missing from cache -- "
+                      f"RETRAINED FROM SCRATCH (adding NN)",
+                      flush=True, file=_sys.stderr)
                 return self._train(stats_client, feature_builder, season)
 
             # Pure-confidence XGB caches must have the market-free flag.
@@ -117,7 +142,9 @@ class BettingModel:
             # would leak market signal into the confidence probability.
             if (self.sport.odds_key == _MLB_ODDS_KEY
                     and saved.get("xgb_input_kind") != "market_free"):
-                print("  XGB input kind upgraded to market_free -- retraining.")
+                print(f"MODEL[{self.sport.name}]: XGB input kind upgraded "
+                      f"to market_free -- RETRAINED FROM SCRATCH",
+                      flush=True, file=_sys.stderr)
                 return self._train(stats_client, feature_builder, season)
 
             self.xgb          = saved["xgb"]
@@ -141,8 +168,24 @@ class BettingModel:
                 nn_s = f"{self.nn_val_accuracy:.1%}" if self.nn_val_accuracy else "N/A"
                 status += f" | NN val: {nn_s}"
             status += ")"
+            print(
+                f"MODEL[{self.sport.name}]: LOADED FROM CACHE  "
+                f"features={actual}  XGB_CV={xgb_s}  LR_CV={lr_s}  "
+                f"NN_val={(f'{self.nn_val_accuracy:.1%}' if self.nn_val_accuracy else 'N/A')}",
+                flush=True, file=_sys.stderr,
+            )
             return status
 
+        # Force-retrain path or no local cache file -- if Supabase
+        # download also failed, RETRAINED FROM SCRATCH is the only
+        # option.  The _train method calls model_cache_persist.upload
+        # after joblib.dump so the next restart finds the fresh model.
+        import sys as _sys
+        reason = "force_retrain=True" if force_retrain else "no cache file (local or Supabase)"
+        print(
+            f"MODEL[{self.sport.name}]: RETRAINED FROM SCRATCH ({reason})",
+            flush=True, file=_sys.stderr,
+        )
         return self._train(stats_client, feature_builder, season)
 
     def _train(
@@ -339,6 +382,15 @@ class BettingModel:
             },
             self.model_path,
         )
+
+        # Mirror the freshly-trained joblib up to Supabase so the next
+        # Railway restart can re-download it instead of retraining.
+        # Silent no-op when Supabase isn't configured.
+        try:
+            from . import model_cache_persist as _persist
+            _persist.upload(self.model_path)
+        except Exception:                                                 # noqa: BLE001
+            pass
 
         status = (
             f"Trained {self.sport.name} model on {n} games | "
