@@ -89,6 +89,21 @@ def page_head_css() -> str:
       ::-webkit-scrollbar-thumb   {{ background: {BORDER}; border-radius: 4px; }}
       ::-webkit-scrollbar-thumb:hover {{ background: {TEXT_DIM2}; }}
 
+      /* Horizontal carousels (EV Scan + Highest Confidence on /).  Hide
+         the native scrollbar entirely -- the < / > overlay arrows +
+         wheel-to-horizontal JS in components/carousel_wheel.py provide
+         the affordances now.  Per-browser:
+           Firefox      -- scrollbar-width: none
+           Chromium/WK  -- ::-webkit-scrollbar { display: none }
+           Edge old IE  -- -ms-overflow-style: none
+         No layout reflow on Firefox because scrollbar-width:none
+         removes the gutter too. */
+      .carousel-scroller {{
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }}
+      .carousel-scroller::-webkit-scrollbar {{ display: none; }}
+
       .theme-card {{
         background: {CARD};
         border: 1px solid {BORDER};
