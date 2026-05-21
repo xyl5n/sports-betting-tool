@@ -2715,17 +2715,49 @@ def _fetch_raw_schedule(sport: str, date_str: str) -> list[dict]:
     return games
 
 
-def _picks_index_for_today(sport: str) -> dict[str, dict]:
+def _team_key(name: str) -> str:
+    """Normalize a team name for cross-API matching.  MLB Stats API and
+    The Odds API both return the official full name ("Los Angeles
+    Dodgers") so a lowercase + whitespace squash is enough in 99% of
+    cases.  Returns "" for falsy input so two unknown teams don't
+    collide on the empty string."""
+    if not name:
+        return ""
+    return " ".join(str(name).lower().split())
+
+
+def _picks_index_for_today(sport: str) -> tuple[dict[str, dict], dict[tuple[str, str, str], dict]]:
     """When the user navigates to today's date the freshest model picks
-    live in the in-process _analysis_state.  Return {game_id: serialized}
-    so _api_schedule can graft each game's pick onto the schedule row."""
+    live in the in-process _analysis_state.  Returns two indexes:
+
+      by_id     -- {game_id: serialized}  (Odds API id; legacy lookup)
+      by_match  -- {(home_key, away_key, et_date): serialized}
+                   (team-name + ET-date composite key)
+
+    The schedule endpoint uses MLB Stats API gamePk ids (e.g.
+    "824274") and the Odds API uses opaque ids like
+    "427339d860a9d7bf7b2075fa02850c56", so a pure id-based join always
+    misses.  The composite key lets schedule rows find their matching
+    analysis result without depending on either API's id scheme.
+    """
     state = _wnba_analysis_state if sport == "wnba" else _analysis_state
-    out: dict[str, dict] = {}
+    by_id: dict[str, dict] = {}
+    by_match: dict[tuple[str, str, str], dict] = {}
     for r in (state.get("results") or []):
         gid = (r.get("game") or {}).get("id") or r.get("game_id") or r.get("id")
         if gid:
-            out[str(gid)] = r
-    return out
+            by_id[str(gid)] = r
+        # Team-name + ET-date composite key.  Pull from r["game"] for
+        # raw analysis dicts and from the flat keys for serialized
+        # passthrough rows (snapshot hydration path).
+        game = r.get("game") or {}
+        home = game.get("home_team") or r.get("home_team") or ""
+        away = game.get("away_team") or r.get("away_team") or ""
+        ct   = game.get("commence_time") or r.get("commence_time") or ""
+        et_d = _game_et_date(ct) or ""
+        if home and away and et_d:
+            by_match[(_team_key(home), _team_key(away), et_d)] = r
+    return by_id, by_match
 
 
 def _picks_index_for_historical(sport: str, date_str: str) -> dict[str, dict]:
@@ -2992,10 +3024,25 @@ def schedule_for_date(sport: str):
 
     # Join with picks based on whether date is past / present / future.
     is_today = (date_str == _today_et())
-    picks    = (
-        _picks_index_for_today(sport) if is_today
-        else _picks_index_for_historical(sport, date_str)
-    )
+    if is_today:
+        # Two indexes returned: legacy by-id (Odds API ids), and the
+        # team-name + ET-date composite that bridges MLB statsapi /
+        # ESPN ids to Odds API ids.
+        picks_by_id, picks_by_match = _picks_index_for_today(sport)
+        picks_hist: dict[str, dict] = {}
+    else:
+        picks_by_id = {}
+        picks_by_match = {}
+        picks_hist = _picks_index_for_historical(sport, date_str)
+
+    # Join hit counters -- logged once after the loop so the deploy log
+    # makes it obvious whether the schedule -> analysis merge actually
+    # found anything.  When `matched_by_match > 0 and matched_by_id ==
+    # 0` the ID-only path was failing as suspected (Odds API ids vs
+    # MLB statsapi gamePks).
+    matched_by_id = 0
+    matched_by_match = 0
+    fell_through_no_odds = 0
 
     # For today, serialize so the frontend sees the same flat dict shape
     # /api/analyze emits; for historical, leave history_rows inline so
@@ -3003,7 +3050,29 @@ def schedule_for_date(sport: str):
     out_games: list[dict] = []
     for g in games:
         gid = str(g.get("id") or "")
-        pick_entry = picks.get(gid)
+        pick_entry = None
+        match_source = ""
+        if is_today:
+            pick_entry = picks_by_id.get(gid)
+            if pick_entry is not None:
+                matched_by_id += 1
+                match_source = "id"
+            else:
+                # Composite-key fallback: team names + ET commence date.
+                key = (
+                    _team_key(g.get("home_team")),
+                    _team_key(g.get("away_team")),
+                    _game_et_date(g.get("commence_time", "")) or "",
+                )
+                pick_entry = picks_by_match.get(key)
+                if pick_entry is not None:
+                    matched_by_match += 1
+                    match_source = "team_date"
+        else:
+            pick_entry = picks_hist.get(gid)
+            if pick_entry is not None:
+                match_source = "id_hist"
+
         if is_today and pick_entry:
             try:
                 bankroll = float((
@@ -3019,10 +3088,22 @@ def schedule_for_date(sport: str):
                 # games on the same date.
                 serialized["_status"] = g.get("status")
                 serialized["_has_odds"] = True
+                # _data_source lets game_card.render log which path each
+                # card took -- "analysis_id" (legacy id match) or
+                # "analysis_team_date" (composite match) tells us the
+                # ID-mismatch bug is fixed in production.
+                serialized["_data_source"] = f"analysis_{match_source}"
+                # Force the schedule's stable id onto the serialized
+                # row so MLB statsapi gamePks survive the join.  The
+                # detail page already looks up by both keys, but pinning
+                # the schedule id here keeps Track + live-score lookups
+                # consistent across the slate and the detail view.
+                serialized["_schedule_id"] = gid
                 out_games.append(serialized)
                 continue
             except Exception:                                             # noqa: BLE001
                 pass
+        fell_through_no_odds += 1
 
         # No model pick available for this game on this date.  Emit
         # a sparse row + try to attach model-only predictions so the
@@ -3041,6 +3122,7 @@ def schedule_for_date(sport: str):
             "commence_time": g.get("commence_time"),
             "_status":       g.get("status"),
             "_no_odds":      True,
+            "_data_source":  "schedule_stub",
         }
         if g.get("home_score") is not None and g.get("away_score") is not None:
             row["_final_score"] = {
@@ -3059,11 +3141,13 @@ def schedule_for_date(sport: str):
             cached_pred = cached_preds_for_date.get(gid) if cached_preds_for_date else None
             if cached_pred:
                 row["_model_prediction"] = cached_pred
+                row["_data_source"] = "no_odds_cached_prediction"
             else:
                 try:
                     model_pred = _predict_no_odds_game(sport, g)
                     if model_pred is not None:
                         row["_model_prediction"] = model_pred
+                        row["_data_source"] = "no_odds_live_prediction"
                         # Write back to cache so the next request hits
                         # the fast path (uses fresh cached_preds_for_date
                         # so we don't double-read on a busy endpoint).
@@ -3072,6 +3156,15 @@ def schedule_for_date(sport: str):
                 except Exception as exc:                                       # noqa: BLE001
                     _eprint(f"schedule {sport} {gid}: no-odds predict skipped: {exc}")
         out_games.append(row)
+
+    if is_today:
+        _eprint(
+            f"SCHEDULE JOIN [{sport.upper()}] date={date_str} "
+            f"schedule_games={len(games)} "
+            f"matched_by_id={matched_by_id} "
+            f"matched_by_team_date={matched_by_match} "
+            f"fell_through_no_odds={fell_through_no_odds}"
+        )
 
     return jsonify({
         "sport":    sport,
@@ -4364,6 +4457,21 @@ def analyze():
             f"ANALYZE COMPLETE [MLB]: {len(serialized)} games total -- "
             f"{_with_odds} with odds, {_no_odds} no_odds"
         )
+
+        # Force a fresh re-read of today's snapshot back into the
+        # in-memory _analysis_state.  The route already mutates that
+        # dict in-process (line ~4279), so this is mostly a belt-and-
+        # suspenders for routes that read from the disk snapshot (the
+        # NiceGUI renderer calls backend.hydrate_state on every page
+        # render).  Without it, the next schedule join would still
+        # work, but a stale daily_snapshot.json could shadow the
+        # fresh _analysis_state if the renderer ran a snapshot reload
+        # mid-request.
+        try:
+            hydrate_state()
+        except Exception as _he:                                          # noqa: BLE001
+            _eprint(f"ANALYZE [MLB] post-analyze hydrate_state failed "
+                    f"(non-fatal): {type(_he).__name__}: {_he}")
 
         return jsonify({
             "success":         True,
@@ -7378,6 +7486,15 @@ def analyze_wnba():
             f"ANALYZE COMPLETE [WNBA]: {len(serialized)} games total -- "
             f"{_with_odds} with odds, {_no_odds} no_odds"
         )
+
+        # Belt-and-suspenders re-hydrate -- see MLB analyze route for
+        # the rationale.  Keeps the disk snapshot + in-memory state
+        # consistent before the next /api/schedule call lands.
+        try:
+            hydrate_state()
+        except Exception as _he:                                          # noqa: BLE001
+            _eprint(f"ANALYZE [WNBA] post-analyze hydrate_state failed "
+                    f"(non-fatal): {type(_he).__name__}: {_he}")
 
         return jsonify({
             "success":        True,
