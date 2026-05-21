@@ -172,11 +172,17 @@ def _refreshable_grid(backend, sport: str, state: dict) -> None:
     _game_grid(backend, sport, state)
 
 
+@ui.refreshable
 def _date_nav(state: dict) -> None:
     """Top-of-slate date navigation: < arrow | date label + calendar
     icon | > arrow.  Calendar icon opens a ui.menu containing a
     ui.date picker so users can jump to any date in one click instead
     of arrowing through one day at a time.
+
+    Decorated @ui.refreshable so the click handlers can re-render
+    this whole row (and crucially the date label) when state["date"]
+    mutates -- without the decorator the label was created once with
+    the initial value and never updated on subsequent nav clicks.
 
     Tap targets sized 36px+ here, bumped to 44px on mobile via the
     global rule in components/theme.py."""
@@ -190,6 +196,11 @@ def _date_nav(state: dict) -> None:
         # ui.date returns the value as either str or datetime depending
         # on Quasar version; coerce to ISO string for consistency.
         state["date"] = str(d)[:10]
+        # Refresh BOTH the date nav (so the label + picker initial value
+        # pick up the new date) AND the grid (so the cards reload for
+        # the new schedule).  Without the _date_nav.refresh() call the
+        # label was stuck at whatever string it had on first render.
+        _date_nav.refresh()
         _refreshable_grid.refresh()
 
     def _step(delta_days: int) -> None:
