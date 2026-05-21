@@ -123,6 +123,25 @@ def page_head_css() -> str:
       }}
       .carousel-scroller::-webkit-scrollbar {{ display: none; }}
 
+      /* Game grid -- two columns on desktop (>768px), one on mobile.
+         Cards fill left-to-right top-to-bottom; an odd final game
+         occupies the left column only (grid auto-flow default).
+         The mobile-breakpoint @media rule further down also bumps
+         tap-target heights on the cards' Track + View Details
+         controls so each tile stays comfortable on touch. */
+      .game-grid {{
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: {SPACE_MD};
+        width: 100%;
+      }}
+      @media (min-width: 769px) {{
+        .game-grid {{
+          grid-template-columns: 1fr 1fr;
+          gap: {SPACE_LG};
+        }}
+      }}
+
       .theme-card {{
         background: {CARD};
         border: 1px solid {BORDER};

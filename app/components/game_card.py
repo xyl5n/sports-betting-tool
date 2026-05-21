@@ -145,13 +145,24 @@ def _no_model_row(g: dict) -> None:
 
 
 def _no_odds_row(g: dict) -> None:
-    """Inline notice for games on the schedule but missing from The
-    Odds API.  Replaces both the bet boxes AND the Track button --
-    there's nothing to bet on yet.  For past dates with a final score
-    the same notice shows that no odds were ever recorded for the
-    game (so picks couldn't be made), but the score block above still
-    renders so the user can see the final.
+    """Inline block for games on the schedule but missing from The
+    Odds API.  When the schedule endpoint attached a model-only
+    prediction (g["_model_prediction"]), render three prediction
+    sections: Predicted Winner, Run Line Prediction, Projected
+    Total.  Otherwise fall back to a "No Odds Available" notice.
+
+    Either path replaces the normal bet boxes AND the Track button
+    -- there's no market to bet against, no edge to compute, no
+    Kelly sizing to display, and nothing to record in the model
+    pick history (no settlement possible without odds).
     """
+    pred = g.get("_model_prediction") or {}
+    if pred:
+        _model_prediction_block(g, pred)
+        return
+
+    # Default fallback when the predictor stack isn't ready or the
+    # game's teams aren't in the GameStore yet.
     with ui.row().classes("w-full").style(
         f"background: {t.CARD_HI}; "
         f"border: 1px dashed {t.BORDER}; "
@@ -173,6 +184,108 @@ def _no_odds_row(g: dict) -> None:
             f"font-size: 12px; color: {t.TEXT_DIM}; "
             f"flex: 1; line-height: 1.4;"
         )
+
+
+def _model_prediction_block(g: dict, pred: dict) -> None:
+    """Three model-only prediction sections that replace the bet
+    boxes when no odds exist.  Styled with a dashed PRIMARY border +
+    a 'MODEL PREDICTION' badge so the user can't mistake these for
+    actual sportsbook lines.
+
+    Sections:
+      1. Predicted Winner -- home% vs away% from the moneyline model
+      2. Run Line / Spread -- which side covers + probability against
+         a synthetic line (-1.5 MLB / -2.5 WNBA, the standard slabs)
+      3. Projected Total -- model's raw point/run estimate + an
+         Over/Under tag relative to a neutral baseline (9 MLB / 160 WNBA)
+    """
+    # Outer container: dashed PRIMARY border + faint purple bg so the
+    # block reads as "estimate" not "live market line".  No box-shadow
+    # hover glow (the card itself already has one).
+    with ui.column().classes("w-full").style(
+        f"background: rgba({t.PRIMARY_R}, {t.PRIMARY_G}, {t.PRIMARY_B}, 0.04); "
+        f"border: 1px dashed {t.PRIMARY}; "
+        f"border-radius: {t.RADIUS_SM}; "
+        f"padding: 10px 12px; gap: 8px;"
+    ):
+        # Header chip
+        with ui.row().classes("items-center w-full").style("gap: 6px;"):
+            ui.label("MODEL PREDICTION").style(
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.PRIMARY}; "
+                f"background: rgba({t.PRIMARY_R}, {t.PRIMARY_G}, {t.PRIMARY_B}, 0.12); "
+                f"padding: 2px 7px; border-radius: 3px;"
+            )
+            ui.label("no betting lines available -- estimates only").style(
+                f"font-size: 10px; color: {t.TEXT_DIM2}; "
+                f"font-style: italic;"
+            )
+
+        # 1) Predicted Winner -- two short labels side-by-side
+        home_team = _short(g.get("home_team", ""))
+        away_team = _short(g.get("away_team", ""))
+        home_p = float(pred.get("ml_prob_home") or 0.5) * 100
+        away_p = float(pred.get("ml_prob_away") or 0.5) * 100
+        with ui.column().style("gap: 2px; width: 100%;"):
+            ui.label("PREDICTED WINNER").style(
+                f"font-size: 9px; font-weight: 700; letter-spacing: .5px; "
+                f"color: {t.TEXT_DIM2};"
+            )
+            with ui.row().classes("items-center justify-between w-full").style("gap: 8px;"):
+                ui.label(f"{home_team} {home_p:.0f}%").style(
+                    f"font-size: 13px; font-weight: 700; "
+                    f"color: {t.POS if home_p > 50 else t.TEXT};"
+                )
+                ui.label("vs").style(
+                    f"font-size: 11px; color: {t.TEXT_DIM2};"
+                )
+                ui.label(f"{away_team} {away_p:.0f}%").style(
+                    f"font-size: 13px; font-weight: 700; "
+                    f"color: {t.POS if away_p > 50 else t.TEXT};"
+                )
+
+        # 2) Run Line / Spread -- only when the RL/spread head returned
+        if pred.get("rl_pick_team") and pred.get("rl_prob") is not None:
+            rl_team = _short(pred["rl_pick_team"])
+            rl_line = pred.get("rl_line") or -1.5
+            rl_prob = float(pred["rl_prob"]) * 100
+            line_str = f"{rl_line:+g}" if rl_line is not None else ""
+            with ui.column().style("gap: 2px; width: 100%;"):
+                ui.label("RUN LINE PREDICTION").style(
+                    f"font-size: 9px; font-weight: 700; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                ui.label(f"{rl_team} {line_str} at {rl_prob:.0f}%").style(
+                    f"font-size: 13px; font-weight: 700; color: {t.TEXT};"
+                )
+
+        # 3) Projected Total -- only when totals head returned
+        if pred.get("totals_projected") is not None:
+            proj = float(pred["totals_projected"])
+            baseline = float(pred.get("totals_baseline") or 9.0)
+            direction = "Over" if proj > baseline else ("Under" if proj < baseline else "Even")
+            dir_color = (
+                t.POS if direction == "Over" else
+                t.NEG if direction == "Under" else
+                t.TEXT_DIM
+            )
+            with ui.column().style("gap: 2px; width: 100%;"):
+                ui.label("PROJECTED TOTAL").style(
+                    f"font-size: 9px; font-weight: 700; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                with ui.row().classes("items-baseline").style("gap: 6px;"):
+                    ui.label(f"{proj:.1f}").style(
+                        f"font-size: 18px; font-weight: 800; color: {t.TEXT}; "
+                        f"font-family: monospace; letter-spacing: -.2px;"
+                    )
+                    ui.label(f"projected (vs {baseline:g} baseline)").style(
+                        f"font-size: 10.5px; color: {t.TEXT_DIM};"
+                    )
+                    ui.label(direction.upper()).style(
+                        f"font-size: 10px; font-weight: 800; letter-spacing: .5px; "
+                        f"color: {dir_color}; margin-left: auto;"
+                    )
 
 
 def _meta_row(g: dict, sport: str, state: str = "scheduled") -> None:
