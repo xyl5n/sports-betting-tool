@@ -118,40 +118,102 @@ def model_performance(backend) -> dict:
     }
 
 
+# ── Per-classifier picks tracker loader ─────────────────────────────────────
+
+import json as _json
+from pathlib import Path as _Path
+
+_TRACKER_PATHS = {
+    "xgb": _Path(".cache/xgb_picks_history.json"),
+    "lr":  _Path(".cache/lr_picks_history.json"),
+    "nn":  _Path("data/nn_picks_history.json"),
+}
+
+
+def classifier_accuracy_from_trackers() -> dict:
+    """Aggregate per-classifier correct/total from the three picks-history
+    files (xgb_picks_history.json, lr_picks_history.json,
+    nn_picks_history.json).
+
+    These files carry one entry PER ANALYZED GAME per bet_type -- the
+    full slate, not just the top-5 picks the daily-picks selector
+    placed bets on.  Reading them here gives the user a true model
+    accuracy across the full prediction surface (which is what they
+    want to see on the Model page + Home chip; the ledger history
+    only ever covered top-5).
+
+    Returns:
+        {
+          "xgb": {"overall": [correct, total],
+                  "moneyline": [c, t], "run_line_spread": [c, t],
+                  "totals": [c, t]},
+          "lr":  {...},
+          "nn":  {...},
+        }
+
+    Each entry's `correct` field is True/False/None (None when the game
+    hasn't settled yet).  None rows don't count toward either side.
+    Silent fallback to zeros on missing / corrupted files so the page
+    always renders.
+    """
+    # bet_type categories -- align with pages/model.py::_CATS
+    _CATS = {
+        "moneyline":       ("moneyline", "single"),
+        "run_line_spread": ("run_line", "spread"),
+        "totals":          ("totals",),
+    }
+
+    out: dict[str, dict[str, list[int]]] = {
+        m: {"overall": [0, 0], **{c: [0, 0] for c in _CATS}}
+        for m in _TRACKER_PATHS
+    }
+
+    for model_key, path in _TRACKER_PATHS.items():
+        if not path.exists():
+            continue
+        try:
+            payload = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for entry in (payload.get("picks") or []):
+            correct = entry.get("correct")
+            if correct is None:
+                continue
+            bt = (entry.get("bet_type") or "moneyline").lower()
+            cat = next(
+                (k for k, aliases in _CATS.items() if bt in aliases),
+                None,
+            )
+            if cat is None:
+                continue
+            out[model_key][cat][1] += 1
+            out[model_key][cat][0] += int(bool(correct))
+            out[model_key]["overall"][1] += 1
+            out[model_key]["overall"][0] += int(bool(correct))
+    return out
+
+
 # ── Chip #2 -- best classifier (XGB / LR / NN) ─────────────────────────────
 
 def best_classifier(backend) -> dict | None:
     """Return {'model': 'XGBoost'|..., 'correct': N, 'total': N, 'pct': float}
     for the classifier with the highest correct-call rate across all
-    settled bets, or None if fewer than 10 settled bets are present.
+    settled predictions, or None if fewer than 10 settled predictions
+    exist in any classifier's tracker.
 
-    Each ledger history row carries xgb_prob / lr_prob / nn_prob plus
-    bet_side + result.  A classifier is "correct" on a row when the side
-    it implied (>=0.5 -> home, <0.5 -> away) matches the side that
-    actually covered (bet_side if win, opposite if loss).  Mirrors the
-    Model-page tally so the chip lines up with that view.
+    Reads from the per-classifier tracker files (not ledger history) so
+    EVERY analyzed game contributes -- not just the top-5 placed bets.
+    The Model page's CLASSIFIER ACCURACY card uses the same source so
+    the chip and that card always agree.
     """
-    history = _all_history(backend)
-    models = ("xgb", "lr", "nn")
+    tallies = classifier_accuracy_from_trackers()
     pretty = {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}
-    tallies = {m: [0, 0] for m in models}     # [correct, total]
 
-    for bet in history:
-        result = (bet.get("result") or "").lower()
-        if result not in ("win", "loss"):
-            continue
-        side = (bet.get("bet_side") or bet.get("side") or "home").lower()
-        bet_on_home = side == "home"
-        home_covered = bet_on_home if result == "win" else not bet_on_home
-        for m in models:
-            p = bet.get(f"{m}_prob")
-            if p is None:
-                continue
-            picks_home = float(p) >= 0.5
-            tallies[m][1] += 1
-            tallies[m][0] += int(picks_home == home_covered)
-
-    qualified = [(m, *tallies[m]) for m in models if tallies[m][1] >= 10]
+    qualified = [
+        (m, *tallies[m]["overall"])
+        for m in tallies
+        if tallies[m]["overall"][1] >= 10
+    ]
     if not qualified:
         return None
     best = max(qualified, key=lambda r: (r[1] / r[2]) if r[2] else 0)
