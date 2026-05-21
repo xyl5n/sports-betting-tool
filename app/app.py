@@ -5978,24 +5978,32 @@ def admin_model_reset():
     Wipe today's non-confirmed model picks across every storage layer.
 
     Clears, in this order:
-      1. open model bets (non-confirmed) for each requested sport's ledger,
-         refunding their stakes to model_bankroll
-      2. data/ensemble_picks_today.json   -- replaced with an empty
-         structure dated today so the next ensemble_store.save / load
-         starts fresh
-      3. data/daily_snapshot.json         -- deleted (next analyze run
-         repopulates it)
-      4. Supabase app_cache rows for daily_snapshot + analysis_cache:mlb +
-         analysis_cache:wnba so a worker restart can't restore yesterday's
-         picks from Supabase
+      1. open model bets (non-confirmed) for each requested sport's
+         ledger, refunding their stakes to model_bankroll
+      2. Supabase `bets` table -- delete every row with confirmed=False
+         for each requested sport so the next ledger load can't
+         resurrect them
+      3. data/ensemble_picks_today.json -- rewritten as the empty
+         structure dated today
+      4. data/daily_snapshot.json -- deleted
+      5. data/analysis_cache.json + data/wnba_analysis_cache.json --
+         deleted so the next analyze run writes fresh state
+      6. Supabase app_cache rows for the three canonical keys
+         (daily_snapshot, analysis_cache:mlb, analysis_cache:wnba)
+      7. Supabase app_cache rows with keys containing "picks",
+         "snapshot", or "analysis" -- catches stray rows the
+         canonical-key pass would miss
+      8. In-memory _analysis_state / _wnba_analysis_state results +
+         parlays so the UI immediately reflects zero picks without
+         a page refresh
 
-    Body: {sport: "mlb"|"wnba"|"both"}.  The local files + Supabase rows
-    are cross-sport so they always get cleared regardless of the body --
-    only the ledger reset is sport-scoped.
+    Body: {sport: "mlb"|"wnba"|"both"}.  The cross-sport storage
+    layers (files + Supabase app_cache + in-memory state) always get
+    cleared regardless of the body -- only the per-sport ledger +
+    Supabase `bets` clear is sport-scoped.
 
-    Returns a detailed summary the admin toast surfaces verbatim:
-      "MLB ledger cleared 15 open bets, ensemble picks wiped, snapshot
-       cleared, Supabase rows deleted: 3"
+    Returns a detailed summary the admin toast surfaces verbatim,
+    plus per-layer counts in the JSON payload for the UI / diagnostics.
     """
     print("[ADMIN-ROUTE] /api/admin/model/reset invoked  body="
           f"{request.json!r}", flush=True, file=sys.stderr)
@@ -6010,9 +6018,10 @@ def admin_model_reset():
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         audit: list[str] = []
         removed_by_sport: dict[str, int] = {}
+        supabase_bets_by_sport: dict[str, int] = {}
         total_removed = 0
 
-        # ── 1) Per-sport ledger reset ────────────────────────────────────
+        # ── 1) Per-sport ledger reset (local JSON) ────────────────────────
         for s in sports:
             try:
                 led = Ledger(path=paths[s], starting_bankroll=1000.0)
@@ -6027,7 +6036,7 @@ def admin_model_reset():
                 )
                 _eprint(
                     f"RESET-MODEL [{s.upper()}]: removed {n} open bets "
-                    f"(from {n_open_before} total)"
+                    f"(from {n_open_before} total open in local ledger)"
                 )
             except Exception as ledger_exc:                                # noqa: BLE001
                 removed_by_sport[s] = 0
@@ -6039,7 +6048,34 @@ def admin_model_reset():
                     f"{traceback.format_exc()}"
                 )
 
-        # ── 2) ensemble_picks_today.json -> fresh empty for today ────────
+        # ── 2) Supabase `bets` table -- delete model (non-confirmed) ─────
+        # Without this the next Ledger.load() pulls the stale model bets
+        # back from Supabase and the picks reappear on the home page.
+        for s in sports:
+            try:
+                from src import db as _db
+                n_sb = int(_db.delete_bets_bulk(sport=s, confirmed=False) or 0)
+                supabase_bets_by_sport[s] = n_sb
+                total_removed += n_sb
+                audit.append(
+                    f"{s.upper()} Supabase bets table: {n_sb} model row(s) deleted"
+                )
+                _eprint(
+                    f"RESET-MODEL [{s.upper()}]: Supabase bets table cleared "
+                    f"({n_sb} non-confirmed row(s) deleted)"
+                )
+            except Exception as sb_exc:                                    # noqa: BLE001
+                supabase_bets_by_sport[s] = 0
+                audit.append(
+                    f"{s.upper()} Supabase bets delete FAILED: "
+                    f"{type(sb_exc).__name__}: {sb_exc}"
+                )
+                _eprint(
+                    f"RESET-MODEL [{s.upper()}] Supabase bets FAILED: "
+                    f"{type(sb_exc).__name__}: {sb_exc}"
+                )
+
+        # ── 3) ensemble_picks_today.json -> fresh empty for today ────────
         ensemble_cleared = 0
         try:
             existing = {}
@@ -6082,62 +6118,124 @@ def admin_model_reset():
                 f"{traceback.format_exc()}"
             )
 
-        # ── 3) daily_snapshot.json -> delete on disk ─────────────────────
-        try:
-            if _DAILY_SNAPSHOT_FILE.exists():
-                _DAILY_SNAPSHOT_FILE.unlink(missing_ok=True)
-                audit.append("snapshot cleared (local file deleted)")
-                _eprint(f"RESET-MODEL: deleted {_DAILY_SNAPSHOT_FILE}")
-            else:
-                audit.append("snapshot cleared (local file already absent)")
-        except Exception as snap_exc:                                      # noqa: BLE001
-            audit.append(
-                f"snapshot clear FAILED: "
-                f"{type(snap_exc).__name__}: {snap_exc}"
-            )
-            _eprint(
-                f"RESET-MODEL SNAPSHOT FAILED: "
-                f"{type(snap_exc).__name__}: {snap_exc}\n"
-                f"{traceback.format_exc()}"
-            )
+        # ── 4 + 5) Local cache + snapshot file deletes ───────────────────
+        # Same loop because the failure handling is identical -- each
+        # file gets one audit line whether it existed or not.
+        local_files = [
+            ("daily_snapshot.json",       _DAILY_SNAPSHOT_FILE),
+            ("analysis_cache.json",       _ANALYSIS_CACHE_FILE),
+            ("wnba_analysis_cache.json",  _WNBA_ANALYSIS_CACHE_FILE),
+        ]
+        local_files_deleted = 0
+        for label, path in local_files:
+            try:
+                if path.exists():
+                    path.unlink(missing_ok=True)
+                    local_files_deleted += 1
+                    audit.append(f"{label} deleted")
+                    _eprint(f"RESET-MODEL: deleted local file {path}")
+                else:
+                    audit.append(f"{label} already absent")
+            except Exception as file_exc:                                  # noqa: BLE001
+                audit.append(
+                    f"{label} delete FAILED: "
+                    f"{type(file_exc).__name__}: {file_exc}"
+                )
+                _eprint(
+                    f"RESET-MODEL {label} DELETE FAILED: "
+                    f"{type(file_exc).__name__}: {file_exc}"
+                )
 
-        # ── 4) Supabase app_cache: synchronous delete with counts ────────
-        # cache_delete returns True / False per key, not a row count, so
-        # the "deleted" tally counts successful Supabase responses per
-        # key.  Railway's container won't get to restore yesterday's
-        # snapshot from Supabase once these rows are gone.
-        supabase_deleted = 0
-        supabase_keys = [
+        # ── 6) Supabase app_cache: canonical keys ────────────────────────
+        # Order matters -- daily_snapshot is what hydrate_state restores
+        # from on a fresh worker, so wipe it first.
+        supabase_canonical_deleted = 0
+        canonical_keys = [
             _CACHE_KEY_SNAPSHOT,
             _CACHE_KEY_ANALYSIS_MLB,
             _CACHE_KEY_ANALYSIS_WNBA,
         ]
-        for ckey in supabase_keys:
+        for ckey in canonical_keys:
             try:
                 from src import db as _db
                 ok = bool(_db.cache_delete(ckey))
                 if ok:
-                    supabase_deleted += 1
+                    supabase_canonical_deleted += 1
                     _eprint(f"RESET-MODEL: Supabase app_cache row '{ckey}' deleted")
                 else:
-                    _eprint(f"RESET-MODEL: Supabase app_cache row '{ckey}' "
-                            f"not deleted (offline or missing)")
+                    _eprint(
+                        f"RESET-MODEL: Supabase app_cache row '{ckey}' "
+                        f"not deleted (offline or missing)"
+                    )
             except Exception as sb_exc:                                    # noqa: BLE001
                 _eprint(
                     f"RESET-MODEL Supabase delete({ckey}) failed: "
                     f"{type(sb_exc).__name__}: {sb_exc}"
                 )
-        audit.append(f"Supabase rows deleted: {supabase_deleted}")
+        audit.append(
+            f"Supabase canonical app_cache rows deleted: {supabase_canonical_deleted}"
+        )
+
+        # ── 7) Supabase app_cache: pattern delete ────────────────────────
+        # Catches anything that contains "picks", "snapshot", or
+        # "analysis" in the key -- future code paths can add new rows
+        # without us needing to update this reset endpoint.
+        supabase_pattern_deleted = 0
+        supabase_pattern_keys: list[str] = []
+        try:
+            from src import db as _db
+            n, keys = _db.cache_delete_keys_like(["picks", "snapshot", "analysis"])
+            supabase_pattern_deleted = int(n or 0)
+            supabase_pattern_keys = list(keys or [])
+            audit.append(
+                f"Supabase pattern-match rows deleted: "
+                f"{supabase_pattern_deleted}"
+            )
+            if supabase_pattern_keys:
+                _eprint(
+                    f"RESET-MODEL: Supabase pattern delete removed "
+                    f"{supabase_pattern_deleted} row(s): "
+                    f"{', '.join(supabase_pattern_keys[:20])}"
+                    + (" ..." if len(supabase_pattern_keys) > 20 else "")
+                )
+            else:
+                _eprint(
+                    f"RESET-MODEL: Supabase pattern delete found 0 matches "
+                    f"for picks / snapshot / analysis"
+                )
+        except Exception as sb_exc:                                        # noqa: BLE001
+            audit.append(
+                f"Supabase pattern delete FAILED: "
+                f"{type(sb_exc).__name__}: {sb_exc}"
+            )
+            _eprint(
+                f"RESET-MODEL Supabase pattern delete FAILED: "
+                f"{type(sb_exc).__name__}: {sb_exc}"
+            )
+
+        supabase_deleted = supabase_canonical_deleted + supabase_pattern_deleted
         total_removed += supabase_deleted
 
-        # ── 5) Reset in-memory state so the next read doesn't restore --
-        # values from the snapshot we just deleted ───────────────────────
+        # ── 8) In-memory state -- so the UI reflects zero picks now ──────
         try:
             _analysis_state["results"] = []
             _analysis_state["parlays"] = {}
+            _analysis_state["last_analyzed_at"] = None
             _wnba_analysis_state["results"] = []
             _wnba_analysis_state["parlays"] = {}
+            _wnba_analysis_state["last_analyzed_at"] = None
+            # ensemble_store keeps its own in-memory cache; reload it
+            # so the next get_picks() call sees the freshly-empty file.
+            try:
+                ensemble_store.load()
+            except Exception:                                              # noqa: BLE001
+                pass
             audit.append("in-memory analysis state cleared")
+            _eprint(
+                "RESET-MODEL: in-memory _analysis_state + "
+                "_wnba_analysis_state results / parlays / last_analyzed_at "
+                "cleared; ensemble_store reloaded"
+            )
         except Exception as mem_exc:                                       # noqa: BLE001
             audit.append(
                 f"in-memory clear FAILED: "
@@ -6147,13 +6245,18 @@ def admin_model_reset():
         message = ", ".join(audit)
         _eprint(f"RESET-MODEL COMPLETE: {message}  total_removed={total_removed}")
         return jsonify({
-            "success":          True,
-            "removed":          removed_by_sport,
-            "total_removed":    total_removed,
-            "ensemble_cleared": ensemble_cleared,
-            "supabase_deleted": supabase_deleted,
-            "message":          message,
-            "audit":            audit,
+            "success":                    True,
+            "removed":                    removed_by_sport,
+            "supabase_bets_by_sport":     supabase_bets_by_sport,
+            "ensemble_cleared":           ensemble_cleared,
+            "local_files_deleted":        local_files_deleted,
+            "supabase_canonical_deleted": supabase_canonical_deleted,
+            "supabase_pattern_deleted":   supabase_pattern_deleted,
+            "supabase_pattern_keys":      supabase_pattern_keys,
+            "supabase_deleted":           supabase_deleted,
+            "total_removed":              total_removed,
+            "message":                    message,
+            "audit":                      audit,
         })
     except Exception as exc:                                              # noqa: BLE001
         _eprint(
