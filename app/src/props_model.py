@@ -76,6 +76,12 @@ _MARKET_REG_KEY: dict[str, tuple[str, str]] = {
 # Feature-name metadata written by the training script.
 _REG_META_PATH = _CACHE_DIR / "props_reg_metadata.json"
 
+# Per-player rolling-stat snapshots written by the training script.
+# Inference looks these up by MLB player ID so the szn_*/r7_*/r14_* feature
+# slots get real values instead of the prop line as a degenerate proxy.
+_PITCHER_SNAPSHOTS_PATH = _CACHE_DIR / "pitcher_rolling_snapshots.json"
+_BATTER_SNAPSHOTS_PATH  = _CACHE_DIR / "batter_rolling_snapshots.json"
+
 # Per-classifier picks history (mirrors xgb / lr / nn picks history
 # in /api/admin/reset/model_record so the new sinks plug into the
 # existing reset machinery).
@@ -373,6 +379,145 @@ def _load_reg_meta() -> dict:
     return _reg_meta_cache
 
 
+# ── Pitcher snapshot cache ──────────────────────────────────────────────────
+# Mirror of the batter snapshot system below.  Loaded once per process and
+# indexed two ways:
+#   _pitcher_snapshots_by_id:   str(player_id) -> snapshot dict
+#   _pitcher_snapshots_by_name: lower(player_name) -> snapshot dict
+# The by-name index lets predict() skip the MLB API name→ID lookup when the
+# prop's player_name matches a training-set name exactly.
+
+_pitcher_snapshot_cache: Optional[dict] = None
+_pitcher_snapshots_by_id:   dict[str, dict] = {}
+_pitcher_snapshots_by_name: dict[str, dict] = {}
+_pitcher_league_medians:    dict[str, float] = {}
+
+
+def _load_pitcher_snapshots() -> dict:
+    """Lazily load pitcher_rolling_snapshots.json once per process."""
+    global _pitcher_snapshot_cache, _pitcher_snapshots_by_id
+    global _pitcher_snapshots_by_name, _pitcher_league_medians
+    if _pitcher_snapshot_cache is not None:
+        return _pitcher_snapshot_cache
+    if not _PITCHER_SNAPSHOTS_PATH.exists():
+        _pitcher_snapshot_cache = {}
+        return {}
+    try:
+        payload = json.loads(_PITCHER_SNAPSHOTS_PATH.read_text(encoding="utf-8"))
+        players = payload.get("players") or {}
+        _pitcher_snapshots_by_id = {str(k): v for k, v in players.items()}
+        _pitcher_snapshots_by_name = {
+            (v.get("name") or "").strip().lower(): v
+            for v in _pitcher_snapshots_by_id.values()
+            if (v.get("name") or "").strip()
+        }
+        _pitcher_league_medians = dict(payload.get("league_medians") or {})
+        _pitcher_snapshot_cache = payload
+        _log(
+            f"pitcher snapshots loaded: {len(_pitcher_snapshots_by_id)} players, "
+            f"{len(_pitcher_league_medians)} league medians"
+        )
+    except Exception as exc:                                               # noqa: BLE001
+        _log(f"pitcher snapshot load failed: {exc}")
+        _pitcher_snapshot_cache = {}
+    return _pitcher_snapshot_cache
+
+
+def _lookup_pitcher_snapshot(prop: dict) -> Optional[dict]:
+    """Return the snapshot for the prop's pitcher, or None.
+
+    Resolution order:
+      1. Direct name match against snapshot index (cheap, in-process).
+      2. MLB Stats API name search via player_profile_client (cached
+         per-process; falls back gracefully if the module isn't importable).
+    """
+    _load_pitcher_snapshots()
+    name = (prop.get("player_name") or "").strip()
+    if not name:
+        return None
+    snap = _pitcher_snapshots_by_name.get(name.lower())
+    if snap is not None:
+        return snap
+    # Fall back to MLB ID lookup, then snapshot-by-id.
+    try:
+        from .player_profile_client import search_player_by_name
+        pid = search_player_by_name(name)
+        if pid is not None:
+            return _pitcher_snapshots_by_id.get(str(pid))
+    except Exception:                                                      # noqa: BLE001
+        pass
+    return None
+
+
+# ── Batter snapshot cache ───────────────────────────────────────────────────
+# Loaded once per process and indexed two ways:
+#   _batter_snapshots_by_id:   str(player_id) -> snapshot dict
+#   _batter_snapshots_by_name: lower(player_name) -> snapshot dict
+# The by-name index lets predict() skip the MLB API name→ID lookup when the
+# prop's player_name matches a training-set name exactly.
+
+_batter_snapshot_cache: Optional[dict] = None
+_batter_snapshots_by_id:   dict[str, dict] = {}
+_batter_snapshots_by_name: dict[str, dict] = {}
+_batter_league_medians:    dict[str, float] = {}
+
+
+def _load_batter_snapshots() -> dict:
+    """Lazily load batter_rolling_snapshots.json once per process."""
+    global _batter_snapshot_cache, _batter_snapshots_by_id
+    global _batter_snapshots_by_name, _batter_league_medians
+    if _batter_snapshot_cache is not None:
+        return _batter_snapshot_cache
+    if not _BATTER_SNAPSHOTS_PATH.exists():
+        _batter_snapshot_cache = {}
+        return {}
+    try:
+        payload = json.loads(_BATTER_SNAPSHOTS_PATH.read_text(encoding="utf-8"))
+        players = payload.get("players") or {}
+        _batter_snapshots_by_id = {str(k): v for k, v in players.items()}
+        _batter_snapshots_by_name = {
+            (v.get("name") or "").strip().lower(): v
+            for v in _batter_snapshots_by_id.values()
+            if (v.get("name") or "").strip()
+        }
+        _batter_league_medians = dict(payload.get("league_medians") or {})
+        _batter_snapshot_cache = payload
+        _log(
+            f"batter snapshots loaded: {len(_batter_snapshots_by_id)} players, "
+            f"{len(_batter_league_medians)} league medians"
+        )
+    except Exception as exc:                                               # noqa: BLE001
+        _log(f"batter snapshot load failed: {exc}")
+        _batter_snapshot_cache = {}
+    return _batter_snapshot_cache
+
+
+def _lookup_batter_snapshot(prop: dict) -> Optional[dict]:
+    """Return the snapshot for the prop's batter, or None.
+
+    Resolution order:
+      1. Direct name match against snapshot index (cheap, in-process).
+      2. MLB Stats API name search via player_profile_client (cached
+         per-process; falls back gracefully if the module isn't importable).
+    """
+    _load_batter_snapshots()
+    name = (prop.get("player_name") or "").strip()
+    if not name:
+        return None
+    snap = _batter_snapshots_by_name.get(name.lower())
+    if snap is not None:
+        return snap
+    # Fall back to MLB ID lookup, then snapshot-by-id.
+    try:
+        from .player_profile_client import search_player_by_name
+        pid = search_player_by_name(name)
+        if pid is not None:
+            return _batter_snapshots_by_id.get(str(pid))
+    except Exception:                                                      # noqa: BLE001
+        pass
+    return None
+
+
 def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
     """Build a full-length feature vector for a regression or classifier call.
 
@@ -382,13 +527,23 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
       2. Hardcoded _PITCHER_FEATURE_NAMES / _BATTER_FEATURE_NAMES constants
          (always available, never requires a file on disk)
 
-    The vector is constructed as follows:
-      - Rolling/season stats (szn_*, r7_*, r14_*): use the prop line as a
-        proxy — the sportsbook line encodes the expected per-game total.
-      - Park factors: looked up from the hardcoded tables above.
-      - is_home_i: from prop payload.
-      - All other features: filled from _PITCHER_DEFAULTS / _BATTER_DEFAULTS
-        (league-average neutrals) so missing context minimally shifts predictions.
+    Batter rolling stats (bucket == "batter"):
+      Look up the batter's snapshot (latest engineered training row) by
+      player_name → MLB ID and fill every szn_*/r7_*/r14_* feature with
+      the snapshot's real value.  League-median fallback when the player
+      has no snapshot (rookies / mid-season call-ups).  The old behaviour
+      of stamping the prop line into every rolling slot was physically
+      incoherent and made the model effectively blind at inference time.
+
+    Pitcher rolling stats (bucket == "pitcher"):
+      Same pattern as batter — snapshot lookup, then league median.  For
+      pitchers not in the snapshot (rookies, mid-season debuts, or a
+      Railway redeploy that lost the JSON before Supabase restore) the
+      live-fetch helper in pitcher_inference_features.py hits MLB Stats
+      API for fresh rolling stats as a last-ditch fallback before
+      falling through to league-average defaults.  We never use the
+      prop line as a proxy for pitcher rolling stats — the same
+      argument that broke it for batters breaks it for pitchers.
 
     Always returns (vector, feature_names) — never (None, None).
     """
@@ -407,17 +562,70 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
 
     line = float(prop.get("line") or 0.0)
 
-    # Rolling/season averages — use line as best available proxy.
-    for fname in feature_names:
-        if fname.startswith(("szn_", "r7_", "r14_")):
-            idx = fn_idx.get(fname)
-            if idx is not None:
-                vec[idx] = line
+    snapshot_feats: dict[str, float] = {}
+    league_medians: dict[str, float] = {}
+    snap_source = "none"
+    if bucket == "batter":
+        snap = _lookup_batter_snapshot(prop)
+        if isinstance(snap, dict):
+            snapshot_feats = snap.get("features") or {}
+            snap_source = "player"
+        league_medians = _batter_league_medians or {}
+        if not snapshot_feats and league_medians:
+            snap_source = "league_median"
+    elif bucket == "pitcher":
+        snap = _lookup_pitcher_snapshot(prop)
+        if isinstance(snap, dict):
+            snapshot_feats = snap.get("features") or {}
+            snap_source = "player"
+        league_medians = _pitcher_league_medians or {}
+        if not snapshot_feats:
+            # Snapshot miss -- try the live MLB Stats API enrichment for
+            # rookies / mid-season debuts / post-retrain pitchers that
+            # haven't made it into the snapshot yet.  Cached on disk so
+            # the same pitcher isn't refetched per prop.
+            try:
+                from . import pitcher_inference_features as _pif  # noqa: PLC0415
+                live_feats = _pif.enrich_pitcher_features(prop) or {}
+                if live_feats:
+                    snapshot_feats = live_feats
+                    snap_source = "live_api"
+            except Exception as exc:                                          # noqa: BLE001
+                _log(f"live pitcher enrichment failed: {exc}")
+        if not snapshot_feats and league_medians:
+            snap_source = "league_median"
 
-    # is_home_i
-    is_home = bool(prop.get("is_home"))
-    if "is_home_i" in fn_idx:
-        vec[fn_idx["is_home_i"]] = float(is_home)
+    # Rolling/season averages.
+    # Both buckets: snapshot value, then league median, then line as last-ditch
+    # fallback.  Line-as-proxy is only used when EVERY other source is missing.
+    for fname in feature_names:
+        if not fname.startswith(("szn_", "r7_", "r14_")):
+            continue
+        idx = fn_idx.get(fname)
+        if idx is None:
+            continue
+        if fname in snapshot_feats:
+            vec[idx] = float(snapshot_feats[fname])
+        elif fname in league_medians:
+            vec[idx] = float(league_medians[fname])
+        else:
+            vec[idx] = line
+
+    # Pull non-rolling features from the snapshot when available (platoon
+    # splits, BABIP, k_pct, batting_order, days_since_last_start, ip_last_30d,
+    # is_home_i, ...).  These are more accurate than league-average defaults.
+    if snapshot_feats:
+        for fname, val in snapshot_feats.items():
+            idx = fn_idx.get(fname)
+            if idx is not None and vec[idx] == 0.0:
+                vec[idx] = float(val)
+
+    # is_home_i — prefer the prop payload's matchup-specific value when set,
+    # otherwise leave whatever the snapshot wrote.  (Snapshot's is_home is
+    # captured from the pitcher's last training-set start; for live props
+    # the prop dict's is_home is authoritative.)
+    if "is_home_i" in fn_idx and prop.get("is_home") is not None:
+        vec[fn_idx["is_home_i"]] = float(bool(prop.get("is_home")))
 
     # Park factors — home_team drives the ballpark.  Odds API passes
     # full team names ("New York Yankees") so we normalize through the
@@ -430,11 +638,16 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
     if "ballpark_factor_hr" in fn_idx:
         vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
 
-    # Fill all other features from league-average defaults.
+    # Fill any remaining holes from league-average neutral defaults.
     for fname, default_val in defaults.items():
         idx = fn_idx.get(fname)
         if idx is not None and vec[idx] == 0.0:
             vec[idx] = default_val
+
+    _log(
+        f"build_reg_vector {bucket}: name={prop.get('player_name','?')!r} "
+        f"snapshot={snap_source}"
+    )
 
     return vec, feature_names
 
@@ -517,6 +730,58 @@ def restore_models_from_supabase() -> dict:
             out["props_reg_metadata"] = f"error: {exc}"
             _log(f"restore props_reg_metadata failed: {exc}")
 
+    # Restore pitcher_rolling_snapshots.json -- same wire format as the
+    # batter snapshot below (base64-encoded JSON pushed by training).
+    if not _PITCHER_SNAPSHOTS_PATH.exists():
+        try:
+            from . import db as _db
+            row = _db.cache_get("pitcher_rolling_snapshots")
+            if isinstance(row, dict):
+                data = row.get("data") if isinstance(row.get("data"), dict) else row
+                b64 = (data or {}).get("b64")
+                if b64:
+                    _PITCHER_SNAPSHOTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    _PITCHER_SNAPSHOTS_PATH.write_bytes(base64.b64decode(b64))
+                    out["pitcher_rolling_snapshots"] = "restored"
+                    _log(
+                        f"restore pitcher_rolling_snapshots: wrote "
+                        f"{_PITCHER_SNAPSHOTS_PATH} "
+                        f"({_PITCHER_SNAPSHOTS_PATH.stat().st_size} bytes)"
+                    )
+                else:
+                    out["pitcher_rolling_snapshots"] = "no_b64"
+            else:
+                out["pitcher_rolling_snapshots"] = "missing"
+        except Exception as exc:                                          # noqa: BLE001
+            out["pitcher_rolling_snapshots"] = f"error: {exc}"
+            _log(f"restore pitcher_rolling_snapshots failed: {exc}")
+
+    # Restore batter_rolling_snapshots.json (training-script pushes it base64-
+    # encoded alongside the joblibs, so the same b64 unwrap works).
+    if not _BATTER_SNAPSHOTS_PATH.exists():
+        try:
+            from . import db as _db
+            row = _db.cache_get("batter_rolling_snapshots")
+            if isinstance(row, dict):
+                data = row.get("data") if isinstance(row.get("data"), dict) else row
+                b64 = (data or {}).get("b64")
+                if b64:
+                    _BATTER_SNAPSHOTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    _BATTER_SNAPSHOTS_PATH.write_bytes(base64.b64decode(b64))
+                    out["batter_rolling_snapshots"] = "restored"
+                    _log(
+                        f"restore batter_rolling_snapshots: wrote "
+                        f"{_BATTER_SNAPSHOTS_PATH} "
+                        f"({_BATTER_SNAPSHOTS_PATH.stat().st_size} bytes)"
+                    )
+                else:
+                    out["batter_rolling_snapshots"] = "no_b64"
+            else:
+                out["batter_rolling_snapshots"] = "missing"
+        except Exception as exc:                                          # noqa: BLE001
+            out["batter_rolling_snapshots"] = f"error: {exc}"
+            _log(f"restore batter_rolling_snapshots failed: {exc}")
+
     return out
 
 
@@ -568,6 +833,32 @@ def push_models_to_supabase() -> dict:
         except Exception as exc:                                          # noqa: BLE001
             out["props_reg_metadata"] = f"error: {exc}"
             _log(f"push props_reg_metadata failed: {exc}")
+
+    # Push pitcher_rolling_snapshots.json -- same wire format as batter.
+    if _PITCHER_SNAPSHOTS_PATH.exists():
+        try:
+            from . import db as _db
+            b64 = base64.b64encode(_PITCHER_SNAPSHOTS_PATH.read_bytes()).decode("ascii")
+            _db.cache_set("pitcher_rolling_snapshots", None, "models", {"b64": b64})
+            out["pitcher_rolling_snapshots"] = "pushed"
+            _log(f"push pitcher_rolling_snapshots: uploaded {_PITCHER_SNAPSHOTS_PATH}")
+        except Exception as exc:                                          # noqa: BLE001
+            out["pitcher_rolling_snapshots"] = f"error: {exc}"
+            _log(f"push pitcher_rolling_snapshots failed: {exc}")
+
+    # Push batter_rolling_snapshots.json as base64 so restore matches the
+    # joblib code path.  Snapshots are small (~200 KB) so encoding overhead
+    # is fine.
+    if _BATTER_SNAPSHOTS_PATH.exists():
+        try:
+            from . import db as _db
+            b64 = base64.b64encode(_BATTER_SNAPSHOTS_PATH.read_bytes()).decode("ascii")
+            _db.cache_set("batter_rolling_snapshots", None, "models", {"b64": b64})
+            out["batter_rolling_snapshots"] = "pushed"
+            _log(f"push batter_rolling_snapshots: uploaded {_BATTER_SNAPSHOTS_PATH}")
+        except Exception as exc:                                          # noqa: BLE001
+            out["batter_rolling_snapshots"] = f"error: {exc}"
+            _log(f"push batter_rolling_snapshots failed: {exc}")
 
     return out
 
