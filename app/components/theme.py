@@ -400,6 +400,231 @@ def page_head_css() -> str:
         background: {CARD_HI} !important;
       }}
 
+      /* ── Themed form controls ─────────────────────────────────────────
+         Quasar's defaults are Material-Design pale.  Override them so
+         filter bars on /props, /player, /admin and /mybets read as
+         "ours" rather than vendor stock.  Classes ``.pill-toggle``,
+         ``.styled-select``, ``.styled-switch``, ``.styled-slider`` are
+         opt-in marker classes applied by ``components/controls.py``;
+         the ``.q-tabs`` / ``.q-tab`` overrides further down also apply
+         globally so the market tabs on the player page and the
+         MLB/WNBA/PROPS tabs on /mybets all match.
+                                                                        */
+
+      /* Segmented pill toggle (q-btn-toggle) ─────────────────────── */
+      .pill-toggle.q-btn-toggle {{
+        background: transparent !important;
+        border: 1px solid {BORDER} !important;
+        border-radius: {RADIUS_PILL} !important;
+        padding: 3px !important;
+        box-shadow: none !important;
+        display: inline-flex !important;
+        gap: 2px !important;
+      }}
+      .pill-toggle .q-btn {{
+        background: transparent !important;
+        color: {TEXT_DIM} !important;
+        border-radius: {RADIUS_PILL} !important;
+        min-height: 28px !important;
+        padding: 4px 12px !important;
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        letter-spacing: .35px !important;
+        text-transform: uppercase !important;
+        box-shadow: none !important;
+        border: none !important;
+        transition: background 150ms ease-out, color 150ms ease-out !important;
+      }}
+      .pill-toggle .q-btn:hover {{
+        background: {CARD_HI} !important;
+        color: {TEXT} !important;
+      }}
+      .pill-toggle .q-btn.bg-primary,
+      .pill-toggle .q-btn[aria-pressed="true"] {{
+        background: linear-gradient(135deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
+        color: {BG} !important;
+        font-weight: 800 !important;
+        box-shadow:
+          0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.6),
+          0 0 14px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.35) !important;
+      }}
+
+      /* Dropdown select (q-select with outlined prop) ────────────── */
+      .styled-select.q-field--outlined .q-field__control {{
+        background: {CARD_HI} !important;
+        border-radius: {RADIUS_SM} !important;
+        min-height: 38px !important;
+        padding: 0 12px !important;
+      }}
+      .styled-select.q-field--outlined .q-field__control::before {{
+        border: 1px solid {BORDER} !important;
+        border-radius: {RADIUS_SM} !important;
+      }}
+      .styled-select.q-field--outlined:hover .q-field__control::before {{
+        border-color: {PRIMARY} !important;
+      }}
+      .styled-select.q-field--outlined .q-field__control::after {{
+        border-bottom-width: 0 !important;   /* drop Material's underline */
+      }}
+      .styled-select.q-field--outlined.q-field--focused
+        .q-field__control::before {{
+        border-color: {PRIMARY} !important;
+        box-shadow: 0 0 0 1px {PRIMARY},
+                    0 0 12px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.25) !important;
+      }}
+      .styled-select .q-field__native,
+      .styled-select .q-field__input {{
+        color: {TEXT} !important;
+        font-size: 12.5px !important;
+        font-weight: 600 !important;
+      }}
+      .styled-select .q-field__label {{
+        color: {TEXT_DIM2} !important;
+        font-size: 11px !important;
+      }}
+      .styled-select .q-select__dropdown-icon {{
+        color: {TEXT_DIM} !important;
+      }}
+
+      /* Dropdown popup (q-menu) -- shared by every q-select.  Themed
+         globally so the popups always match the trigger, even when a
+         page uses ui.select directly without going through our helper.
+                                                                       */
+      .q-menu {{
+        background: {CARD} !important;
+        border: 1px solid {BORDER} !important;
+        border-radius: {RADIUS_MD} !important;
+        color: {TEXT} !important;
+        box-shadow:
+          0 12px 32px rgba(0, 0, 0, 0.55),
+          inset 0 0 0 1px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.08) !important;
+      }}
+      .q-menu .q-item {{
+        color: {TEXT} !important;
+        min-height: 36px !important;
+        padding: 8px 14px !important;
+        font-size: 12.5px !important;
+      }}
+      .q-menu .q-item:hover,
+      .q-menu .q-item--active,
+      .q-menu .q-item.q-manual-focusable--focused {{
+        background: {CARD_HI} !important;
+        color: {PRIMARY_HI} !important;
+      }}
+      .q-menu .q-item__section--main {{
+        color: inherit !important;
+      }}
+
+      /* Switch (q-toggle) ──────────────────────────────────────── */
+      .styled-switch .q-toggle__track {{
+        background: {CARD_HI} !important;
+        opacity: 1 !important;
+        border: 1px solid {BORDER} !important;
+        height: 14px !important;
+      }}
+      .styled-switch .q-toggle__inner--truthy .q-toggle__track {{
+        background: linear-gradient(135deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
+        border-color: {PRIMARY} !important;
+      }}
+      .styled-switch .q-toggle__thumb {{
+        background: #ffffff !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4) !important;
+      }}
+      .styled-switch .q-toggle__inner--truthy .q-toggle__thumb {{
+        box-shadow:
+          0 2px 6px rgba(0, 0, 0, 0.4),
+          0 0 10px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.55) !important;
+      }}
+
+      /* Slider (q-slider) ──────────────────────────────────────── */
+      .styled-slider .q-slider__track {{
+        background: {CARD_HI} !important;
+        height: 5px !important;
+        border-radius: 999px !important;
+      }}
+      .styled-slider .q-slider__selection {{
+        background: linear-gradient(90deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
+        border-radius: 999px !important;
+      }}
+      .styled-slider .q-slider__thumb {{
+        color: {PRIMARY_HI} !important;
+      }}
+      .styled-slider .q-slider__thumb-shape {{
+        filter: drop-shadow(0 0 6px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.55));
+      }}
+      .styled-slider .q-slider__pin {{
+        background: linear-gradient(135deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
+        color: {BG} !important;
+        font-weight: 800 !important;
+        border-radius: {RADIUS_SM} !important;
+      }}
+      .styled-slider .q-slider__pin-text-container {{
+        color: {BG} !important;
+        font-weight: 800 !important;
+      }}
+
+      /* Tabs (q-tabs / q-tab) ──────────────────────────────────────
+         The market tabs on /player and the MLB/WNBA/PROPS tabs on
+         /mybets share these styles -- no per-page override needed.
+                                                                    */
+      .q-tabs {{
+        color: {TEXT_DIM} !important;
+        font-family: inherit !important;
+        min-height: 38px !important;
+      }}
+      .q-tab {{
+        color: {TEXT_DIM} !important;
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        letter-spacing: .4px !important;
+        text-transform: uppercase !important;
+        min-height: 38px !important;
+        padding: 6px 14px !important;
+        opacity: 1 !important;
+        transition: background 150ms, color 150ms !important;
+      }}
+      .q-tab:hover {{
+        color: {TEXT} !important;
+        background: {CARD_HI} !important;
+      }}
+      .q-tab--active {{
+        color: {PRIMARY_HI} !important;
+        font-weight: 800 !important;
+      }}
+      .q-tab__indicator {{
+        background: linear-gradient(90deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
+        height: 2px !important;
+        border-radius: 2px !important;
+        box-shadow: 0 0 10px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.55) !important;
+      }}
+      .q-tab .q-focus-helper,
+      .q-tab .q-ripple {{ display: none !important; }}
+
+      /* Defensive: native <select> can sneak in from third-party
+         widgets.  Render them with the same dark card look so they
+         don't break the theme. */
+      select:not([multiple]) {{
+        appearance: none;
+        -webkit-appearance: none;
+        background: {CARD_HI};
+        color: {TEXT};
+        border: 1px solid {BORDER};
+        border-radius: {RADIUS_SM};
+        padding: 6px 28px 6px 12px;
+        font-size: 12.5px;
+        font-weight: 600;
+        background-image:
+          linear-gradient(45deg, transparent 50%, {TEXT_DIM} 50%),
+          linear-gradient(135deg, {TEXT_DIM} 50%, transparent 50%);
+        background-position:
+          calc(100% - 16px) 50%,
+          calc(100% - 11px) 50%;
+        background-size: 5px 5px, 5px 5px;
+        background-repeat: no-repeat;
+      }}
+      select:not([multiple]):hover {{ border-color: {PRIMARY}; }}
+      select:focus {{ outline: none; border-color: {PRIMARY}; }}
+
       /* Bet-box labels: full version is visible by default; the abbreviated
          span (ML / RL / SPR / TOT) takes over below 480px so the labels +
          optional VALUE chip fit inside a ~110px box on a portrait phone. */

@@ -1784,7 +1784,7 @@ def _toggle_row(backend, label: str, sub: str, field: str, initial: bool) -> Non
             with ui.column().style("gap: 2px;"):
                 ui.label(label).style(f"color: {t.TEXT}; font-size: 13px; font-weight: 600;")
                 ui.label(sub).style(f"color: {t.TEXT_DIM}; font-size: 11px;")
-            sw = ui.switch(value=initial)
+            sw = ui.switch(value=initial).props("dense color=primary").classes("styled-switch")
         status = _make_status_holder()
 
         async def _on_change(e):
