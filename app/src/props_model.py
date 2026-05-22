@@ -111,6 +111,104 @@ _PARK_HR: dict[str, float] = {
 }
 
 
+# ── Hardcoded feature name lists (must match train_props_models.py) ──────────
+# These are duplicated here so inference never requires props_reg_metadata.json
+# to be present on disk (the file is lost on every Railway redeploy).
+
+_P_ROLL = ["K", "BB", "H", "ER", "IP", "k_per_9", "bb_per_9"]
+_B_ROLL = [
+    "H", "HR", "RBI", "R", "BB", "SO", "TB", "AB", "PA",
+    "H_per_AB", "TB_per_AB", "HR_per_AB", "BB_per_PA", "SO_per_PA",
+]
+
+_PITCHER_FEATURE_NAMES: list[str] = (
+    [f"szn_{c}" for c in _P_ROLL]   # 7
+    + [f"r7_{c}"  for c in _P_ROLL] # 7
+    + [f"r14_{c}" for c in _P_ROLL] # 7
+    + ["is_home_i", "days_since_last_start", "ip_last_30d", "ballpark_factor_k"]  # 4
+    + ["era_vs_lhb", "k_rate_vs_lhb", "era_vs_rhb", "k_rate_vs_rhb"]             # 4
+    + [
+        "lineup_avg_k_rate", "lineup_lhb_count", "lineup_rhb_count",
+        "weather_temp", "weather_wind_speed", "weather_wind_dir_num",
+        "time_of_day", "umpire_k_rate", "implied_total",
+        "first_inning_k_pct", "pitch_mix_fastball_pct",
+        "pitch_mix_breaking_pct", "pitch_mix_offspeed_pct",
+    ]  # 13
+)  # 7+7+7+4+4+13 = 42
+
+_BATTER_FEATURE_NAMES: list[str] = (
+    [f"szn_{c}" for c in _B_ROLL]   # 14
+    + [f"r7_{c}"  for c in _B_ROLL] # 14
+    + [f"r14_{c}" for c in _B_ROLL] # 14
+    + [
+        "k_pct_7d", "k_pct_14d", "babip_7d", "babip_14d",
+        "batting_order", "is_home_i", "ballpark_factor_hits", "ballpark_factor_hr",
+    ]  # 8
+    + ["ops_vs_lhp", "obp_vs_lhp", "slg_vs_lhp", "ops_vs_rhp", "obp_vs_rhp", "slg_vs_rhp"]  # 6
+    + [
+        "whiff_pct", "chase_pct", "hard_hit_rate", "barrel_rate", "sprint_speed",
+        "platoon_matchup_flag", "weather_temp", "weather_wind_speed", "time_of_day",
+        "ba_vs_breaking", "ba_vs_fastball", "ba_vs_offspeed",
+        "h2h_career_ab", "h2h_career_avg", "h2h_career_k_rate", "implied_total",
+    ]  # 16
+)  # 14+14+14+8+6+16 = 72
+
+# Neutral inference-time defaults for features that require live data
+# (lineup, weather, umpire stats, etc.).  These match league-average
+# values so missing context shifts predictions minimally.
+_PITCHER_DEFAULTS: dict[str, float] = {
+    "ip_last_30d":            30.0,
+    "days_since_last_start":   5.0,
+    "era_vs_lhb":              4.50,
+    "k_rate_vs_lhb":           0.215,
+    "era_vs_rhb":              4.50,
+    "k_rate_vs_rhb":           0.215,
+    "lineup_avg_k_rate":       0.220,
+    "lineup_lhb_count":        4.0,
+    "lineup_rhb_count":        5.0,
+    "weather_temp":           72.0,
+    "weather_wind_speed":      8.0,
+    "weather_wind_dir_num":    0.0,
+    "time_of_day":             1.0,  # 1 = day, 0 = night (league avg ~0.25 day)
+    "umpire_k_rate":           0.215,
+    "implied_total":           8.5,
+    "first_inning_k_pct":      0.210,
+    "pitch_mix_fastball_pct":  0.55,
+    "pitch_mix_breaking_pct":  0.25,
+    "pitch_mix_offspeed_pct":  0.20,
+}
+
+_BATTER_DEFAULTS: dict[str, float] = {
+    "k_pct_7d":            0.230,
+    "k_pct_14d":           0.230,
+    "babip_7d":            0.295,
+    "babip_14d":           0.295,
+    "batting_order":       5.0,
+    "ops_vs_lhp":          0.720,
+    "obp_vs_lhp":          0.315,
+    "slg_vs_lhp":          0.405,
+    "ops_vs_rhp":          0.720,
+    "obp_vs_rhp":          0.315,
+    "slg_vs_rhp":          0.405,
+    "whiff_pct":           0.245,
+    "chase_pct":           0.295,
+    "hard_hit_rate":       0.370,
+    "barrel_rate":         0.075,
+    "sprint_speed":       27.0,
+    "platoon_matchup_flag": 0.0,
+    "weather_temp":        72.0,
+    "weather_wind_speed":   8.0,
+    "time_of_day":          1.0,
+    "ba_vs_breaking":      0.235,
+    "ba_vs_fastball":      0.265,
+    "ba_vs_offspeed":      0.255,
+    "h2h_career_ab":       12.0,
+    "h2h_career_avg":       0.255,
+    "h2h_career_k_rate":    0.220,
+    "implied_total":        8.5,
+}
+
+
 def _log(msg: str) -> None:
     print(f"PROPS-MODEL: {msg}", flush=True, file=sys.stderr)
 
@@ -209,45 +307,54 @@ def _load_reg_meta() -> dict:
     return _reg_meta_cache
 
 
-def _build_reg_vector(prop: dict, bucket: str) -> tuple[Optional[list[float]], Optional[list[str]]]:
-    """Build a feature vector for a regression model inference call.
+def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
+    """Build a full-length feature vector for a regression or classifier call.
 
-    Uses the feature names saved at training time (props_reg_metadata.json)
-    to construct a zero vector of the correct length, then fills in the fields
-    available from the prop payload.  Missing fields stay zero — the same
-    convention used during training for inference-time placeholder features.
+    Preference order for feature names:
+      1. props_reg_metadata.json saved at training time (same process-lifetime
+         cache as before)
+      2. Hardcoded _PITCHER_FEATURE_NAMES / _BATTER_FEATURE_NAMES constants
+         (always available, never requires a file on disk)
 
-    Returns (vector, feature_names) or (None, None) when metadata unavailable.
+    The vector is constructed as follows:
+      - Rolling/season stats (szn_*, r7_*, r14_*): use the prop line as a
+        proxy — the sportsbook line encodes the expected per-game total.
+      - Park factors: looked up from the hardcoded tables above.
+      - is_home_i: from prop payload.
+      - All other features: filled from _PITCHER_DEFAULTS / _BATTER_DEFAULTS
+        (league-average neutrals) so missing context minimally shifts predictions.
+
+    Always returns (vector, feature_names) — never (None, None).
     """
+    # Prefer metadata from training file; fall back to hardcoded constants.
     meta = _load_reg_meta()
     fn_key = f"{bucket}_feature_names"
-    feature_names: Optional[list[str]] = meta.get(fn_key)
-    if not feature_names:
-        return None, None
+    feature_names: list[str] = (
+        meta.get(fn_key)
+        or (_PITCHER_FEATURE_NAMES if bucket == "pitcher" else _BATTER_FEATURE_NAMES)
+    )
+
+    defaults = _PITCHER_DEFAULTS if bucket == "pitcher" else _BATTER_DEFAULTS
 
     fn_idx = {name: i for i, name in enumerate(feature_names)}
     vec    = [0.0] * len(feature_names)
 
     line = float(prop.get("line") or 0.0)
 
-    # Use prop line as a proxy for season-to-date and rolling averages.
-    # This is the best available signal at inference time: the sportsbook
-    # line itself reflects the expected per-game stat total.
+    # Rolling/season averages — use line as best available proxy.
     for fname in feature_names:
         if fname.startswith(("szn_", "r7_", "r14_")):
             idx = fn_idx.get(fname)
             if idx is not None:
                 vec[idx] = line
 
-    # is_home_i — whether this player is at home
+    # is_home_i
     is_home = bool(prop.get("is_home"))
     if "is_home_i" in fn_idx:
         vec[fn_idx["is_home_i"]] = float(is_home)
 
-    # Park team = always the home team's stadium, regardless of which side
-    # the player is on.
+    # Park factors — home_team drives the ballpark.
     park_team = (prop.get("home_team") or "").strip().upper()[:3]
-
     if "ballpark_factor_k" in fn_idx:
         vec[fn_idx["ballpark_factor_k"]] = _PARK_K.get(park_team, 1.0)
     if "ballpark_factor_hits" in fn_idx:
@@ -255,9 +362,11 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[Optional[list[float]], O
     if "ballpark_factor_hr" in fn_idx:
         vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
 
-    # days_since_last_start: neutral default (~5 days rest for starters)
-    if "days_since_last_start" in fn_idx:
-        vec[fn_idx["days_since_last_start"]] = 5.0
+    # Fill all other features from league-average defaults.
+    for fname, default_val in defaults.items():
+        idx = fn_idx.get(fname)
+        if idx is not None and vec[idx] == 0.0:
+            vec[idx] = default_val
 
     return vec, feature_names
 
@@ -278,6 +387,9 @@ def restore_models_from_supabase() -> dict:
     except Exception:                                                     # noqa: BLE001
         return {"supabase": False}
 
+    import base64
+
+    # Restore joblib model files (base64-encoded bytes in data["b64"]).
     all_pairs = [
         ("props_model_pitcher", PITCHER_MODEL_PATH),
         ("props_model_batter",  BATTER_MODEL_PATH),
@@ -300,10 +412,7 @@ def restore_models_from_supabase() -> dict:
                 _log(f"restore {key}: no Supabase row -- predictor will use heuristic")
                 continue
             data = row.get("data") if isinstance(row.get("data"), dict) else row
-            # Supabase stores the joblib bytes base64-encoded in
-            # data["b64"] (same convention src.model uses).  Decode
-            # and write to disk.
-            import base64
+            # Supabase stores the joblib bytes base64-encoded in data["b64"].
             b64 = (data or {}).get("b64")
             if not b64:
                 out[key] = "no_b64"
@@ -315,6 +424,31 @@ def restore_models_from_supabase() -> dict:
         except Exception as exc:                                          # noqa: BLE001
             out[key] = f"error: {exc}"
             _log(f"restore {key} failed: {exc}")
+
+    # Restore props_reg_metadata.json (stored as JSON in data["json"]).
+    if not _REG_META_PATH.exists():
+        try:
+            from . import db as _db
+            row = _db.cache_get("props_reg_metadata")
+            if isinstance(row, dict):
+                data = row.get("data") if isinstance(row.get("data"), dict) else row
+                raw_json = (data or {}).get("json")
+                if raw_json:
+                    _REG_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    _REG_META_PATH.write_text(
+                        raw_json if isinstance(raw_json, str) else json.dumps(raw_json),
+                        encoding="utf-8",
+                    )
+                    out["props_reg_metadata"] = "restored"
+                    _log(f"restore props_reg_metadata: wrote {_REG_META_PATH}")
+                else:
+                    out["props_reg_metadata"] = "no_json"
+            else:
+                out["props_reg_metadata"] = "missing"
+        except Exception as exc:                                          # noqa: BLE001
+            out["props_reg_metadata"] = f"error: {exc}"
+            _log(f"restore props_reg_metadata failed: {exc}")
+
     return out
 
 
@@ -354,6 +488,19 @@ def push_models_to_supabase() -> dict:
         except Exception as exc:                                          # noqa: BLE001
             out[key] = f"error: {exc}"
             _log(f"push {key} failed: {exc}")
+
+    # Push props_reg_metadata.json so cold boots can restore it.
+    if _REG_META_PATH.exists():
+        try:
+            from . import db as _db
+            raw = _REG_META_PATH.read_text(encoding="utf-8")
+            _db.cache_set("props_reg_metadata", None, "models", {"json": raw})
+            out["props_reg_metadata"] = "pushed"
+            _log(f"push props_reg_metadata: uploaded {_REG_META_PATH}")
+        except Exception as exc:                                          # noqa: BLE001
+            out["props_reg_metadata"] = f"error: {exc}"
+            _log(f"push props_reg_metadata failed: {exc}")
+
     return out
 
 
@@ -412,7 +559,8 @@ def predict(prop: dict) -> dict:
     if model is not None:
         try:
             import numpy as np  # noqa: PLC0415
-            X = np.array([_feature_vector_for_prop(prop)], dtype=float)
+            vec, feat_names = _build_reg_vector(prop, bucket)
+            X = np.array([vec], dtype=float)
             # Most sklearn / xgb classifiers expose predict_proba.
             # Fall back to predict() returning {0,1}.
             if hasattr(model, "predict_proba"):
