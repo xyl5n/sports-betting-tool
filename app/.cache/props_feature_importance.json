@@ -1,0 +1,369 @@
+{
+  "generated_at": "2026-05-22T04:51:04.559879Z",
+  "pitcher": {
+    "top_30": [
+      {
+        "feature": "k_rate_vs_rhb",
+        "mean_abs_shap": 0.512457
+      },
+      {
+        "feature": "k_rate_vs_lhb",
+        "mean_abs_shap": 0.331834
+      },
+      {
+        "feature": "r7_IP",
+        "mean_abs_shap": 0.290727
+      },
+      {
+        "feature": "days_since_last_start",
+        "mean_abs_shap": 0.238689
+      },
+      {
+        "feature": "szn_k_per_9",
+        "mean_abs_shap": 0.150994
+      },
+      {
+        "feature": "r7_K",
+        "mean_abs_shap": 0.128442
+      },
+      {
+        "feature": "szn_K",
+        "mean_abs_shap": 0.099758
+      },
+      {
+        "feature": "is_home_i",
+        "mean_abs_shap": 0.099756
+      },
+      {
+        "feature": "r7_H",
+        "mean_abs_shap": 0.085392
+      },
+      {
+        "feature": "r14_IP",
+        "mean_abs_shap": 0.079698
+      },
+      {
+        "feature": "szn_BB",
+        "mean_abs_shap": 0.072671
+      },
+      {
+        "feature": "szn_H",
+        "mean_abs_shap": 0.071851
+      },
+      {
+        "feature": "r7_BB",
+        "mean_abs_shap": 0.063075
+      },
+      {
+        "feature": "szn_ER",
+        "mean_abs_shap": 0.061094
+      },
+      {
+        "feature": "ip_last_30d",
+        "mean_abs_shap": 0.058972
+      },
+      {
+        "feature": "r7_k_per_9",
+        "mean_abs_shap": 0.04624
+      },
+      {
+        "feature": "szn_bb_per_9",
+        "mean_abs_shap": 0.041489
+      },
+      {
+        "feature": "r14_H",
+        "mean_abs_shap": 0.03987
+      },
+      {
+        "feature": "szn_IP",
+        "mean_abs_shap": 0.037104
+      },
+      {
+        "feature": "r14_K",
+        "mean_abs_shap": 0.031122
+      },
+      {
+        "feature": "r14_bb_per_9",
+        "mean_abs_shap": 0.02725
+      },
+      {
+        "feature": "r7_ER",
+        "mean_abs_shap": 0.026862
+      },
+      {
+        "feature": "r7_bb_per_9",
+        "mean_abs_shap": 0.024624
+      },
+      {
+        "feature": "r14_k_per_9",
+        "mean_abs_shap": 0.023929
+      },
+      {
+        "feature": "r14_ER",
+        "mean_abs_shap": 0.0233
+      },
+      {
+        "feature": "r14_BB",
+        "mean_abs_shap": 0.016872
+      },
+      {
+        "feature": "ballpark_factor_k",
+        "mean_abs_shap": 0.0
+      },
+      {
+        "feature": "era_vs_lhb",
+        "mean_abs_shap": 0.0
+      },
+      {
+        "feature": "era_vs_rhb",
+        "mean_abs_shap": 0.0
+      },
+      {
+        "feature": "lineup_avg_k_rate",
+        "mean_abs_shap": 0.0
+      }
+    ],
+    "all": {
+      "k_rate_vs_rhb": 0.512457,
+      "k_rate_vs_lhb": 0.331834,
+      "r7_IP": 0.290727,
+      "days_since_last_start": 0.238689,
+      "szn_k_per_9": 0.150994,
+      "r7_K": 0.128442,
+      "szn_K": 0.099758,
+      "is_home_i": 0.099756,
+      "r7_H": 0.085392,
+      "r14_IP": 0.079698,
+      "szn_BB": 0.072671,
+      "szn_H": 0.071851,
+      "r7_BB": 0.063075,
+      "szn_ER": 0.061094,
+      "ip_last_30d": 0.058972,
+      "r7_k_per_9": 0.04624,
+      "szn_bb_per_9": 0.041489,
+      "r14_H": 0.03987,
+      "szn_IP": 0.037104,
+      "r14_K": 0.031122,
+      "r14_bb_per_9": 0.02725,
+      "r7_ER": 0.026862,
+      "r7_bb_per_9": 0.024624,
+      "r14_k_per_9": 0.023929,
+      "r14_ER": 0.0233,
+      "r14_BB": 0.016872,
+      "ballpark_factor_k": 0.0,
+      "era_vs_lhb": 0.0,
+      "era_vs_rhb": 0.0,
+      "lineup_avg_k_rate": 0.0,
+      "lineup_lhb_count": 0.0,
+      "lineup_rhb_count": 0.0,
+      "weather_temp": 0.0,
+      "weather_wind_speed": 0.0,
+      "weather_wind_dir_num": 0.0,
+      "time_of_day": 0.0,
+      "umpire_k_rate": 0.0,
+      "implied_total": 0.0,
+      "first_inning_k_pct": 0.0,
+      "pitch_mix_fastball_pct": 0.0,
+      "pitch_mix_breaking_pct": 0.0,
+      "pitch_mix_offspeed_pct": 0.0
+    }
+  },
+  "batter": {
+    "top_30": [
+      {
+        "feature": "szn_AB",
+        "mean_abs_shap": 0.106346
+      },
+      {
+        "feature": "ops_vs_rhp",
+        "mean_abs_shap": 0.090739
+      },
+      {
+        "feature": "r14_AB",
+        "mean_abs_shap": 0.081268
+      },
+      {
+        "feature": "szn_PA",
+        "mean_abs_shap": 0.054049
+      },
+      {
+        "feature": "slg_vs_rhp",
+        "mean_abs_shap": 0.051678
+      },
+      {
+        "feature": "obp_vs_rhp",
+        "mean_abs_shap": 0.044954
+      },
+      {
+        "feature": "ops_vs_lhp",
+        "mean_abs_shap": 0.04314
+      },
+      {
+        "feature": "szn_BB_per_PA",
+        "mean_abs_shap": 0.034742
+      },
+      {
+        "feature": "slg_vs_lhp",
+        "mean_abs_shap": 0.032745
+      },
+      {
+        "feature": "obp_vs_lhp",
+        "mean_abs_shap": 0.029894
+      },
+      {
+        "feature": "szn_TB_per_AB",
+        "mean_abs_shap": 0.028479
+      },
+      {
+        "feature": "r7_AB",
+        "mean_abs_shap": 0.023965
+      },
+      {
+        "feature": "r14_SO_per_PA",
+        "mean_abs_shap": 0.019922
+      },
+      {
+        "feature": "szn_TB",
+        "mean_abs_shap": 0.018806
+      },
+      {
+        "feature": "r14_PA",
+        "mean_abs_shap": 0.016752
+      },
+      {
+        "feature": "r7_PA",
+        "mean_abs_shap": 0.01635
+      },
+      {
+        "feature": "szn_HR_per_AB",
+        "mean_abs_shap": 0.015086
+      },
+      {
+        "feature": "szn_H_per_AB",
+        "mean_abs_shap": 0.014578
+      },
+      {
+        "feature": "szn_SO_per_PA",
+        "mean_abs_shap": 0.014375
+      },
+      {
+        "feature": "szn_R",
+        "mean_abs_shap": 0.013967
+      },
+      {
+        "feature": "r7_BB_per_PA",
+        "mean_abs_shap": 0.009728
+      },
+      {
+        "feature": "r7_H",
+        "mean_abs_shap": 0.009717
+      },
+      {
+        "feature": "r7_H_per_AB",
+        "mean_abs_shap": 0.009413
+      },
+      {
+        "feature": "r7_TB_per_AB",
+        "mean_abs_shap": 0.009154
+      },
+      {
+        "feature": "szn_HR",
+        "mean_abs_shap": 0.008895
+      },
+      {
+        "feature": "szn_BB",
+        "mean_abs_shap": 0.00855
+      },
+      {
+        "feature": "is_home_i",
+        "mean_abs_shap": 0.008368
+      },
+      {
+        "feature": "r14_SO",
+        "mean_abs_shap": 0.008079
+      },
+      {
+        "feature": "szn_SO",
+        "mean_abs_shap": 0.008009
+      },
+      {
+        "feature": "babip_7d",
+        "mean_abs_shap": 0.007568
+      }
+    ],
+    "all": {
+      "szn_AB": 0.106346,
+      "ops_vs_rhp": 0.090739,
+      "r14_AB": 0.081268,
+      "szn_PA": 0.054049,
+      "slg_vs_rhp": 0.051678,
+      "obp_vs_rhp": 0.044954,
+      "ops_vs_lhp": 0.04314,
+      "szn_BB_per_PA": 0.034742,
+      "slg_vs_lhp": 0.032745,
+      "obp_vs_lhp": 0.029894,
+      "szn_TB_per_AB": 0.028479,
+      "r7_AB": 0.023965,
+      "r14_SO_per_PA": 0.019922,
+      "szn_TB": 0.018806,
+      "r14_PA": 0.016752,
+      "r7_PA": 0.01635,
+      "szn_HR_per_AB": 0.015086,
+      "szn_H_per_AB": 0.014578,
+      "szn_SO_per_PA": 0.014375,
+      "szn_R": 0.013967,
+      "r7_BB_per_PA": 0.009728,
+      "r7_H": 0.009717,
+      "r7_H_per_AB": 0.009413,
+      "r7_TB_per_AB": 0.009154,
+      "szn_HR": 0.008895,
+      "szn_BB": 0.00855,
+      "is_home_i": 0.008368,
+      "r14_SO": 0.008079,
+      "szn_SO": 0.008009,
+      "babip_7d": 0.007568,
+      "r14_TB_per_AB": 0.007514,
+      "r14_R": 0.007265,
+      "babip_14d": 0.007162,
+      "szn_RBI": 0.006892,
+      "szn_H": 0.00625,
+      "r14_H": 0.005842,
+      "r7_R": 0.005577,
+      "r7_SO_per_PA": 0.005563,
+      "r7_BB": 0.005472,
+      "r14_BB_per_PA": 0.004704,
+      "r14_RBI": 0.004543,
+      "r14_H_per_AB": 0.004179,
+      "r7_RBI": 0.003748,
+      "k_pct_14d": 0.003396,
+      "r14_BB": 0.00336,
+      "r7_HR_per_AB": 0.003338,
+      "r14_HR": 0.003328,
+      "r14_TB": 0.003071,
+      "r7_TB": 0.002971,
+      "r7_SO": 0.002289,
+      "k_pct_7d": 0.002095,
+      "r14_HR_per_AB": 0.002012,
+      "r7_HR": 0.001143,
+      "batting_order": 0.0,
+      "ballpark_factor_hits": 0.0,
+      "ballpark_factor_hr": 0.0,
+      "whiff_pct": 0.0,
+      "chase_pct": 0.0,
+      "hard_hit_rate": 0.0,
+      "barrel_rate": 0.0,
+      "sprint_speed": 0.0,
+      "platoon_matchup_flag": 0.0,
+      "weather_temp": 0.0,
+      "weather_wind_speed": 0.0,
+      "time_of_day": 0.0,
+      "ba_vs_breaking": 0.0,
+      "ba_vs_fastball": 0.0,
+      "ba_vs_offspeed": 0.0,
+      "h2h_career_ab": 0.0,
+      "h2h_career_avg": 0.0,
+      "h2h_career_k_rate": 0.0,
+      "implied_total": 0.0
+    }
+  }
+}
