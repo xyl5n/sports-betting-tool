@@ -1170,17 +1170,17 @@ def _run_diagnostics(backend) -> list[tuple[str, str, str]]:
         except Exception as exc:                                          # noqa: BLE001
             out.append((f"{sport} analysis cache", "err", f"{type(exc).__name__}: {exc}"))
 
-    # 4. Daily picks file (model's top-5-per-category selections)
+    # 4. Daily picks file (10 best game picks + 5 prop picks)
     try:
         daily = backend.load_daily_picks() or {}
         picks = daily.get("picks") or {}
-        cats = {k: len(v or []) for k, v in picks.items()}
-        total = sum(cats.values())
+        n_game  = len(picks.get("game_picks") or [])
+        n_props = len(picks.get("prop_picks") or [])
+        total   = n_game + n_props
         out.append((
             "Daily picks file",
             "ok" if total > 0 else "warn",
-            f"data/daily_picks.json  ML={cats.get('moneyline',0)}  "
-            f"RL/Spread={cats.get('run_line_spread',0)}  Totals={cats.get('totals',0)}",
+            f"data/daily_picks.json  Game={n_game}  Props={n_props}",
         ))
     except Exception as exc:                                              # noqa: BLE001
         out.append(("Daily picks file", "err", f"{type(exc).__name__}: {exc}"))
