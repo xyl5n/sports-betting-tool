@@ -5759,6 +5759,14 @@ def admin_reset_model_record():
                 f"last_analysis_meta"
             )
 
+        # Reload ensemble_store so get_picks() returns an empty list rather
+        # than the pre-delete in-memory snapshot.
+        try:
+            ensemble_store.load()
+            audit.append("ensemble_store reloaded")
+        except Exception:                                                  # noqa: BLE001
+            pass
+
         try:
             from src import db as _db
             if _db.is_supabase():
@@ -6489,6 +6497,7 @@ def admin_model_reset():
             ("daily_snapshot.json",       _DAILY_SNAPSHOT_FILE),
             ("analysis_cache.json",       _ANALYSIS_CACHE_FILE),
             ("wnba_analysis_cache.json",  _WNBA_ANALYSIS_CACHE_FILE),
+            ("daily_picks.json",          _DAILY_PICKS_FILE),
         ]
         local_files_deleted = 0
         for label, path in local_files:
@@ -8943,6 +8952,18 @@ def _run_midnight_reset() -> None:
         # Clear analysis timestamps file
         try:
             _ANALYSIS_TIMESTAMPS_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # Delete picks files so the UI shows empty instead of yesterday's picks
+        # during the window between midnight and the 8 AM auto-analysis run.
+        for _picks_path in (_ENSEMBLE_PICKS_FILE, _DAILY_PICKS_FILE):
+            try:
+                _picks_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Reload ensemble_store in-memory cache so get_picks() returns empty.
+        try:
+            ensemble_store.load()
         except Exception:
             pass
         # Zero in-memory analysis states
