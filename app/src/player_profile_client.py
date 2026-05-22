@@ -634,10 +634,21 @@ def get_today_prop(player_name: str) -> Optional[dict]:
                         "recommendation":  pred.get("recommendation"),
                         "confidence":      round(score, 4),
                         "predicted_value": pred.get("predicted_value"),
+                        "ev_pct":          _calc_ev(score, p.get("best_odds")),
                     }
         return best
     except Exception as exc:
         _log(f"get_today_prop({player_name!r}) failed: {exc}")
+        return None
+
+
+def _calc_ev(confidence, american_odds):
+    """Thin wrapper around props_ev.calc_ev_pct that never raises --
+    EV is best-effort metadata for the UI, not load-bearing."""
+    try:
+        from .props_ev import calc_ev_pct
+        return calc_ev_pct(confidence, american_odds)
+    except Exception:                                                     # noqa: BLE001
         return None
 
 
@@ -749,6 +760,7 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
                         "source":          "live",
                         "line_type":       class_info.get("line_type", "alt"),
                         "is_primary":      bool(class_info.get("is_primary")),
+                        "ev_pct":          _calc_ev(score, p.get("best_odds")),
                     }
 
         for entry in per_line.values():
@@ -796,6 +808,9 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
                 # entry once the relevant market is in props_client cache.
                 "line_type":       "main",
                 "is_primary":      True,
+                "ev_pct":          _calc_ev(
+                    pp.get("confidence"), pp.get("best_odds"),
+                ),
             }
             k = _key(entry)
             if k not in seen:

@@ -271,6 +271,10 @@ def score_today_props() -> dict:
                     "is_primary":      bool(class_info.get("is_primary")),
                     "over_odds":       class_info.get("over_odds"),
                     "under_odds":      class_info.get("under_odds"),
+                    # Expected value % at the best available odds.
+                    # Computed once here so the page never re-derives
+                    # it; matches the formula in src/props_ev.py.
+                    "ev_pct":          _calc_ev_for(score, p.get("best_odds")),
                     "_raw_prop":       p,   # only used during enrichment
                 }
 
@@ -394,7 +398,7 @@ _ALT_KEEP_FIELDS = (
     "line", "side", "line_type",
     "best_odds", "best_book", "over_odds", "under_odds",
     "recommendation", "confidence", "edge", "model_prob",
-    "predicted_value", "source",
+    "predicted_value", "source", "ev_pct",
 )
 
 
@@ -404,3 +408,17 @@ def _slim_alt(entry: dict) -> dict:
     (summary, opp_rank, _raw_prop) because alts share the same player
     data as their primary -- the primary card already shows it."""
     return {k: entry[k] for k in _ALT_KEEP_FIELDS if k in entry}
+
+
+def _calc_ev_for(confidence, american_odds):
+    """Thin wrapper around props_ev.calc_ev_pct that never raises.
+
+    Returns ``None`` on any failure -- the scoring loop should not
+    abort because of an odd-shaped odds payload from an upstream
+    feed.  ev_pct is best-effort metadata, not load-bearing.
+    """
+    try:
+        from .props_ev import calc_ev_pct
+        return calc_ev_pct(confidence, american_odds)
+    except Exception:                                                     # noqa: BLE001
+        return None
