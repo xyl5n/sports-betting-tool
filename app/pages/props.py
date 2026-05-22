@@ -119,7 +119,17 @@ def _record_card(label: str, rec: dict) -> None:
 # ── Props list ──────────────────────────────────────────────────────────────
 
 def _section_props_list(backend, *, bucket: str, title: str) -> None:
-    """Render one bucket's prop list, sorted by model confidence."""
+    """Render one bucket's prop list as cards.
+
+    Each card is ONE pick (the side the model has higher confidence in
+    for that player + market + line).  Both-sides dedup happens here,
+    not at the predictor: the predictor still scores Over and Under
+    separately so we can compare them and pick the winner.
+
+    Only picks with confidence > 55% land on the page -- everything
+    weaker collapses into a single "no high confidence props available"
+    notice so the user sees a clean slate rather than coin-flip noise.
+    """
     try:
         from src.props_client import get_client, ALL_PITCHER_MARKETS, ALL_BATTER_MARKETS
         from src.props_model  import predict
@@ -127,12 +137,16 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
         _dbg(f"props imports failed: {exc}")
         return
 
+    _CONF_THRESHOLD = 0.55
+
     payload = get_client().get_today_props() or {}
     all_markets = payload.get("markets") or {}
     bucket_markets = ALL_PITCHER_MARKETS if bucket == "pitcher" else ALL_BATTER_MARKETS
 
-    # Flatten + score + sort.
-    rows: list[dict] = []
+    # Score every prop, then bucket by (player, market, line) so the
+    # over + under pair can be compared.  Each bucket keeps ONE entry
+    # -- whichever side scored higher confidence.
+    by_pick: dict[tuple[str, str, float], dict] = {}
     for market, props in all_markets.items():
         if market not in bucket_markets:
             continue
@@ -142,28 +156,44 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
             except Exception as exc:                                      # noqa: BLE001
                 _dbg(f"predict failed for {market} {p.get('player_name')}: {exc}")
                 continue
-            rows.append({
-                "market":         market,
-                "player":         p.get("player_name", "?"),
-                "team":           _team_for_prop(p, bucket),
-                "line":           p.get("line"),
-                "side":           p.get("side"),
-                "best_odds":      p.get("best_odds"),
-                "best_book":      p.get("best_book"),
-                "recommendation": pred.get("recommendation"),
-                "confidence":     float(pred.get("confidence") or 0.0),
-                "edge":           float(pred.get("edge") or 0.0),
-                "source":         pred.get("source"),
-                "event_id":       p.get("event_id"),
-                "commence_time":  p.get("commence_time"),
-            })
+            try:
+                line_f = float(p.get("line"))
+            except (TypeError, ValueError):
+                continue
+            key = (p.get("player_name", "?"), market, line_f)
+            # When _model_prob > _market_prob the predictor's
+            # recommendation is "Over" / "Under"; when it equals or
+            # underwhelms it's "Pass".  Either way `confidence` is
+            # always >= 0.5 because the helper clamps the floor.  We
+            # care about which raw model probability is higher: that
+            # tells us which side the model actually believes in.
+            side = (p.get("side") or "Over").strip().title()
+            score = float(pred.get("confidence") or 0.0)
+            existing = by_pick.get(key)
+            if existing is None or score > existing["confidence"]:
+                by_pick[key] = {
+                    "market":         market,
+                    "player":         p.get("player_name", "?"),
+                    "team":           _team_for_prop(p, bucket),
+                    "line":           p.get("line"),
+                    "side":           side,
+                    "best_odds":      p.get("best_odds"),
+                    "best_book":      p.get("best_book"),
+                    "recommendation": pred.get("recommendation"),
+                    "confidence":     score,
+                    "edge":           float(pred.get("edge") or 0.0),
+                    "model_prob":     float(pred.get("model_prob") or 0.0),
+                    "source":         pred.get("source"),
+                    "event_id":       p.get("event_id"),
+                    "commence_time":  p.get("commence_time"),
+                }
 
-    # Default sort: highest confidence first.  Pass calls bubble to the bottom.
-    rows.sort(
-        key=lambda r: (
-            r["recommendation"] == "Pass",
-            -r["confidence"],
-        )
+    # Filter to >= 55% confidence + sort by confidence DESC.
+    rows = [r for r in by_pick.values() if r["confidence"] >= _CONF_THRESHOLD]
+    rows.sort(key=lambda r: -r["confidence"])
+    _dbg(
+        f"[PROPS-PAGE] {bucket}: scored {len(by_pick)} picks (dedup), "
+        f"{len(rows)} above {int(_CONF_THRESHOLD * 100)}% threshold"
     )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
@@ -172,7 +202,7 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                 f"color: {t.TEXT};"
             )
-            ui.label(f"{len(rows)} props").style(
+            ui.label(f"{len(rows)} high-conf picks").style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                 f"font-size: 11px; font-weight: 700; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
@@ -185,8 +215,9 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
 
         if not rows:
             ui.label(
-                f"No {bucket} props fetched yet.  Tier 1 refreshes every 15 min "
-                f"during game hours (11 AM–11 PM ET)."
+                f"No high confidence {bucket} props available right now.  "
+                f"Tier 1 refreshes every 15 min during game hours "
+                f"(11 AM–11 PM ET)."
             ).style(
                 f"color: {t.TEXT_DIM}; font-size: 12px; "
                 f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
@@ -195,90 +226,105 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
             )
             return
 
-        with ui.column().classes("w-full").style("gap: 6px;"):
+        # Card grid -- single column on mobile, two columns on desktop
+        # via the existing .game-grid class so the props page feels
+        # consistent with the slate cards on /sports.
+        with ui.element("div").classes("game-grid w-full"):
             for r in rows:
-                _prop_row(r)
+                _prop_card(r)
 
 
-def _prop_row(r: dict) -> None:
-    """One prop in the list.  High-confidence (>65%) gets a left-border
-    accent so it visually pops without breaking the grid."""
-    high_conf = r["confidence"] >= 0.65
-    rec_col = (
-        t.POS if r["recommendation"] == "Over"
-        else (t.NEG if r["recommendation"] == "Under" else t.TEXT_DIM)
-    )
-    border_left = (
-        f"4px solid {rec_col};" if high_conf
-        else f"4px solid transparent;"
-    )
+def _prop_card(r: dict) -> None:
+    """One prop pick rendered as a card matching the visual rhythm of
+    the slate's game cards (matchup header on top, accent bar on the
+    side of the recommended chip, monospace stat values, soft border).
 
-    with ui.row().classes("items-center w-full").style(
+    The Over / Under chip is the visual focal point -- colored to
+    match the recommendation so a quick scan of the page shows which
+    side the model picked at a glance.
+    """
+    side = (r.get("side") or "Over").strip().title()
+    is_over = side == "Over"
+    chip_bg = t.POS if is_over else t.NEG
+    confidence_pct = r["confidence"] * 100
+
+    with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-left: {border_left} "
-        f"border-radius: {t.RADIUS_SM}; padding: 10px 12px; gap: 10px;"
+        f"border-radius: {t.RADIUS_MD}; "
+        f"padding: {t.SPACE_MD}; gap: {t.SPACE_SM}; "
+        f"min-width: 0;"
     ):
-        # Player + team
-        with ui.column().style("flex: 2; min-width: 0; gap: 2px;"):
-            ui.label(r["player"]).style(
-                f"font-size: 13px; font-weight: 700; color: {t.TEXT}; "
-                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-            )
-            ui.label(f"{r['team'] or ''}  ·  {_short_market(r['market'])}").style(
-                f"font-size: 10.5px; color: {t.TEXT_DIM}; "
-                f"letter-spacing: .3px; "
-                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-            )
-
-        # Line
-        with ui.column().style("flex: 0 0 60px; gap: 2px; text-align: center;"):
-            ui.label("LINE").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
-            )
-            ui.label(f"{r['line']}" if r.get('line') is not None else "—").style(
-                f"font-size: 14px; font-weight: 800; color: {t.TEXT}; "
-                f"font-family: monospace;"
-            )
-
-        # Recommendation
-        with ui.column().style("flex: 0 0 70px; gap: 2px; text-align: center;"):
-            ui.label("MODEL").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
-            )
-            ui.label(r["recommendation"] or "—").style(
-                f"font-size: 13px; font-weight: 800; color: {rec_col};"
-            )
-
-        # Confidence
-        with ui.column().style("flex: 0 0 90px; gap: 2px; text-align: center;"):
-            ui.label("CONF").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
-            )
-            ui.label(f"{r['confidence'] * 100:.0f}%").style(
-                f"font-size: 13px; font-weight: 800; "
-                f"color: {t.POS if high_conf else t.PRIMARY}; "
-                f"font-family: monospace;"
-            )
-
-        # Best odds + book
-        with ui.column().style(
-            "flex: 0 0 110px; gap: 2px; text-align: right; "
-            "align-items: flex-end;"
+        # Header row: market chip on the left, matchup on the right.
+        # Mirrors the meta_row pattern on the slate's game cards.
+        with ui.row().classes("items-center w-full").style(
+            f"gap: 8px;"
         ):
-            ui.label("BEST ODDS").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
+            ui.label(_short_market(r["market"]).upper()).style(
+                f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+            )
+            ui.label(r.get("team") or "").style(
+                f"font-size: 11px; color: {t.TEXT_DIM2}; "
+                f"font-family: monospace; "
+                f"margin-left: auto;"
+            )
+
+        # Player name: big like the team names on the slate.
+        ui.label(r["player"]).style(
+            f"font-size: 16px; font-weight: 700; color: {t.TEXT}; "
+            f"line-height: 1.2; "
+            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+        )
+
+        # Pick row: chip + line + confidence + best odds.  Three flex
+        # zones so the chip stays left-anchored and the odds column
+        # right-aligns the same way bet boxes do on the slate.
+        with ui.row().classes("items-center w-full").style(
+            f"gap: 10px; flex-wrap: nowrap;"
+        ):
+            # OVER / UNDER pill -- the page's visual anchor.
+            ui.label(f"{side.upper()} {r['line']}").style(
+                f"background: {chip_bg}; color: {t.BG}; "
+                f"font-size: 13px; font-weight: 800; letter-spacing: .5px; "
+                f"padding: 6px 12px; border-radius: {t.RADIUS_SM}; "
+                f"flex-shrink: 0;"
+            )
+
+            # Spacer
+            ui.element("div").style("flex: 1;")
+
+            # Confidence number with subdued label above (matches the
+            # CONF / PROB blocks inside bet_box.render on the slate).
+            with ui.column().style(
+                "gap: 1px; align-items: flex-end; flex-shrink: 0;"
+            ):
+                ui.label("CONFIDENCE").style(
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                ui.label(f"{confidence_pct:.0f}%").style(
+                    f"font-size: 18px; font-weight: 800; color: {chip_bg}; "
+                    f"font-family: monospace; letter-spacing: -.2px;"
+                )
+
+        # Footer row: best odds + book.  Same row used by the slate's
+        # _track_row for symmetry.
+        with ui.row().classes("items-center w-full").style(
+            f"gap: 10px; "
+            f"padding-top: 6px; border-top: 1px solid {t.BORDER_SOFT};"
+        ):
+            ui.label("Best odds").style(
+                f"font-size: 10.5px; color: {t.TEXT_DIM};"
             )
             ui.label(_odds_str(r.get("best_odds"))).style(
-                f"font-size: 13px; font-weight: 700; color: {t.TEXT}; "
+                f"font-size: 12px; font-weight: 700; color: {t.TEXT}; "
                 f"font-family: monospace;"
             )
-            ui.label((r.get("best_book") or "")[:14]).style(
-                f"font-size: 9.5px; color: {t.TEXT_DIM2}; "
-                f"white-space: nowrap; overflow: hidden;"
+            ui.label(r.get("best_book") or "").style(
+                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                f"margin-left: auto; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
 
 
