@@ -1018,23 +1018,34 @@ def push_models_to_supabase() -> dict:
 
 # ── Prediction API ──────────────────────────────────────────────────────────
 
-# Probability bounds applied to every raw classifier output.
-# XGBoost is systematically overconfident — it pushes P(Over) toward 0/1
-# far beyond what the empirical frequency justifies.
-# CalibratedClassifierCV (isotonic, baked into retrained artifacts) corrects
-# this natively; these bounds are a belt-and-suspenders guard that stays
-# effective before a retrained artifact is available.
+# PR: removed the 0.10/0.90 probability squash and the 0.85 confidence cap.
+# These were belt-and-suspenders guardrails put in place before the
+# CalibratedClassifierCV wrapper was reliable -- they prevented the model
+# from ever expressing high conviction even when the isotonic-calibrated
+# probability legitimately said so.  With retrained PR3 artifacts where
+# every saved joblib IS the calibrated wrapper (verified in
+# scripts/train_props_models.py:1900: `joblib.dump(calibrated, out_path)`),
+# the calibration map already enforces realistic frequencies and the
+# extra clamping just truncated the tails of the distribution.
 #
-# Critical invariant: squashing is applied to P(Over) BEFORE any side-flip
-# so that P(Over) + P(Under) = 1.0 is preserved exactly.
-_PROB_LO: float = 0.10   # model can never be more than 90% against
-_PROB_HI: float = 0.90   # model can never be more than 90% for
-_CONF_CAP: float = 0.85  # maximum confidence displayed to the user
+# Constants kept for backward compat with any external caller / test that
+# imports them; _squash_prob is now a pass-through so removing the
+# function entirely doesn't break those.
+_PROB_LO: float = 0.0    # was 0.10 -- no lower clamp
+_PROB_HI: float = 1.0    # was 0.90 -- no upper clamp
+_CONF_CAP: float = 1.0   # was 0.85 -- displayed confidence can saturate at 1.0
 
 
 def _squash_prob(p: float) -> float:
-    """Clamp a raw classifier probability to [_PROB_LO, _PROB_HI]."""
-    return max(_PROB_LO, min(_PROB_HI, p))
+    """PR no-op shim.  Previously clamped to [_PROB_LO, _PROB_HI] = [0.10,
+    0.90] to dampen XGBoost's tendency to push raw probabilities to the
+    extremes.  CalibratedClassifierCV (isotonic, baked into PR3 artifacts)
+    now does that natively -- this function passes the input through so
+    confidence values reflect real statistical calibration rather than an
+    artificial floor / ceiling.  Kept (rather than deleted) so external
+    callers don't break; predict() / predict_pair() no longer call it.
+    """
+    return float(p)
 
 
 def _poisson_over_prob(lam: float, line: float) -> float:
@@ -1174,7 +1185,7 @@ def predict(prop: dict) -> dict:
     Output shape:
         {
           recommendation:  "Over" | "Under" | "Pass",
-          confidence:      float,          # 0..1, capped at _CONF_CAP (0.85)
+          confidence:      float,          # 0..1, no artificial cap
           model_prob:      float,          # calibrated P(this side)
           market_prob:     float,          # de-vigged P(this side) from the line
           edge:            float,          # model_prob - market_prob, signed
@@ -1184,17 +1195,21 @@ def predict(prop: dict) -> dict:
 
     Probability calibration
     -----------------------
-    Raw XGBoost probabilities are squashed to [_PROB_LO, _PROB_HI] = [0.10, 0.90]
-    BEFORE any side flip.  This caps displayed confidence at _CONF_CAP (0.85)
-    and is belt-and-suspenders for the CalibratedClassifierCV wrapper baked
-    into retrained artifacts (see train_props_models.py).
+    Raw XGBoost probabilities are no longer squashed to [0.10, 0.90].
+    The retrained PR3 artifacts save the CalibratedClassifierCV wrapper
+    (see scripts/train_props_models.py:1900) and isotonic calibration is
+    what we trust for realistic frequencies now.  The previous 0.85
+    confidence cap is also gone -- displayed confidence can saturate at
+    1.0 when the calibrated probability + de-vigged market disagree
+    that strongly.
 
     Side symmetry
     -------------
-    The squash is applied to P(Over) before flipping for the Under side, so
+    P(Over) is computed once and the Under side complements it, so
     predict(over_prop).model_prob + predict(under_prop).model_prob == 1.0
-    exactly when both props share the same underlying line.  Use predict_pair()
-    to make this invariant explicit and avoid a second model call.
+    exactly when both props share the same underlying line.  Use
+    predict_pair() to make this invariant explicit and avoid a second
+    model call.
     """
     bucket = _bucket_for_market(prop.get("market", ""))
     market_prob = _american_to_prob(prop.get("best_odds"))
@@ -1209,10 +1224,13 @@ def predict(prop: dict) -> dict:
     # Pitcher markets and batter-no-regressor cases still use the classifier.
     raw_p, source = _compute_raw_over_prob(prop, bucket, predicted_value=predicted_value)
 
-    # Squash BEFORE side flip so Over + Under still sum to 1.0.
-    over_prob = _squash_prob(raw_p)
+    # No squash -- raw P(Over) from the calibrated classifier (or
+    # Poisson-PMF regressor) is what we use.  Clamp only to [0, 1] in
+    # case the calibrator extrapolated slightly outside that range
+    # (isotonic regression can do this at the boundaries).
+    over_prob = max(0.0, min(1.0, float(raw_p)))
 
-    # Flip for the Under side AFTER squashing.
+    # Flip for the Under side AFTER the [0,1] clamp.
     side = (prop.get("side") or "Over").strip().title()
     if side == "Under":
         over_prob   = 1.0 - over_prob
@@ -1222,7 +1240,9 @@ def predict(prop: dict) -> dict:
     if   edge >  0.03: recommendation = "Over"
     elif edge < -0.03: recommendation = "Under"
     else:               recommendation = "Pass"
-    confidence = min(_CONF_CAP, max(0.50, abs(edge) * 2.0 + 0.50))
+    # Confidence formula unchanged; the only difference is the upper
+    # bound is now 1.0 instead of the old 0.85 hard ceiling.
+    confidence = min(1.0, max(0.50, abs(edge) * 2.0 + 0.50))
 
     return {
         "recommendation":  recommendation,
@@ -1262,7 +1282,11 @@ def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
     raw_over, source = _compute_raw_over_prob(
         over_prop, bucket, predicted_value=predicted_value,
     )
-    raw_over_prob = _squash_prob(raw_over)
+    # No squash -- calibrated artifact handles probability shaping.
+    # Clamp only to [0, 1] in case isotonic regression extrapolated
+    # slightly past the boundary; the Under-side complement below then
+    # automatically stays in [0, 1] too.
+    raw_over_prob = max(0.0, min(1.0, float(raw_over)))
 
     # ── Market: no-vig per side ───────────────────────────────────────────
     mkt_over_raw  = _american_to_prob(over_prop.get("best_odds"))
@@ -1283,7 +1307,8 @@ def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
         if   edge >  0.03: rec = "Over"
         elif edge < -0.03: rec = "Under"
         else:               rec = "Pass"
-        conf = min(_CONF_CAP, max(0.50, abs(edge) * 2.0 + 0.50))
+        # Confidence saturates at 1.0 (was capped at _CONF_CAP=0.85).
+        conf = min(1.0, max(0.50, abs(edge) * 2.0 + 0.50))
         return {
             "recommendation":  rec,
             "confidence":      round(conf, 4),
