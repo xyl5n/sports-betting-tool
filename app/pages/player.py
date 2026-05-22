@@ -639,6 +639,12 @@ def _game_log_table(
             f"<th style='{th_base} text-align:{align}; min-width:{mw};'>{col}</th>"
         )
 
+    # Pre-extract min-width values used in the Date/OPP cells so f-strings
+    # do not need backslash-escaped quotes inside expressions — that pattern
+    # is a SyntaxError on Python < 3.12.
+    _mw_date = col_min_w["Date"]
+    _mw_opp  = col_min_w["OPP"]
+
     # body rows (newest first)
     body_rows = ""
     for g in reversed(games):
@@ -652,7 +658,7 @@ def _game_log_table(
                         f"<td style='font-size:12px; font-family:monospace; "
                         f"padding:6px 10px; text-align:left; color:{t.TEXT_DIM2}; "
                         f"border-bottom:1px solid {t.BORDER_SOFT}; white-space:nowrap; "
-                        f"min-width:{col_min_w[\"Date\"]};'>{val}</td>"
+                        f"min-width:{_mw_date};'>{val}</td>"
                     )
                 elif col == "OPP":
                     val = _opp_display(g)
@@ -660,7 +666,7 @@ def _game_log_table(
                         f"<td style='font-size:12px; font-family:monospace; "
                         f"padding:6px 10px; text-align:left; color:{t.TEXT_DIM}; "
                         f"border-bottom:1px solid {t.BORDER_SOFT}; white-space:nowrap; "
-                        f"min-width:{col_min_w[\"OPP\"]};'>{val}</td>"
+                        f"min-width:{_mw_opp};'>{val}</td>"
                     )
                 elif col == "IP":
                     cells += f"<td style='{_td(col)}'>{_safe_ip(g)}</td>"
