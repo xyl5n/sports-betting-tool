@@ -438,7 +438,13 @@ def get_client() -> PropsClient:
 
 
 def run_tier_1_refresh() -> None:
-    """APScheduler callback.  Every 15 min during 11 AM–11 PM ET."""
+    """APScheduler callback.  Every 15 min during 11 AM–11 PM ET.
+
+    After the raw-line fetch succeeds we kick the scoring pipeline so
+    the props page (which reads from the scored cache) sees fresh
+    picks within seconds of new lines arriving.  Scoring failures are
+    swallowed so a model glitch doesn't take down the line refresh.
+    """
     try:
         get_client().fetch_tier_1()
     except Exception as exc:                                              # noqa: BLE001
@@ -447,15 +453,40 @@ def run_tier_1_refresh() -> None:
             f"TIER1 FAILED (scheduler swallow): {type(exc).__name__}: {exc}\n"
             f"{traceback.format_exc()}"
         )
+        return
+    try:
+        from .props_scored_cache import score_today_props
+        score_today_props()
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback
+        _log(
+            f"TIER1 SCORING FAILED (swallow): {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
 
 
 def run_tier_2_refresh() -> None:
-    """Called once per day at /api/analyze time.  Tier 2 markets only."""
+    """Called once per day at /api/analyze time.  Tier 2 markets only.
+
+    Same scoring follow-up as Tier 1 -- after the raw-line fetch we
+    rescore so the page's cache picks up the newly-fetched markets
+    (batter_home_runs, batter_rbis, ...) without a 15-min wait.
+    """
     try:
         get_client().fetch_tier_2()
     except Exception as exc:                                              # noqa: BLE001
         import traceback
         _log(
             f"TIER2 FAILED (analyze swallow): {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
+        return
+    try:
+        from .props_scored_cache import score_today_props
+        score_today_props()
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback
+        _log(
+            f"TIER2 SCORING FAILED (swallow): {type(exc).__name__}: {exc}\n"
             f"{traceback.format_exc()}"
         )

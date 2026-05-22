@@ -122,127 +122,35 @@ def _record_card(label: str, rec: dict) -> None:
 # ── Unified props list (pitcher + batter combined, filter bar) ───────────────
 
 def _section_unified_props_list(backend) -> None:
-    """Render all picks (pitcher + batter combined) in one list sorted
-    by confidence DESC, with a filter bar at the top.
+    """Render the pre-scored, pre-enriched picks from the props cache.
 
-    Performance shape:
-      - The prediction loop runs once per page render (props_client cache
-        is local + Supabase so the fetch is cheap).
-      - For each pick we compute a performance summary + opp rank.  Both
-        are backed by the per-player gamelog cache and a daily team-ranks
-        cache, so warm caches keep this <100ms per pick.
+    Pure display layer -- this function NEVER calls predict() and never
+    fetches gamelogs or opponent ranks.  The scoring + enrichment
+    pipeline runs in the background scheduler (see
+    src.props_scored_cache.score_today_props, wired into
+    run_tier_1_refresh / run_tier_2_refresh).  If the scheduler hasn't
+    populated the cache yet (e.g. before 11 AM ET on a fresh deploy)
+    we render an empty-state message; we do NOT trigger a re-score
+    from the page, which would block NiceGUI's event loop and drop
+    the browser connection on slates with thousands of props.
     """
     try:
-        from src.props_client import get_client
-        from src.props_model  import predict
-        from src.player_profile_client import (
-            get_player_prop_summary,
-            get_player_today_opponent,
-            get_opp_rank_for_prop,
-        )
+        from src.props_scored_cache import load_scored_props
     except Exception as exc:                                              # noqa: BLE001
-        _dbg(f"props imports failed: {exc}")
+        _dbg(f"props cache import failed: {exc}")
         return
 
-    _CONF_THRESHOLD = 0.55
-
-    payload = get_client().get_today_props() or {}
-    all_markets = payload.get("markets") or {}
-
-    # Score every prop, dedup by (player, market, line) keeping the
-    # higher-confidence side -- same logic as the prior two-bucket
-    # implementation, now in one pass across all markets.
-    by_pick: dict[tuple[str, str, float], dict] = {}
-    for market, props in all_markets.items():
-        bucket = "pitcher" if market.startswith("pitcher_") else "batter"
-        for p in (props or []):
-            try:
-                pred = predict(p)
-            except Exception as exc:                                      # noqa: BLE001
-                _dbg(f"predict failed for {market} {p.get('player_name')}: {exc}")
-                continue
-            try:
-                line_f = float(p.get("line"))
-            except (TypeError, ValueError):
-                continue
-            key   = (p.get("player_name", "?"), market, line_f)
-            side  = (p.get("side") or "Over").strip().title()
-            score = float(pred.get("confidence") or 0.0)
-            existing = by_pick.get(key)
-            if existing is None or score > existing["confidence"]:
-                by_pick[key] = {
-                    "market":          market,
-                    "bucket":          bucket,
-                    "player":          p.get("player_name", "?"),
-                    "team":            _team_for_prop(p, bucket),
-                    "home_team":       p.get("home_team"),
-                    "away_team":       p.get("away_team"),
-                    "line":            p.get("line"),
-                    "side":            side,
-                    "best_odds":       p.get("best_odds"),
-                    "best_book":       p.get("best_book"),
-                    "recommendation":  pred.get("recommendation"),
-                    "confidence":      score,
-                    "edge":            float(pred.get("edge") or 0.0),
-                    "model_prob":      float(pred.get("model_prob") or 0.0),
-                    "source":          pred.get("source"),
-                    "predicted_value": pred.get("predicted_value"),
-                    "event_id":        p.get("event_id"),
-                    "commence_time":   p.get("commence_time"),
-                    "_raw_prop":       p,
-                }
-
-    # Filter to >= 55% confidence AND (when a regression model exists)
-    # a predicted value that clears the line by >= 0.5 units.
-    def _has_reg_edge(r: dict) -> bool:
-        pv = r.get("predicted_value")
-        if pv is None:
-            return True
-        try:
-            line_f = float(r["line"])
-            if (r.get("side") or "Over").strip().title() == "Over":
-                return pv >= line_f + 0.5
-            return pv <= line_f - 0.5
-        except (TypeError, ValueError):
-            return True
-
-    rows = [
-        r for r in by_pick.values()
-        if r["confidence"] >= _CONF_THRESHOLD and _has_reg_edge(r)
-    ]
-    rows.sort(key=lambda r: -r["confidence"])
-
-    # ── Enrich each pick with performance summary + opp rank ─────────────
-    # We do this once now (rather than inside _prop_card) so the filter
-    # bar can filter on the same data without recomputing on every
-    # refresh.  Costs are dominated by gamelog fetches, all cached.
-    for r in rows:
-        try:
-            opp = get_player_today_opponent(r["player"], r["_raw_prop"])
-        except Exception:                                                 # noqa: BLE001
-            opp = None
-        r["opp_abbrev"] = opp
-        try:
-            r["summary"] = get_player_prop_summary(
-                r["player"], r["market"], r["line"], r["side"],
-                opp_abbrev=opp,
-                is_pitcher=(r["bucket"] == "pitcher"),
-            )
-        except Exception as exc:                                          # noqa: BLE001
-            _dbg(f"summary failed for {r['player']} {r['market']}: {exc}")
-            r["summary"] = {}
-        try:
-            r["opp_rank"] = get_opp_rank_for_prop(opp, r["market"])
-        except Exception:                                                 # noqa: BLE001
-            r["opp_rank"] = None
+    cache = load_scored_props() or {}
+    rows: list[dict] = list(cache.get("picks") or [])
+    rows.sort(key=lambda r: -float(r.get("confidence") or 0.0))
 
     _dbg(
-        f"[PROPS-PAGE] unified: scored {len(by_pick)} picks (dedup), "
-        f"{len(rows)} above {int(_CONF_THRESHOLD * 100)}% threshold"
+        f"[PROPS-PAGE] read scored cache: {len(rows)} picks "
+        f"(generated_at={cache.get('generated_at')})"
     )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
-        # Header row -- title + count + last fetch
+        # Header row -- title + count + last refresh
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
             ui.label("PICKS").style(
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
@@ -253,23 +161,14 @@ def _section_unified_props_list(backend) -> None:
                 f"font-size: 11px; font-weight: 700; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
             )
-            if payload.get("fetched_at"):
-                ui.label(f"updated {_short_iso(payload['fetched_at'])}").style(
+            if cache.get("generated_at"):
+                ui.label(f"scored {_short_iso(cache['generated_at'])}").style(
                     f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
                     f"margin-left: auto; font-family: monospace;"
                 )
 
         if not rows:
-            ui.label(
-                "No high confidence props available right now. "
-                "Tier 1 refreshes every 15 min during game hours "
-                "(11 AM–11 PM ET)."
-            ).style(
-                f"color: {t.TEXT_DIM}; font-size: 12px; "
-                f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
-                f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_LG}; "
-                f"text-align: center; font-style: italic;"
-            )
+            _empty_state_message()
             return
 
         # ── Filter bar ───────────────────────────────────────────────────
@@ -311,6 +210,42 @@ def _update_count(label_el, rows: list[dict], state: dict) -> None:
         label_el.text = f"{n} pick{'s' if n != 1 else ''}"
     except Exception:                                                     # noqa: BLE001
         pass
+
+
+def _empty_state_message() -> None:
+    """Friendly placeholder shown when the scored-cache is empty.
+
+    Two flavours: pre-window (before 11 AM ET) we tell the user to
+    come back when scoring starts; in-window we explain a refresh is
+    in flight.  Either way we DO NOT trigger scoring from the page --
+    that's a scheduler-only concern.
+    """
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        pre_window = now_et.hour < 11
+    except Exception:                                                     # noqa: BLE001
+        pre_window = False
+
+    if pre_window:
+        title = "Props loading"
+        body  = "Check back after 11 AM ET — scoring runs every 15 minutes during game hours."
+    else:
+        title = "Props refreshing"
+        body  = "The next scored batch will appear here within a few minutes."
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_XL} {t.SPACE_LG}; "
+        f"gap: 6px; align-items: center;"
+    ):
+        ui.label(title).style(
+            f"font-size: 15px; font-weight: 800; color: {t.TEXT};"
+        )
+        ui.label(body).style(
+            f"font-size: 12px; color: {t.TEXT_DIM}; text-align: center;"
+        )
 
 
 # ── Filter bar ──────────────────────────────────────────────────────────────
@@ -692,17 +627,6 @@ def _card_opp_rank_chip(r: dict) -> None:
 
 
 # ── Small helpers ───────────────────────────────────────────────────────────
-
-def _team_for_prop(p: dict, bucket: str) -> str:
-    """Best-effort team label.  For pitchers we can't tell from the
-    payload alone whether they're home or away; fall back to "vs <opp>".
-    For batters same problem -- show both team initials."""
-    home = (p.get("home_team") or "")[:3].upper()
-    away = (p.get("away_team") or "")[:3].upper()
-    if home and away:
-        return f"{away} @ {home}"
-    return home or away or ""
-
 
 def _short_market(market: str) -> str:
     """Human-readable label for the market key."""
