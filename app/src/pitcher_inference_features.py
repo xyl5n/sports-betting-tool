@@ -464,3 +464,33 @@ def enrich_pitcher_features(prop: dict) -> dict[str, float]:
     _log(f"enriched {player_name!r} pid={pid} -> {len(out)} real features "
          f"(rolling={len(rolling)}, splits=4, is_home={'is_home_i' in out})")
     return out
+
+
+def get_is_home_for_pitcher(player_name: str, date_str: str) -> bool | None:
+    """Return True if the pitcher is scheduled as the home starter on *date_str*,
+    False if away, or None if the pitcher cannot be resolved or found in today's
+    schedule.
+
+    Cheap — only resolves the player ID and checks the day's pitcher schedule;
+    does NOT fetch game logs or platoon splits.  The pitcher schedule is cached
+    by PitcherClient so repeated calls within the same process are free.
+
+    Used by player_profile_client.get_today_prop() to inject the correct
+    is_home context before calling predict() so the model sees today's
+    home/away status rather than the stale training-snapshot value.
+    """
+    pid = _resolve_pid(player_name, date_str)
+    if pid is None:
+        return None
+    try:
+        from .pitcher_client import get_pitcher_client
+        client   = get_pitcher_client()
+        schedule = client._get_schedule(date_str)  # noqa: SLF001
+        for entry in schedule:
+            if (entry.get("home_pitcher") or {}).get("id") == pid:
+                return True
+            if (entry.get("away_pitcher") or {}).get("id") == pid:
+                return False
+    except Exception:  # noqa: BLE001
+        pass
+    return None
