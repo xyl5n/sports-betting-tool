@@ -767,6 +767,21 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         df = pd.DataFrame(games).sort_values("date").reset_index(drop=True)
         df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
 
+        # ── Defensive: ensure park_team exists ────────────────────────────
+        # Old cache files (written before park_team was added) lack this column.
+        # Derive it: home game → pitcher's own team is the park; away → opponent.
+        if "park_team" not in df.columns:
+            player_team = p.get("team", "")
+            df["park_team"] = df.apply(
+                lambda r: player_team if r.get("is_home") else (r.get("opp_team") or ""),
+                axis=1,
+            )
+
+        # ── Defensive: ensure games_started exists ─────────────────────────
+        # Should always be present, but guard against unexpected cache shapes.
+        if "games_started" not in df.columns:
+            df["games_started"] = 0
+
         # Per-row rate stats (needed for rolling averages)
         df["k_per_9"]  = (df["K"]  * 9.0 / df["IP"].clip(lower=0.01)).fillna(0.0)
         df["bb_per_9"] = (df["BB"] * 9.0 / df["IP"].clip(lower=0.01)).fillna(0.0)
@@ -779,19 +794,21 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
             df[f"r7_{c}"]  = df[c].shift(1).rolling(window=7,  min_periods=2).mean()
             df[f"r14_{c}"] = df[c].shift(1).rolling(window=14, min_periods=3).mean()
 
-        # days_since_last_start: calendar days between consecutive starts
-        # (shift so each row only knows the gap UP TO this appearance)
-        start_mask = df["games_started"] > 0
+        # days_since_last_start: calendar days between consecutive starts.
+        # Initialize _prev_start to NaT first so the column always exists even
+        # when start_mask is all-False (avoids KeyError on .ffill()).
+        df["_prev_start"] = pd.NaT
+        start_mask  = df["games_started"] > 0
         start_dates = df.loc[start_mask, "date_dt"]
-        df.loc[start_mask, "_prev_start"] = start_dates.shift(1).values
+        if not start_dates.empty:
+            df.loc[start_mask, "_prev_start"] = start_dates.shift(1).values
         df["_prev_start"] = df["_prev_start"].ffill()
         df["days_since_last_start"] = (
             (df["date_dt"] - pd.to_datetime(df["_prev_start"]))
-            .dt.days.fillna(5)  # neutral default ~5 days rest
+            .dt.days.fillna(5)   # neutral default ~5 days rest
             .clip(0, 30)
+            .fillna(5)           # second pass in case clip introduced NaN
         )
-        # For the first start there's no prior start → use 5 (normal rotation rest)
-        df["days_since_last_start"] = df["days_since_last_start"].fillna(5)
 
         # ip_last_30d: total IP pitched in the 30 calendar days BEFORE this game.
         # Use a date-indexed rolling sum (shift so current game excluded).
@@ -809,9 +826,9 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
             # Fallback: simple 6-game rolling sum (~30 days at typical 5d cadence)
             df["ip_last_30d"] = df["IP"].shift(1).rolling(6, min_periods=0).sum().fillna(0)
 
-        # Ballpark strikeout factor from hardcoded dict
-        df["ballpark_factor_k"] = (
-            df["park_team"].map(lambda t: PARK_FACTORS_K.get(t, 1.0))
+        # Ballpark strikeout factor — park_team is guaranteed to exist above
+        df["ballpark_factor_k"] = df["park_team"].map(
+            lambda t: PARK_FACTORS_K.get(str(t) if t else "", 1.0)
         )
 
         # Drop rows that lack rolling averages (first 2 appearances)
@@ -853,12 +870,21 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
+
+    # ── Column diagnostic — confirm all expected features are present ──────
+    _log(
+        f"pitcher feature matrix columns ({len(feature_names)} total): "
+        + ", ".join(sorted(feature_names))
+    )
+    missing_check = [c for c in feature_names if df_all[c].isna().all()]
+    if missing_check:
+        _log(f"  WARN: all-NaN columns (will be filled with 0): {missing_check}")
+
     X = df_all[feature_names].fillna(0).to_numpy(dtype=float)
     y = df_all["label"].to_numpy(dtype=int)
     _log(
         f"pitcher features: {X.shape[0]} rows × {X.shape[1]} cols  "
-        f"positive_rate={y.mean():.3f}  "
-        f"feature_count={len(feature_names)}"
+        f"positive_rate={y.mean():.3f}"
     )
     return X, y, feature_names
 
@@ -926,6 +952,23 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
         df = pd.DataFrame(games).sort_values("date").reset_index(drop=True)
 
+        # ── Defensive: ensure park_team exists ────────────────────────────
+        # Old cache files lack this column; derive it from is_home + opp_team.
+        if "park_team" not in df.columns:
+            player_team = p.get("team", "")
+            df["park_team"] = df.apply(
+                lambda r: player_team if r.get("is_home") else (r.get("opp_team") or ""),
+                axis=1,
+            )
+
+        # ── Defensive: ensure batting_order exists ─────────────────────────
+        if "batting_order" not in df.columns:
+            df["batting_order"] = 0
+
+        # ── Defensive: ensure opp_team exists (should always, but guard) ───
+        if "opp_team" not in df.columns:
+            df["opp_team"] = ""
+
         # Per-row rate stats
         df["H_per_AB"]  = (df["H"]  / df["AB"].clip(lower=1)).fillna(0.0)
         df["TB_per_AB"] = (df["TB"] / df["AB"].clip(lower=1)).fillna(0.0)
@@ -960,12 +1003,12 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         df["k_pct_7d"]  = df["k_pct"].shift(1).rolling(window=7,  min_periods=2).mean()
         df["k_pct_14d"] = df["k_pct"].shift(1).rolling(window=14, min_periods=3).mean()
 
-        # Ballpark factors from hardcoded dicts
+        # Ballpark factors — park_team is guaranteed to exist above
         df["ballpark_factor_hits"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_H.get(t, 1.0)
+            lambda t: PARK_FACTORS_H.get(str(t) if t else "", 1.0)
         )
         df["ballpark_factor_hr"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_HR.get(t, 1.0)
+            lambda t: PARK_FACTORS_HR.get(str(t) if t else "", 1.0)
         )
 
         df = df.dropna(subset=[f"szn_{roll_stats[0]}", f"r7_{roll_stats[0]}"])
@@ -1010,12 +1053,21 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
+
+    # ── Column diagnostic — confirm all expected features are present ──────
+    _log(
+        f"batter feature matrix columns ({len(feature_names)} total): "
+        + ", ".join(sorted(feature_names))
+    )
+    missing_check = [c for c in feature_names if df_all[c].isna().all()]
+    if missing_check:
+        _log(f"  WARN: all-NaN columns (will be filled with 0): {missing_check}")
+
     X = df_all[feature_names].fillna(0).to_numpy(dtype=float)
     y = df_all["label"].to_numpy(dtype=int)
     _log(
         f"batter features: {X.shape[0]} rows × {X.shape[1]} cols  "
-        f"positive_rate={y.mean():.3f}  "
-        f"feature_count={len(feature_names)}"
+        f"positive_rate={y.mean():.3f}"
     )
     return X, y, feature_names
 
