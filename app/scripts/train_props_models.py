@@ -714,7 +714,15 @@ def collect_multi_season_data(
 # ---------------------------------------------------------------------------
 
 def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, dict]]):
-    """Build (X, y, feature_names) for pitcher_strikeouts >= 6 label.
+    """Build (X, y, reg_targets, feature_names, snapshots) for pitcher_strikeouts >= 6 label.
+
+    Also returns a *snapshots* dict {str(player_id): {features..., name, team,
+    as_of_date}} keyed by player ID; each entry holds that pitcher's
+    most-recent engineered feature row across all training seasons.  The
+    inference layer looks these up at predict time so szn_*/r7_*/r14_*
+    features carry the pitcher's real recent form instead of the prop
+    line as a noisy proxy (which is what the old line-as-proxy heuristic
+    in props_model._build_reg_vector did for pitchers).
 
     Real features (computed from game logs + platoon splits):
         season-to-date and 7/14-game rolling K, BB, H, ER, IP, K/9, BB/9
@@ -734,7 +742,7 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         import numpy as np
     except ImportError:
         _log("pandas/numpy missing -- aborting pitcher build")
-        return None, None, None, None
+        return None, None, None, None, None
 
     # Inference-time features that are always zero during training
     INFER_FEATS = [
@@ -755,10 +763,13 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
 
     rows: list[dict] = []
     reg_rows: list[dict] = []
+    snapshots: dict[str, dict] = {}
     for p in (payload.get("pitchers") or []):
         games  = p.get("games") or []
         season = p.get("season", 2025)
         pid    = p["id"]
+        pname  = p.get("name") or ""
+        pteam  = p.get("team") or ""
         if not games:
             continue
 
@@ -876,9 +887,30 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
                 "outs": float(round(row["IP"] * 3)),
             })
 
+        # ── Snapshot: capture this pitcher's MOST RECENT engineered row ──────
+        # The snapshot represents their feature state going into a hypothetical
+        # next start.  Inference looks it up by name → MLB ID so szn_*/r7_*/r14_*
+        # plus days_since_last_start / ip_last_30d / platoon splits all carry
+        # real values instead of the line-as-proxy heuristic.  Last-season wins
+        # because collect_multi_season_data appends seasons in order — most
+        # recent training season for a given pitcher overwrites earlier ones.
+        last = df.iloc[-1]
+        snap_feats = {c: float(last[c]) for c in feat_cols}
+        snap_feats["era_vs_lhb"]    = float(splits.get("era_vs_lhb", 4.50))
+        snap_feats["k_rate_vs_lhb"] = float(splits.get("k_rate_vs_lhb", 0.215))
+        snap_feats["era_vs_rhb"]    = float(splits.get("era_vs_rhb", 4.50))
+        snap_feats["k_rate_vs_rhb"] = float(splits.get("k_rate_vs_rhb", 0.215))
+        snapshots[str(pid)] = {
+            "name":        pname,
+            "team":        pteam,
+            "season":      int(season),
+            "as_of_date":  str(last.get("date", "")),
+            "features":    snap_feats,
+        }
+
     if not rows:
         _log("pitcher dataset empty after feature build")
-        return None, None, None, None
+        return None, None, None, None, None
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
@@ -902,7 +934,8 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         stat: pd.DataFrame(reg_rows)[stat].to_numpy(dtype=float)
         for stat in _PITCHER_REG_STATS
     }
-    return X, y, reg_targets, feature_names
+    _log(f"pitcher snapshots captured: {len(snapshots)} unique pitchers")
+    return X, y, reg_targets, feature_names, snapshots
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +943,13 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
 # ---------------------------------------------------------------------------
 
 def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, dict]]):
-    """Build (X, y, feature_names) for batter_hits >= 1 label.
+    """Build (X, y, feature_names, snapshots) for batter_hits >= 1 label.
+
+    Also returns a *snapshots* dict {str(player_id): {features..., name, team,
+    as_of_date}} keyed by player ID; each entry holds that player's most-recent
+    engineered feature row across all training seasons.  The inference layer
+    looks up snapshots at predict time so we no longer fill rolling features
+    with the prop line as a noisy proxy.
 
     Real features (computed from game logs + platoon splits):
         season-to-date and 7/14-game rolling H, HR, RBI, R, BB, SO, TB,
@@ -931,7 +970,7 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         import numpy as np
     except ImportError:
         _log("pandas/numpy missing -- aborting batter build")
-        return None, None, None, None
+        return None, None, None, None, None
 
     INFER_FEATS = [
         "whiff_pct",
@@ -954,10 +993,16 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
     rows: list[dict] = []
     reg_rows: list[dict] = []
+    # Per-player snapshots: most-recent engineered row across all seasons.
+    # Since collect_multi_season_data appends seasons in chronological order,
+    # the last assignment wins (= most recent season the player appeared in).
+    snapshots: dict[str, dict] = {}
     for p in (payload.get("batters") or []):
         games  = p.get("games") or []
         season = p.get("season", 2025)
         pid    = p["id"]
+        pname  = p.get("name", "")
+        pteam  = p.get("team", "")
         if not games:
             continue
 
@@ -1072,9 +1117,29 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
                 "BB":  float(row["BB"]),
             })
 
+        # ── Snapshot: capture this player's MOST RECENT engineered row ───────
+        # The snapshot represents their feature state going into a hypothetical
+        # next game and is what the inference layer needs.  Last-season wins
+        # because collect_multi_season_data appends seasons in order.
+        last = df.iloc[-1]
+        snap_feats = {c: float(last[c]) for c in feat_cols}
+        snap_feats["ops_vs_lhp"] = float(splits.get("ops_vs_lhp", 0.720))
+        snap_feats["obp_vs_lhp"] = float(splits.get("obp_vs_lhp", 0.315))
+        snap_feats["slg_vs_lhp"] = float(splits.get("slg_vs_lhp", 0.405))
+        snap_feats["ops_vs_rhp"] = float(splits.get("ops_vs_rhp", 0.720))
+        snap_feats["obp_vs_rhp"] = float(splits.get("obp_vs_rhp", 0.315))
+        snap_feats["slg_vs_rhp"] = float(splits.get("slg_vs_rhp", 0.405))
+        snapshots[str(pid)] = {
+            "name":        pname,
+            "team":        pteam,
+            "season":      int(season),
+            "as_of_date":  str(last.get("date", "")),
+            "features":    snap_feats,
+        }
+
     if not rows:
         _log("batter dataset empty after feature build")
-        return None, None, None, None
+        return None, None, None, None, None
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
@@ -1098,7 +1163,8 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         stat: pd.DataFrame(reg_rows)[stat].to_numpy(dtype=float)
         for stat in _BATTER_REG_STATS
     }
-    return X, y, reg_targets, feature_names
+    _log(f"batter snapshots captured: {len(snapshots)} unique players")
+    return X, y, reg_targets, feature_names, snapshots
 
 
 # ---------------------------------------------------------------------------
@@ -1281,8 +1347,15 @@ def _train_regressor(
     out_path: Path,
     *,
     label: str,
+    objective: str = "reg:squarederror",
 ) -> tuple[Optional[float], Optional[object]]:
-    """5-fold CV XGBoost regression training.  Returns (oof_rmse, final_model)."""
+    """5-fold CV XGBoost regression training.  Returns (oof_rmse, final_model).
+
+    *objective* defaults to ``reg:squarederror``.  For non-negative count
+    targets (batter H/TB/HR/RBI/R/BB, pitcher K/ER/H/BB/outs) ``count:poisson``
+    is principled and typically yields better-calibrated, lower-RMSE
+    predictions on sparse counts like HR.
+    """
     if X is None or y_reg is None or len(X) < 20:
         _log(f"{label}: not enough data ({0 if X is None else len(X)} rows) "
              "-- skipping regressor train")
@@ -1304,7 +1377,7 @@ def _train_regressor(
             n_estimators=400, max_depth=4, learning_rate=0.04,
             subsample=0.8, colsample_bytree=0.75,
             min_child_weight=3, gamma=0.1,
-            objective="reg:squarederror", eval_metric="rmse",
+            objective=objective, eval_metric="rmse",
             verbosity=0,
         )
         reg.fit(X[tr], y_reg[tr])
@@ -1313,13 +1386,13 @@ def _train_regressor(
         _log(f"{label} fold {fold}: rmse={fold_rmse:.3f}")
 
     oof_rmse = float(np.sqrt(mean_squared_error(y_reg, oof)))
-    _log(f"{label} OOF: rmse={oof_rmse:.3f}")
+    _log(f"{label} OOF: rmse={oof_rmse:.3f}  objective={objective}")
 
     final = xgb.XGBRegressor(
         n_estimators=400, max_depth=4, learning_rate=0.04,
         subsample=0.8, colsample_bytree=0.75,
         min_child_weight=3, gamma=0.1,
-        objective="reg:squarederror", eval_metric="rmse",
+        objective=objective, eval_metric="rmse",
         verbosity=0,
     )
     final.fit(X, y_reg)
@@ -1521,40 +1594,68 @@ def main() -> int:
     pitcher_path = Path(".cache/props_model_pitcher.joblib")
     batter_path  = Path(".cache/props_model_batter.joblib")
 
+    pitcher_snapshots: dict[str, dict] = {}
     if not args.skip_pitcher:
         _log("building pitcher feature matrix …")
-        X, y, reg_targets_p, feat_names = _build_pitcher_dataset(payload, pitcher_splits_by_season)
+        X, y, reg_targets_p, feat_names, pitcher_snapshots = _build_pitcher_dataset(
+            payload, pitcher_splits_by_season,
+        )
         acc, model = _train_and_save(X, y, pitcher_path, label="pitcher")
         summary["pitcher_oof_acc"] = acc
         summary["pitcher_features"] = len(feat_names) if feat_names else 0
+        summary["pitcher_snapshots"] = len(pitcher_snapshots or {})
         if model is not None and not args.no_shap and feat_names is not None:
             pitcher_importance = _run_shap_analysis(model, X, feat_names, "pitcher")
         if feat_names:
             pitcher_feat_names = feat_names
         if X is not None and reg_targets_p:
+            # Count-valued targets (K, BB, ER, H) use Poisson objective —
+            # principled for non-negative counts and typically yields better-
+            # calibrated, lower-RMSE predictions on sparse counts than the
+            # default squared-error objective.  `outs` is left on squared-error:
+            # its distribution is multimodal (clustered around 15, 18, 21 outs
+            # = 5, 6, 7 IP) rather than Poisson-shaped, and Poisson fit makes
+            # it worse in our holdout tests.
             for stat in _PITCHER_REG_STATS:
                 y_reg = reg_targets_p.get(stat)
-                if y_reg is not None:
-                    reg_path = _CACHE_DIR / f"props_model_pitcher_reg_{stat}.joblib"
-                    rmse, _ = _train_regressor(X, y_reg, reg_path, label=f"pitcher_reg_{stat}")
-                    summary[f"pitcher_reg_{stat}_rmse"] = rmse
+                if y_reg is None:
+                    continue
+                reg_path = _CACHE_DIR / f"props_model_pitcher_reg_{stat}.joblib"
+                obj = "count:poisson" if stat in ("K", "BB", "ER", "H") else "reg:squarederror"
+                rmse, _ = _train_regressor(
+                    X, y_reg, reg_path,
+                    label=f"pitcher_reg_{stat}",
+                    objective=obj,
+                )
+                summary[f"pitcher_reg_{stat}_rmse"] = rmse
 
+    batter_snapshots: dict[str, dict] = {}
     if not args.skip_batter:
         _log("building batter feature matrix …")
-        X, y, reg_targets_b, feat_names = _build_batter_dataset(payload, batter_splits_by_season)
+        X, y, reg_targets_b, feat_names, batter_snapshots = _build_batter_dataset(
+            payload, batter_splits_by_season,
+        )
         acc, model = _train_and_save(X, y, batter_path, label="batter")
         summary["batter_oof_acc"] = acc
         summary["batter_features"] = len(feat_names) if feat_names else 0
+        summary["batter_snapshots"] = len(batter_snapshots or {})
         if model is not None and not args.no_shap and feat_names is not None:
             batter_importance = _run_shap_analysis(model, X, feat_names, "batter")
         if feat_names:
             batter_feat_names = feat_names
         if X is not None and reg_targets_b:
+            # Batter count stats (H, TB, HR, RBI, R, BB) use Poisson objective —
+            # principled for non-negative counts and meaningfully better calibrated
+            # for sparse targets like HR.
             for stat in _BATTER_REG_STATS:
                 y_reg = reg_targets_b.get(stat)
                 if y_reg is not None:
                     reg_path = _CACHE_DIR / f"props_model_batter_reg_{stat}.joblib"
-                    rmse, _ = _train_regressor(X, y_reg, reg_path, label=f"batter_reg_{stat}")
+                    rmse, _ = _train_regressor(
+                        X, y_reg, reg_path,
+                        label=f"batter_reg_{stat}",
+                        objective="count:poisson",
+                    )
                     summary[f"batter_reg_{stat}_rmse"] = rmse
 
     # ── 4. Save SHAP feature importance JSON ────────────────────────────────
@@ -1566,6 +1667,87 @@ def main() -> int:
     if pitcher_feat_names or batter_feat_names:
         _save_reg_metadata(pitcher_feat_names, batter_feat_names)
         summary["reg_metadata_saved"] = True
+
+    # ── 4c. Save pitcher rolling-stat snapshots ─────────────────────────────
+    # Mirror of the batter snapshot block below.  One row per pitcher capturing
+    # their most-recent engineered features.  Inference looks these up so the
+    # pitcher rolling features carry real values instead of the prop line.
+    pitcher_snapshot_path = _CACHE_DIR / "pitcher_rolling_snapshots.json"
+    if pitcher_snapshots:
+        try:
+            import statistics
+            feat_keys: set[str] = set()
+            for snap in pitcher_snapshots.values():
+                feat_keys.update((snap.get("features") or {}).keys())
+            league_medians_p: dict[str, float] = {}
+            for fk in feat_keys:
+                vals = [
+                    float(snap["features"].get(fk, 0.0))
+                    for snap in pitcher_snapshots.values()
+                    if isinstance(snap.get("features"), dict)
+                ]
+                if vals:
+                    league_medians_p[fk] = float(statistics.median(vals))
+
+            payload_psnap = {
+                "generated_at":   datetime.utcnow().isoformat() + "Z",
+                "league_medians": league_medians_p,
+                "players":        pitcher_snapshots,
+            }
+            pitcher_snapshot_path.write_text(
+                json.dumps(payload_psnap, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            _log(
+                f"pitcher snapshots saved: {pitcher_snapshot_path} "
+                f"({len(pitcher_snapshots)} players, "
+                f"{pitcher_snapshot_path.stat().st_size // 1024} KB)"
+            )
+            summary["pitcher_snapshots_saved"] = True
+        except Exception as exc:  # noqa: BLE001
+            _log(f"pitcher snapshot save failed: {exc}")
+
+    # ── 4d. Save batter rolling-stat snapshots ──────────────────────────────
+    # One snapshot per player capturing their most-recent engineered row.
+    # Inference looks these up by player_name → MLB ID so szn_*/r7_*/r14_*
+    # features get real values instead of the prop line as a noisy proxy.
+    snapshot_path = _CACHE_DIR / "batter_rolling_snapshots.json"
+    if batter_snapshots:
+        try:
+            import statistics
+            # Compute league-median fallback values across all snapshots —
+            # used by inference when a specific player has no snapshot
+            # (rookies, mid-season call-ups).
+            feat_keys: set[str] = set()
+            for snap in batter_snapshots.values():
+                feat_keys.update((snap.get("features") or {}).keys())
+            league_medians: dict[str, float] = {}
+            for fk in feat_keys:
+                vals = [
+                    float(snap["features"].get(fk, 0.0))
+                    for snap in batter_snapshots.values()
+                    if isinstance(snap.get("features"), dict)
+                ]
+                if vals:
+                    league_medians[fk] = float(statistics.median(vals))
+
+            payload_snap = {
+                "generated_at":    datetime.utcnow().isoformat() + "Z",
+                "league_medians":  league_medians,
+                "players":         batter_snapshots,
+            }
+            snapshot_path.write_text(
+                json.dumps(payload_snap, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            _log(
+                f"batter snapshots saved: {snapshot_path} "
+                f"({len(batter_snapshots)} players, "
+                f"{snapshot_path.stat().st_size // 1024} KB)"
+            )
+            summary["batter_snapshots_saved"] = True
+        except Exception as exc:  # noqa: BLE001
+            _log(f"batter snapshot save failed: {exc}")
 
     # ── 5. Supabase push ────────────────────────────────────────────────────
     if not args.no_push:
@@ -1580,6 +1762,12 @@ def main() -> int:
         for stat in _BATTER_REG_STATS:
             reg_path = _CACHE_DIR / f"props_model_batter_reg_{stat}.joblib"
             model_pairs.append((reg_path, f"props_model_batter_reg_{stat}"))
+        # Snapshot JSON travels alongside the joblibs so cold-boot inference
+        # gets it via the same restore path.
+        if pitcher_snapshot_path.exists():
+            model_pairs.append((pitcher_snapshot_path, "pitcher_rolling_snapshots"))
+        if snapshot_path.exists():
+            model_pairs.append((snapshot_path, "batter_rolling_snapshots"))
         push_result = _push_to_supabase_direct(model_pairs)
         summary["supabase_push"] = push_result
 
