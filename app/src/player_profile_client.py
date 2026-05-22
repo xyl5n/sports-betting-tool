@@ -640,6 +640,126 @@ def get_today_prop(player_name: str) -> Optional[dict]:
         return None
 
 
+def get_today_props_for_player(player_name: str) -> list[dict]:
+    """Return EVERY prop prediction for *player_name* today, one per
+    (market, line, side) combination, with the model's recommendation
+    + confidence + predicted_value attached.
+
+    Used by the player profile page so a starting pitcher with a
+    strikeouts line AND an outs line AND a hits-allowed line shows
+    three separate charts -- not just the highest-confidence one.
+
+    Resolution order mirrors get_today_prop(), but instead of returning
+    only the best entry it deduplicates by (market, line, side) and
+    returns every match.
+
+    Returns [] when no props are available for the player today.
+    """
+    name_lower = player_name.strip().lower()
+    out: list[dict] = []
+    seen: set[tuple] = set()
+
+    def _key(entry: dict) -> tuple:
+        return (
+            entry.get("market") or "",
+            entry.get("line"),
+            (entry.get("side") or "").strip().lower(),
+        )
+
+    # ── Part 1: scored entries in daily_picks ─────────────────────────────────
+    try:
+        from .daily_picks import load_daily_picks
+        daily      = load_daily_picks()
+        prop_picks = (daily.get("picks") or {}).get("prop_picks") or []
+        for pp in prop_picks:
+            if (pp.get("player") or "").strip().lower() != name_lower:
+                continue
+            entry = {
+                "market":          pp.get("market"),
+                "line":            pp.get("line"),
+                "side":            (pp.get("side") or "Over").strip().title(),
+                "best_odds":       pp.get("best_odds"),
+                "recommendation":  pp.get("recommendation"),
+                "confidence":      pp.get("confidence"),
+                "predicted_value": pp.get("predicted_value"),
+                "source":          "daily_picks",
+            }
+            k = _key(entry)
+            if k not in seen:
+                seen.add(k)
+                out.append(entry)
+    except Exception as exc:
+        _log(f"get_today_props_for_player({player_name!r}): daily_picks read failed: {exc}")
+
+    # ── Part 2: every live prop, re-scored ────────────────────────────────────
+    # Loops every (market, props) bucket from props_client and predicts
+    # one row per side, so a player with Over+Under listings yields a single
+    # consolidated entry per (market, line) keyed by the side the model
+    # actually recommends (highest score wins between the two sides).
+    try:
+        from .props_client import (
+            get_client as _get_props_client,
+            ALL_PITCHER_MARKETS,
+            ALL_BATTER_MARKETS,
+        )
+        from .props_model  import predict as _predict
+    except Exception:
+        return out
+
+    try:
+        payload     = _get_props_client().get_today_props() or {}
+        all_markets = payload.get("markets") or {}
+        # Bucket per (market, line) so over+under collapse into one entry,
+        # keeping whichever side has the higher model confidence.  Matches
+        # how pages/props.py renders dedup'd rows.
+        per_line: dict[tuple, dict] = {}
+        for market, props in all_markets.items():
+            for p in (props or []):
+                if (p.get("player_name") or "").strip().lower() != name_lower:
+                    continue
+                try:
+                    line_f = float(p.get("line"))
+                except (TypeError, ValueError):
+                    continue
+                p = _inject_is_home(p)
+                try:
+                    pred = _predict(p)
+                except Exception:
+                    continue
+                score = float(pred.get("confidence") or 0.0)
+                key   = (market, line_f)
+                existing = per_line.get(key)
+                if existing is None or score > float(existing["confidence"] or 0.0):
+                    per_line[key] = {
+                        "market":          market,
+                        "line":            line_f,
+                        "side":            (p.get("side") or "Over").strip().title(),
+                        "best_odds":       p.get("best_odds"),
+                        "best_book":       p.get("best_book"),
+                        "recommendation":  pred.get("recommendation"),
+                        "confidence":      round(score, 4),
+                        "predicted_value": pred.get("predicted_value"),
+                        "source":          "live",
+                    }
+
+        for entry in per_line.values():
+            k = _key(entry)
+            if k not in seen:
+                seen.add(k)
+                out.append(entry)
+    except Exception as exc:
+        _log(f"get_today_props_for_player({player_name!r}) live re-score failed: {exc}")
+
+    # Sort by confidence DESC so the strongest pick lands first on the page.
+    out.sort(key=lambda e: -float(e.get("confidence") or 0.0))
+    _log(
+        f"get_today_props_for_player({player_name!r}): "
+        f"{len(out)} prop(s) "
+        f"[markets={[e.get('market') for e in out]}]"
+    )
+    return out
+
+
 def _inject_is_home(prop: dict) -> dict:
     """Return a shallow copy of *prop* with ``is_home`` set from today's
     pitcher schedule, or the original dict unchanged if the lookup fails.

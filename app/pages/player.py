@@ -117,7 +117,9 @@ def _layout(player_id_slug: str) -> None:
             from src.player_profile_client import (
                 resolve_player_id, get_player_info,
                 get_season_stats, get_season_splits,
-                get_player_gamelog, get_today_prop,
+                get_player_gamelog,
+                get_today_prop,                  # kept for backward-compat
+                get_today_props_for_player,      # PR: multi-prop fetcher
             )
         except ImportError as exc:
             ui.label(f"Player data client unavailable: {exc}").style(
@@ -142,7 +144,13 @@ def _layout(player_id_slug: str) -> None:
         season_stats  = get_season_stats(player_id, is_pitcher=is_pitcher)
         season_splits = get_season_splits(player_id, is_pitcher=is_pitcher)
         raw_games     = get_player_gamelog(player_id, _CURRENT_SEASON, is_pitcher=is_pitcher)
-        today_prop    = get_today_prop(info["name"])
+
+        # PR: fetch EVERY prop the player has today (not just one).  The
+        # legacy single-prop helper is kept as a fallback so the hero
+        # card's "TODAY: OVER 6.5  72%" pill stays populated when the
+        # multi-fetch returns empty (e.g. props_client cache cold).
+        today_props_all = get_today_props_for_player(info["name"]) or []
+        today_prop      = today_props_all[0] if today_props_all else get_today_prop(info["name"])
 
         # Filter pitchers to starts only; take last 10/20
         if is_pitcher:
@@ -151,15 +159,19 @@ def _layout(player_id_slug: str) -> None:
             games = raw_games[-20:]
 
         _log(f"rendering {info['name']} (id={player_id}, pitcher={is_pitcher}, "
-             f"games={len(games)}, today_prop={today_prop is not None})")
+             f"games={len(games)}, props_today={len(today_props_all)})")
         _log(f"player_page game dict keys: {list(games[0].keys()) if games else 'no games'}")
 
         # ── Sections ──────────────────────────────────────────────────────
         _section_hero(info, is_pitcher, today_prop)
-        if today_prop:
-            _section_today_prop(today_prop, is_pitcher)
+        if today_props_all:
+            _section_today_props_overview(today_props_all, is_pitcher)
         _section_season_stats(season_stats, season_splits, is_pitcher)
-        _section_recent_performance(games, is_pitcher, today_prop)
+        _section_props_charts(games, is_pitcher, today_props_all)
+        # Game log stays at the bottom; highlights the strongest prop's
+        # stat column by default so the row that connects to the top
+        # chart gets emphasized.
+        _section_game_log(games, is_pitcher, today_props_all)
 
 
 # ── Section: hero card ───────────────────────────────────────────────────────
@@ -238,69 +250,88 @@ def _section_hero(info: dict, is_pitcher: bool, today_prop: Optional[dict]) -> N
 
 # ── Section: today's prop ───────────────────────────────────────────────────
 
-def _section_today_prop(prop: dict, is_pitcher: bool) -> None:
-    from pages.props import _short_market, _odds_str  # reuse helpers
+def _section_today_props_overview(props: list[dict], is_pitcher: bool) -> None:
+    """Compact overview row: one small card per today's prop.
+
+    Layout sits between the hero and season-stats sections so the user
+    sees every prop the model has on the player BEFORE scrolling to the
+    detailed charts.  Each card is sized to flex-shrink to a half-row
+    on mobile and a third on desktop without breaking the grid.
+
+    Sorted by confidence DESC (handled in get_today_props_for_player).
+    """
+    from pages.props import _short_market   # reuse market-name humanizer
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label("TODAY'S PROPS").style(
+                f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+                f"color: {t.TEXT_DIM2};"
+            )
+            ui.label(f"{len(props)} market{'s' if len(props) != 1 else ''}").style(
+                f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                f"font-size: 10px; font-weight: 700; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+            )
+
+        # Two-up on desktop, single column on mobile.  Reuses the
+        # existing .game-grid responsive grid from theme.page_head_css
+        # so the breakpoint matches the rest of the app.
+        with ui.element("div").classes("game-grid w-full"):
+            for prop in props:
+                _today_prop_minicard(prop, _short_market)
+
+
+def _today_prop_minicard(prop: dict, short_market_fn) -> None:
+    """One prop in the TODAY'S PROPS overview row.  Compact -- chip,
+    line, side, confidence, predicted_value.  Designed so multiple
+    fit on a mobile screen without scroll within the card itself."""
     market    = prop.get("market", "")
-    rec       = prop.get("recommendation") or "Pass"
-    conf_pct  = int((prop.get("confidence") or 0) * 100)
+    rec       = (prop.get("recommendation") or "Pass").strip().title()
+    conf_pct  = int(round((float(prop.get("confidence") or 0)) * 100))
     line      = prop.get("line")
     pv        = prop.get("predicted_value")
     chip_bg   = t.POS if rec == "Over" else (t.NEG if rec == "Under" else t.CARD_HI)
     chip_text = t.BG if rec in ("Over", "Under") else t.TEXT_DIM
 
-    with ui.column().style(
+    with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 10px;"
+        f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; gap: 8px; "
+        f"min-width: 0;"
     ):
-        ui.label("TODAY'S PREDICTION").style(
-            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
-            f"color: {t.TEXT_DIM2};"
-        )
-        with ui.row().classes("items-center w-full").style("gap: 12px; flex-wrap: wrap;"):
-            # Market chip
-            ui.label(_short_market(market).upper()).style(
+        # Market chip + confidence on a single line
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label(short_market_fn(market).upper()).style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
-                f"font-size: 10px; font-weight: 700; letter-spacing: .5px; "
-                f"padding: 4px 10px; border-radius: {t.RADIUS_PILL};"
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
             )
-            # Line
-            ui.label(f"Line: {line}").style(
-                f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
-                f"font-family: monospace;"
+            ui.label(f"{conf_pct}%").style(
+                f"font-size: 14px; font-weight: 800; color: {chip_bg}; "
+                f"font-family: monospace; margin-left: auto;"
             )
-            # Side pill
-            ui.label(f"{rec.upper()} {line}").style(
-                f"background: {chip_bg}; color: {chip_text}; "
-                f"font-size: 14px; font-weight: 800; padding: 6px 14px; "
-                f"border-radius: {t.RADIUS_SM};"
-            )
-            # Confidence
-            with ui.column().style("gap: 1px; align-items: flex-end; margin-left: auto;"):
-                ui.label("CONFIDENCE").style(
-                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                    f"color: {t.TEXT_DIM2};"
-                )
-                ui.label(f"{conf_pct}%").style(
-                    f"font-size: 20px; font-weight: 800; color: {chip_bg}; "
-                    f"font-family: monospace;"
-                )
-        if pv is not None:
+
+        # Big side pill + line
+        ui.label(f"{rec.upper()} {line}").style(
+            f"background: {chip_bg}; color: {chip_text}; "
+            f"font-size: 14px; font-weight: 800; "
+            f"padding: 6px 12px; border-radius: {t.RADIUS_SM}; "
+            f"align-self: flex-start;"
+        )
+
+        # Predicted value footnote (small)
+        if isinstance(pv, (int, float)) and line is not None:
             stat_abbr = _prop_stat_abbr(market)
-            pv_label = f"{pv:.1f}" + (f" {stat_abbr}" if stat_abbr else "")
+            pv_label = f"projects {pv:.1f}" + (f" {stat_abbr}" if stat_abbr else "")
             try:
-                margin = (float(pv) - float(line)) if rec == "Over" else (float(line) - float(pv))
-                pv_color = t.POS if margin > 1.0 else t.WARN
+                margin = float(pv) - float(line)
+                pv_color = t.POS if margin > 0 else t.NEG
             except (TypeError, ValueError):
                 pv_color = t.TEXT_DIM
-            with ui.row().classes("items-center").style("gap: 8px;"):
-                ui.label("PREDICTED").style(
-                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                    f"color: {t.TEXT_DIM2};"
-                )
-                ui.label(pv_label).style(
-                    f"font-size: 14px; font-weight: 700; color: {pv_color}; "
-                    f"font-family: monospace;"
-                )
+            ui.label(pv_label).style(
+                f"font-size: 11px; color: {pv_color}; "
+                f"font-family: monospace;"
+            )
 
 
 # ── Section: season stats ───────────────────────────────────────────────────
@@ -363,15 +394,47 @@ def _section_season_stats(
 
 # ── Section: recent performance ──────────────────────────────────────────────
 
-def _section_recent_performance(
+# ── Section: per-prop charts ─────────────────────────────────────────────────
+
+# Reverse map: market key -> game-log stat key.  Used by the multi-prop
+# chart section to figure out which gamelog column corresponds to a
+# given prop market.  Pitcher + batter combined so the same lookup
+# works for both buckets.
+_MARKET_TO_STAT: dict[str, str] = {
+    "pitcher_strikeouts":   "K",
+    "pitcher_earned_runs":  "ER",
+    "pitcher_hits_allowed": "H",
+    "pitcher_walks":        "BB",
+    "pitcher_outs":         "outs",
+    "batter_hits":          "H",
+    "batter_total_bases":   "TB",
+    "batter_home_runs":     "HR",
+    "batter_rbis":          "RBI",
+    "batter_runs_scored":   "R",
+    "batter_walks":         "BB",
+}
+
+
+def _section_props_charts(
     games: list[dict],
     is_pitcher: bool,
-    today_prop: Optional[dict],
+    today_props: list[dict],
 ) -> None:
+    """Per-prop chart grid.
+
+    One card per available prop -- each card shows the last N games'
+    actual value as a bar, with a dashed horizontal reference line at
+    today's book line.  Bars are colored green when the player hit the
+    over and red when they hit the under, so the hit-rate vs the line
+    is readable at a glance.
+
+    When today has zero scored props (off-day, props haven't been
+    fetched yet) we fall back to the legacy single-chart view so the
+    page isn't blank -- it just renders the player's primary stat
+    without a reference line.
+    """
     if not games:
-        ui.label(
-            "No recent game data available."
-        ).style(
+        ui.label("No recent game data available.").style(
             f"color: {t.TEXT_DIM}; font-size: 13px; "
             f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
             f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_LG}; "
@@ -379,152 +442,247 @@ def _section_recent_performance(
         )
         return
 
-    stat_opts = _PITCHER_STATS if is_pitcher else _BATTER_STATS
-    market_map = _STAT_TO_MARKET if is_pitcher else _BATTER_STAT_TO_MARKET
-    default_stat = stat_opts[0][0]
+    n_games_label = (
+        f"last {len(games)} starts" if is_pitcher else f"last {len(games)} games"
+    )
 
-    # Find prop line for the current stat (from today's prop if available)
-    def _prop_line_for_stat(stat_key: str) -> Optional[float]:
-        if not today_prop:
-            return None
-        market = market_map.get(stat_key)
-        if market and today_prop.get("market") == market:
-            try:
-                return float(today_prop["line"])
-            except (TypeError, ValueError):
-                return None
-        return None
+    # Section header
+    with ui.row().classes("items-center w-full").style("gap: 8px;"):
+        ui.label("RECENT PERFORMANCE vs LINE").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2};"
+        )
+        ui.label(n_games_label).style(
+            f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+            f"font-size: 10px; font-weight: 700; "
+            f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+        )
 
-    # Build chart options
-    def _chart_options(stat_key: str) -> dict:
-        prop_line = _prop_line_for_stat(stat_key)
-        dates  = [g.get("date", "")[-5:] for g in games]  # "MM-DD"
-        values = [_stat_value(g, stat_key) for g in games]
-        bar_color = _bar_color(stat_key, values, prop_line)
-
-        mark_line_data = []
-        if prop_line is not None:
-            mark_line_data = [{
-                "yAxis": prop_line,
-                "label": {
-                    "formatter": f"Line {prop_line}",
-                    "position": "end",
-                    "color": t.WARN,
-                    "fontSize": 10,
-                },
-                "lineStyle": {"color": t.WARN, "type": "dashed", "width": 2},
-            }]
-
-        return {
-            "backgroundColor": t.BG,
-            "grid": {
-                "left": "2%", "right": "2%",
-                "top": "12%", "bottom": "3%",
-                "containLabel": True,
-            },
-            "tooltip": {
-                "trigger": "axis",
-                "backgroundColor": t.CARD,
-                "borderColor": t.BORDER,
-                "textStyle": {"color": t.TEXT, "fontSize": 12},
-                "formatter": f"{{b}}: {{c}} {stat_key}",
-            },
-            "xAxis": {
-                "type": "category",
-                "data": dates,
-                "axisLabel": {"color": t.TEXT_DIM2, "fontSize": 10},
-                "axisLine": {"lineStyle": {"color": t.BORDER}},
-                "axisTick": {"show": False},
-            },
-            "yAxis": {
-                "type": "value",
-                "axisLabel": {"color": t.TEXT_DIM2, "fontSize": 10},
-                "splitLine": {"lineStyle": {"color": t.BORDER_SOFT}},
-                "min": 0,
-            },
-            "series": [{
-                "type": "bar",
-                "data": values,
-                "itemStyle": {"color": bar_color},
-                "markLine": {
-                    "symbol": ["none", "none"],
-                    "data": mark_line_data,
-                } if mark_line_data else None,
-            }],
-        }
-
-    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
-        with ui.row().classes("items-center w-full").style("gap: 8px;"):
-            ui.label("RECENT PERFORMANCE").style(
-                f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
-                f"color: {t.TEXT_DIM2};"
+    # No-props fallback: render a single chart for the default stat with
+    # no reference line so the page still shows the player's recent
+    # output.  Picks the primary stat for the role (K for pitchers,
+    # H for batters).
+    if not today_props:
+        default_stat = "K" if is_pitcher else "H"
+        with ui.column().classes("w-full").style(
+            f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 10px;"
+        ):
+            ui.label(
+                f"No props lines posted yet — showing recent "
+                f"{'strikeouts' if is_pitcher else 'hits'} only."
+            ).style(
+                f"font-size: 11px; color: {t.TEXT_DIM2}; font-style: italic;"
             )
-            n_label = f"last {len(games)} starts" if is_pitcher else f"last {len(games)} games"
-            ui.label(n_label).style(
+            ui.echart(_per_prop_chart_options(
+                games, stat_key=default_stat, prop_line=None,
+                side="Over", market_label=default_stat,
+            )).style("width: 100%; height: 200px;")
+        return
+
+    # Card-per-prop grid.  Reuses .game-grid so it's 2-up on desktop and
+    # single-column on mobile, matching the rest of the slate cards.
+    with ui.element("div").classes("game-grid w-full"):
+        for prop in today_props:
+            _prop_chart_card(games, is_pitcher, prop)
+
+
+def _prop_chart_card(games: list[dict], is_pitcher: bool, prop: dict) -> None:
+    """Render one card containing a single prop's chart + summary chips.
+
+    Header shows the market name + line + side + confidence so the user
+    sees the bet context above the bars.  The bars themselves carry the
+    hit/miss color signal so the over/under rate against the line is
+    obvious at a glance.
+    """
+    from pages.props import _short_market
+
+    market    = prop.get("market", "")
+    side      = (prop.get("recommendation") or prop.get("side") or "Over").strip().title()
+    line      = prop.get("line")
+    try:
+        line_f = float(line)
+    except (TypeError, ValueError):
+        line_f = None
+    conf_pct  = int(round((float(prop.get("confidence") or 0)) * 100))
+    chip_bg   = t.POS if side == "Over" else (t.NEG if side == "Under" else t.CARD_HI)
+    chip_text = t.BG if side in ("Over", "Under") else t.TEXT_DIM
+    stat_key  = _MARKET_TO_STAT.get(market)
+    if stat_key is None:
+        return  # market we can't visualize from gamelog — silently skip
+
+    # Hit/miss tally for the header pill ("hit over 7/10")
+    values = [_stat_value(g, stat_key) for g in games]
+    if line_f is not None:
+        if side == "Over":
+            hits = sum(1 for v in values if v > line_f)
+        else:
+            hits = sum(1 for v in values if v < line_f)
+        rate_label = f"{hits}/{len(values)}  hit {side.lower()}"
+    else:
+        rate_label = ""
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 10px; "
+        f"min-width: 0;"
+    ):
+        # Header row: market + side pill + confidence
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label(_short_market(market).upper()).style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
-                f"font-size: 10px; font-weight: 700; "
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
             )
-
-        # Stat selector pills
-        selected: dict = {"stat": default_stat}
-        pill_refs: dict[str, ui.label] = {}
-        chart_ref: dict = {}
-
-        def _pill_style(is_active: bool) -> str:
-            if is_active:
-                return (
-                    f"background: {t.PRIMARY}; color: #fff; "
-                    f"font-size: 11px; font-weight: 700; "
-                    f"padding: 5px 12px; border-radius: {t.RADIUS_PILL}; "
-                    f"cursor: pointer;"
+            if line is not None:
+                ui.label(f"{side.upper()} {line}").style(
+                    f"background: {chip_bg}; color: {chip_text}; "
+                    f"font-size: 12px; font-weight: 800; "
+                    f"padding: 4px 10px; border-radius: {t.RADIUS_SM};"
                 )
-            return (
-                f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
-                f"font-size: 11px; font-weight: 600; "
-                f"padding: 5px 12px; border-radius: {t.RADIUS_PILL}; "
-                f"cursor: pointer;"
+            with ui.column().style(
+                "gap: 1px; align-items: flex-end; margin-left: auto;"
+            ):
+                ui.label("CONF").style(
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                ui.label(f"{conf_pct}%").style(
+                    f"font-size: 16px; font-weight: 800; color: {chip_bg}; "
+                    f"font-family: monospace;"
+                )
+
+        # Sub-row: hit rate against line ("hit over 7/10")
+        if rate_label:
+            ui.label(rate_label).style(
+                f"font-size: 11px; color: {t.TEXT_DIM}; "
+                f"font-family: monospace; letter-spacing: .3px;"
             )
 
-        def _on_stat_click(stat_key: str) -> None:
-            prev = selected["stat"]
-            selected["stat"] = stat_key
-            # Update pill styles
-            for sk, lbl in pill_refs.items():
-                lbl.style(_pill_style(sk == stat_key))
-            # Update chart
-            chart_el = chart_ref.get("el")
-            if chart_el:
-                opts = _chart_options(stat_key)
-                chart_el.options.clear()
-                chart_el.options.update(opts)
-                chart_el.update()
-            # Refresh table
-            tbl_ref = chart_ref.get("tbl")
-            if tbl_ref:
-                tbl_ref.clear()
-                with tbl_ref:
-                    _game_log_table(games, is_pitcher, stat_key)
+        # The chart itself
+        ui.echart(_per_prop_chart_options(
+            games, stat_key=stat_key, prop_line=line_f,
+            side=side, market_label=_short_market(market),
+        )).style("width: 100%; height: 200px;")
 
-        with ui.row().classes("items-center").style(f"gap: 6px; flex-wrap: wrap;"):
-            for sk, slabel in stat_opts:
-                lbl = ui.label(slabel).style(
-                    _pill_style(sk == default_stat)
-                )
-                lbl.on("click", lambda e, s=sk: _on_stat_click(s))
-                pill_refs[sk] = lbl
 
-        # ECharts bar chart
-        chart_el = ui.echart(_chart_options(default_stat)).style(
-            "width: 100%; height: 220px;"
+def _per_prop_chart_options(
+    games: list[dict],
+    *,
+    stat_key: str,
+    prop_line: Optional[float],
+    side: str,
+    market_label: str,
+) -> dict:
+    """ECharts options for a single prop's last-N-games bar chart.
+
+    Each bar's color is driven by whether the actual value cleared the
+    line in the betting side's direction (green) or didn't (red).  When
+    no line is provided (no-props fallback) every bar gets the neutral
+    primary color so the chart still renders informatively.
+    """
+    dates  = [g.get("date", "")[-5:] for g in games]   # "MM-DD"
+    values = [_stat_value(g, stat_key) for g in games]
+
+    # Per-bar items so each bar can carry its own color.  ECharts
+    # accepts {value, itemStyle: {color: ...}} dicts in series[].data.
+    bar_items: list[dict] = []
+    for v in values:
+        if prop_line is None:
+            col = t.PRIMARY
+        else:
+            # Over wins -> green when actual > line; Under wins -> green
+            # when actual < line.  Equality is a push -> dim color.
+            if side == "Under":
+                if   v < prop_line: col = t.POS
+                elif v > prop_line: col = t.NEG
+                else:               col = t.TEXT_DIM2
+            else:
+                if   v > prop_line: col = t.POS
+                elif v < prop_line: col = t.NEG
+                else:               col = t.TEXT_DIM2
+        bar_items.append({"value": v, "itemStyle": {"color": col}})
+
+    mark_line_data: list[dict] = []
+    if prop_line is not None:
+        mark_line_data.append({
+            "yAxis":     prop_line,
+            "label": {
+                "formatter": f"Line {prop_line}",
+                "position":  "end",
+                "color":     t.WARN,
+                "fontSize":  10,
+            },
+            "lineStyle": {"color": t.WARN, "type": "dashed", "width": 2},
+        })
+
+    return {
+        "backgroundColor": t.BG,
+        "grid": {
+            "left": "2%", "right": "2%",
+            "top":  "10%", "bottom": "3%",
+            "containLabel": True,
+        },
+        "tooltip": {
+            "trigger":         "axis",
+            "backgroundColor": t.CARD,
+            "borderColor":     t.BORDER,
+            "textStyle":       {"color": t.TEXT, "fontSize": 12},
+            "formatter":       f"{{b}}: {{c}} {stat_key}",
+        },
+        "xAxis": {
+            "type":      "category",
+            "data":      dates,
+            "axisLabel": {"color": t.TEXT_DIM2, "fontSize": 10},
+            "axisLine":  {"lineStyle": {"color": t.BORDER}},
+            "axisTick":  {"show": False},
+        },
+        "yAxis": {
+            "type":      "value",
+            "axisLabel": {"color": t.TEXT_DIM2, "fontSize": 10},
+            "splitLine": {"lineStyle": {"color": t.BORDER_SOFT}},
+            "min":       0,
+        },
+        "series": [{
+            "type":      "bar",
+            "data":      bar_items,
+            "markLine":  ({
+                "symbol": ["none", "none"],
+                "data":   mark_line_data,
+            } if mark_line_data else None),
+        }],
+    }
+
+
+def _section_game_log(
+    games: list[dict],
+    is_pitcher: bool,
+    today_props: list[dict],
+) -> None:
+    """Game log table at the bottom of the page.
+
+    Carries forward from the prior layout but no longer has a stat
+    picker -- the per-prop charts above already show each market
+    individually.  Highlights whichever stat column corresponds to the
+    strongest-confidence prop (or the role's primary stat when no
+    props exist) so the row that produced the top chart is visually
+    linked to the table.
+    """
+    if not games:
+        return
+
+    if today_props:
+        top_market = today_props[0].get("market", "")
+        highlighted = _MARKET_TO_STAT.get(top_market) or ("K" if is_pitcher else "H")
+    else:
+        highlighted = "K" if is_pitcher else "H"
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        ui.label("GAME LOG").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2};"
         )
-        chart_ref["el"] = chart_el
-
-        # Game log table
-        tbl_container = ui.column().classes("w-full")
-        chart_ref["tbl"] = tbl_container
-        with tbl_container:
-            _game_log_table(games, is_pitcher, default_stat)
+        _game_log_table(games, is_pitcher, highlighted)
 
 
 # ── Game log table ───────────────────────────────────────────────────────────
