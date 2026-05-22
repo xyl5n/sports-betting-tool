@@ -8875,6 +8875,21 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     except Exception as _exc:
         _eprint(f"AUTO-SETTLE: postponed check error: {type(_exc).__name__}: {_exc}")
 
+    # ── MLB player props settlement ───────────────────────────────────────────
+    # Runs after the moneyline / RL / totals settlement so the box
+    # scores those calls warmed are already in MLB's edge cache.
+    # Wrapped because a slow Stats API call must not abort the rest
+    # of the settlement job.
+    props_summary: dict = {}
+    try:
+        from src.props_settlement import settle_open_prop_picks
+        props_summary = settle_open_prop_picks() or {}
+    except Exception as _exc:
+        _eprint(
+            f"AUTO-SETTLE: props settlement error "
+            f"{type(_exc).__name__}: {_exc}"
+        )
+
     # ── Terminal summary ──────────────────────────────────────────────────────
     wins   = sum(1 for s in settled if s.get("result") == "win")
     losses = sum(1 for s in settled if s.get("result") == "loss")
@@ -8900,22 +8915,48 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     if not settled and not voided:
         _eprint("AUTO-SETTLE: no newly settled bets")
 
+    # Aggregate props counts across both buckets for the summary fields.
+    props_settled = (
+        (props_summary.get("pitcher") or {}).get("settled", 0)
+        + (props_summary.get("batter")  or {}).get("settled", 0)
+    )
+    props_wins = (
+        (props_summary.get("pitcher") or {}).get("wins", 0)
+        + (props_summary.get("batter")  or {}).get("wins", 0)
+    )
+    props_losses = (
+        (props_summary.get("pitcher") or {}).get("losses", 0)
+        + (props_summary.get("batter")  or {}).get("losses", 0)
+    )
+    if props_settled:
+        _eprint(
+            f"AUTO-SETTLE: props settled {props_settled} pick(s) -- "
+            f"{props_wins}W / {props_losses}L"
+        )
+
     # ── Update state ──────────────────────────────────────────────────────────
     with _auto_settlement_lock:
         _auto_settlement_state.update({
-            "last_ran_at":  datetime.now(timezone.utc).isoformat(),
-            "last_settled": len(settled),
-            "last_wins":    wins,
-            "last_losses":  losses,
-            "last_voided":  len(voided),
+            "last_ran_at":     datetime.now(timezone.utc).isoformat(),
+            "last_settled":    len(settled),
+            "last_wins":       wins,
+            "last_losses":     losses,
+            "last_voided":     len(voided),
+            "last_props_settled": props_settled,
+            "last_props_wins":    props_wins,
+            "last_props_losses":  props_losses,
         })
 
     return {
-        "settled": len(settled),
-        "wins":    wins,
-        "losses":  losses,
-        "voided":  len(voided),
-        "forced":  force,
+        "settled":        len(settled),
+        "wins":           wins,
+        "losses":         losses,
+        "voided":         len(voided),
+        "props_settled":  props_settled,
+        "props_wins":     props_wins,
+        "props_losses":   props_losses,
+        "props_summary":  props_summary,
+        "forced":         force,
     }
 
 
@@ -8932,7 +8973,10 @@ def admin_settle_now():
         _eprint(
             f"FORCE-SETTLE complete: settled={result.get('settled', 0)}  "
             f"wins={result.get('wins', 0)}  losses={result.get('losses', 0)}  "
-            f"voided={result.get('voided', 0)}"
+            f"voided={result.get('voided', 0)}  "
+            f"props_settled={result.get('props_settled', 0)}  "
+            f"props_wins={result.get('props_wins', 0)}  "
+            f"props_losses={result.get('props_losses', 0)}"
         )
         return jsonify({"success": True, **result})
     except Exception as exc:                                              # noqa: BLE001
