@@ -786,10 +786,7 @@ def _inject_is_home(prop: dict) -> dict:
         from .pitcher_inference_features import get_is_home_for_pitcher
         is_home = get_is_home_for_pitcher(player_name, date_str)
         if is_home is not None:
-            _log(
-                f"_inject_is_home: {player_name!r} {date_str} "
-                f"is_home={is_home} (market={market})"
-            )
+            # Per-pick log removed (fired once per pitcher prop scored).
             return dict(prop, is_home=is_home)
     except Exception as exc:
         _log(f"_inject_is_home({player_name!r}) failed: {exc}")

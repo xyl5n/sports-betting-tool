@@ -760,10 +760,14 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
         if idx is not None and vec[idx] == 0.0:
             vec[idx] = default_val
 
-    _log(
-        f"build_reg_vector {bucket}: name={prop.get('player_name','?')!r} "
-        f"snapshot={snap_source} opp_baseline={'yes' if opp_lookup_done else 'no'}"
-    )
+    # NOTE: previously a per-call _log line announced
+    #   "build_reg_vector batter: name='Aaron Judge' snapshot=... opp_baseline=..."
+    # for every prop scored.  At ~3000 props per Tier-1 refresh that
+    # exceeded Railway's 500 logs/sec limit and crowded out every other
+    # signal.  The summary line at the end of each scoring pass (in
+    # pages/props.py: "[PROPS-PAGE] ... scored N picks") is sufficient
+    # to debug aggregate behaviour, and failure paths in this function
+    # still log individually.
 
     return vec, feature_names
 
