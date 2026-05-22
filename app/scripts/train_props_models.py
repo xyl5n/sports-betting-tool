@@ -1106,8 +1106,13 @@ def _run_shap_analysis(
         explainer   = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X_sample)
 
-        # shap_values is 2-D (n_samples × n_features) for binary XGBoost
-        mean_abs = dict(zip(feature_names, abs(shap_values).mean(axis=0)))
+        # shap_values is 2-D (n_samples × n_features) for binary XGBoost.
+        # Cast to Python float immediately — numpy float32 is not JSON-
+        # serializable and would crash _save_feature_importance.
+        mean_abs = {
+            k: float(v)
+            for k, v in zip(feature_names, abs(shap_values).mean(axis=0))
+        }
 
         top15 = sorted(mean_abs.items(), key=lambda kv: -kv[1])[:15]
         _log(f"SHAP top-15 features [{label}]:")
@@ -1222,20 +1227,38 @@ def _train_and_save(
 # Supabase push (env-var driven, dotenv-aware)
 # ---------------------------------------------------------------------------
 
+def _sanitize_supabase_url(raw: str) -> str:
+    """Strip path / query / fragment from a Supabase project URL.
+
+    supabase-py builds REST paths by concatenating '/rest/v1' onto the URL
+    we pass in.  A trailing slash (or any path component) produces a double-
+    slash like 'https://x.supabase.co//rest/v1/app_cache', which PostgREST
+    rejects with PGRST125.  This matches the sanitization in src/db.py.
+    """
+    from urllib.parse import urlparse
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    if "://" not in raw:
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return raw
+
+
 def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
     """Push trained model files directly to Supabase app_cache table.
 
-    Reads SUPABASE_URL + SUPABASE_KEY from environment.  When
-    python-dotenv is installed and a .env file exists anywhere in the
-    parent chain, it is loaded first so local runs work without setting
-    env vars manually.
+    Uses the same supabase-py create_client pattern as src/db.py.
+    Reads SUPABASE_URL + SUPABASE_KEY from environment; loads .env via
+    python-dotenv when present so local runs work without Railway env vars.
 
-    Returns a short status string for the summary log.
+    Returns a short status string for the training summary log.
     """
-    # Load .env if available
+    # ── Load .env if python-dotenv is available ──────────────────────────
     try:
         from dotenv import load_dotenv
-        # Walk up to find a .env file (script may run from app/ or project root)
         here = Path(__file__).resolve()
         for parent in [here.parent, here.parent.parent, here.parent.parent.parent]:
             env_file = parent / ".env"
@@ -1244,28 +1267,44 @@ def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
                 _log(f"dotenv: loaded {env_file}")
                 break
     except ImportError:
-        pass  # python-dotenv optional
+        pass  # python-dotenv is optional
 
-    url = os.environ.get("SUPABASE_URL", "").strip()
-    key = os.environ.get("SUPABASE_KEY", "").strip()
+    url_raw = os.environ.get("SUPABASE_URL", "").strip()
+    key     = os.environ.get("SUPABASE_KEY", "").strip()
 
-    if not url or not key:
+    if not url_raw or not key:
         _log("Supabase: SUPABASE_URL or SUPABASE_KEY not set -- skipping push")
         return "skipped (no env vars)"
 
+    # Sanitize URL before passing to create_client (strips trailing slash /
+    # path components that cause PostgREST double-slash errors).
+    url = _sanitize_supabase_url(url_raw)
+    if url != url_raw:
+        _log(f"Supabase: URL sanitized: {url_raw!r} -> {url!r}")
+
+    # ── Import supabase-py (same pattern as src/db.py) ───────────────────
+    # postgrest-py is a required dependency of supabase>=2.0.0.  If this
+    # import raises ModuleNotFoundError it means requirements.txt was not
+    # fully installed — postgrest is now pinned explicitly to prevent this.
     try:
         import base64
-        from supabase import create_client
-    except ImportError as exc:
-        _log(f"Supabase: missing dependency ({exc}) -- skipping push")
-        return f"skipped ({exc})"
+        from supabase import create_client   # type: ignore[import-not-found]
+    except ModuleNotFoundError as exc:
+        _log(
+            f"Supabase: import failed ({exc}).  "
+            "Ensure 'supabase' and 'postgrest' are in requirements.txt "
+            "and the venv is up to date -- skipping push"
+        )
+        return f"skipped (import error: {exc})"
 
+    # ── Connect ──────────────────────────────────────────────────────────
     try:
         sb = create_client(url, key)
     except Exception as exc:  # noqa: BLE001
         _log(f"Supabase: create_client failed ({exc}) -- skipping push")
-        return f"error: {exc}"
+        return f"error: create_client: {exc}"
 
+    # ── Upsert each model file into app_cache ─────────────────────────────
     results = []
     for path, cache_key in [
         (pitcher_path, "props_model_pitcher"),
@@ -1277,18 +1316,26 @@ def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
             continue
         try:
             encoded = base64.b64encode(path.read_bytes()).decode()
-            sb.table("app_cache").upsert({
-                "key":        cache_key,
-                "value":      encoded,
-                "updated_at": datetime.utcnow().isoformat() + "Z",
-            }).execute()
-            _log(f"Supabase: pushed {cache_key} ({len(encoded)//1024} KB)")
+            # on_conflict="key" matches the app_cache table primary key,
+            # consistent with how src/db.py writes to this table.
+            sb.table("app_cache").upsert(
+                {
+                    "key":        cache_key,
+                    "value":      encoded,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                },
+                on_conflict="key",
+            ).execute()
+            _log(f"Supabase: pushed {cache_key} ({len(encoded) // 1024} KB)")
             results.append(f"{cache_key}: ok")
         except Exception as exc:  # noqa: BLE001
-            _log(f"Supabase push {cache_key} failed: {exc}")
-            results.append(f"{cache_key}: error({exc})")
+            _log(f"Supabase: push {cache_key} failed: {exc}")
+            results.append(f"{cache_key}: error({type(exc).__name__}: {exc})")
 
-    return "  ".join(results)
+    status = "  ".join(results)
+    all_ok = all(r.endswith(": ok") for r in results)
+    _log(f"Supabase push complete: {status}")
+    return status if not all_ok else "ok"
 
 
 # ---------------------------------------------------------------------------
