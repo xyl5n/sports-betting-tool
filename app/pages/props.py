@@ -174,11 +174,13 @@ def _section_unified_props_list(backend) -> None:
         # ── Filter bar ───────────────────────────────────────────────────
         # State drives both the visible card list and the count chip in
         # the header above.  Default state shows everything sorted by
-        # confidence.
+        # confidence.  ``show_alts`` defaults off -- alts are persisted
+        # in the cache but hidden until the user opts in.
         state = {
-            "game":     "all",       # "all" or "<away>@<home>"
-            "market":   "all",       # "all" or specific market key
-            "min_rate": 0,           # 0..100 -- minimum L10 hit rate %
+            "game":      "all",      # "all" or "<away>@<home>"
+            "market":    "all",      # "all" or specific market key
+            "min_rate":  0,          # 0..100 -- minimum L10 hit rate %
+            "show_alts": False,      # reveal alt-line rows under primaries
         }
 
         _filter_bar(rows, state, lambda: (cards_refresh.refresh(),
@@ -197,7 +199,7 @@ def _section_unified_props_list(backend) -> None:
                 return
             with ui.element("div").classes("game-grid w-full"):
                 for r in shown:
-                    _prop_card(r, backend)
+                    _prop_card(r, backend, show_alts=state.get("show_alts", False))
 
         cards_refresh()
 
@@ -337,6 +339,32 @@ def _filter_bar(rows: list[dict], state: dict, on_change) -> None:
                     f"min-height: 0;"
                 )
 
+        # Show Alt Lines toggle -- defaults off so the user opts in
+        # before the alt rows expand beneath each primary card.  Sits
+        # in its own row so it doesn't crowd the three primary filters
+        # above on narrow screens.
+        with ui.row().classes("items-center w-full").style(
+            "gap: 8px; padding-top: 4px;"
+        ):
+            ui.label("SHOW ALT LINES").style(
+                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.TEXT_DIM2};"
+            )
+            ui.switch(
+                value=bool(state.get("show_alts")),
+                on_change=lambda e: (
+                    state.update(show_alts=bool(e.value)),
+                    on_change(),
+                ),
+            ).props("dense color=primary")
+            ui.label(
+                "Reveal each pick's alternative line options (shoulder "
+                "lines, set far from even money)."
+            ).style(
+                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                f"font-style: italic;"
+            )
+
 
 def _apply_pick_filters(rows: list[dict], state: dict) -> list[dict]:
     """Return rows that satisfy every active filter in *state*."""
@@ -381,7 +409,7 @@ def _short_team(name: str) -> str:
     return parts[-1]
 
 
-def _prop_card(r: dict, backend) -> None:
+def _prop_card(r: dict, backend, *, show_alts: bool = False) -> None:
     """One prop pick rendered as a card.
 
     Density is the main design constraint here -- we want every piece
@@ -394,6 +422,7 @@ def _prop_card(r: dict, backend) -> None:
       * Inline summary chips: season avg + L5 + L10 + L20 + H2H hit rate
       * Opposing-team rank chip ("OPP NYY: 28th of 30")
       * Best odds + book + Track button
+      * Alt lines block (only when *show_alts* is True)
 
     On mobile the summary chips drop to a single column inside the
     same card -- ECharts not used here so the row is light enough to
@@ -486,11 +515,12 @@ def _prop_card(r: dict, backend) -> None:
         # ── Opposing-team rank chip ──────────────────────────────────────
         _card_opp_rank_chip(r)
 
-        # Footer row: best odds + book + Track Bet button.
+        # Footer row: line-type chip + best odds + book + Track Bet button.
         with ui.row().classes("items-center w-full").style(
             f"gap: 10px; "
             f"padding-top: 6px; border-top: 1px solid {t.BORDER_SOFT};"
         ):
+            _card_line_type_chip(r)
             ui.label("Best odds").style(
                 f"font-size: 10.5px; color: {t.TEXT_DIM};"
             )
@@ -504,6 +534,93 @@ def _prop_card(r: dict, backend) -> None:
             )
             ui.element("div").style("flex: 1;")
             _track_btn(r, backend)
+
+        # ── Alt-line rows ────────────────────────────────────────────────
+        # Only rendered when the "Show Alt Lines" toggle is on.  Each row
+        # shows the alt line + side + model confidence + odds pair so
+        # the user can see the shoulder-line context the model also
+        # scored without those lines competing as primary picks.
+        if show_alts:
+            _card_alt_lines_block(r)
+
+
+def _card_line_type_chip(r: dict) -> None:
+    """Tiny MAIN / ALT chip on the footer row.  Surfaces the
+    classification so an alt-only player (no main market available)
+    isn't quietly priced as if it were a standard line."""
+    line_type = (r.get("line_type") or "main").lower()
+    if line_type == "main":
+        label = "MAIN"
+        fg    = t.POS
+    else:
+        label = "ALT"
+        fg    = t.WARN
+    ui.label(label).style(
+        f"font-size: 9px; font-weight: 800; letter-spacing: .6px; "
+        f"color: {fg}; background: {t.CARD_HI}; "
+        f"padding: 2px 6px; border-radius: {t.RADIUS_PILL};"
+    )
+
+
+def _card_alt_lines_block(r: dict) -> None:
+    """Render each alt line attached to the primary pick *r* as a
+    compact one-row strip.  Each strip shows line + side + confidence
+    + over/under odds pair so the user can compare the alt confidence
+    to the primary's at a glance.
+
+    Skipped silently when *r* has no ``alt_picks`` (most picks won't,
+    since The Odds API only surfaces alts for a subset of markets).
+    """
+    alts = r.get("alt_picks") or []
+    if not alts:
+        return
+    with ui.column().classes("w-full").style(
+        f"gap: 4px; padding-top: 8px; "
+        f"border-top: 1px dashed {t.BORDER_SOFT};"
+    ):
+        ui.label(f"ALT LINES  ({len(alts)})").style(
+            f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+            f"color: {t.TEXT_DIM2};"
+        )
+        for a in alts:
+            _alt_row(a)
+
+
+def _alt_row(a: dict) -> None:
+    """One compact row in the alt-lines block.  Mirrors the primary
+    card's pick-row layout (side pill + confidence + odds) but at a
+    smaller scale so several can stack inside one parent card without
+    overwhelming the page."""
+    side    = (a.get("side") or "Over").strip().title()
+    is_over = side == "Over"
+    pill_bg = t.POS if is_over else t.NEG
+    try:
+        conf_pct = float(a.get("confidence") or 0.0) * 100
+    except (TypeError, ValueError):
+        conf_pct = 0.0
+    o_odds = a.get("over_odds")
+    u_odds = a.get("under_odds")
+    with ui.row().classes("items-center w-full").style(
+        "gap: 8px; flex-wrap: nowrap;"
+    ):
+        ui.label(f"{side.upper()} {a.get('line')}").style(
+            f"background: {pill_bg}; color: {t.BG}; "
+            f"font-size: 10.5px; font-weight: 800; letter-spacing: .3px; "
+            f"padding: 3px 8px; border-radius: {t.RADIUS_SM}; flex-shrink: 0;"
+        )
+        ui.label(f"{conf_pct:.0f}%").style(
+            f"font-size: 11px; font-weight: 800; color: {pill_bg}; "
+            f"font-family: monospace; min-width: 36px;"
+        )
+        odds_bits: list[str] = []
+        if o_odds is not None:
+            odds_bits.append(f"O {_odds_str(o_odds)}")
+        if u_odds is not None:
+            odds_bits.append(f"U {_odds_str(u_odds)}")
+        ui.label(" · ".join(odds_bits) if odds_bits else "—").style(
+            f"font-size: 10.5px; color: {t.TEXT_DIM}; "
+            f"font-family: monospace; margin-left: auto;"
+        )
 
 
 def _card_summary_chips(r: dict) -> None:

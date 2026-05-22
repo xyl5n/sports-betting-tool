@@ -667,30 +667,14 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
             (entry.get("side") or "").strip().lower(),
         )
 
-    # ── Part 1: scored entries in daily_picks ─────────────────────────────────
-    try:
-        from .daily_picks import load_daily_picks
-        daily      = load_daily_picks()
-        prop_picks = (daily.get("picks") or {}).get("prop_picks") or []
-        for pp in prop_picks:
-            if (pp.get("player") or "").strip().lower() != name_lower:
-                continue
-            entry = {
-                "market":          pp.get("market"),
-                "line":            pp.get("line"),
-                "side":            (pp.get("side") or "Over").strip().title(),
-                "best_odds":       pp.get("best_odds"),
-                "recommendation":  pp.get("recommendation"),
-                "confidence":      pp.get("confidence"),
-                "predicted_value": pp.get("predicted_value"),
-                "source":          "daily_picks",
-            }
-            k = _key(entry)
-            if k not in seen:
-                seen.add(k)
-                out.append(entry)
-    except Exception as exc:
-        _log(f"get_today_props_for_player({player_name!r}): daily_picks read failed: {exc}")
+    # ── Part 1 + Part 2 ordering ──────────────────────────────────────────────
+    # Part 2 (classified live re-score) runs FIRST so we can pin the
+    # "right" line per (player, market) before falling back to the
+    # daily_picks cache (which may contain alt-line entries selected
+    # by the pre-classifier scoring pass).  Part 1 then only fills
+    # markets Part 2 didn't cover, preventing the page from showing
+    # both an alt tab and a main tab for the same prop.
+    markets_seen_in_p2: set[str] = set()
 
     # ── Part 2: every live prop, re-scored ────────────────────────────────────
     # Loops every (market, props) bucket from props_client and predicts
@@ -708,13 +692,32 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
         return out
 
     try:
+        from .props_line_classifier import classify_lines_for_market
+    except Exception:                                                     # noqa: BLE001
+        classify_lines_for_market = None    # type: ignore[assignment]
+
+    try:
         payload     = _get_props_client().get_today_props() or {}
         all_markets = payload.get("markets") or {}
         # Bucket per (market, line) so over+under collapse into one entry,
         # keeping whichever side has the higher model confidence.  Matches
         # how pages/props.py renders dedup'd rows.
         per_line: dict[tuple, dict] = {}
+        # Per-market classification so we can tag each (market, line) with
+        # its line_type and surface only the primary line per market on
+        # the player page (alts are dropped here -- the props page is the
+        # place where the "Show Alt Lines" toggle reveals them).
+        per_market_class: dict[str, dict[tuple, dict]] = {}
         for market, props in all_markets.items():
+            if classify_lines_for_market is not None:
+                # Only the rows belonging to this player are needed for
+                # the player-page classification -- keeps the helper
+                # cheap when the slate has hundreds of players.
+                player_rows = [
+                    p for p in (props or [])
+                    if (p.get("player_name") or "").strip().lower() == name_lower
+                ]
+                per_market_class[market] = classify_lines_for_market(player_rows)
             for p in (props or []):
                 if (p.get("player_name") or "").strip().lower() != name_lower:
                     continue
@@ -729,6 +732,9 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
                     continue
                 score = float(pred.get("confidence") or 0.0)
                 key   = (market, line_f)
+                class_info = (per_market_class.get(market) or {}).get(
+                    ((p.get("player_name") or "").strip(), line_f), {}
+                )
                 existing = per_line.get(key)
                 if existing is None or score > float(existing["confidence"] or 0.0):
                     per_line[key] = {
@@ -741,15 +747,62 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
                         "confidence":      round(score, 4),
                         "predicted_value": pred.get("predicted_value"),
                         "source":          "live",
+                        "line_type":       class_info.get("line_type", "alt"),
+                        "is_primary":      bool(class_info.get("is_primary")),
                     }
 
         for entry in per_line.values():
+            # Player page only ever shows the primary line per (market) --
+            # drops 5-line "alt" packs that would otherwise produce a
+            # tab per shoulder line and give the user inflated confidence
+            # signals on lines no sportsbook would actually trade at.
+            if not entry.get("is_primary"):
+                continue
+            k = _key(entry)
+            if k not in seen:
+                seen.add(k)
+                out.append(entry)
+                markets_seen_in_p2.add(entry.get("market") or "")
+    except Exception as exc:
+        _log(f"get_today_props_for_player({player_name!r}) live re-score failed: {exc}")
+
+    # ── Part 1 (fallback): daily_picks cache ──────────────────────────────────
+    # Only fills markets Part 2 didn't cover -- if Part 2 already
+    # produced a (player, market) entry, we trust its classification
+    # and skip the daily_picks version (which may be an alt due to
+    # _collect_props's pre-classifier scoring pass).
+    try:
+        from .daily_picks import load_daily_picks
+        daily      = load_daily_picks()
+        prop_picks = (daily.get("picks") or {}).get("prop_picks") or []
+        for pp in prop_picks:
+            if (pp.get("player") or "").strip().lower() != name_lower:
+                continue
+            market_name = pp.get("market") or ""
+            if market_name in markets_seen_in_p2:
+                continue
+            entry = {
+                "market":          market_name,
+                "line":            pp.get("line"),
+                "side":            (pp.get("side") or "Over").strip().title(),
+                "best_odds":       pp.get("best_odds"),
+                "recommendation":  pp.get("recommendation"),
+                "confidence":      pp.get("confidence"),
+                "predicted_value": pp.get("predicted_value"),
+                "source":          "daily_picks",
+                # daily_picks rows predate the classifier; assume main so
+                # the player page renders them.  If the line is actually
+                # an alt, the next Part-2 re-score will overwrite this
+                # entry once the relevant market is in props_client cache.
+                "line_type":       "main",
+                "is_primary":      True,
+            }
             k = _key(entry)
             if k not in seen:
                 seen.add(k)
                 out.append(entry)
     except Exception as exc:
-        _log(f"get_today_props_for_player({player_name!r}) live re-score failed: {exc}")
+        _log(f"get_today_props_for_player({player_name!r}): daily_picks read failed: {exc}")
 
     # Sort by confidence DESC so the strongest pick lands first on the page.
     out.sort(key=lambda e: -float(e.get("confidence") or 0.0))

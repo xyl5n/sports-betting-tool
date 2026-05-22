@@ -201,6 +201,20 @@ def score_today_props() -> dict:
         _log("no raw props in cache -- skipping rescore (cache untouched)")
         return load_scored_props()
 
+    # ── Classify each market's lines as main vs alt up front ───────────
+    # Done before scoring so we can stamp every (player, market, line)
+    # entry with its line_type as we go.  The classifier looks at the
+    # raw over+under best_odds pair to decide which line is the book's
+    # standard market line (close to even money) vs an inflated alt.
+    from .props_line_classifier import classify_lines_for_market
+    classifications: dict[str, dict[tuple, dict]] = {}
+    for market, raw_market_props in all_markets.items():
+        if market not in all_bucket_markets:
+            continue
+        classifications[market] = classify_lines_for_market(
+            raw_market_props or []
+        )
+
     # ── Score every prop, dedup by (player, market, line) ───────────────
     # Both sides (Over + Under) score independently; we keep whichever
     # the model is more confident in.  Matches what /api/analyze's
@@ -211,6 +225,7 @@ def score_today_props() -> dict:
         if market not in all_bucket_markets:
             continue
         bucket = "pitcher" if market.startswith("pitcher_") else "batter"
+        market_class = classifications.get(market, {})
         for p in (props or []):
             try:
                 pred = predict(p)
@@ -225,6 +240,9 @@ def score_today_props() -> dict:
             key   = (p.get("player_name", "?"), market, line_f)
             side  = (p.get("side") or "Over").strip().title()
             score = float(pred.get("confidence") or 0.0)
+            class_info = market_class.get(
+                (p.get("player_name", "") or "", line_f), {}
+            )
             existing = by_pick.get(key)
             if existing is None or score > existing["confidence"]:
                 by_pick[key] = {
@@ -246,10 +264,39 @@ def score_today_props() -> dict:
                     "predicted_value": pred.get("predicted_value"),
                     "event_id":        p.get("event_id"),
                     "commence_time":   p.get("commence_time"),
+                    # Classifier-stamped line type fields.  ``line_type``
+                    # is "main" / "alt"; ``is_primary`` flags the single
+                    # representative line for that (player, market).
+                    "line_type":       class_info.get("line_type", "alt"),
+                    "is_primary":      bool(class_info.get("is_primary")),
+                    "over_odds":       class_info.get("over_odds"),
+                    "under_odds":      class_info.get("under_odds"),
                     "_raw_prop":       p,   # only used during enrichment
                 }
 
-    # ── Filter: confidence threshold + regression-edge sanity ───────────
+    # ── Group primaries vs alts per (player, market) ────────────────────
+    # The primary row is the single chosen representative for each
+    # (player, market) pair (main line when one exists, balanced alt
+    # otherwise).  Non-primary rows for the same player+market are
+    # attached to their primary as alt_picks so the UI can reveal them
+    # behind the "Show Alt Lines" toggle.
+    primaries: list[dict] = []
+    alts_by_pm: dict[tuple[str, str], list[dict]] = {}
+    for entry in by_pick.values():
+        pm = (entry["player"], entry["market"])
+        if entry.get("is_primary"):
+            primaries.append(entry)
+        else:
+            alts_by_pm.setdefault(pm, []).append(entry)
+    for pri in primaries:
+        pm = (pri["player"], pri["market"])
+        alts = alts_by_pm.get(pm, [])
+        alts.sort(key=lambda r: float(r.get("line") or 0.0))
+        # Trim each alt down to the columns the UI actually renders so
+        # the persisted payload stays small.
+        pri["alt_picks"] = [_slim_alt(a) for a in alts]
+
+    # ── Filter primaries: confidence threshold + regression-edge sanity ─
     def _has_reg_edge(r: dict) -> bool:
         pv = r.get("predicted_value")
         if pv is None:
@@ -263,7 +310,7 @@ def score_today_props() -> dict:
             return True
 
     rows = [
-        r for r in by_pick.values()
+        r for r in primaries
         if r["confidence"] >= _CONF_THRESHOLD and _has_reg_edge(r)
     ]
     rows.sort(key=lambda r: -r["confidence"])
@@ -295,15 +342,23 @@ def score_today_props() -> dict:
         # bookmaker arrays that bloat the cache row).
         r.pop("_raw_prop", None)
 
+    # ── Counts for the summary log ──────────────────────────────────────
+    n_main_kept = sum(1 for r in rows if r.get("line_type") == "main")
+    n_alt_kept  = len(rows) - n_main_kept
+    n_alts_attached = sum(len(r.get("alt_picks") or []) for r in rows)
+
     payload = {
         "date":         date_str,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "picks":        rows,
         "summary": {
-            "scored":      n_scored,
-            "predict_err": n_pred_err,
-            "deduped":     len(by_pick),
-            "kept":        len(rows),
+            "scored":       n_scored,
+            "predict_err":  n_pred_err,
+            "deduped":      len(by_pick),
+            "kept":         len(rows),
+            "main_picks":   n_main_kept,
+            "alt_picks":    n_alt_kept,
+            "alts_attached": n_alts_attached,
         },
     }
     _write_local(date_str, payload)
@@ -311,7 +366,9 @@ def score_today_props() -> dict:
     elapsed_ms = int((time.monotonic() - started) * 1000)
     _log(
         f"done date={date_str} scored={n_scored} err={n_pred_err} "
-        f"dedup={len(by_pick)} kept={len(rows)} elapsed={elapsed_ms}ms"
+        f"dedup={len(by_pick)} kept={len(rows)} "
+        f"main={n_main_kept} alt={n_alt_kept} "
+        f"alts_attached={n_alts_attached} elapsed={elapsed_ms}ms"
     )
     return payload
 
@@ -326,3 +383,24 @@ def _team_for_prop(p: dict) -> str:
     if home and away:
         return f"{away} @ {home}"
     return home or away or ""
+
+
+# Whitelist of fields the UI consumes when rendering an alt-line row
+# under the primary card.  Trimming the rest keeps the persisted
+# payload small (alt rows can number in the dozens per player on a
+# full alt-market day).
+_ALT_KEEP_FIELDS = (
+    "market", "bucket", "player", "team",
+    "line", "side", "line_type",
+    "best_odds", "best_book", "over_odds", "under_odds",
+    "recommendation", "confidence", "edge", "model_prob",
+    "predicted_value", "source",
+)
+
+
+def _slim_alt(entry: dict) -> dict:
+    """Return a copy of *entry* with only the fields the UI needs to
+    render an alt-line sub-row.  Drops the heavy enrichment fields
+    (summary, opp_rank, _raw_prop) because alts share the same player
+    data as their primary -- the primary card already shows it."""
+    return {k: entry[k] for k in _ALT_KEEP_FIELDS if k in entry}
