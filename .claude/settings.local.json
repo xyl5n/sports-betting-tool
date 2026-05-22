@@ -44,7 +44,11 @@
       "WebFetch(domain:docs.sharpapi.io)",
       "WebSearch",
       "WebFetch(domain:sharpapi.io)",
-      "WebFetch(domain:api.sharpapi.io)"
+      "WebFetch(domain:api.sharpapi.io)",
+      "Bash(git checkout *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr create --title 'Expand props model training: multi-season data, 40+ new features, SHAP analysis' --body ' *)"
     ]
   }
 }
