@@ -287,12 +287,14 @@ def _prop_card(r: dict) -> None:
                 f"margin-left: auto;"
             )
 
-        # Player name: big like the team names on the slate.
-        ui.label(r["player"]).style(
+        # Player name: links to player profile page.
+        # Slug = lowercase hyphenated name (e.g. "Spencer Strider" → "spencer-strider").
+        _name_slug = r["player"].lower().replace(" ", "-")
+        ui.link(r["player"], f"/player/mlb/{_name_slug}").style(
             f"font-size: 16px; font-weight: 700; color: {t.TEXT}; "
-            f"line-height: 1.2; "
+            f"line-height: 1.2; text-decoration: none; "
             f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-        )
+        ).tooltip("View player profile")
 
         # Pick row: chip + line + confidence + best odds.  Three flex
         # zones so the chip stays left-anchored and the odds column
