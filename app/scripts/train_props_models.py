@@ -1269,10 +1269,43 @@ def _train_and_save(
         use_label_encoder=False, verbosity=0,
     )
     final.fit(X, y)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(final, out_path)
-    _log(f"{label} model saved: {out_path}")
-    return float(oof_acc), final
+
+    # ── Isotonic calibration ──────────────────────────────────────────────
+    # XGBoost classifiers are systematically overconfident.  Wrap with
+    # CalibratedClassifierCV (isotonic) so predict_proba() outputs are
+    # closer to empirical frequencies.
+    #
+    # cv='prefit' means the calibrator is fitted on the same training data
+    # used for the XGB model.  The OOF log-loss above already measures true
+    # generalisation; the calibration curve measured here is optimistic but
+    # the isotonic regression has so few effective parameters that overfitting
+    # on the training set is minimal in practice.
+    try:
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.metrics     import brier_score_loss
+
+        # Pre-calibration Brier score using OOF predictions (honest).
+        brier_pre = brier_score_loss(y, oof)
+        _log(f"{label} pre-calibration Brier (OOF): {brier_pre:.4f}")
+
+        calibrated = CalibratedClassifierCV(final, method="isotonic", cv="prefit")
+        calibrated.fit(X, y)
+
+        # Post-calibration Brier on training data (optimistic but directional).
+        cal_proba = calibrated.predict_proba(X)[:, 1]
+        brier_post = brier_score_loss(y, cal_proba)
+        _log(f"{label} post-calibration Brier (train): {brier_post:.4f}")
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(calibrated, out_path)
+        _log(f"{label} calibrated model saved: {out_path}")
+        return float(oof_acc), calibrated
+    except Exception as cal_exc:                                            # noqa: BLE001
+        _log(f"{label} calibration failed ({cal_exc}) -- saving uncalibrated model")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(final, out_path)
+        _log(f"{label} model saved (uncalibrated): {out_path}")
+        return float(oof_acc), final
 
 
 def _train_regressor(
