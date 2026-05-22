@@ -82,6 +82,11 @@ _REG_META_PATH = _CACHE_DIR / "props_reg_metadata.json"
 _PITCHER_SNAPSHOTS_PATH = _CACHE_DIR / "pitcher_rolling_snapshots.json"
 _BATTER_SNAPSHOTS_PATH  = _CACHE_DIR / "batter_rolling_snapshots.json"
 
+# Per (season, team) opponent-context baselines (k_rate, woba, lhb_pct)
+# computed from cached batter game logs.  Used by the pitcher inference path
+# to look up the opposing batting team's offensive profile.
+_TEAM_BASELINES_PATH = _CACHE_DIR / "team_baselines.json"
+
 # Per-classifier picks history (mirrors xgb / lr / nn picks history
 # in /api/admin/reset/model_record so the new sinks plug into the
 # existing reset machinery).
@@ -200,13 +205,17 @@ _PITCHER_FEATURE_NAMES: list[str] = (
     + ["is_home_i", "days_since_last_start", "ip_last_30d", "ballpark_factor_k"]  # 4
     + ["era_vs_lhb", "k_rate_vs_lhb", "era_vs_rhb", "k_rate_vs_rhb"]             # 4
     + [
+        "opp_team_k_rate", "opp_team_woba", "opp_team_lhb_pct",                  # PR #2 opponent context
+        "career_k_per_9", "career_bb_per_9", "career_ip",                        # PR #2 career baseline
+    ]  # 6
+    + [
         "lineup_avg_k_rate", "lineup_lhb_count", "lineup_rhb_count",
         "weather_temp", "weather_wind_speed", "weather_wind_dir_num",
         "time_of_day", "umpire_k_rate", "implied_total",
         "first_inning_k_pct", "pitch_mix_fastball_pct",
         "pitch_mix_breaking_pct", "pitch_mix_offspeed_pct",
     ]  # 13
-)  # 7+7+7+4+4+13 = 42
+)  # 7+7+7+4+4+6+13 = 48
 
 _BATTER_FEATURE_NAMES: list[str] = (
     [f"szn_{c}" for c in _B_ROLL]   # 14
@@ -235,6 +244,13 @@ _PITCHER_DEFAULTS: dict[str, float] = {
     "k_rate_vs_lhb":           0.215,
     "era_vs_rhb":              4.50,
     "k_rate_vs_rhb":           0.215,
+    # PR #2 opponent + career baseline neutrals (modern-era league averages)
+    "opp_team_k_rate":         0.225,
+    "opp_team_woba":           0.720,   # OPS proxy ≈ league-average wOBA
+    "opp_team_lhb_pct":        0.420,
+    "career_k_per_9":          8.50,
+    "career_bb_per_9":         3.30,
+    "career_ip":              50.0,
     "lineup_avg_k_rate":       0.220,
     "lineup_lhb_count":        4.0,
     "lineup_rhb_count":        5.0,
@@ -377,6 +393,67 @@ def _load_reg_meta() -> dict:
         _log(f"reg metadata load failed: {exc}")
         _reg_meta_cache = {}
     return _reg_meta_cache
+
+
+# ── Team baselines cache (PR #2 opponent context) ───────────────────────────
+# Loaded once per process; maps "<season>:<team_abbrev>" to {team_k_rate,
+# team_woba, team_lhb_pct}.  Inference looks up by the opposing batting team
+# for the prop's game so pitcher predictions account for opponent quality.
+
+_team_baselines_cache:    Optional[dict[str, dict[str, float]]] = None
+_team_baselines_year_max: Optional[int] = None
+
+
+def _load_team_baselines() -> dict[str, dict[str, float]]:
+    """Lazily load team_baselines.json once per process.  Returns {}
+    when the file is absent — the predictor's per-row defaults then apply."""
+    global _team_baselines_cache, _team_baselines_year_max
+    if _team_baselines_cache is not None:
+        return _team_baselines_cache
+    if not _TEAM_BASELINES_PATH.exists():
+        _team_baselines_cache = {}
+        return {}
+    try:
+        payload = json.loads(_TEAM_BASELINES_PATH.read_text(encoding="utf-8"))
+        baselines = payload.get("team_baselines") or {}
+        _team_baselines_cache = baselines
+        # Remember the most-recent season we have data for; inference uses
+        # this when the prop's actual season is missing (e.g. spring training
+        # or opening week before season-specific data exists).
+        years: list[int] = []
+        for k in baselines.keys():
+            try:
+                years.append(int(k.split(":", 1)[0]))
+            except (TypeError, ValueError):
+                continue
+        _team_baselines_year_max = max(years) if years else None
+        _log(f"team baselines loaded: {len(baselines)} (season, team) buckets, "
+             f"latest_year={_team_baselines_year_max}")
+    except Exception as exc:                                               # noqa: BLE001
+        _log(f"team baselines load failed: {exc}")
+        _team_baselines_cache = {}
+    return _team_baselines_cache
+
+
+def _lookup_team_baseline(team_abbrev: str, season: int) -> dict[str, float]:
+    """Return {team_k_rate, team_woba, team_lhb_pct} for the given
+    (season, team).  Falls back to the latest available season when the
+    requested year is missing; returns an empty dict only when there's
+    nothing usable at all."""
+    if not team_abbrev:
+        return {}
+    baselines = _load_team_baselines()
+    if not baselines:
+        return {}
+    key = f"{season}:{team_abbrev}"
+    if key in baselines:
+        return baselines[key]
+    # Fall back to most-recent season for that team.
+    if _team_baselines_year_max is not None:
+        fb_key = f"{_team_baselines_year_max}:{team_abbrev}"
+        if fb_key in baselines:
+            return baselines[fb_key]
+    return {}
 
 
 # ── Pitcher snapshot cache ──────────────────────────────────────────────────
@@ -638,6 +715,45 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
     if "ballpark_factor_hr" in fn_idx:
         vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
 
+    # ── PR #2 opponent-context lookup (pitcher only) ─────────────────────────
+    # The opposing batting team is whichever side ISN'T the pitcher's team.
+    # The pitcher's team comes from their snapshot; if missing, infer from
+    # is_home + home_team/away_team.  Season comes from commence_time year.
+    opp_lookup_done = False
+    if bucket == "pitcher":
+        # Determine pitcher's own team
+        pitcher_team_raw = ""
+        if isinstance(snap_source, str) and snap_source == "player":
+            snap_obj = _lookup_pitcher_snapshot(prop) or {}
+            pitcher_team_raw = (snap_obj.get("team") or "").strip().upper()
+        # Resolve opp_team: the side that isn't the pitcher's team.
+        home_abbrev = _team_to_abbrev(prop.get("home_team") or "")
+        away_abbrev = _team_to_abbrev(prop.get("away_team") or "")
+        opp_abbrev = ""
+        if pitcher_team_raw and pitcher_team_raw in (home_abbrev, away_abbrev):
+            opp_abbrev = away_abbrev if pitcher_team_raw == home_abbrev else home_abbrev
+        elif prop.get("is_home") is True:
+            opp_abbrev = away_abbrev
+        elif prop.get("is_home") is False:
+            opp_abbrev = home_abbrev
+        # Season from commence_time
+        commence = (prop.get("commence_time") or "").strip()
+        try:
+            season = int(commence[:4]) if commence else 0
+        except (TypeError, ValueError):
+            season = 0
+        opp_stats = _lookup_team_baseline(opp_abbrev, season) if opp_abbrev else {}
+        if opp_stats:
+            opp_lookup_done = True
+            for src_key, feat_key in (
+                ("team_k_rate",  "opp_team_k_rate"),
+                ("team_woba",    "opp_team_woba"),
+                ("team_lhb_pct", "opp_team_lhb_pct"),
+            ):
+                idx = fn_idx.get(feat_key)
+                if idx is not None and src_key in opp_stats:
+                    vec[idx] = float(opp_stats[src_key])
+
     # Fill any remaining holes from league-average neutral defaults.
     for fname, default_val in defaults.items():
         idx = fn_idx.get(fname)
@@ -646,7 +762,7 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
 
     _log(
         f"build_reg_vector {bucket}: name={prop.get('player_name','?')!r} "
-        f"snapshot={snap_source}"
+        f"snapshot={snap_source} opp_baseline={'yes' if opp_lookup_done else 'no'}"
     )
 
     return vec, feature_names
@@ -756,6 +872,31 @@ def restore_models_from_supabase() -> dict:
             out["pitcher_rolling_snapshots"] = f"error: {exc}"
             _log(f"restore pitcher_rolling_snapshots failed: {exc}")
 
+    # Restore team_baselines.json (PR #2 opponent-context lookup).
+    # Wire format is identical to the snapshot files above (base64).
+    if not _TEAM_BASELINES_PATH.exists():
+        try:
+            from . import db as _db
+            row = _db.cache_get("team_baselines")
+            if isinstance(row, dict):
+                data = row.get("data") if isinstance(row.get("data"), dict) else row
+                b64 = (data or {}).get("b64")
+                if b64:
+                    _TEAM_BASELINES_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    _TEAM_BASELINES_PATH.write_bytes(base64.b64decode(b64))
+                    out["team_baselines"] = "restored"
+                    _log(
+                        f"restore team_baselines: wrote {_TEAM_BASELINES_PATH} "
+                        f"({_TEAM_BASELINES_PATH.stat().st_size} bytes)"
+                    )
+                else:
+                    out["team_baselines"] = "no_b64"
+            else:
+                out["team_baselines"] = "missing"
+        except Exception as exc:                                          # noqa: BLE001
+            out["team_baselines"] = f"error: {exc}"
+            _log(f"restore team_baselines failed: {exc}")
+
     # Restore batter_rolling_snapshots.json (training-script pushes it base64-
     # encoded alongside the joblibs, so the same b64 unwrap works).
     if not _BATTER_SNAPSHOTS_PATH.exists():
@@ -833,6 +974,18 @@ def push_models_to_supabase() -> dict:
         except Exception as exc:                                          # noqa: BLE001
             out["props_reg_metadata"] = f"error: {exc}"
             _log(f"push props_reg_metadata failed: {exc}")
+
+    # Push team_baselines.json (PR #2 opponent context).
+    if _TEAM_BASELINES_PATH.exists():
+        try:
+            from . import db as _db
+            b64 = base64.b64encode(_TEAM_BASELINES_PATH.read_bytes()).decode("ascii")
+            _db.cache_set("team_baselines", None, "models", {"b64": b64})
+            out["team_baselines"] = "pushed"
+            _log(f"push team_baselines: uploaded {_TEAM_BASELINES_PATH}")
+        except Exception as exc:                                          # noqa: BLE001
+            out["team_baselines"] = f"error: {exc}"
+            _log(f"push team_baselines failed: {exc}")
 
     # Push pitcher_rolling_snapshots.json -- same wire format as batter.
     if _PITCHER_SNAPSHOTS_PATH.exists():
