@@ -172,24 +172,41 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
             existing = by_pick.get(key)
             if existing is None or score > existing["confidence"]:
                 by_pick[key] = {
-                    "market":         market,
-                    "player":         p.get("player_name", "?"),
-                    "team":           _team_for_prop(p, bucket),
-                    "line":           p.get("line"),
-                    "side":           side,
-                    "best_odds":      p.get("best_odds"),
-                    "best_book":      p.get("best_book"),
-                    "recommendation": pred.get("recommendation"),
-                    "confidence":     score,
-                    "edge":           float(pred.get("edge") or 0.0),
-                    "model_prob":     float(pred.get("model_prob") or 0.0),
-                    "source":         pred.get("source"),
-                    "event_id":       p.get("event_id"),
-                    "commence_time":  p.get("commence_time"),
+                    "market":          market,
+                    "player":          p.get("player_name", "?"),
+                    "team":            _team_for_prop(p, bucket),
+                    "line":            p.get("line"),
+                    "side":            side,
+                    "best_odds":       p.get("best_odds"),
+                    "best_book":       p.get("best_book"),
+                    "recommendation":  pred.get("recommendation"),
+                    "confidence":      score,
+                    "edge":            float(pred.get("edge") or 0.0),
+                    "model_prob":      float(pred.get("model_prob") or 0.0),
+                    "source":          pred.get("source"),
+                    "predicted_value": pred.get("predicted_value"),
+                    "event_id":        p.get("event_id"),
+                    "commence_time":   p.get("commence_time"),
                 }
 
-    # Filter to >= 55% confidence + sort by confidence DESC.
-    rows = [r for r in by_pick.values() if r["confidence"] >= _CONF_THRESHOLD]
+    # Filter to >= 55% confidence AND (when a regression model exists)
+    # a predicted value that clears the line by >= 0.5 units.
+    def _has_reg_edge(r: dict) -> bool:
+        pv = r.get("predicted_value")
+        if pv is None:
+            return True   # no regressor — confidence alone is sufficient
+        try:
+            line_f = float(r["line"])
+            if (r.get("side") or "Over").strip().title() == "Over":
+                return pv >= line_f + 0.5
+            return pv <= line_f - 0.5
+        except (TypeError, ValueError):
+            return True
+
+    rows = [
+        r for r in by_pick.values()
+        if r["confidence"] >= _CONF_THRESHOLD and _has_reg_edge(r)
+    ]
     rows.sort(key=lambda r: -r["confidence"])
     _dbg(
         f"[PROPS-PAGE] {bucket}: scored {len(by_pick)} picks (dedup), "
@@ -308,6 +325,31 @@ def _prop_card(r: dict) -> None:
                     f"font-family: monospace; letter-spacing: -.2px;"
                 )
 
+        # Predicted value row (only shown when a regression model produced
+        # a numeric estimate).  Green when margin > 1.0, amber otherwise.
+        pv = r.get("predicted_value")
+        if pv is not None:
+            try:
+                line_f    = float(r["line"])
+                side_str  = (r.get("side") or "Over").strip().title()
+                margin    = (pv - line_f) if side_str == "Over" else (line_f - pv)
+                pv_color  = t.POS if margin > 1.0 else "#F59E0B"
+            except (TypeError, ValueError):
+                margin, pv_color = 0.0, t.TEXT_DIM
+            stat_abbr = _market_stat_abbr(r.get("market", ""))
+            with ui.row().classes("items-center w-full").style(
+                f"gap: 8px; padding-top: 4px;"
+            ):
+                ui.label("PREDICTED").style(
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                pv_label = f"{pv:.1f}" + (f" {stat_abbr}" if stat_abbr else "")
+                ui.label(pv_label).style(
+                    f"font-size: 13px; font-weight: 700; color: {pv_color}; "
+                    f"font-family: monospace;"
+                )
+
         # Footer row: best odds + book.  Same row used by the slate's
         # _track_row for symmetry.
         with ui.row().classes("items-center w-full").style(
@@ -370,6 +412,26 @@ def _odds_str(o) -> str:
     except (TypeError, ValueError):
         return str(o)
     return f"+{n}" if n > 0 else str(n)
+
+
+def _market_stat_abbr(market: str) -> str:
+    """Short stat label shown next to the predicted value."""
+    mapping = {
+        "pitcher_strikeouts":   "K",
+        "pitcher_outs":         "outs",
+        "pitcher_hits_allowed": "H",
+        "pitcher_walks":        "BB",
+        "pitcher_earned_runs":  "ER",
+        "batter_hits":          "H",
+        "batter_total_bases":   "TB",
+        "batter_home_runs":     "HR",
+        "batter_rbis":          "RBI",
+        "batter_runs_scored":   "R",
+        "batter_walks":         "BB",
+        "batter_strikeouts":    "K",
+        "batter_stolen_bases":  "SB",
+    }
+    return mapping.get(market, "")
 
 
 def _short_iso(iso: str) -> str:

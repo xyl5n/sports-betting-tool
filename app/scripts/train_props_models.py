@@ -100,6 +100,10 @@ _MIN_PITCHER_STARTS = 5
 _MIN_BATTER_PA = 20
 TRAINING_SEASONS = [2023, 2024, 2025]
 
+# Regression target stats — one XGBRegressor per stat per bucket
+_PITCHER_REG_STATS = ["K", "ER", "H", "BB", "outs"]
+_BATTER_REG_STATS  = ["H", "TB", "HR", "RBI", "R", "BB"]
+
 
 # ---------------------------------------------------------------------------
 # Park factors (hardcoded for all 30 MLB stadiums, keyed by team abbreviation)
@@ -730,7 +734,7 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         import numpy as np
     except ImportError:
         _log("pandas/numpy missing -- aborting pitcher build")
-        return None, None, None
+        return None, None, None, None
 
     # Inference-time features that are always zero during training
     INFER_FEATS = [
@@ -750,6 +754,7 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
     ]
 
     rows: list[dict] = []
+    reg_rows: list[dict] = []
     for p in (payload.get("pitchers") or []):
         games  = p.get("games") or []
         season = p.get("season", 2025)
@@ -863,10 +868,17 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
                 record[f] = 0.0
             record["label"] = int(row["label"])
             rows.append(record)
+            reg_rows.append({
+                "K":    float(row["K"]),
+                "ER":   float(row["ER"]),
+                "H":    float(row["H"]),
+                "BB":   float(row["BB"]),
+                "outs": float(round(row["IP"] * 3)),
+            })
 
     if not rows:
         _log("pitcher dataset empty after feature build")
-        return None, None, None
+        return None, None, None, None
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
@@ -886,7 +898,11 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         f"pitcher features: {X.shape[0]} rows × {X.shape[1]} cols  "
         f"positive_rate={y.mean():.3f}"
     )
-    return X, y, feature_names
+    reg_targets: dict[str, "np.ndarray"] = {
+        stat: pd.DataFrame(reg_rows)[stat].to_numpy(dtype=float)
+        for stat in _PITCHER_REG_STATS
+    }
+    return X, y, reg_targets, feature_names
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +931,7 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         import numpy as np
     except ImportError:
         _log("pandas/numpy missing -- aborting batter build")
-        return None, None, None
+        return None, None, None, None
 
     INFER_FEATS = [
         "whiff_pct",
@@ -937,6 +953,7 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
     ]
 
     rows: list[dict] = []
+    reg_rows: list[dict] = []
     for p in (payload.get("batters") or []):
         games  = p.get("games") or []
         season = p.get("season", 2025)
@@ -1046,10 +1063,18 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
                 record[f] = 0.0
             record["label"] = int(row["label"])
             rows.append(record)
+            reg_rows.append({
+                "H":   float(row["H"]),
+                "TB":  float(row["TB"]),
+                "HR":  float(row["HR"]),
+                "RBI": float(row["RBI"]),
+                "R":   float(row["R"]),
+                "BB":  float(row["BB"]),
+            })
 
     if not rows:
         _log("batter dataset empty after feature build")
-        return None, None, None
+        return None, None, None, None
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
@@ -1069,7 +1094,11 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         f"batter features: {X.shape[0]} rows × {X.shape[1]} cols  "
         f"positive_rate={y.mean():.3f}"
     )
-    return X, y, feature_names
+    reg_targets: dict[str, "np.ndarray"] = {
+        stat: pd.DataFrame(reg_rows)[stat].to_numpy(dtype=float)
+        for stat in _BATTER_REG_STATS
+    }
+    return X, y, reg_targets, feature_names
 
 
 # ---------------------------------------------------------------------------
@@ -1162,6 +1191,29 @@ def _save_feature_importance(
         _log(f"feature importance save failed: {exc}")
 
 
+def _save_reg_metadata(
+    pitcher_feature_names: list[str],
+    batter_feature_names: list[str],
+) -> None:
+    """Save feature name lists so the inference layer can build correct-length
+    zero vectors without importing the training data at runtime."""
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = _CACHE_DIR / "props_reg_metadata.json"
+    payload = {
+        "generated_at":          datetime.utcnow().isoformat() + "Z",
+        "pitcher_feature_names": pitcher_feature_names,
+        "batter_feature_names":  batter_feature_names,
+    }
+    try:
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _log(f"regression metadata saved: {out_path}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"regression metadata save failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Train + save
 # ---------------------------------------------------------------------------
@@ -1223,6 +1275,60 @@ def _train_and_save(
     return float(oof_acc), final
 
 
+def _train_regressor(
+    X,
+    y_reg,
+    out_path: Path,
+    *,
+    label: str,
+) -> tuple[Optional[float], Optional[object]]:
+    """5-fold CV XGBoost regression training.  Returns (oof_rmse, final_model)."""
+    if X is None or y_reg is None or len(X) < 20:
+        _log(f"{label}: not enough data ({0 if X is None else len(X)} rows) "
+             "-- skipping regressor train")
+        return None, None
+    try:
+        from sklearn.model_selection import KFold
+        from sklearn.metrics         import mean_squared_error
+        import xgboost as xgb
+        import joblib
+        import numpy as np
+    except ImportError as exc:
+        _log(f"{label}: missing dependency ({exc}) -- aborting")
+        return None, None
+
+    kf   = KFold(n_splits=5, shuffle=True, random_state=42)
+    oof  = np.zeros(len(y_reg))
+    for fold, (tr, te) in enumerate(kf.split(X), 1):
+        reg = xgb.XGBRegressor(
+            n_estimators=400, max_depth=4, learning_rate=0.04,
+            subsample=0.8, colsample_bytree=0.75,
+            min_child_weight=3, gamma=0.1,
+            objective="reg:squarederror", eval_metric="rmse",
+            verbosity=0,
+        )
+        reg.fit(X[tr], y_reg[tr])
+        oof[te]   = reg.predict(X[te])
+        fold_rmse = float(np.sqrt(mean_squared_error(y_reg[te], oof[te])))
+        _log(f"{label} fold {fold}: rmse={fold_rmse:.3f}")
+
+    oof_rmse = float(np.sqrt(mean_squared_error(y_reg, oof)))
+    _log(f"{label} OOF: rmse={oof_rmse:.3f}")
+
+    final = xgb.XGBRegressor(
+        n_estimators=400, max_depth=4, learning_rate=0.04,
+        subsample=0.8, colsample_bytree=0.75,
+        min_child_weight=3, gamma=0.1,
+        objective="reg:squarederror", eval_metric="rmse",
+        verbosity=0,
+    )
+    final.fit(X, y_reg)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(final, out_path)
+    _log(f"{label} regressor saved: {out_path}")
+    return oof_rmse, final
+
+
 # ---------------------------------------------------------------------------
 # Supabase push (env-var driven, dotenv-aware)
 # ---------------------------------------------------------------------------
@@ -1247,7 +1353,7 @@ def _sanitize_supabase_url(raw: str) -> str:
     return raw
 
 
-def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
+def _push_to_supabase_direct(model_pairs: list[tuple[Path, str]]) -> str:
     """Push trained model files directly to Supabase app_cache table.
 
     Uses the same supabase-py create_client pattern as src/db.py.
@@ -1306,10 +1412,7 @@ def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
 
     # ── Upsert each model file into app_cache ─────────────────────────────
     results = []
-    for path, cache_key in [
-        (pitcher_path, "props_model_pitcher"),
-        (batter_path,  "props_model_batter"),
-    ]:
+    for path, cache_key in model_pairs:
         if not path.exists():
             _log(f"Supabase: {path} not found -- skipping")
             results.append(f"{cache_key}: missing")
@@ -1412,37 +1515,72 @@ def main() -> int:
     # ── 3. Feature engineering + training ───────────────────────────────────
     pitcher_importance: dict[str, float] = {}
     batter_importance:  dict[str, float] = {}
+    pitcher_feat_names: list[str] = []
+    batter_feat_names:  list[str] = []
 
     pitcher_path = Path(".cache/props_model_pitcher.joblib")
     batter_path  = Path(".cache/props_model_batter.joblib")
 
     if not args.skip_pitcher:
         _log("building pitcher feature matrix …")
-        X, y, feat_names = _build_pitcher_dataset(payload, pitcher_splits_by_season)
+        X, y, reg_targets_p, feat_names = _build_pitcher_dataset(payload, pitcher_splits_by_season)
         acc, model = _train_and_save(X, y, pitcher_path, label="pitcher")
         summary["pitcher_oof_acc"] = acc
         summary["pitcher_features"] = len(feat_names) if feat_names else 0
         if model is not None and not args.no_shap and feat_names is not None:
             pitcher_importance = _run_shap_analysis(model, X, feat_names, "pitcher")
+        if feat_names:
+            pitcher_feat_names = feat_names
+        if X is not None and reg_targets_p:
+            for stat in _PITCHER_REG_STATS:
+                y_reg = reg_targets_p.get(stat)
+                if y_reg is not None:
+                    reg_path = _CACHE_DIR / f"props_model_pitcher_reg_{stat}.joblib"
+                    rmse, _ = _train_regressor(X, y_reg, reg_path, label=f"pitcher_reg_{stat}")
+                    summary[f"pitcher_reg_{stat}_rmse"] = rmse
 
     if not args.skip_batter:
         _log("building batter feature matrix …")
-        X, y, feat_names = _build_batter_dataset(payload, batter_splits_by_season)
+        X, y, reg_targets_b, feat_names = _build_batter_dataset(payload, batter_splits_by_season)
         acc, model = _train_and_save(X, y, batter_path, label="batter")
         summary["batter_oof_acc"] = acc
         summary["batter_features"] = len(feat_names) if feat_names else 0
         if model is not None and not args.no_shap and feat_names is not None:
             batter_importance = _run_shap_analysis(model, X, feat_names, "batter")
+        if feat_names:
+            batter_feat_names = feat_names
+        if X is not None and reg_targets_b:
+            for stat in _BATTER_REG_STATS:
+                y_reg = reg_targets_b.get(stat)
+                if y_reg is not None:
+                    reg_path = _CACHE_DIR / f"props_model_batter_reg_{stat}.joblib"
+                    rmse, _ = _train_regressor(X, y_reg, reg_path, label=f"batter_reg_{stat}")
+                    summary[f"batter_reg_{stat}_rmse"] = rmse
 
     # ── 4. Save SHAP feature importance JSON ────────────────────────────────
     if pitcher_importance or batter_importance:
         _save_feature_importance(pitcher_importance, batter_importance)
         summary["shap_saved"] = str(_CACHE_DIR / "props_feature_importance.json")
 
+    # ── 4b. Save regression feature-name metadata ───────────────────────────
+    if pitcher_feat_names or batter_feat_names:
+        _save_reg_metadata(pitcher_feat_names, batter_feat_names)
+        summary["reg_metadata_saved"] = True
+
     # ── 5. Supabase push ────────────────────────────────────────────────────
     if not args.no_push:
         _log("pushing models to Supabase …")
-        push_result = _push_to_supabase_direct(pitcher_path, batter_path)
+        model_pairs: list[tuple[Path, str]] = [
+            (pitcher_path, "props_model_pitcher"),
+            (batter_path,  "props_model_batter"),
+        ]
+        for stat in _PITCHER_REG_STATS:
+            reg_path = _CACHE_DIR / f"props_model_pitcher_reg_{stat}.joblib"
+            model_pairs.append((reg_path, f"props_model_pitcher_reg_{stat}"))
+        for stat in _BATTER_REG_STATS:
+            reg_path = _CACHE_DIR / f"props_model_batter_reg_{stat}.joblib"
+            model_pairs.append((reg_path, f"props_model_batter_reg_{stat}"))
+        push_result = _push_to_supabase_direct(model_pairs)
         summary["supabase_push"] = push_result
 
     elapsed = time.monotonic() - started
