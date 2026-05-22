@@ -374,6 +374,23 @@ def score_today_props() -> dict:
         f"main={n_main_kept} alt={n_alt_kept} "
         f"alts_attached={n_alts_attached} elapsed={elapsed_ms}ms"
     )
+    # Per-top-pick line-type breakdown so an alt sneaking into the top
+    # of the slate is obvious at a glance in Railway logs.  Only the
+    # top 10 are listed; ranked by confidence desc to match the page
+    # ordering.
+    top_n = rows[:10]
+    if top_n:
+        top_lines = [
+            f"#{i + 1} {r.get('player', '?')} "
+            f"{r.get('market', '?')} "
+            f"{r.get('side', '?').upper()} "
+            f"{r.get('line')} "
+            f"conf={float(r.get('confidence') or 0):.3f} "
+            f"[{(r.get('line_type') or 'alt').upper()}]"
+            for i, r in enumerate(top_n)
+        ]
+        for line in top_lines:
+            _log(f"top:   {line}")
     return payload
 
 

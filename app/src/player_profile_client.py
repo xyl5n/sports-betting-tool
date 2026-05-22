@@ -583,10 +583,20 @@ def get_today_prop(player_name: str) -> Optional[dict]:
             if best is None or score > float(best.get("confidence") or 0.0):
                 best = _scored_cache_to_entry(pick)
         if best is not None:
+            # Verbose log so a future side-flip report can be traced to
+            # the exact cache row.  Shows every field that could disagree
+            # between /props and /player rendering: side (what /props
+            # displays), recommendation (what /player used to display
+            # before the predict() fix), confidence + ev_pct + line_type.
             _log(
-                f"get_today_prop({player_name!r}): served from scored_cache "
-                f"({best.get('market')} {best.get('side')} {best.get('line')} "
-                f"conf={best.get('confidence')})"
+                f"get_today_prop({player_name!r}) scored_cache READ: "
+                f"market={best.get('market')} "
+                f"side={best.get('side')!r} "
+                f"line={best.get('line')} "
+                f"recommendation={best.get('recommendation')!r} "
+                f"conf={best.get('confidence')} "
+                f"ev_pct={best.get('ev_pct')} "
+                f"line_type={best.get('line_type')!r}"
             )
             return best
     except Exception as exc:
@@ -691,6 +701,22 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
             entry = _scored_cache_to_entry(pick)
             out.append(entry)
             markets_seen.add(entry.get("market") or "")
+            # Per-pick debug log so a future side-flip report can be
+            # diagnosed by tailing Railway logs as the player page
+            # loads.  Logs every field that the /player UI consumes,
+            # alongside the canonical ``side`` so disagreements with
+            # /props are obvious at first glance.
+            _log(
+                f"get_today_props_for_player({player_name!r}) "
+                f"scored_cache READ: "
+                f"market={entry.get('market')} "
+                f"side={entry.get('side')!r} "
+                f"line={entry.get('line')} "
+                f"recommendation={entry.get('recommendation')!r} "
+                f"conf={entry.get('confidence')} "
+                f"ev_pct={entry.get('ev_pct')} "
+                f"line_type={entry.get('line_type')!r}"
+            )
     except Exception as exc:
         _log(
             f"get_today_props_for_player({player_name!r}): "
