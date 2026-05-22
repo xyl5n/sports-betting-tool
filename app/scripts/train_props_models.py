@@ -499,11 +499,16 @@ def fetch_pitcher_game_log(pid: int, season: int) -> list[dict]:
             except Exception:  # noqa: BLE001
                 is_home = False
             try:
-                gs = int(st.get("gamesStarted") or 0)
-                k  = int(st.get("strikeOuts") or 0)
-                bb = int(st.get("baseOnBalls") or 0)
-                h  = int(st.get("hits") or 0)
-                er = int(st.get("earnedRuns") or 0)
+                gs  = int(st.get("gamesStarted") or 0)
+                k   = int(st.get("strikeOuts") or 0)
+                bb  = int(st.get("baseOnBalls") or 0)
+                h   = int(st.get("hits") or 0)
+                er  = int(st.get("earnedRuns") or 0)
+                # PR3: capture homeRuns allowed so career FIP can be computed
+                # without a separate fetch.  Older cache files lack this field;
+                # consumers default it to None / 0 and fall back to a BB/9
+                # proxy in that case.
+                hr  = int(st.get("homeRuns") or 0)
             except (TypeError, ValueError):
                 continue
             ip = _parse_ip(st.get("inningsPitched"))
@@ -520,6 +525,7 @@ def fetch_pitcher_game_log(pid: int, season: int) -> list[dict]:
                 "ER":            er,
                 "BB":            bb,
                 "K":             k,
+                "HR":            hr,
                 "games_started": gs,
             })
     rows.sort(key=lambda r: r["date"])
@@ -1003,20 +1009,25 @@ def compute_team_baselines(
 def compute_career_baselines(payload: dict) -> dict[int, dict[str, float]]:
     """Aggregate per-pitcher career baseline stats across all training seasons.
 
-    Returns {pid: {career_k_per_9, career_bb_per_9, career_ip}}.
+    Returns {pid: {career_k_per_9, career_bb_per_9, career_fip, career_ip}}.
 
-    Note on FIP substitution: the user originally requested career_fip, but
-    pitcher FIP requires HR-allowed which the gameLog cache does not include.
-    We substitute career_bb_per_9 — same skill axis (control) at zero extra
-    HTTP cost.  Switching to true FIP would mean refetching every pitcher's
-    full gameLog with HR field, which is a separate concern.
+    career_fip uses the classic FIP formula:
+        FIP = (13*HR + 3*BB - 2*K) / IP + 3.10
+    The constant 3.10 is the modern-era league-FIP intercept.  When the
+    pitcher's gameLog cache lacks HR (pre-PR3 cache files), we fall back
+    to a BB/9-derived proxy on the same scale (3.10 + (career_bb_per_9 -
+    3.30) * 0.6) so feature_fip stays sane without re-fetching.  Newly
+    fetched cache rows after PR3 include HR and produce true FIP.
     """
     career: dict[int, dict[str, float]] = {}
+    seen_hr: dict[int, bool] = {}
     for p in (payload.get("pitchers") or []):
         pid = int(p.get("id") or 0)
         if not pid:
             continue
-        bucket = career.setdefault(pid, {"K": 0.0, "BB": 0.0, "IP": 0.0})
+        bucket = career.setdefault(
+            pid, {"K": 0.0, "BB": 0.0, "HR": 0.0, "IP": 0.0},
+        )
         for g in (p.get("games") or []):
             try:
                 bucket["K"]  += int(g.get("K")  or 0)
@@ -1024,16 +1035,42 @@ def compute_career_baselines(payload: dict) -> dict[int, dict[str, float]]:
                 bucket["IP"] += float(g.get("IP") or 0.0)
             except (TypeError, ValueError):
                 continue
+            # HR is PR3-new in fetch_pitcher_game_log; only count when
+            # explicitly present (None != 0) so we know whether to fall
+            # back to the BB/9 proxy for this pitcher.
+            hr_raw = g.get("HR")
+            if hr_raw is not None:
+                try:
+                    bucket["HR"] += int(hr_raw)
+                    seen_hr[pid] = True
+                except (TypeError, ValueError):
+                    pass
 
     out: dict[int, dict[str, float]] = {}
+    fip_proxy_count = 0
+    fip_true_count  = 0
     for pid, b in career.items():
         ip = max(b["IP"], 0.01)
+        career_k_per_9  = round(b["K"]  * 9.0 / ip, 4)
+        career_bb_per_9 = round(b["BB"] * 9.0 / ip, 4)
+        if seen_hr.get(pid):
+            # True FIP with the modern-era 3.10 league constant.
+            career_fip = (13 * b["HR"] + 3 * b["BB"] - 2 * b["K"]) / ip + 3.10
+            fip_true_count += 1
+        else:
+            # Proxy: shift around league-avg FIP using BB/9 deviation.
+            career_fip = 3.10 + (career_bb_per_9 - 3.30) * 0.6
+            fip_proxy_count += 1
         out[pid] = {
-            "career_k_per_9":  round(b["K"]  * 9.0 / ip, 4),
-            "career_bb_per_9": round(b["BB"] * 9.0 / ip, 4),
+            "career_k_per_9":  career_k_per_9,
+            "career_bb_per_9": career_bb_per_9,
+            "career_fip":      round(float(career_fip), 4),
             "career_ip":       round(b["IP"], 2),
         }
-    _log(f"career baselines computed: {len(out)} pitchers")
+    _log(
+        f"career baselines computed: {len(out)} pitchers  "
+        f"(true_fip={fip_true_count}, proxy_fip={fip_proxy_count})"
+    )
     return out
 
 
@@ -1079,7 +1116,7 @@ def _build_pitcher_dataset(
         import numpy as np
     except ImportError:
         _log("pandas/numpy missing -- aborting pitcher build")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     # Inference-time features that are always zero during training
     INFER_FEATS = [
@@ -1118,11 +1155,12 @@ def _build_pitcher_dataset(
         })
 
         # Career baseline (same value for every row of this pid).  Defaults
-        # match league-average modern era: K/9 ~ 8.5, BB/9 ~ 3.3, IP small
-        # so the model can learn "low IP = high variance" if it wants.
+        # match league-average modern era: K/9 ~ 8.5, BB/9 ~ 3.3, FIP ~ 4.0,
+        # IP small so the model can learn "low IP = high variance" if it wants.
         career = (career_baselines or {}).get(pid, {
             "career_k_per_9":  8.50,
             "career_bb_per_9": 3.30,
+            "career_fip":      4.00,
             "career_ip":       50.0,
         })
 
@@ -1143,6 +1181,22 @@ def _build_pitcher_dataset(
         # Should always be present, but guard against unexpected cache shapes.
         if "games_started" not in df.columns:
             df["games_started"] = 0
+
+        # ── PR3: filter relief outings BEFORE computing rolling stats ──────
+        # Pre-PR3 the pitcher dataset included every appearance, so a
+        # starter's rolling K/9 was contaminated by 1-IP relief outings
+        # from earlier in the season.  Keep only games where the pitcher
+        # was the listed starter; the model trains on starter-only rows
+        # which is what the props line is set against.
+        before_filter = len(df)
+        df = df[df["games_started"] > 0].reset_index(drop=True)
+        if len(df) < before_filter:
+            _log(
+                f"  pid={pid} {pname}: dropped {before_filter - len(df)} relief "
+                f"outing(s), kept {len(df)} starts"
+            )
+        if df.empty:
+            continue
 
         # Per-row rate stats (needed for rolling averages)
         df["k_per_9"]  = (df["K"]  * 9.0 / df["IP"].clip(lower=0.01)).fillna(0.0)
@@ -1241,11 +1295,20 @@ def _build_pitcher_dataset(
             # ── Pitcher career baseline (static per pid) ─────────────────────
             record["career_k_per_9"]  = float(career["career_k_per_9"])
             record["career_bb_per_9"] = float(career["career_bb_per_9"])
+            # PR3: career_fip computed in compute_career_baselines using
+            # true HR when available, BB/9 proxy otherwise.  Same skill
+            # axis as career_bb_per_9 but on the 4.00-centered FIP scale.
+            record["career_fip"]      = float(career.get("career_fip", 4.00))
             record["career_ip"]       = float(career["career_ip"])
             # Inference-time features — zero during training
             for f in INFER_FEATS:
                 record[f] = 0.0
-            record["label"] = int(row["label"])
+            record["label"]      = int(row["label"])
+            # PR3: stamp pid on every row so _train_and_save can pass
+            # groups=pitcher_ids to GroupKFold and prevent player-identity
+            # leak across folds.  Stripped before X is built (column not
+            # in feat_cols).
+            record["_player_id"] = int(pid)
             rows.append(record)
             reg_rows.append({
                 "K":    float(row["K"]),
@@ -1275,6 +1338,7 @@ def _build_pitcher_dataset(
         # Career baselines travel with the pitcher snapshot (stable across games).
         snap_feats["career_k_per_9"]  = float(career["career_k_per_9"])
         snap_feats["career_bb_per_9"] = float(career["career_bb_per_9"])
+        snap_feats["career_fip"]      = float(career.get("career_fip", 4.00))
         snap_feats["career_ip"]       = float(career["career_ip"])
         snapshots[str(pid)] = {
             "name":        pname,
@@ -1286,10 +1350,15 @@ def _build_pitcher_dataset(
 
     if not rows:
         _log("pitcher dataset empty after feature build")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     df_all = pd.DataFrame(rows)
-    feature_names = [c for c in df_all.columns if c != "label"]
+    # PR3: _player_id is the GroupKFold grouping key, not a model feature
+    # -- exclude it from feat_cols before X is built.
+    feature_names = [
+        c for c in df_all.columns
+        if c not in ("label", "_player_id")
+    ]
 
     # ── Column diagnostic — confirm all expected features are present ──────
     _log(
@@ -1302,16 +1371,17 @@ def _build_pitcher_dataset(
 
     X = df_all[feature_names].fillna(0).to_numpy(dtype=float)
     y = df_all["label"].to_numpy(dtype=int)
+    groups = df_all["_player_id"].to_numpy(dtype=int)
     _log(
         f"pitcher features: {X.shape[0]} rows × {X.shape[1]} cols  "
-        f"positive_rate={y.mean():.3f}"
+        f"positive_rate={y.mean():.3f}  unique_groups={len(set(groups.tolist()))}"
     )
     reg_targets: dict[str, "np.ndarray"] = {
         stat: pd.DataFrame(reg_rows)[stat].to_numpy(dtype=float)
         for stat in _PITCHER_REG_STATS
     }
     _log(f"pitcher snapshots captured: {len(snapshots)} unique pitchers")
-    return X, y, reg_targets, feature_names, snapshots
+    return X, y, reg_targets, feature_names, snapshots, groups
 
 
 # ---------------------------------------------------------------------------
@@ -1346,7 +1416,7 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         import numpy as np
     except ImportError:
         _log("pandas/numpy missing -- aborting batter build")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     INFER_FEATS = [
         "whiff_pct",
@@ -1433,6 +1503,15 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
             df[f"r7_{c}"]  = df[c].shift(1).rolling(window=7,  min_periods=2).mean()
             df[f"r14_{c}"] = df[c].shift(1).rolling(window=14, min_periods=3).mean()
 
+        # PR3: r30 (30-game) rolling windows for sparse count stats.  HR
+        # and BB tail-events average ~0.1 / ~0.3 per game so 7- and 14-game
+        # rolling means are jumpy on a per-row basis.  A 30-game window
+        # smooths the signal toward the player's true level over a 5-6
+        # week horizon — adds two features instead of replacing the
+        # shorter windows so the model can blend them.
+        for c in ("HR", "BB"):
+            df[f"r30_{c}"] = df[c].shift(1).rolling(window=30, min_periods=5).mean()
+
         # BABIP rolling averages (7d and 14d)
         df["babip_7d"]  = df["_babip"].shift(1).rolling(window=7,  min_periods=2).mean()
         df["babip_14d"] = df["_babip"].shift(1).rolling(window=14, min_periods=3).mean()
@@ -1460,6 +1539,8 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
             [f"szn_{c}"  for c in roll_stats]
             + [f"r7_{c}" for c in roll_stats]
             + [f"r14_{c}" for c in roll_stats]
+            # PR3: 30-game smoothing for the two sparse count stats.
+            + ["r30_HR", "r30_BB"]
             + [
                 "k_pct_7d", "k_pct_14d",
                 "babip_7d", "babip_14d",
@@ -1482,7 +1563,10 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
             # Inference-time features — zero during training
             for f in INFER_FEATS:
                 record[f] = 0.0
-            record["label"] = int(row["label"])
+            record["label"]      = int(row["label"])
+            # PR3: stamp pid on every batter row so _train_and_save can pass
+            # groups=batter_ids to GroupKFold.  Stripped from feat_cols below.
+            record["_player_id"] = int(pid)
             rows.append(record)
             reg_rows.append({
                 "H":   float(row["H"]),
@@ -1515,10 +1599,14 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
     if not rows:
         _log("batter dataset empty after feature build")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     df_all = pd.DataFrame(rows)
-    feature_names = [c for c in df_all.columns if c != "label"]
+    # PR3: _player_id is the GroupKFold grouping key, not a model feature.
+    feature_names = [
+        c for c in df_all.columns
+        if c not in ("label", "_player_id")
+    ]
 
     # ── Column diagnostic — confirm all expected features are present ──────
     _log(
@@ -1531,16 +1619,17 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
     X = df_all[feature_names].fillna(0).to_numpy(dtype=float)
     y = df_all["label"].to_numpy(dtype=int)
+    groups = df_all["_player_id"].to_numpy(dtype=int)
     _log(
         f"batter features: {X.shape[0]} rows × {X.shape[1]} cols  "
-        f"positive_rate={y.mean():.3f}"
+        f"positive_rate={y.mean():.3f}  unique_groups={len(set(groups.tolist()))}"
     )
     reg_targets: dict[str, "np.ndarray"] = {
         stat: pd.DataFrame(reg_rows)[stat].to_numpy(dtype=float)
         for stat in _BATTER_REG_STATS
     }
     _log(f"batter snapshots captured: {len(snapshots)} unique players")
-    return X, y, reg_targets, feature_names, snapshots
+    return X, y, reg_targets, feature_names, snapshots, groups
 
 
 # ---------------------------------------------------------------------------
@@ -1666,6 +1755,7 @@ def _train_and_save(
     out_path: Path,
     *,
     label: str,
+    groups=None,
 ) -> tuple[Optional[float], Optional[object]]:
     """5-fold CV XGBoost training + isotonic calibration on a 20% holdout.
 
@@ -1680,13 +1770,23 @@ def _train_and_save(
     holdout — base fits on 80%, isotonic regression fits on the unseen
     20% — so the post-calibration Brier score is an honest test-set
     number, not a self-graded one.
+
+    PR3 change: when *groups* is provided, switch from StratifiedKFold
+    (shuffle=True) to GroupKFold so the same player_id never lands in
+    both train and test folds.  Previous shuffle-only splits leaked
+    player identity across folds — a pitcher's first 8 starts could
+    train the fold that scored their 9th, inflating OOF accuracy.
+    The 80/20 calibration split also switches to GroupShuffleSplit so
+    base + calibration cohorts stay disjoint at the player level.
     """
     if X is None or y is None or len(X) < 20:
         _log(f"{label}: not enough data ({0 if X is None else len(X)} rows) "
              "-- skipping train")
         return None, None
     try:
-        from sklearn.model_selection import StratifiedKFold, train_test_split
+        from sklearn.model_selection import (
+            StratifiedKFold, GroupKFold, GroupShuffleSplit, train_test_split,
+        )
         from sklearn.metrics         import accuracy_score, log_loss
         import xgboost as xgb
         import joblib
@@ -1704,9 +1804,34 @@ def _train_and_save(
     )
 
     # ── OOF k-fold on full X, y — honest generalisation measure ───────────
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    # When groups is provided we switch to GroupKFold so all rows from the
+    # same player land in the same fold (no identity leak between train
+    # and test).  Falls back to StratifiedKFold(shuffle=True) when groups
+    # is None so callers that don't track player identity still work.
+    groups_arr = None
+    if groups is not None:
+        try:
+            groups_arr = np.asarray(groups)
+            if groups_arr.shape[0] != len(y):
+                _log(f"{label}: groups length mismatch "
+                     f"({groups_arr.shape[0]} vs {len(y)}) -- ignoring")
+                groups_arr = None
+        except Exception:                                                  # noqa: BLE001
+            groups_arr = None
+
+    if groups_arr is not None:
+        unique_groups = int(len(set(groups_arr.tolist())))
+        _log(f"{label} using GroupKFold (n_splits=5)  unique_groups={unique_groups}")
+        splitter = GroupKFold(n_splits=5)
+        split_iter = splitter.split(X, y, groups=groups_arr)
+    else:
+        _log(f"{label} using StratifiedKFold (n_splits=5, shuffle=True) "
+             "-- no groups provided")
+        splitter = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        split_iter = splitter.split(X, y)
+
     oof = np.zeros(len(y))
-    for fold, (tr, te) in enumerate(skf.split(X, y), 1):
+    for fold, (tr, te) in enumerate(split_iter, 1):
         clf = xgb.XGBClassifier(**_xgb_kwargs)
         clf.fit(X[tr], y[tr])
         proba        = clf.predict_proba(X[te])[:, 1]
@@ -1719,14 +1844,27 @@ def _train_and_save(
     oof_ll  = log_loss(y, oof, labels=[0, 1])
     _log(f"{label} OOF: acc={oof_acc:.3f}  log_loss={oof_ll:.3f}")
 
-    # ── 80/20 stratified split: base trains on 80%, isotonic fits on 20% ──
-    X_train, X_cal, y_train, y_cal = train_test_split(
-        X, y, test_size=0.20, random_state=42, stratify=y,
-    )
-    _log(
-        f"{label} split: base={len(X_train)} rows, calibration={len(X_cal)} rows "
-        f"(positive_rate train={y_train.mean():.3f}  cal={y_cal.mean():.3f})"
-    )
+    # ── 80/20 split: base trains on 80%, isotonic fits on 20%.
+    # When groups is provided, GroupShuffleSplit keeps players whole so
+    # the calibration cohort is fully unseen by the base classifier.
+    if groups_arr is not None:
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
+        tr_idx, cal_idx = next(gss.split(X, y, groups=groups_arr))
+        X_train, X_cal = X[tr_idx], X[cal_idx]
+        y_train, y_cal = y[tr_idx], y[cal_idx]
+        _log(
+            f"{label} split: base={len(X_train)} rows ({len(set(groups_arr[tr_idx].tolist()))} players), "
+            f"calibration={len(X_cal)} rows ({len(set(groups_arr[cal_idx].tolist()))} players)  "
+            f"-- GroupShuffleSplit (no player overlap)"
+        )
+    else:
+        X_train, X_cal, y_train, y_cal = train_test_split(
+            X, y, test_size=0.20, random_state=42, stratify=y,
+        )
+        _log(
+            f"{label} split: base={len(X_train)} rows, calibration={len(X_cal)} rows "
+            f"(positive_rate train={y_train.mean():.3f}  cal={y_cal.mean():.3f})"
+        )
 
     base = xgb.XGBClassifier(**_xgb_kwargs)
     base.fit(X_train, y_train)
@@ -1945,6 +2083,114 @@ def _push_to_supabase_direct(model_pairs: list[tuple[Path, str]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# PR3: backtest harness invocation (pre/post comparison)
+# ---------------------------------------------------------------------------
+
+def _run_backtest_snapshot(*, label: str) -> dict:
+    """Shell out to scripts/backtest_props_model.py and return the
+    summary it writes to .cache/backtest_<timestamp>_<label>.json.
+
+    Run as a subprocess so the backtest's imports of src.props_model
+    pick up the joblibs currently on disk (the in-process module cache
+    inside this script would still hold pre-overwrite state).
+
+    Returns {} on any failure -- the comparison helper renders 'n/a'
+    instead of crashing the train run.
+    """
+    import subprocess
+    out_path = _CACHE_DIR / f"backtest_{label}.json"
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve().parent / "backtest_props_model.py"),
+        "--label", label,
+        "--no-baseline-write",
+        "--output-json", str(out_path),
+    ]
+    _log(f"=== BACKTEST {label} ===  cmd={' '.join(cmd)}")
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+        )
+        # Pipe the subprocess's stderr through ours so the PROPS-SETTLE /
+        # backtest lines surface in the same Railway log stream.
+        if proc.stderr:
+            for line in proc.stderr.splitlines():
+                print(line, flush=True, file=sys.stderr)
+        if proc.returncode != 0:
+            _log(f"backtest {label}: exited {proc.returncode} -- treating as empty")
+            return {}
+    except subprocess.TimeoutExpired:
+        _log(f"backtest {label}: TIMEOUT after 600s -- treating as empty")
+        return {}
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"backtest {label}: subprocess crashed {type(exc).__name__}: {exc}")
+        return {}
+
+    if not out_path.exists():
+        _log(f"backtest {label}: expected output {out_path} missing")
+        return {}
+    try:
+        return json.loads(out_path.read_text(encoding="utf-8"))
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"backtest {label}: result parse failed: {exc}")
+        return {}
+
+
+def _print_backtest_delta(pre: Optional[dict], post: Optional[dict]) -> None:
+    """Render a per-market table comparing pre/post hit rate + MAE + RMSE.
+
+    Both inputs are the JSON shape backtest_props_model.py emits:
+        {per_market: {<market>: {n, hit_rate, mae, rmse, ...}}, ...}
+    Missing fields render as 'n/a' so a partial snapshot doesn't crash
+    the report.
+    """
+    if not pre and not post:
+        _log("=== BACKTEST DELTA ===  both snapshots empty -- nothing to compare")
+        return
+    pre  = pre  or {}
+    post = post or {}
+    pre_pm  = (pre.get("per_market")  or {}) if isinstance(pre,  dict) else {}
+    post_pm = (post.get("per_market") or {}) if isinstance(post, dict) else {}
+    all_markets = sorted(set(pre_pm.keys()) | set(post_pm.keys()))
+
+    _log("=== BACKTEST DELTA (PR2 baseline -> PR3) ===")
+    _log(f"  {'market':<28}  "
+         f"{'n_pre':>6}  {'n_post':>6}  "
+         f"{'hit_pre':>8}  {'hit_post':>8}  {'Δ_hit':>7}  "
+         f"{'mae_pre':>8}  {'mae_post':>8}  {'Δ_mae':>7}  "
+         f"{'rmse_pre':>9}  {'rmse_post':>9}  {'Δ_rmse':>8}")
+
+    def _f(value, spec="0.3f") -> str:
+        if value is None:
+            return "n/a"
+        try:
+            return format(float(value), spec)
+        except (TypeError, ValueError):
+            return "n/a"
+
+    def _delta(a, b, spec="+0.3f") -> str:
+        try:
+            return format(float(b) - float(a), spec)
+        except (TypeError, ValueError):
+            return "n/a"
+
+    for m in all_markets:
+        a = pre_pm.get(m, {}) or {}
+        b = post_pm.get(m, {}) or {}
+        _log(
+            f"  {m:<28}  "
+            f"{str(a.get('n_bets_scored', a.get('n', 'n/a'))):>6}  "
+            f"{str(b.get('n_bets_scored', b.get('n', 'n/a'))):>6}  "
+            f"{_f(a.get('hit_rate')):>8}  {_f(b.get('hit_rate')):>8}  "
+            f"{_delta(a.get('hit_rate'), b.get('hit_rate')):>7}  "
+            f"{_f(a.get('mae')):>8}  {_f(b.get('mae')):>8}  "
+            f"{_delta(a.get('mae'), b.get('mae'), '+0.3f'):>7}  "
+            f"{_f(a.get('rmse'), '0.4f'):>9}  {_f(b.get('rmse'), '0.4f'):>9}  "
+            f"{_delta(a.get('rmse'), b.get('rmse'), '+0.4f'):>8}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main driver
 # ---------------------------------------------------------------------------
 
@@ -1975,6 +2221,13 @@ def main() -> int:
         "--no-shap", action="store_true",
         help="Skip SHAP feature importance analysis (saves ~30s)",
     )
+    ap.add_argument(
+        "--run-backtest", action="store_true",
+        help="PR3: run the backtest harness BEFORE retraining (captures the "
+             "existing-joblib baseline) AND AFTER retraining (captures the "
+             "new joblibs).  Writes both snapshots into .cache/ and prints a "
+             "per-stat / per-market delta report to stderr.",
+    )
     args = ap.parse_args()
 
     # Single-season shortcut
@@ -1983,6 +2236,11 @@ def main() -> int:
     started = time.monotonic()
     _log(f"=== PROPS MODEL TRAINING ===  seasons={seasons}")
     summary: dict = {"seasons": seasons}
+
+    # PR3: pre-training backtest snapshot (captures the existing-joblib
+    # PR2 baseline before this run overwrites the .cache/*.joblib files).
+    if args.run_backtest:
+        summary["backtest_pre"] = _run_backtest_snapshot(label="PR3-pre")
 
     # ── 1. Collect game logs (multi-season, cached per season) ──────────────
     payload = collect_multi_season_data(seasons, refresh=args.refresh_data)
@@ -2050,14 +2308,21 @@ def main() -> int:
     batter_path  = Path(".cache/props_model_batter.joblib")
 
     pitcher_snapshots: dict[str, dict] = {}
+    pitcher_groups = None
     if not args.skip_pitcher:
         _log("building pitcher feature matrix …")
-        X, y, reg_targets_p, feat_names, pitcher_snapshots = _build_pitcher_dataset(
-            payload, pitcher_splits_by_season,
-            team_baselines=team_baselines,
-            career_baselines=career_baselines,
+        X, y, reg_targets_p, feat_names, pitcher_snapshots, pitcher_groups = (
+            _build_pitcher_dataset(
+                payload, pitcher_splits_by_season,
+                team_baselines=team_baselines,
+                career_baselines=career_baselines,
+            )
         )
-        acc, model = _train_and_save(X, y, pitcher_path, label="pitcher")
+        # PR3: pass groups=pitcher_ids so _train_and_save uses GroupKFold,
+        # keeping each pitcher's starts in a single fold.
+        acc, model = _train_and_save(
+            X, y, pitcher_path, label="pitcher", groups=pitcher_groups,
+        )
         summary["pitcher_oof_acc"] = acc
         summary["pitcher_features"] = len(feat_names) if feat_names else 0
         summary["pitcher_snapshots"] = len(pitcher_snapshots or {})
@@ -2087,12 +2352,17 @@ def main() -> int:
                 summary[f"pitcher_reg_{stat}_rmse"] = rmse
 
     batter_snapshots: dict[str, dict] = {}
+    batter_groups = None
     if not args.skip_batter:
         _log("building batter feature matrix …")
-        X, y, reg_targets_b, feat_names, batter_snapshots = _build_batter_dataset(
-            payload, batter_splits_by_season,
+        X, y, reg_targets_b, feat_names, batter_snapshots, batter_groups = (
+            _build_batter_dataset(payload, batter_splits_by_season)
         )
-        acc, model = _train_and_save(X, y, batter_path, label="batter")
+        # PR3: same GroupKFold treatment for batters -- player_id is the
+        # grouping key so no batter's games span train + test folds.
+        acc, model = _train_and_save(
+            X, y, batter_path, label="batter", groups=batter_groups,
+        )
         summary["batter_oof_acc"] = acc
         summary["batter_features"] = len(feat_names) if feat_names else 0
         summary["batter_snapshots"] = len(batter_snapshots or {})
@@ -2229,6 +2499,15 @@ def main() -> int:
             model_pairs.append((_TEAM_BASELINES_PATH, "team_baselines"))
         push_result = _push_to_supabase_direct(model_pairs)
         summary["supabase_push"] = push_result
+
+    # PR3: post-training backtest snapshot (captures the freshly trained
+    # joblibs on the same settled-ledger bets the pre-snapshot scored).
+    # Prints a side-by-side delta so the PR can quote the per-market
+    # accuracy / hit-rate movement directly.
+    if args.run_backtest:
+        post_snapshot = _run_backtest_snapshot(label="PR3-post")
+        summary["backtest_post"] = post_snapshot
+        _print_backtest_delta(summary.get("backtest_pre"), post_snapshot)
 
     elapsed = time.monotonic() - started
     _log(f"=== DONE in {elapsed:.1f}s ===  summary={json.dumps(summary, default=str)}")
