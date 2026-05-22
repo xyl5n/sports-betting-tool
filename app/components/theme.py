@@ -83,12 +83,13 @@ BOTTOM_NAV_HEIGHT = "60px"         # mobile bottom tab bar
 # ── Tab keys (single source of truth so navbar + router stay in sync) ───────
 TAB_HOME    = "home"
 TAB_SPORTS  = "sports"
+TAB_PROPS   = "props"
 TAB_AI      = "ai"
 TAB_MYBETS  = "mybets"
 TAB_MODEL   = "model"
 TAB_ADMIN   = "admin"
 
-TABS = (TAB_HOME, TAB_SPORTS, TAB_AI, TAB_MYBETS, TAB_MODEL, TAB_ADMIN)
+TABS = (TAB_HOME, TAB_SPORTS, TAB_PROPS, TAB_AI, TAB_MYBETS, TAB_MODEL, TAB_ADMIN)
 
 
 def page_head_css() -> str:
