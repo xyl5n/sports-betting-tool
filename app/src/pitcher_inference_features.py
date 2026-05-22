@@ -461,8 +461,11 @@ def enrich_pitcher_features(prop: dict) -> dict[str, float]:
     except Exception:  # noqa: BLE001
         pass
 
-    _log(f"enriched {player_name!r} pid={pid} -> {len(out)} real features "
-         f"(rolling={len(rolling)}, splits=4, is_home={'is_home_i' in out})")
+    # Per-enrichment log removed -- this fires once per scored prop
+    # (~3000 per refresh) and was the second-biggest contributor to
+    # Railway log spam after build_reg_vector.  Failure paths above
+    # still log individually.  Aggregate scoring summary is logged at
+    # the page level once per refresh.
     return out
 
 
