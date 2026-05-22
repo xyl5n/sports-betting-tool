@@ -506,8 +506,49 @@ def push_models_to_supabase() -> dict:
 
 # ── Prediction API ──────────────────────────────────────────────────────────
 
+# Probability bounds applied to every raw classifier output.
+# XGBoost is systematically overconfident — it pushes P(Over) toward 0/1
+# far beyond what the empirical frequency justifies.
+# CalibratedClassifierCV (isotonic, baked into retrained artifacts) corrects
+# this natively; these bounds are a belt-and-suspenders guard that stays
+# effective before a retrained artifact is available.
+#
+# Critical invariant: squashing is applied to P(Over) BEFORE any side-flip
+# so that P(Over) + P(Under) = 1.0 is preserved exactly.
+_PROB_LO: float = 0.10   # model can never be more than 90% against
+_PROB_HI: float = 0.90   # model can never be more than 90% for
+_CONF_CAP: float = 0.85  # maximum confidence displayed to the user
+
+
+def _squash_prob(p: float) -> float:
+    """Clamp a raw classifier probability to [_PROB_LO, _PROB_HI]."""
+    return max(_PROB_LO, min(_PROB_HI, p))
+
+
 def _bucket_for_market(market: str) -> str:
     return "pitcher" if (market or "").startswith("pitcher_") else "batter"
+
+
+def _run_regressor(prop: dict, bucket: str) -> "Optional[float]":
+    """Run the per-stat regression model and return a predicted numeric value,
+    or None when no regressor is available for this market."""
+    predicted_value: Optional[float] = None
+    reg_info = _MARKET_REG_KEY.get(prop.get("market", ""))
+    if reg_info is None:
+        return None
+    reg_bucket, reg_stat = reg_info
+    reg_loaders = _pitcher_reg_models if reg_bucket == "pitcher" else _batter_reg_models
+    reg_model = reg_loaders.get(reg_stat, _LoadedModel(Path("_nonexistent_"))).load()
+    if reg_model is None:
+        return None
+    try:
+        import numpy as np  # noqa: PLC0415
+        vec, _ = _build_reg_vector(prop, reg_bucket)
+        X_reg = np.array([vec], dtype=float)
+        predicted_value = round(float(reg_model.predict(X_reg)[0]), 2)
+    except Exception as exc:                                                # noqa: BLE001
+        _log(f"regression predict failed for {prop.get('market')}: {exc}")
+    return predicted_value
 
 
 def _feature_vector_for_prop(prop: dict) -> list[float]:
@@ -535,40 +576,45 @@ def predict(prop: dict) -> dict:
     Output shape:
         {
           recommendation:  "Over" | "Under" | "Pass",
-          confidence:      float,          # 0..1
-          model_prob:      float,          # raw P(Over)
-          market_prob:     float,          # de-vigged P(Over) from the line
+          confidence:      float,          # 0..1, capped at _CONF_CAP (0.85)
+          model_prob:      float,          # calibrated P(this side)
+          market_prob:     float,          # de-vigged P(this side) from the line
           edge:            float,          # model_prob - market_prob, signed
           source:          "joblib" | "heuristic",
           predicted_value: float | None,   # numeric stat prediction (regressor)
         }
 
-    Heuristic fallback (when joblib missing):  market_prob is used
-    directly, so recommendation = Over iff market_prob >= 0.5, with a
-    confidence floor at 0.50 so the UI never shows "100% confidence
-    based on no data".
+    Probability calibration
+    -----------------------
+    Raw XGBoost probabilities are squashed to [_PROB_LO, _PROB_HI] = [0.10, 0.90]
+    BEFORE any side flip.  This caps displayed confidence at _CONF_CAP (0.85)
+    and is belt-and-suspenders for the CalibratedClassifierCV wrapper baked
+    into retrained artifacts (see train_props_models.py).
+
+    Side symmetry
+    -------------
+    The squash is applied to P(Over) before flipping for the Under side, so
+    predict(over_prop).model_prob + predict(under_prop).model_prob == 1.0
+    exactly when both props share the same underlying line.  Use predict_pair()
+    to make this invariant explicit and avoid a second model call.
     """
     bucket = _bucket_for_market(prop.get("market", ""))
     model = (_pitcher_model if bucket == "pitcher" else _batter_model).load()
 
-    # Pair the over/under for no-vig market prob when both sides came
-    # back in the same payload.  Caller passes the over row; under
-    # picks up the inverse below.
     over_prob = market_prob = _american_to_prob(prop.get("best_odds"))
 
     if model is not None:
         try:
             import numpy as np  # noqa: PLC0415
-            vec, feat_names = _build_reg_vector(prop, bucket)
+            vec, _ = _build_reg_vector(prop, bucket)
             X = np.array([vec], dtype=float)
-            # Most sklearn / xgb classifiers expose predict_proba.
-            # Fall back to predict() returning {0,1}.
             if hasattr(model, "predict_proba"):
                 proba = model.predict_proba(X)[0]
-                # Assume class 1 = Over per train script convention.
-                over_prob = float(proba[1]) if len(proba) > 1 else float(proba[0])
+                raw_p = float(proba[1]) if len(proba) > 1 else float(proba[0])
             else:
-                over_prob = float(model.predict(X)[0])
+                raw_p = float(model.predict(X)[0])
+            # Squash BEFORE side flip so Over + Under still sum to 1.0.
+            over_prob = _squash_prob(raw_p)
             source = "joblib"
         except Exception as exc:                                          # noqa: BLE001
             _log(f"joblib predict failed for {bucket}: {exc} -- heuristic")
@@ -576,39 +622,17 @@ def predict(prop: dict) -> dict:
     else:
         source = "heuristic"
 
-    # If the caller passed the Under side, flip the model output.
+    # Flip for the Under side AFTER squashing.
     side = (prop.get("side") or "Over").strip().title()
     if side == "Under":
-        over_prob = 1.0 - over_prob
+        over_prob   = 1.0 - over_prob
         market_prob = 1.0 - market_prob
 
     edge = over_prob - market_prob
-    # Recommend Over when model_prob beats market_prob materially,
-    # Under for the inverse, otherwise Pass.  Threshold 3% mirrors the
-    # EV Scan default on the home page.
-    if   over_prob - market_prob >  0.03: recommendation = "Over"
-    elif over_prob - market_prob < -0.03: recommendation = "Under"
-    else:                                  recommendation = "Pass"
-    # Confidence = how far the model is from the market.  Multiplied
-    # by 2 so a 50% model on a 35% market = 30% confidence (sane scale).
-    confidence = min(0.99, max(0.50, abs(over_prob - market_prob) * 2.0 + 0.50))
-
-    # ── Regression: predicted numeric stat value ─────────────────────────
-    predicted_value: Optional[float] = None
-    reg_info = _MARKET_REG_KEY.get(prop.get("market", ""))
-    if reg_info is not None:
-        reg_bucket, reg_stat = reg_info
-        reg_loaders = _pitcher_reg_models if reg_bucket == "pitcher" else _batter_reg_models
-        reg_model = reg_loaders.get(reg_stat, _LoadedModel(Path("_nonexistent_"))).load()
-        if reg_model is not None:
-            try:
-                import numpy as np  # noqa: PLC0415
-                vec, _ = _build_reg_vector(prop, reg_bucket)
-                if vec is not None:
-                    X_reg = np.array([vec], dtype=float)
-                    predicted_value = round(float(reg_model.predict(X_reg)[0]), 2)
-            except Exception as exc:                                      # noqa: BLE001
-                _log(f"regression predict failed for {prop.get('market')}: {exc}")
+    if   edge >  0.03: recommendation = "Over"
+    elif edge < -0.03: recommendation = "Under"
+    else:               recommendation = "Pass"
+    confidence = min(_CONF_CAP, max(0.50, abs(edge) * 2.0 + 0.50))
 
     return {
         "recommendation":  recommendation,
@@ -617,8 +641,80 @@ def predict(prop: dict) -> dict:
         "market_prob":     round(market_prob, 4),
         "edge":            round(edge, 4),
         "source":          source,
-        "predicted_value": predicted_value,
+        "predicted_value": _run_regressor(prop, bucket),
     }
+
+
+def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
+    """Score both sides of a prop with a single model call.
+
+    Guarantees over_result["model_prob"] + under_result["model_prob"] == 1.0
+    exactly — the Under result is derived by complementing the Over probability,
+    not by an independent model call.
+
+    Market probabilities are de-vigged per-side using each prop's own
+    best_odds so the market_prob pair also sums to 1.0 correctly.
+
+    Use this instead of two separate predict() calls whenever both sides of
+    the same line are available.
+    """
+    bucket = _bucket_for_market(
+        over_prop.get("market") or under_prop.get("market") or ""
+    )
+    model = (_pitcher_model if bucket == "pitcher" else _batter_model).load()
+
+    # ── Model: single call, P(Over) direction ────────────────────────────
+    raw_over_prob = _american_to_prob(over_prop.get("best_odds"))
+    source = "heuristic"
+    if model is not None:
+        try:
+            import numpy as np  # noqa: PLC0415
+            vec, _ = _build_reg_vector(over_prop, bucket)
+            X = np.array([vec], dtype=float)
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X)[0]
+                raw = float(proba[1]) if len(proba) > 1 else float(proba[0])
+            else:
+                raw = float(model.predict(X)[0])
+            raw_over_prob = _squash_prob(raw)
+            source = "joblib"
+        except Exception as exc:                                          # noqa: BLE001
+            _log(f"predict_pair joblib failed for {bucket}: {exc} -- heuristic")
+
+    # ── Market: no-vig per side ───────────────────────────────────────────
+    mkt_over_raw  = _american_to_prob(over_prop.get("best_odds"))
+    mkt_under_raw = _american_to_prob(under_prop.get("best_odds"))
+    total_mkt = mkt_over_raw + mkt_under_raw
+    if total_mkt > 0:
+        mkt_over  = mkt_over_raw  / total_mkt
+        mkt_under = mkt_under_raw / total_mkt
+    else:
+        mkt_over  = 0.5
+        mkt_under = 0.5
+
+    # ── Under is the exact complement ────────────────────────────────────
+    raw_under_prob = 1.0 - raw_over_prob
+
+    # ── Regression (shared; keyed off the Over prop) ─────────────────────
+    predicted_value = _run_regressor(over_prop, bucket)
+
+    def _make(model_p: float, market_p: float) -> dict:
+        edge = model_p - market_p
+        if   edge >  0.03: rec = "Over"
+        elif edge < -0.03: rec = "Under"
+        else:               rec = "Pass"
+        conf = min(_CONF_CAP, max(0.50, abs(edge) * 2.0 + 0.50))
+        return {
+            "recommendation":  rec,
+            "confidence":      round(conf, 4),
+            "model_prob":      round(model_p, 4),
+            "market_prob":     round(market_p, 4),
+            "edge":            round(edge, 4),
+            "source":          source,
+            "predicted_value": predicted_value,
+        }
+
+    return _make(raw_over_prob, mkt_over), _make(raw_under_prob, mkt_under)
 
 
 # ── Record tracking ─────────────────────────────────────────────────────────
