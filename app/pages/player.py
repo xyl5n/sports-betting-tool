@@ -247,13 +247,18 @@ def _section_hero(info: dict, is_pitcher: bool, today_prop: Optional[dict]) -> N
 
             # Today's prop chip (compact preview in hero)
             if today_prop and today_prop.get("recommendation") != "Pass":
-                side  = today_prop.get("side") or "Over"
+                # Prefer ``side`` over ``recommendation`` -- the side
+                # field is the canonical "which side was scored" tag and
+                # always matches what /props shows.  Older cache rows
+                # written before the predict() recommendation fix may
+                # have a flipped recommendation; reading side first
+                # keeps the chip on /player consistent with /props.
+                side  = today_prop.get("side") or today_prop.get("recommendation") or "Over"
                 conf  = int((today_prop.get("confidence") or 0) * 100)
                 line  = today_prop.get("line")
-                rec   = today_prop.get("recommendation") or side
-                chip_bg = t.POS if rec == "Over" else t.NEG
+                chip_bg = t.POS if side == "Over" else t.NEG
                 ui.label(
-                    f"TODAY: {rec.upper()} {line}  {conf}%"
+                    f"TODAY: {side.upper()} {line}  {conf}%"
                 ).style(
                     f"background: {chip_bg}; color: {t.BG}; "
                     f"font-size: 11px; font-weight: 800; letter-spacing: .4px; "
@@ -477,7 +482,13 @@ def _market_tab_body(
     )
 
     market   = prop.get("market", "")
-    side     = (prop.get("recommendation") or prop.get("side") or "Over").strip().title()
+    # ``side`` is the canonical scored direction (matches what /props
+    # renders).  We used to fall back to ``recommendation`` first,
+    # which surfaced the Michael Harris II flip when the cache row
+    # had ``side=Under`` + ``recommendation=Over`` from the predict()
+    # bug fixed in src/props_model.py.  Keep ``recommendation`` only as
+    # a last-ditch fallback for legacy entries that lack ``side``.
+    side     = (prop.get("side") or prop.get("recommendation") or "Over").strip().title()
     line     = prop.get("line")
     try:
         line_f = float(line)

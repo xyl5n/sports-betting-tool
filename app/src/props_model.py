@@ -1216,6 +1216,9 @@ def predict(prop: dict) -> dict:
     model call.
     """
     bucket = _bucket_for_market(prop.get("market", ""))
+    # market_prob = _american_to_prob(this side's odds).  Already aligned
+    # to the prop's side: for Over odds it's P_market(over wins), for
+    # Under odds it's P_market(under wins).  No flip below.
     market_prob = _american_to_prob(prop.get("best_odds"))
 
     # Compute regressor predicted_value once so we don't run it twice
@@ -1234,15 +1237,28 @@ def predict(prop: dict) -> dict:
     # (isotonic regression can do this at the boundaries).
     over_prob = max(0.0, min(1.0, float(raw_p)))
 
-    # Flip for the Under side AFTER the [0,1] clamp.
+    # Align both probabilities to the prop's actual side BEFORE computing
+    # edge.  Bug-fix history:
+    #   v1: flipped both over_prob AND market_prob on Under-side.  Wrong --
+    #       market_prob was already this-side from _american_to_prob, so the
+    #       second flip corrupted it to the OTHER side.
+    #   v2 (now): only flip over_prob (P_model from "over" -> "this side").
+    #       market_prob stays as-is.  Edge is now P_model(this) - P_market(this)
+    #       and is correctly signed in BOTH branches.
     side = (prop.get("side") or "Over").strip().title()
     if side == "Under":
-        over_prob   = 1.0 - over_prob
-        market_prob = 1.0 - market_prob
+        over_prob = 1.0 - over_prob   # now = P_model(under)
 
     edge = over_prob - market_prob
-    if   edge >  0.03: recommendation = "Over"
-    elif edge < -0.03: recommendation = "Under"
+
+    # Positive edge -> model favors THIS side -> bet THIS side.  Old code
+    # hardcoded "Over"/"Under" labels here, which left Under-side picks
+    # with recommendation="Over" when their edge was positive (and vice
+    # versa) -- the visible cross-page side flip on /props vs
+    # /player/<id>.
+    other_side = "Under" if side == "Over" else "Over"
+    if   edge >  0.03: recommendation = side
+    elif edge < -0.03: recommendation = other_side
     else:               recommendation = "Pass"
     # Confidence formula unchanged; the only difference is the upper
     # bound is now 1.0 instead of the old 0.85 hard ceiling.
@@ -1306,10 +1322,16 @@ def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
     # ── Under is the exact complement ────────────────────────────────────
     raw_under_prob = 1.0 - raw_over_prob
 
-    def _make(model_p: float, market_p: float) -> dict:
+    def _make(model_p: float, market_p: float, side: str) -> dict:
         edge = model_p - market_p
-        if   edge >  0.03: rec = "Over"
-        elif edge < -0.03: rec = "Under"
+        # Same fix as predict(): positive edge means model favors THIS
+        # side, so recommend THIS side -- the old code hardcoded "Over"
+        # / "Under" labels here regardless of which side was being
+        # scored, which gave Under-side props an "Over" recommendation
+        # when their edge was positive.
+        other_side = "Under" if side == "Over" else "Over"
+        if   edge >  0.03: rec = side
+        elif edge < -0.03: rec = other_side
         else:               rec = "Pass"
         # Confidence saturates at 1.0 (was capped at _CONF_CAP=0.85).
         conf = min(1.0, max(0.50, abs(edge) * 2.0 + 0.50))
@@ -1323,7 +1345,10 @@ def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
             "predicted_value": predicted_value,
         }
 
-    return _make(raw_over_prob, mkt_over), _make(raw_under_prob, mkt_under)
+    return (
+        _make(raw_over_prob,  mkt_over,  "Over"),
+        _make(raw_under_prob, mkt_under, "Under"),
+    )
 
 
 # ── Record tracking ─────────────────────────────────────────────────────────
