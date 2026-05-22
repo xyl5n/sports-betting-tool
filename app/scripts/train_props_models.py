@@ -767,6 +767,21 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         df = pd.DataFrame(games).sort_values("date").reset_index(drop=True)
         df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
 
+        # ── Defensive: ensure park_team exists ────────────────────────────
+        # Old cache files (written before park_team was added) lack this column.
+        # Derive it: home game → pitcher's own team is the park; away → opponent.
+        if "park_team" not in df.columns:
+            player_team = p.get("team", "")
+            df["park_team"] = df.apply(
+                lambda r: player_team if r.get("is_home") else (r.get("opp_team") or ""),
+                axis=1,
+            )
+
+        # ── Defensive: ensure games_started exists ─────────────────────────
+        # Should always be present, but guard against unexpected cache shapes.
+        if "games_started" not in df.columns:
+            df["games_started"] = 0
+
         # Per-row rate stats (needed for rolling averages)
         df["k_per_9"]  = (df["K"]  * 9.0 / df["IP"].clip(lower=0.01)).fillna(0.0)
         df["bb_per_9"] = (df["BB"] * 9.0 / df["IP"].clip(lower=0.01)).fillna(0.0)
@@ -779,19 +794,21 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
             df[f"r7_{c}"]  = df[c].shift(1).rolling(window=7,  min_periods=2).mean()
             df[f"r14_{c}"] = df[c].shift(1).rolling(window=14, min_periods=3).mean()
 
-        # days_since_last_start: calendar days between consecutive starts
-        # (shift so each row only knows the gap UP TO this appearance)
-        start_mask = df["games_started"] > 0
+        # days_since_last_start: calendar days between consecutive starts.
+        # Initialize _prev_start to NaT first so the column always exists even
+        # when start_mask is all-False (avoids KeyError on .ffill()).
+        df["_prev_start"] = pd.NaT
+        start_mask  = df["games_started"] > 0
         start_dates = df.loc[start_mask, "date_dt"]
-        df.loc[start_mask, "_prev_start"] = start_dates.shift(1).values
+        if not start_dates.empty:
+            df.loc[start_mask, "_prev_start"] = start_dates.shift(1).values
         df["_prev_start"] = df["_prev_start"].ffill()
         df["days_since_last_start"] = (
             (df["date_dt"] - pd.to_datetime(df["_prev_start"]))
-            .dt.days.fillna(5)  # neutral default ~5 days rest
+            .dt.days.fillna(5)   # neutral default ~5 days rest
             .clip(0, 30)
+            .fillna(5)           # second pass in case clip introduced NaN
         )
-        # For the first start there's no prior start → use 5 (normal rotation rest)
-        df["days_since_last_start"] = df["days_since_last_start"].fillna(5)
 
         # ip_last_30d: total IP pitched in the 30 calendar days BEFORE this game.
         # Use a date-indexed rolling sum (shift so current game excluded).
@@ -809,9 +826,9 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
             # Fallback: simple 6-game rolling sum (~30 days at typical 5d cadence)
             df["ip_last_30d"] = df["IP"].shift(1).rolling(6, min_periods=0).sum().fillna(0)
 
-        # Ballpark strikeout factor from hardcoded dict
-        df["ballpark_factor_k"] = (
-            df["park_team"].map(lambda t: PARK_FACTORS_K.get(t, 1.0))
+        # Ballpark strikeout factor — park_team is guaranteed to exist above
+        df["ballpark_factor_k"] = df["park_team"].map(
+            lambda t: PARK_FACTORS_K.get(str(t) if t else "", 1.0)
         )
 
         # Drop rows that lack rolling averages (first 2 appearances)
@@ -853,12 +870,21 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
+
+    # ── Column diagnostic — confirm all expected features are present ──────
+    _log(
+        f"pitcher feature matrix columns ({len(feature_names)} total): "
+        + ", ".join(sorted(feature_names))
+    )
+    missing_check = [c for c in feature_names if df_all[c].isna().all()]
+    if missing_check:
+        _log(f"  WARN: all-NaN columns (will be filled with 0): {missing_check}")
+
     X = df_all[feature_names].fillna(0).to_numpy(dtype=float)
     y = df_all["label"].to_numpy(dtype=int)
     _log(
         f"pitcher features: {X.shape[0]} rows × {X.shape[1]} cols  "
-        f"positive_rate={y.mean():.3f}  "
-        f"feature_count={len(feature_names)}"
+        f"positive_rate={y.mean():.3f}"
     )
     return X, y, feature_names
 
@@ -926,6 +952,23 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
         df = pd.DataFrame(games).sort_values("date").reset_index(drop=True)
 
+        # ── Defensive: ensure park_team exists ────────────────────────────
+        # Old cache files lack this column; derive it from is_home + opp_team.
+        if "park_team" not in df.columns:
+            player_team = p.get("team", "")
+            df["park_team"] = df.apply(
+                lambda r: player_team if r.get("is_home") else (r.get("opp_team") or ""),
+                axis=1,
+            )
+
+        # ── Defensive: ensure batting_order exists ─────────────────────────
+        if "batting_order" not in df.columns:
+            df["batting_order"] = 0
+
+        # ── Defensive: ensure opp_team exists (should always, but guard) ───
+        if "opp_team" not in df.columns:
+            df["opp_team"] = ""
+
         # Per-row rate stats
         df["H_per_AB"]  = (df["H"]  / df["AB"].clip(lower=1)).fillna(0.0)
         df["TB_per_AB"] = (df["TB"] / df["AB"].clip(lower=1)).fillna(0.0)
@@ -960,12 +1003,12 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         df["k_pct_7d"]  = df["k_pct"].shift(1).rolling(window=7,  min_periods=2).mean()
         df["k_pct_14d"] = df["k_pct"].shift(1).rolling(window=14, min_periods=3).mean()
 
-        # Ballpark factors from hardcoded dicts
+        # Ballpark factors — park_team is guaranteed to exist above
         df["ballpark_factor_hits"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_H.get(t, 1.0)
+            lambda t: PARK_FACTORS_H.get(str(t) if t else "", 1.0)
         )
         df["ballpark_factor_hr"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_HR.get(t, 1.0)
+            lambda t: PARK_FACTORS_HR.get(str(t) if t else "", 1.0)
         )
 
         df = df.dropna(subset=[f"szn_{roll_stats[0]}", f"r7_{roll_stats[0]}"])
@@ -1010,12 +1053,21 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
     df_all = pd.DataFrame(rows)
     feature_names = [c for c in df_all.columns if c != "label"]
+
+    # ── Column diagnostic — confirm all expected features are present ──────
+    _log(
+        f"batter feature matrix columns ({len(feature_names)} total): "
+        + ", ".join(sorted(feature_names))
+    )
+    missing_check = [c for c in feature_names if df_all[c].isna().all()]
+    if missing_check:
+        _log(f"  WARN: all-NaN columns (will be filled with 0): {missing_check}")
+
     X = df_all[feature_names].fillna(0).to_numpy(dtype=float)
     y = df_all["label"].to_numpy(dtype=int)
     _log(
         f"batter features: {X.shape[0]} rows × {X.shape[1]} cols  "
-        f"positive_rate={y.mean():.3f}  "
-        f"feature_count={len(feature_names)}"
+        f"positive_rate={y.mean():.3f}"
     )
     return X, y, feature_names
 
@@ -1054,8 +1106,13 @@ def _run_shap_analysis(
         explainer   = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X_sample)
 
-        # shap_values is 2-D (n_samples × n_features) for binary XGBoost
-        mean_abs = dict(zip(feature_names, abs(shap_values).mean(axis=0)))
+        # shap_values is 2-D (n_samples × n_features) for binary XGBoost.
+        # Cast to Python float immediately — numpy float32 is not JSON-
+        # serializable and would crash _save_feature_importance.
+        mean_abs = {
+            k: float(v)
+            for k, v in zip(feature_names, abs(shap_values).mean(axis=0))
+        }
 
         top15 = sorted(mean_abs.items(), key=lambda kv: -kv[1])[:15]
         _log(f"SHAP top-15 features [{label}]:")
@@ -1170,20 +1227,38 @@ def _train_and_save(
 # Supabase push (env-var driven, dotenv-aware)
 # ---------------------------------------------------------------------------
 
+def _sanitize_supabase_url(raw: str) -> str:
+    """Strip path / query / fragment from a Supabase project URL.
+
+    supabase-py builds REST paths by concatenating '/rest/v1' onto the URL
+    we pass in.  A trailing slash (or any path component) produces a double-
+    slash like 'https://x.supabase.co//rest/v1/app_cache', which PostgREST
+    rejects with PGRST125.  This matches the sanitization in src/db.py.
+    """
+    from urllib.parse import urlparse
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    if "://" not in raw:
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return raw
+
+
 def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
     """Push trained model files directly to Supabase app_cache table.
 
-    Reads SUPABASE_URL + SUPABASE_KEY from environment.  When
-    python-dotenv is installed and a .env file exists anywhere in the
-    parent chain, it is loaded first so local runs work without setting
-    env vars manually.
+    Uses the same supabase-py create_client pattern as src/db.py.
+    Reads SUPABASE_URL + SUPABASE_KEY from environment; loads .env via
+    python-dotenv when present so local runs work without Railway env vars.
 
-    Returns a short status string for the summary log.
+    Returns a short status string for the training summary log.
     """
-    # Load .env if available
+    # ── Load .env if python-dotenv is available ──────────────────────────
     try:
         from dotenv import load_dotenv
-        # Walk up to find a .env file (script may run from app/ or project root)
         here = Path(__file__).resolve()
         for parent in [here.parent, here.parent.parent, here.parent.parent.parent]:
             env_file = parent / ".env"
@@ -1192,28 +1267,44 @@ def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
                 _log(f"dotenv: loaded {env_file}")
                 break
     except ImportError:
-        pass  # python-dotenv optional
+        pass  # python-dotenv is optional
 
-    url = os.environ.get("SUPABASE_URL", "").strip()
-    key = os.environ.get("SUPABASE_KEY", "").strip()
+    url_raw = os.environ.get("SUPABASE_URL", "").strip()
+    key     = os.environ.get("SUPABASE_KEY", "").strip()
 
-    if not url or not key:
+    if not url_raw or not key:
         _log("Supabase: SUPABASE_URL or SUPABASE_KEY not set -- skipping push")
         return "skipped (no env vars)"
 
+    # Sanitize URL before passing to create_client (strips trailing slash /
+    # path components that cause PostgREST double-slash errors).
+    url = _sanitize_supabase_url(url_raw)
+    if url != url_raw:
+        _log(f"Supabase: URL sanitized: {url_raw!r} -> {url!r}")
+
+    # ── Import supabase-py (same pattern as src/db.py) ───────────────────
+    # postgrest-py is a required dependency of supabase>=2.0.0.  If this
+    # import raises ModuleNotFoundError it means requirements.txt was not
+    # fully installed — postgrest is now pinned explicitly to prevent this.
     try:
         import base64
-        from supabase import create_client
-    except ImportError as exc:
-        _log(f"Supabase: missing dependency ({exc}) -- skipping push")
-        return f"skipped ({exc})"
+        from supabase import create_client   # type: ignore[import-not-found]
+    except ModuleNotFoundError as exc:
+        _log(
+            f"Supabase: import failed ({exc}).  "
+            "Ensure 'supabase' and 'postgrest' are in requirements.txt "
+            "and the venv is up to date -- skipping push"
+        )
+        return f"skipped (import error: {exc})"
 
+    # ── Connect ──────────────────────────────────────────────────────────
     try:
         sb = create_client(url, key)
     except Exception as exc:  # noqa: BLE001
         _log(f"Supabase: create_client failed ({exc}) -- skipping push")
-        return f"error: {exc}"
+        return f"error: create_client: {exc}"
 
+    # ── Upsert each model file into app_cache ─────────────────────────────
     results = []
     for path, cache_key in [
         (pitcher_path, "props_model_pitcher"),
@@ -1225,18 +1316,26 @@ def _push_to_supabase_direct(pitcher_path: Path, batter_path: Path) -> str:
             continue
         try:
             encoded = base64.b64encode(path.read_bytes()).decode()
-            sb.table("app_cache").upsert({
-                "key":        cache_key,
-                "value":      encoded,
-                "updated_at": datetime.utcnow().isoformat() + "Z",
-            }).execute()
-            _log(f"Supabase: pushed {cache_key} ({len(encoded)//1024} KB)")
+            # on_conflict="key" matches the app_cache table primary key,
+            # consistent with how src/db.py writes to this table.
+            sb.table("app_cache").upsert(
+                {
+                    "key":        cache_key,
+                    "value":      encoded,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                },
+                on_conflict="key",
+            ).execute()
+            _log(f"Supabase: pushed {cache_key} ({len(encoded) // 1024} KB)")
             results.append(f"{cache_key}: ok")
         except Exception as exc:  # noqa: BLE001
-            _log(f"Supabase push {cache_key} failed: {exc}")
-            results.append(f"{cache_key}: error({exc})")
+            _log(f"Supabase: push {cache_key} failed: {exc}")
+            results.append(f"{cache_key}: error({type(exc).__name__}: {exc})")
 
-    return "  ".join(results)
+    status = "  ".join(results)
+    all_ok = all(r.endswith(": ok") for r in results)
+    _log(f"Supabase push complete: {status}")
+    return status if not all_ok else "ok"
 
 
 # ---------------------------------------------------------------------------
