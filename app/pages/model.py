@@ -204,40 +204,78 @@ def _picks_card(backend) -> None:
     except Exception:                                                     # noqa: BLE001
         picks = {}
 
-    # Build a result index keyed by (game_id, bet_type) -> ledger history
-    # row.  Lets _pick_row look up the settled outcome + P&L without
-    # reloading both ledgers per row.  We accept that a pick in
-    # daily_picks.json without a matching settled bet (e.g. not yet
-    # tracked, or in open_bets) just won't get a result -- it stays
-    # neutral.
+    # Build a result index keyed by (game_id, bet_type) -> ledger history row
+    # so _pick_row can look up the settled outcome + P&L without reloading
+    # both ledgers per row.
     result_index = _build_result_index(backend)
+
+    game_picks = picks.get("game_picks") or []
+    prop_picks = picks.get("prop_picks") or []
+    any_rendered = bool(game_picks or prop_picks)
 
     ui.label("TODAY'S MODEL PICKS").style(
         f"font-size: 11px; font-weight: 800; letter-spacing: .8px; "
         f"color: {t.TEXT_DIM2};"
     )
-    any_rendered = False
-    for cat_key, label, _aliases in _CATS:
-        arr = picks.get(cat_key) or []
-        if not arr:
-            continue
-        any_rendered = True
+
+    # ── Game picks (10 best across all markets) ──────────────────────────────
+    if game_picks:
         with ui.column().classes("w-full").style(
             f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
             f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 6px;"
         ):
             with ui.row().classes("items-center w-full justify-between"):
-                ui.label(label.upper()).style(
+                ui.label("GAME PICKS").style(
                     f"font-size: 12px; font-weight: 800; letter-spacing: .8px; "
                     f"color: {t.TEXT};"
                 )
-                ui.label(f"{len(arr)} pick{'s' if len(arr) != 1 else ''}").style(
+                ui.label(
+                    f"{len(game_picks)} pick{'s' if len(game_picks) != 1 else ''}"
+                ).style(
                     f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                     f"font-size: 10px; font-weight: 700; "
                     f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
                 )
-            for p in arr:
+            for p in game_picks:
+                # Derive cat_key from bet_type so line formatting works correctly.
+                bt = p.get("bet_type") or "single"
+                if bt in ("run_line", "spread"):
+                    cat_key = "run_line_spread"
+                elif bt == "totals":
+                    cat_key = "totals"
+                else:
+                    cat_key = "moneyline"
                 _pick_row(p, cat_key, result_index)
+
+    # ── Prop picks (top-5 by confidence) ────────────────────────────────────
+    if prop_picks:
+        with ui.column().classes("w-full").style(
+            f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 6px;"
+        ):
+            with ui.row().classes("items-center w-full justify-between"):
+                ui.label("PROP PICKS").style(
+                    f"font-size: 12px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                ui.label(
+                    f"{len(prop_picks)} pick{'s' if len(prop_picks) != 1 else ''}"
+                ).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 10px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+            for p in prop_picks:
+                _prop_pick_row(p)
+
+    if not any_rendered:
+        with ui.column().classes("w-full").style(
+            f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_LG}; align-items: center;"
+        ):
+            ui.label("No picks generated yet — run analysis.").style(
+                f"color: {t.TEXT_DIM}; font-size: 12px;"
+            )
 
 
 def _build_result_index(backend) -> dict[tuple[str, str], dict]:
@@ -257,15 +295,6 @@ def _build_result_index(backend) -> dict[tuple[str, str], dict]:
                 continue
             out[(str(gid), str(bt))] = h
     return out
-
-    if not any_rendered:
-        with ui.column().classes("w-full").style(
-            f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
-            f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_LG}; align-items: center;"
-        ):
-            ui.label("No picks generated yet -- run analysis.").style(
-                f"color: {t.TEXT_DIM}; font-size: 12px;"
-            )
 
 
 def _pick_row(
@@ -359,6 +388,71 @@ def _pick_row(
             ui.label(amount_text).style(
                 f"font-size: 12px; font-weight: 700; color: {amount_color};"
             )
+
+
+def _prop_pick_row(p: dict) -> None:
+    """Render one prop pick row: rank · player / market label · side · line ·
+    predicted value · confidence."""
+    from components import theme as _t
+
+    rank   = p.get("rank", "·")
+    player = p.get("player") or "—"
+    market = (p.get("market") or "").replace("_", " ").title()
+    side   = (p.get("side") or "Over").strip().title()
+    line   = p.get("line")
+    pv     = p.get("predicted_value")
+    conf   = float(p.get("confidence") or 0) * 100
+    odds   = p.get("best_odds")
+
+    try:
+        line_s = f"{float(line):g}"
+    except (TypeError, ValueError):
+        line_s = "—"
+
+    try:
+        pv_s = f"{float(pv):.2f}"
+    except (TypeError, ValueError):
+        pv_s = "—"
+
+    odds_s = ""
+    if isinstance(odds, (int, float)):
+        odds_s = f"+{int(odds)}" if odds > 0 else f"{int(odds)}"
+
+    # Side color: Over = accent, Under = secondary/dim
+    side_color = _t.PRIMARY if side == "Over" else _t.TEXT_DIM
+
+    with ui.row().classes("items-center w-full").style(
+        f"padding: 6px 0; border-bottom: 1px solid {_t.BORDER_SOFT}; gap: 10px;"
+    ):
+        ui.label(f"{rank}").style(
+            f"color: {_t.TEXT_DIM}; font-weight: 800; min-width: 18px; "
+            f"font-family: monospace; text-align: center;"
+        )
+        with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
+            ui.label(player).style(
+                f"font-size: 13px; font-weight: 700; color: {_t.TEXT}; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            )
+            ui.label(market).style(
+                f"font-size: 10px; color: {_t.TEXT_DIM2}; letter-spacing: .3px;"
+            )
+        ui.label(f"{side} {line_s}").style(
+            f"font-size: 12px; font-weight: 700; color: {side_color}; "
+            f"font-family: monospace; white-space: nowrap;"
+        )
+        with ui.column().style("align-items: flex-end; gap: 1px;"):
+            ui.label(f"{conf:.0f}%").style(
+                f"font-size: 12px; font-weight: 700; color: {_t.PRIMARY}; "
+                f"font-family: monospace;"
+            )
+            if pv_s != "—":
+                ui.label(f"pred {pv_s}").style(
+                    f"font-size: 10px; color: {_t.TEXT_DIM2}; font-family: monospace;"
+                )
+            elif odds_s:
+                ui.label(odds_s).style(
+                    f"font-size: 10px; color: {_t.TEXT_DIM}; font-family: monospace;"
+                )
 
 
 # ── Section: Per-classifier accuracy ────────────────────────────────────────
