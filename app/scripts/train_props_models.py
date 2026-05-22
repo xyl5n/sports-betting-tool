@@ -713,7 +713,201 @@ def collect_multi_season_data(
 # Feature engineering — pitcher
 # ---------------------------------------------------------------------------
 
-def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, dict]]):
+# ---------------------------------------------------------------------------
+# Opponent context + pitcher career baseline (PR #2)
+# ---------------------------------------------------------------------------
+# Three groups of derived features computed once per training run:
+#   * Batter handedness map (player_id -> "L"/"R"/"S") fetched in batches from
+#     MLB Stats API /people?personIds=... and cached on disk.
+#   * Per-(season, team) baselines (k_rate, woba_proxy, lhb_pct) aggregated
+#     from cached batter game logs + the handedness map.  These are looked up
+#     at inference by opposing batting team so the pitcher model sees opponent
+#     quality, not just pitcher form.
+#   * Per-pitcher career baselines (k_per_9, bb_per_9, total_ip) aggregated
+#     across the entire training horizon.  Stable signal that smooths over
+#     small-sample season variance.
+
+_HANDEDNESS_CACHE_PATH = _CACHE_DIR / "batter_handedness.json"
+_TEAM_BASELINES_PATH   = _CACHE_DIR / "team_baselines.json"
+
+
+def collect_batter_handedness(payload: dict, *, refresh: bool = False) -> dict[int, str]:
+    """Fetch L/R/S batting hand for every unique batter in *payload*.
+
+    Returns {batter_id: "L" | "R" | "S"}.  Cached at .cache/batter_handedness.json
+    so reruns skip the ~30 batched HTTP calls.
+
+    Switch hitters (S) are treated as LHB in downstream lineup-LHB% math —
+    they bat from the left vs the majority of starters (RHP), which is the
+    distribution that drives our pitcher-vs-LHB feature interaction.
+    """
+    cache: dict[int, str] = {}
+    if _HANDEDNESS_CACHE_PATH.exists() and not refresh:
+        try:
+            raw = json.loads(_HANDEDNESS_CACHE_PATH.read_text(encoding="utf-8"))
+            cache = {int(k): str(v) for k, v in raw.items() if v}
+            _log(f"batter handedness cache: {len(cache)} players")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"handedness cache read failed ({exc}) -- refetching")
+
+    # Build set of unique batter ids across all seasons in this payload.
+    needed: set[int] = set()
+    for b in (payload.get("batters") or []):
+        bid = int(b.get("id") or 0)
+        if bid and bid not in cache:
+            needed.add(bid)
+
+    if not needed:
+        _log("batter handedness: all players already cached")
+        return cache
+
+    _log(f"batter handedness: fetching {len(needed)} new players in batches")
+    ids = sorted(needed)
+    BATCH = 50
+    fetched = 0
+    for i in range(0, len(ids), BATCH):
+        chunk = ids[i:i + BATCH]
+        url = (f"{_STATS_BASE}/people"
+               f"?personIds={','.join(str(x) for x in chunk)}&hydrate=batSide")
+        data = _fetch_json(url, label=f"people-batch[{i}:{i+len(chunk)}]")
+        if not data:
+            continue
+        for person in (data.get("people") or []):
+            pid = int(person.get("id") or 0)
+            if not pid:
+                continue
+            hand = ((person.get("batSide") or {}).get("code") or "").strip().upper()
+            if hand in ("L", "R", "S"):
+                cache[pid] = hand
+                fetched += 1
+        time.sleep(_HTTP_SLEEP)
+        if (i // BATCH) % 10 == 0:
+            _log(f"  handedness progress: {fetched}/{len(needed)}")
+
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _HANDEDNESS_CACHE_PATH.write_text(
+            json.dumps({str(k): v for k, v in cache.items()}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _log(f"batter handedness saved: {_HANDEDNESS_CACHE_PATH} "
+             f"({len(cache)} players, +{fetched} new)")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"handedness cache write failed: {exc}")
+    return cache
+
+
+def compute_team_baselines(
+    payload: dict,
+    handedness: dict[int, str],
+) -> dict[str, dict[str, float]]:
+    """Aggregate per-(season, team) batter stats from cached game logs.
+
+    Returns {"<season>:<team_abbrev>": {team_k_rate, team_woba, team_lhb_pct}}.
+
+    *team_k_rate* = sum(SO) / sum(PA) across all batters whose team_abbrev
+        equals the key team in the given season.
+    *team_woba* = OPS proxy = OBP + SLG = (H+BB)/(AB+BB) + TB/AB.  Not a true
+        Fangraphs wOBA — that needs split hit totals (1B/2B/3B/HR) we don't
+        cache — but OPS correlates highly with wOBA (~0.96) and uses fields
+        we already have.
+    *team_lhb_pct* = sum(PA) by LHB / sum(PA) total.  Switch hitters are
+        counted as LHB (see collect_batter_handedness docstring).
+
+    Keyed as "<season>:<team>" so a single dict survives multi-season pooling.
+    Inference looks up by the opposing batting team for the prop's game.
+    """
+    agg: dict[tuple[int, str], dict[str, float]] = {}
+    for b in (payload.get("batters") or []):
+        season = int(b.get("season") or 0)
+        team   = (b.get("team") or "").strip().upper()
+        bid    = int(b.get("id") or 0)
+        if not (season and team and bid):
+            continue
+        hand = handedness.get(bid, "R")  # default to RHB when handedness unknown
+        is_lhb = hand in ("L", "S")
+        key = (season, team)
+        bucket = agg.setdefault(key, {
+            "SO": 0.0, "PA": 0.0, "H": 0.0, "BB": 0.0,
+            "AB": 0.0, "TB": 0.0, "PA_LHB": 0.0,
+        })
+        for g in (b.get("games") or []):
+            try:
+                pa = int(g.get("PA") or 0)
+                ab = int(g.get("AB") or 0)
+                so = int(g.get("SO") or 0)
+                bb = int(g.get("BB") or 0)
+                h  = int(g.get("H")  or 0)
+                tb = int(g.get("TB") or 0)
+            except (TypeError, ValueError):
+                continue
+            bucket["SO"] += so
+            bucket["PA"] += pa
+            bucket["H"]  += h
+            bucket["BB"] += bb
+            bucket["AB"] += ab
+            bucket["TB"] += tb
+            if is_lhb:
+                bucket["PA_LHB"] += pa
+
+    out: dict[str, dict[str, float]] = {}
+    for (season, team), b in agg.items():
+        pa = max(b["PA"], 1.0)
+        ab = max(b["AB"], 1.0)
+        obp = (b["H"] + b["BB"]) / max(b["AB"] + b["BB"], 1.0)
+        slg = b["TB"] / ab
+        out[f"{season}:{team}"] = {
+            "team_k_rate":   round(b["SO"] / pa, 4),
+            "team_woba":     round(obp + slg, 4),  # OPS, ~0.96 corr with true wOBA
+            "team_lhb_pct":  round(b["PA_LHB"] / pa, 4),
+        }
+    _log(f"team baselines computed: {len(out)} (season, team) buckets")
+    return out
+
+
+def compute_career_baselines(payload: dict) -> dict[int, dict[str, float]]:
+    """Aggregate per-pitcher career baseline stats across all training seasons.
+
+    Returns {pid: {career_k_per_9, career_bb_per_9, career_ip}}.
+
+    Note on FIP substitution: the user originally requested career_fip, but
+    pitcher FIP requires HR-allowed which the gameLog cache does not include.
+    We substitute career_bb_per_9 — same skill axis (control) at zero extra
+    HTTP cost.  Switching to true FIP would mean refetching every pitcher's
+    full gameLog with HR field, which is a separate concern.
+    """
+    career: dict[int, dict[str, float]] = {}
+    for p in (payload.get("pitchers") or []):
+        pid = int(p.get("id") or 0)
+        if not pid:
+            continue
+        bucket = career.setdefault(pid, {"K": 0.0, "BB": 0.0, "IP": 0.0})
+        for g in (p.get("games") or []):
+            try:
+                bucket["K"]  += int(g.get("K")  or 0)
+                bucket["BB"] += int(g.get("BB") or 0)
+                bucket["IP"] += float(g.get("IP") or 0.0)
+            except (TypeError, ValueError):
+                continue
+
+    out: dict[int, dict[str, float]] = {}
+    for pid, b in career.items():
+        ip = max(b["IP"], 0.01)
+        out[pid] = {
+            "career_k_per_9":  round(b["K"]  * 9.0 / ip, 4),
+            "career_bb_per_9": round(b["BB"] * 9.0 / ip, 4),
+            "career_ip":       round(b["IP"], 2),
+        }
+    _log(f"career baselines computed: {len(out)} pitchers")
+    return out
+
+
+def _build_pitcher_dataset(
+    payload: dict,
+    splits_by_season: dict[int, dict[int, dict]],
+    team_baselines: Optional[dict[str, dict[str, float]]] = None,
+    career_baselines: Optional[dict[int, dict[str, float]]] = None,
+):
     """Build (X, y, reg_targets, feature_names, snapshots) for pitcher_strikeouts >= 6 label.
 
     Also returns a *snapshots* dict {str(player_id): {features..., name, team,
@@ -728,6 +922,14 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         season-to-date and 7/14-game rolling K, BB, H, ER, IP, K/9, BB/9
         days_since_last_start, ip_last_30d (fatigue), ballpark_factor_k,
         is_home, era_vs_lhb, k_rate_vs_lhb, era_vs_rhb, k_rate_vs_rhb
+
+    Opponent context features (per-row, looked up from team_baselines by
+    (season, opp_team) — same values reused at inference time):
+        opp_team_k_rate, opp_team_woba, opp_team_lhb_pct
+
+    Pitcher career baseline features (per-pitcher, identical for every row
+    of the same pid — looked up from career_baselines):
+        career_k_per_9, career_bb_per_9, career_ip
 
     Inference-time placeholder features (zero during training; populated
     at prediction time by the inference layer):
@@ -778,6 +980,15 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         splits = season_splits.get(pid, {
             "era_vs_lhb": 4.50, "k_rate_vs_lhb": 0.215,
             "era_vs_rhb": 4.50, "k_rate_vs_rhb": 0.215,
+        })
+
+        # Career baseline (same value for every row of this pid).  Defaults
+        # match league-average modern era: K/9 ~ 8.5, BB/9 ~ 3.3, IP small
+        # so the model can learn "low IP = high variance" if it wants.
+        career = (career_baselines or {}).get(pid, {
+            "career_k_per_9":  8.50,
+            "career_bb_per_9": 3.30,
+            "career_ip":       50.0,
         })
 
         df = pd.DataFrame(games).sort_values("date").reset_index(drop=True)
@@ -867,6 +1078,14 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
             ]
         )
 
+        # Default opp-team baselines used when the opponent team has no row
+        # in team_baselines (e.g. interleague + first appearance, or a team
+        # abbrev mismatch).  Tuned to modern-era league averages.
+        OPP_DEFAULTS = {
+            "opp_team_k_rate":  0.225,
+            "opp_team_woba":    0.720,   # league-avg OPS proxy
+            "opp_team_lhb_pct": 0.420,
+        }
         for _, row in df.iterrows():
             record = {c: float(row[c]) for c in feat_cols}
             # Static platoon splits (same value for all rows of this player+season)
@@ -874,6 +1093,20 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
             record["k_rate_vs_lhb"] = float(splits.get("k_rate_vs_lhb", 0.215))
             record["era_vs_rhb"]    = float(splits.get("era_vs_rhb", 4.50))
             record["k_rate_vs_rhb"] = float(splits.get("k_rate_vs_rhb", 0.215))
+            # ── Opponent context (per-row, varies with opp_team) ─────────────
+            opp = (row.get("opp_team") or "").strip().upper()
+            opp_key = f"{int(season)}:{opp}"
+            opp_stats = (team_baselines or {}).get(opp_key, OPP_DEFAULTS)
+            record["opp_team_k_rate"]  = float(opp_stats.get("opp_team_k_rate",
+                                              opp_stats.get("team_k_rate", OPP_DEFAULTS["opp_team_k_rate"])))
+            record["opp_team_woba"]    = float(opp_stats.get("opp_team_woba",
+                                              opp_stats.get("team_woba", OPP_DEFAULTS["opp_team_woba"])))
+            record["opp_team_lhb_pct"] = float(opp_stats.get("opp_team_lhb_pct",
+                                              opp_stats.get("team_lhb_pct", OPP_DEFAULTS["opp_team_lhb_pct"])))
+            # ── Pitcher career baseline (static per pid) ─────────────────────
+            record["career_k_per_9"]  = float(career["career_k_per_9"])
+            record["career_bb_per_9"] = float(career["career_bb_per_9"])
+            record["career_ip"]       = float(career["career_ip"])
             # Inference-time features — zero during training
             for f in INFER_FEATS:
                 record[f] = 0.0
@@ -894,12 +1127,20 @@ def _build_pitcher_dataset(payload: dict, splits_by_season: dict[int, dict[int, 
         # real values instead of the line-as-proxy heuristic.  Last-season wins
         # because collect_multi_season_data appends seasons in order — most
         # recent training season for a given pitcher overwrites earlier ones.
+        #
+        # NOTE: opp_team_* features are *opponent*-dependent and live in
+        # team_baselines.json instead of the per-pitcher snapshot.  Inference
+        # looks them up by the current prop's opposing batting team.
         last = df.iloc[-1]
         snap_feats = {c: float(last[c]) for c in feat_cols}
         snap_feats["era_vs_lhb"]    = float(splits.get("era_vs_lhb", 4.50))
         snap_feats["k_rate_vs_lhb"] = float(splits.get("k_rate_vs_lhb", 0.215))
         snap_feats["era_vs_rhb"]    = float(splits.get("era_vs_rhb", 4.50))
         snap_feats["k_rate_vs_rhb"] = float(splits.get("k_rate_vs_rhb", 0.215))
+        # Career baselines travel with the pitcher snapshot (stable across games).
+        snap_feats["career_k_per_9"]  = float(career["career_k_per_9"])
+        snap_feats["career_bb_per_9"] = float(career["career_bb_per_9"])
+        snap_feats["career_ip"]       = float(career["career_ip"])
         snapshots[str(pid)] = {
             "name":        pname,
             "team":        pteam,
@@ -1585,6 +1826,30 @@ def main() -> int:
                 refresh=args.refresh_data,
             )
 
+    # ── 2b. Opponent context + career baselines (PR #2) ─────────────────────
+    # Built once across the full payload and shared by every pitcher row.
+    # team_baselines is also persisted to disk so inference can look up the
+    # opposing batting team's k_rate / woba / lhb_pct at predict time.
+    team_baselines:   dict[str, dict[str, float]] = {}
+    career_baselines: dict[int, dict[str, float]] = {}
+    if not args.skip_pitcher:
+        handedness = collect_batter_handedness(payload, refresh=args.refresh_data)
+        team_baselines   = compute_team_baselines(payload, handedness)
+        career_baselines = compute_career_baselines(payload)
+        try:
+            _TEAM_BASELINES_PATH.write_text(
+                json.dumps({
+                    "generated_at":   datetime.utcnow().isoformat() + "Z",
+                    "team_baselines": team_baselines,
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            _log(f"team baselines saved: {_TEAM_BASELINES_PATH} "
+                 f"({len(team_baselines)} buckets)")
+            summary["team_baselines_saved"] = True
+        except Exception as exc:  # noqa: BLE001
+            _log(f"team baselines save failed: {exc}")
+
     # ── 3. Feature engineering + training ───────────────────────────────────
     pitcher_importance: dict[str, float] = {}
     batter_importance:  dict[str, float] = {}
@@ -1599,6 +1864,8 @@ def main() -> int:
         _log("building pitcher feature matrix …")
         X, y, reg_targets_p, feat_names, pitcher_snapshots = _build_pitcher_dataset(
             payload, pitcher_splits_by_season,
+            team_baselines=team_baselines,
+            career_baselines=career_baselines,
         )
         acc, model = _train_and_save(X, y, pitcher_path, label="pitcher")
         summary["pitcher_oof_acc"] = acc
@@ -1768,6 +2035,8 @@ def main() -> int:
             model_pairs.append((pitcher_snapshot_path, "pitcher_rolling_snapshots"))
         if snapshot_path.exists():
             model_pairs.append((snapshot_path, "batter_rolling_snapshots"))
+        if _TEAM_BASELINES_PATH.exists():
+            model_pairs.append((_TEAM_BASELINES_PATH, "team_baselines"))
         push_result = _push_to_supabase_direct(model_pairs)
         summary["supabase_push"] = push_result
 
