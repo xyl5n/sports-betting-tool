@@ -884,6 +884,92 @@ def _squash_prob(p: float) -> float:
     return max(_PROB_LO, min(_PROB_HI, p))
 
 
+def _poisson_over_prob(lam: float, line: float) -> float:
+    """P(X > line) where X ~ Poisson(lam).
+
+    The principled way to convert a count-regressor's mean prediction into
+    an over-probability for a sportsbook line.  Half-integer lines (1.5,
+    2.5, ...) are unambiguous.  Whole-integer lines return P(X > line) —
+    pushes at X == line are excluded, matching how sportsbooks settle
+    (push is a separate outcome from over/under).
+
+    Args:
+      lam:  Poisson mean (= regressor's predicted_value).
+      line: Sportsbook line.
+
+    Returns:
+      Probability in [0, 1].  Returns 0.0 when lam <= 0.
+    """
+    if lam <= 0:
+        return 0.0
+    import math
+    k = int(math.floor(line))
+    # P(X <= k) accumulated term-by-term to avoid factorial overflow.
+    # term[i] = term[i-1] * lam / i; seed term[0] = exp(-lam).
+    term = math.exp(-lam)
+    cdf  = term
+    for i in range(1, k + 1):
+        term *= lam / i
+        cdf  += term
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def _compute_raw_over_prob(
+    prop: dict, bucket: str, *, predicted_value: Optional[float] = None,
+) -> tuple[float, str]:
+    """Return (raw_over_prob, source) before squashing or side-flip.
+
+    PR2 fix for the "classifier P(H>=1) used as over_prob for every batter
+    market" bug.  For batter markets with a working regressor: convert the
+    predicted_value (= Poisson mean) into P(over) via _poisson_over_prob so
+    each market gets its own line-aware probability.  For pitcher markets
+    and the rare batter case where the regressor doesn't return a value:
+    fall back to the classifier's raw predict_proba output.
+
+    Args:
+      prop: The prop dict.
+      bucket: "batter" or "pitcher".
+      predicted_value: Optional pre-computed regressor mean.  Pass this in
+        when the caller already ran the regressor (e.g. predict_pair) so
+        we don't double-run it.
+
+    Returns:
+      (raw_p, source) where source is "poisson", "joblib", or "heuristic".
+    """
+    raw_p  = _american_to_prob(prop.get("best_odds"))
+    source = "heuristic"
+
+    # ── Poisson PMF path (batter markets with a regressor) ───────────────
+    if bucket == "batter":
+        pv = predicted_value if predicted_value is not None else _run_regressor(prop, bucket)
+        if pv is not None:
+            try:
+                line = float(prop.get("line") or 0.0)
+                raw_p  = _poisson_over_prob(float(pv), line)
+                source = "poisson"
+                return raw_p, source
+            except (TypeError, ValueError) as exc:
+                _log(f"poisson over_prob failed for {prop.get('market')}: {exc} -- classifier")
+
+    # ── Classifier path (pitcher, or batter fallback) ────────────────────
+    model = (_pitcher_model if bucket == "pitcher" else _batter_model).load()
+    if model is not None:
+        try:
+            import numpy as np  # noqa: PLC0415
+            vec, _ = _build_reg_vector(prop, bucket)
+            X = np.array([vec], dtype=float)
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(X)[0]
+                raw_p = float(proba[1]) if len(proba) > 1 else float(proba[0])
+            else:
+                raw_p = float(model.predict(X)[0])
+            source = "joblib"
+        except Exception as exc:                                              # noqa: BLE001
+            _log(f"joblib predict failed for {bucket}: {exc} -- heuristic")
+
+    return raw_p, source
+
+
 def _bucket_for_market(market: str) -> str:
     return "pitcher" if (market or "").startswith("pitcher_") else "batter"
 
@@ -958,28 +1044,20 @@ def predict(prop: dict) -> dict:
     to make this invariant explicit and avoid a second model call.
     """
     bucket = _bucket_for_market(prop.get("market", ""))
-    model = (_pitcher_model if bucket == "pitcher" else _batter_model).load()
+    market_prob = _american_to_prob(prop.get("best_odds"))
 
-    over_prob = market_prob = _american_to_prob(prop.get("best_odds"))
+    # Compute regressor predicted_value once so we don't run it twice
+    # (Poisson over_prob path + the predicted_value field in the result).
+    predicted_value = _run_regressor(prop, bucket)
 
-    if model is not None:
-        try:
-            import numpy as np  # noqa: PLC0415
-            vec, _ = _build_reg_vector(prop, bucket)
-            X = np.array([vec], dtype=float)
-            if hasattr(model, "predict_proba"):
-                proba = model.predict_proba(X)[0]
-                raw_p = float(proba[1]) if len(proba) > 1 else float(proba[0])
-            else:
-                raw_p = float(model.predict(X)[0])
-            # Squash BEFORE side flip so Over + Under still sum to 1.0.
-            over_prob = _squash_prob(raw_p)
-            source = "joblib"
-        except Exception as exc:                                          # noqa: BLE001
-            _log(f"joblib predict failed for {bucket}: {exc} -- heuristic")
-            source = "heuristic"
-    else:
-        source = "heuristic"
+    # PR2: batter markets now derive over_prob from the regressor's mean via
+    # Poisson PMF, so each line (0.5, 1.5, 2.5) gets a market-correct
+    # probability rather than the classifier's P(H>=1) for every market.
+    # Pitcher markets and batter-no-regressor cases still use the classifier.
+    raw_p, source = _compute_raw_over_prob(prop, bucket, predicted_value=predicted_value)
+
+    # Squash BEFORE side flip so Over + Under still sum to 1.0.
+    over_prob = _squash_prob(raw_p)
 
     # Flip for the Under side AFTER squashing.
     side = (prop.get("side") or "Over").strip().title()
@@ -1000,7 +1078,7 @@ def predict(prop: dict) -> dict:
         "market_prob":     round(market_prob, 4),
         "edge":            round(edge, 4),
         "source":          source,
-        "predicted_value": _run_regressor(prop, bucket),
+        "predicted_value": predicted_value,
     }
 
 
@@ -1020,25 +1098,18 @@ def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
     bucket = _bucket_for_market(
         over_prop.get("market") or under_prop.get("market") or ""
     )
-    model = (_pitcher_model if bucket == "pitcher" else _batter_model).load()
+
+    # ── Regression (shared; keyed off the Over prop) — run FIRST so the ──
+    # Poisson PMF path in _compute_raw_over_prob can reuse the result.
+    predicted_value = _run_regressor(over_prop, bucket)
 
     # ── Model: single call, P(Over) direction ────────────────────────────
-    raw_over_prob = _american_to_prob(over_prop.get("best_odds"))
-    source = "heuristic"
-    if model is not None:
-        try:
-            import numpy as np  # noqa: PLC0415
-            vec, _ = _build_reg_vector(over_prop, bucket)
-            X = np.array([vec], dtype=float)
-            if hasattr(model, "predict_proba"):
-                proba = model.predict_proba(X)[0]
-                raw = float(proba[1]) if len(proba) > 1 else float(proba[0])
-            else:
-                raw = float(model.predict(X)[0])
-            raw_over_prob = _squash_prob(raw)
-            source = "joblib"
-        except Exception as exc:                                          # noqa: BLE001
-            _log(f"predict_pair joblib failed for {bucket}: {exc} -- heuristic")
+    # PR2: routes through _compute_raw_over_prob which uses Poisson PMF for
+    # batter markets when a regressor is available, classifier otherwise.
+    raw_over, source = _compute_raw_over_prob(
+        over_prop, bucket, predicted_value=predicted_value,
+    )
+    raw_over_prob = _squash_prob(raw_over)
 
     # ── Market: no-vig per side ───────────────────────────────────────────
     mkt_over_raw  = _american_to_prob(over_prop.get("best_odds"))
@@ -1053,9 +1124,6 @@ def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
 
     # ── Under is the exact complement ────────────────────────────────────
     raw_under_prob = 1.0 - raw_over_prob
-
-    # ── Regression (shared; keyed off the Over prop) ─────────────────────
-    predicted_value = _run_regressor(over_prop, bucket)
 
     def _make(model_p: float, market_p: float) -> dict:
         edge = model_p - market_p

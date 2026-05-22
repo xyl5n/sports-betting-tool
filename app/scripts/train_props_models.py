@@ -1291,13 +1291,26 @@ def _train_and_save(
     *,
     label: str,
 ) -> tuple[Optional[float], Optional[object]]:
-    """5-fold CV XGBoost training.  Returns (oof_accuracy, final_model)."""
+    """5-fold CV XGBoost training + isotonic calibration on a 20% holdout.
+
+    Returns (oof_accuracy, base_classifier).  The *saved* artifact is the
+    CalibratedClassifierCV wrapper; the returned model is the underlying
+    base XGB tree so SHAP TreeExplainer can introspect it (TreeExplainer
+    can't traverse the wrapper).
+
+    PR2 change: previously calibrated with cv='prefit' on the SAME X, y
+    used to fit the base classifier (acknowledged in the source as
+    "optimistic but directional").  Now uses an explicit 20% stratified
+    holdout — base fits on 80%, isotonic regression fits on the unseen
+    20% — so the post-calibration Brier score is an honest test-set
+    number, not a self-graded one.
+    """
     if X is None or y is None or len(X) < 20:
         _log(f"{label}: not enough data ({0 if X is None else len(X)} rows) "
              "-- skipping train")
         return None, None
     try:
-        from sklearn.model_selection import StratifiedKFold
+        from sklearn.model_selection import StratifiedKFold, train_test_split
         from sklearn.metrics         import accuracy_score, log_loss
         import xgboost as xgb
         import joblib
@@ -1306,16 +1319,19 @@ def _train_and_save(
         _log(f"{label}: missing dependency ({exc}) -- aborting")
         return None, None
 
+    _xgb_kwargs = dict(
+        n_estimators=400, max_depth=4, learning_rate=0.04,
+        subsample=0.8, colsample_bytree=0.75,
+        min_child_weight=3, gamma=0.1,
+        objective="binary:logistic", eval_metric="logloss",
+        use_label_encoder=False, verbosity=0,
+    )
+
+    # ── OOF k-fold on full X, y — honest generalisation measure ───────────
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     oof = np.zeros(len(y))
     for fold, (tr, te) in enumerate(skf.split(X, y), 1):
-        clf = xgb.XGBClassifier(
-            n_estimators=400, max_depth=4, learning_rate=0.04,
-            subsample=0.8, colsample_bytree=0.75,
-            min_child_weight=3, gamma=0.1,
-            objective="binary:logistic", eval_metric="logloss",
-            use_label_encoder=False, verbosity=0,
-        )
+        clf = xgb.XGBClassifier(**_xgb_kwargs)
         clf.fit(X[tr], y[tr])
         proba        = clf.predict_proba(X[te])[:, 1]
         oof[te]      = proba
@@ -1327,51 +1343,56 @@ def _train_and_save(
     oof_ll  = log_loss(y, oof, labels=[0, 1])
     _log(f"{label} OOF: acc={oof_acc:.3f}  log_loss={oof_ll:.3f}")
 
-    final = xgb.XGBClassifier(
-        n_estimators=400, max_depth=4, learning_rate=0.04,
-        subsample=0.8, colsample_bytree=0.75,
-        min_child_weight=3, gamma=0.1,
-        objective="binary:logistic", eval_metric="logloss",
-        use_label_encoder=False, verbosity=0,
+    # ── 80/20 stratified split: base trains on 80%, isotonic fits on 20% ──
+    X_train, X_cal, y_train, y_cal = train_test_split(
+        X, y, test_size=0.20, random_state=42, stratify=y,
     )
-    final.fit(X, y)
+    _log(
+        f"{label} split: base={len(X_train)} rows, calibration={len(X_cal)} rows "
+        f"(positive_rate train={y_train.mean():.3f}  cal={y_cal.mean():.3f})"
+    )
 
-    # ── Isotonic calibration ──────────────────────────────────────────────
-    # XGBoost classifiers are systematically overconfident.  Wrap with
-    # CalibratedClassifierCV (isotonic) so predict_proba() outputs are
-    # closer to empirical frequencies.
-    #
-    # cv='prefit' means the calibrator is fitted on the same training data
-    # used for the XGB model.  The OOF log-loss above already measures true
-    # generalisation; the calibration curve measured here is optimistic but
-    # the isotonic regression has so few effective parameters that overfitting
-    # on the training set is minimal in practice.
+    base = xgb.XGBClassifier(**_xgb_kwargs)
+    base.fit(X_train, y_train)
+
+    # ── Isotonic calibration on the held-out 20% ──────────────────────────
+    # We wrap `base` in FrozenEstimator so CalibratedClassifierCV.fit() only
+    # fits the isotonic map — the base classifier's weights aren't touched.
+    # sklearn 1.6+ removed the legacy `cv='prefit'` argument in favour of
+    # this pattern (the cv= arg is now strictly for k-fold ints / splitters).
+    # Base and calibrator see disjoint data, so the Brier delta below reads
+    # honestly as a test-set number.
     try:
         from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.frozen      import FrozenEstimator
         from sklearn.metrics     import brier_score_loss
 
-        # Pre-calibration Brier score using OOF predictions (honest).
-        brier_pre = brier_score_loss(y, oof)
-        _log(f"{label} pre-calibration Brier (OOF): {brier_pre:.4f}")
+        brier_pre_holdout = brier_score_loss(
+            y_cal, base.predict_proba(X_cal)[:, 1],
+        )
+        _log(f"{label} pre-calibration Brier (20% holdout): {brier_pre_holdout:.4f}")
 
-        calibrated = CalibratedClassifierCV(final, method="isotonic", cv="prefit")
-        calibrated.fit(X, y)
+        calibrated = CalibratedClassifierCV(
+            FrozenEstimator(base), method="isotonic",
+        )
+        calibrated.fit(X_cal, y_cal)
 
-        # Post-calibration Brier on training data (optimistic but directional).
-        cal_proba = calibrated.predict_proba(X)[:, 1]
-        brier_post = brier_score_loss(y, cal_proba)
-        _log(f"{label} post-calibration Brier (train): {brier_post:.4f}")
+        brier_post_holdout = brier_score_loss(
+            y_cal, calibrated.predict_proba(X_cal)[:, 1],
+        )
+        _log(f"{label} post-calibration Brier (20% holdout): {brier_post_holdout:.4f}")
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(calibrated, out_path)
         _log(f"{label} calibrated model saved: {out_path}")
-        return float(oof_acc), calibrated
+        # Return base for SHAP; calibrated is what landed on disk.
+        return float(oof_acc), base
     except Exception as cal_exc:                                            # noqa: BLE001
-        _log(f"{label} calibration failed ({cal_exc}) -- saving uncalibrated model")
+        _log(f"{label} calibration failed ({cal_exc}) -- saving uncalibrated base")
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(final, out_path)
+        joblib.dump(base, out_path)
         _log(f"{label} model saved (uncalibrated): {out_path}")
-        return float(oof_acc), final
+        return float(oof_acc), base
 
 
 def _train_regressor(
