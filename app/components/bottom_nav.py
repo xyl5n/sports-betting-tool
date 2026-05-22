@@ -1,14 +1,23 @@
 """
 Bottom tab bar -- mobile-only navigation.
 
-Fixed strip across the bottom of the viewport.  Five large tap targets
-matching the desktop navbar's TAB_* keys.  Hidden on desktop via the
-.mobile-only class -- show/hide is pure CSS in theme.page_head_css().
+Anchored to the viewport bottom via Quasar's QFooter (``ui.footer``)
+so it stays fixed across every page even when scrolling.  We render
+the floating "pill" bar look as a child of the footer rather than
+positioning the bar itself with ``position: fixed`` -- earlier
+attempts at that broke whenever a parent picked up a CSS ``transform``
+(which establishes a new containing block and de-anchors fixed
+descendants).  Quasar's QFooter handles the fixed positioning at
+the layout level, so the bar is robust against future CSS additions.
 
-Sport switcher (MLB / WNBA) lives inside the /sports/* page header
-on mobile because cramming a dropdown into a bottom-nav tab makes the
-tap-targets too small.  The "Sports" tab here just routes to
-/sports/mlb as a sensible default.
+The bar visually lifts off the viewport edge by ``max(12px,
+env(safe-area-inset-bottom))`` so iPhone home indicator + Safari
+swipe zone don't sit under the tap targets.  Quasar auto-reserves
+matching ``padding-bottom`` on ``.q-page-container`` so content above
+stays fully scrollable.
+
+Hidden on desktop via the ``.mobile-only`` class -- show/hide is
+pure CSS in ``theme.page_head_css``.
 """
 from __future__ import annotations
 
@@ -29,32 +38,32 @@ _TABS = (
 
 
 def render(active: str = t.TAB_HOME) -> None:
-    """Render the bottom tab bar.  Hidden on desktop via .mobile-only.
-
-    `bottom: max(12px, env(safe-area-inset-bottom))` lifts the bar
-    off the viewport edge so the tabs don't sit flush against the
-    iPhone home indicator / Safari address bar swipe zone.  On
-    devices without a safe-area inset the explicit 12px floor still
-    leaves clearance; on iPhones the env() value (usually 34px on
-    notched models) wins automatically.  The page container's
-    padding-bottom reservation in theme.py was bumped to match so
-    content above stays scrollable without being hidden under the
-    lifted bar.
-    """
-    with ui.element("div").classes("mobile-only").style(
-        f"position: fixed; left: 0; right: 0; "
-        f"bottom: max(12px, env(safe-area-inset-bottom)); z-index: 50; "
-        f"height: {t.BOTTOM_NAV_HEIGHT}; "
-        f"background: {t.CARD}; "
-        f"border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_LG}; "
-        f"margin: 0 8px; "
-        f"box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6); "
-        f"padding: 4px 6px; "
-        f"justify-content: space-around; align-items: stretch;"
+    """Render the bottom tab bar.  Mounted as a Quasar QFooter, so it
+    stays fixed at the bottom of the viewport on every page."""
+    # ui.footer() defaults to fixed=True (anchored at the bottom of
+    # the QLayout).  We strip the default elevation/border and use the
+    # footer purely as a transparent positioning host -- all visual
+    # styling lives on the inner floating bar.
+    with ui.footer(elevated=False, bordered=False).classes("mobile-only").style(
+        f"background: transparent !important; "
+        f"box-shadow: none !important; "
+        # Horizontal inset + safe-area-aware bottom inset.  The inner
+        # bar's height + this padding is what Quasar reserves as
+        # padding-bottom on .q-page-container so content above never
+        # gets covered.
+        f"padding: 0 8px max(12px, env(safe-area-inset-bottom)) 8px;"
     ):
-        for label, tab_key, href, icon in _TABS:
-            _tab(label, href, icon, active == tab_key)
+        with ui.element("div").style(
+            f"height: {t.BOTTOM_NAV_HEIGHT}; "
+            f"background: {t.CARD}; "
+            f"border: 1px solid {t.BORDER}; "
+            f"border-radius: {t.RADIUS_LG}; "
+            f"box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6); "
+            f"padding: 4px 6px; "
+            f"display: flex; justify-content: space-around; align-items: stretch;"
+        ):
+            for label, tab_key, href, icon in _TABS:
+                _tab(label, href, icon, active == tab_key)
 
 
 def _tab(label: str, href: str, icon: str, is_active: bool) -> None:

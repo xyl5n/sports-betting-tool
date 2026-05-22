@@ -292,8 +292,24 @@ def page_head_css() -> str:
         .desktop-only {{ display: none !important; }}
         .mobile-only  {{ display: flex !important; }}
 
-        /* Tighter padding everywhere on mobile */
-        .page-content {{ padding: 12px !important; gap: 12px !important; }}
+        /* Tighter padding everywhere on mobile.  Top padding is
+           deliberately tiny (4px) so the first card sits flush under
+           the navbar -- on a 667px iPhone viewport the prior 12px
+           top-padding + page-title margin combined to push real
+           content below the fold on landing.  Horizontal + bottom
+           insets stay at 12px for readability and to keep the bottom
+           nav's drop shadow off the last card. */
+        .page-content {{
+          padding: 4px 12px 12px 12px !important;
+          gap: 12px !important;
+        }}
+
+        /* Page titles ("PLAYER PROPS", "ADMIN", etc.) shouldn't add
+           extra vertical space on mobile -- the q-label default is
+           already line-height 1, but Quasar can apply margins via the
+           parent column gap.  Explicit 0 margins keep the title flush
+           with the page-content top padding. */
+        .page-title {{ margin: 0 !important; }}
 
         /* Hero stat cells -- wrap to 2 per row instead of 3 across */
         .hero-stats {{
@@ -325,13 +341,12 @@ def page_head_css() -> str:
         .bet-boxes .text-row > * {{ font-size: 10px !important; }}
         .bet-boxes .pick-text   {{ font-size: 12px !important; }}
 
-        /* Reserve space at the bottom for the mobile tab bar */
-        /* Reserve space for the floating bottom nav: bar height + the
-           12px-or-safe-area lift + breathing room above so the last
-           content row doesn't sit flush under the bar. */
-        .q-page-container {{
-          padding-bottom: calc({BOTTOM_NAV_HEIGHT} + env(safe-area-inset-bottom) + 28px) !important;
-        }}
+        /* Bottom-nav clearance is handled automatically by Quasar's
+           QLayout once the bar is mounted inside ui.footer() (see
+           components/bottom_nav.render).  We deliberately do NOT add
+           a manual padding-bottom on .q-page-container here -- doing
+           so would double-count with QLayout's auto-reservation and
+           push the last card up by ~70px of dead space. */
 
         /* Section titles a touch smaller on mobile */
         .page-title {{ font-size: 18px !important; }}
