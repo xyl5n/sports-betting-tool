@@ -532,6 +532,7 @@ def _market_tab_body(
                     f"font-size: 18px; font-weight: 800; color: {chip_bg}; "
                     f"font-family: monospace;"
                 )
+            _player_ev_badge(prop.get("ev_pct"))
 
         # Predicted value + opponent rank in a sub-row beneath the pill
         with ui.row().classes("items-center w-full").style(
@@ -1121,6 +1122,28 @@ def _not_found(slug: str) -> None:
 
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
+
+def _player_ev_badge(ev_pct) -> None:
+    """Render a small ``+12.4% EV`` chip in the market-tab header.
+
+    Same visual treatment as the props page's badge so the user
+    scans either page with the same color cues -- green positive,
+    red negative, grey when the cache hasn't computed EV yet.  EV%
+    is read straight off the prop dict (computed once in
+    props_scored_cache or player_profile_client).
+    """
+    try:
+        from src.props_ev import ev_color, ev_label
+    except Exception:                                                     # noqa: BLE001
+        return
+    ui.label(ev_label(ev_pct)).style(
+        f"background: {t.CARD_HI}; color: {ev_color(ev_pct, t)}; "
+        f"font-size: 10.5px; font-weight: 800; letter-spacing: .3px; "
+        f"padding: 3px 8px; border-radius: {t.RADIUS_PILL}; "
+        f"font-family: monospace; white-space: nowrap; "
+        f"align-self: flex-start; margin-left: 4px;"
+    )
+
 
 def _stat_value(game: dict, stat_key: str) -> float:
     """Extract the numeric value for *stat_key* from a game dict.

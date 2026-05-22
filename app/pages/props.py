@@ -173,14 +173,15 @@ def _section_unified_props_list(backend) -> None:
 
         # ── Filter bar ───────────────────────────────────────────────────
         # State drives both the visible card list and the count chip in
-        # the header above.  Default state shows everything sorted by
-        # confidence.  ``show_alts`` defaults off -- alts are persisted
-        # in the cache but hidden until the user opts in.
+        # the header above.  Default state hides negative-EV picks and
+        # the alt-line rows.  Both toggles are reachable from the
+        # filter bar below.
         state = {
-            "game":      "all",      # "all" or "<away>@<home>"
-            "market":    "all",      # "all" or specific market key
-            "min_rate":  0,          # 0..100 -- minimum L10 hit rate %
-            "show_alts": False,      # reveal alt-line rows under primaries
+            "game":         "all",   # "all" or "<away>@<home>"
+            "market":       "all",   # "all" or specific market key
+            "min_rate":     0,       # 0..100 -- minimum L10 hit rate %
+            "show_alts":    False,   # reveal alt-line rows under primaries
+            "pos_ev_only":  True,    # hide picks where ev_pct < 0
         }
 
         _filter_bar(rows, state, lambda: (cards_refresh.refresh(),
@@ -365,6 +366,32 @@ def _filter_bar(rows: list[dict], state: dict, on_change) -> None:
                 f"font-style: italic;"
             )
 
+        # Show Negative EV toggle -- defaults off so the list shows
+        # only picks with positive (or unknown) expected value.  We
+        # phrase it as "show negative" rather than "filter to positive"
+        # so the user can flip it on without thinking about polarity.
+        with ui.row().classes("items-center w-full").style(
+            "gap: 8px; padding-top: 4px;"
+        ):
+            ui.label("SHOW NEGATIVE EV").style(
+                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.TEXT_DIM2};"
+            )
+            ui.switch(
+                value=not bool(state.get("pos_ev_only", True)),
+                on_change=lambda e: (
+                    state.update(pos_ev_only=not bool(e.value)),
+                    on_change(),
+                ),
+            ).props("dense color=primary")
+            ui.label(
+                "Include picks where the model's edge doesn't beat the "
+                "book's juice (negative expected value)."
+            ).style(
+                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                f"font-style: italic;"
+            )
+
 
 def _apply_pick_filters(rows: list[dict], state: dict) -> list[dict]:
     """Return rows that satisfy every active filter in *state*."""
@@ -386,6 +413,19 @@ def _apply_pick_filters(rows: list[dict], state: dict) -> list[dict]:
     min_rate = int(state.get("min_rate") or 0)
     if min_rate > 0:
         out = [r for r in out if _l10_hit_rate_pct(r) >= min_rate]
+    if state.get("pos_ev_only"):
+        # Hide negative-EV picks but keep ev_pct=None rows visible --
+        # those are picks where the cache pre-dates the EV computation
+        # and we'd rather show them than disappear them silently.
+        def _keep(r: dict) -> bool:
+            ev = r.get("ev_pct")
+            if ev is None:
+                return True
+            try:
+                return float(ev) >= 0.0
+            except (TypeError, ValueError):
+                return True
+        out = [r for r in out if _keep(r)]
     return out
 
 
@@ -484,6 +524,7 @@ def _prop_card(r: dict, backend, *, show_alts: bool = False) -> None:
                     f"font-size: 18px; font-weight: 800; color: {chip_bg}; "
                     f"font-family: monospace; letter-spacing: -.2px;"
                 )
+                _ev_badge(r.get("ev_pct"))
 
         # Predicted value chip (only when a regression model produced one)
         pv = r.get("predicted_value")
@@ -542,6 +583,36 @@ def _prop_card(r: dict, backend, *, show_alts: bool = False) -> None:
         # scored without those lines competing as primary picks.
         if show_alts:
             _card_alt_lines_block(r)
+
+
+def _ev_badge(ev_pct, *, compact: bool = False) -> None:
+    """Render a small ``+12.4% EV`` chip beside the confidence number.
+
+    Green when EV is positive, red when negative, neutral grey when
+    the cache hasn't computed it yet (e.g. an older payload from before
+    this feature shipped).  ``compact=True`` shrinks the chip for use
+    on the dense alt-row strip.
+
+    EV% is sourced from the persisted ``ev_pct`` field on the pick
+    dict; the props page never recomputes -- see src/props_ev.py for
+    the formula.
+    """
+    try:
+        from src.props_ev import ev_color, ev_label
+    except Exception:                                                     # noqa: BLE001
+        return
+    label = ev_label(ev_pct)
+    color = ev_color(ev_pct, t)
+    if compact:
+        size, padding = "10px", "2px 6px"
+    else:
+        size, padding = "10.5px", "3px 8px"
+    ui.label(label).style(
+        f"background: {t.CARD_HI}; color: {color}; "
+        f"font-size: {size}; font-weight: 800; letter-spacing: .3px; "
+        f"padding: {padding}; border-radius: {t.RADIUS_PILL}; "
+        f"font-family: monospace; white-space: nowrap;"
+    )
 
 
 def _card_line_type_chip(r: dict) -> None:
@@ -612,6 +683,7 @@ def _alt_row(a: dict) -> None:
             f"font-size: 11px; font-weight: 800; color: {pill_bg}; "
             f"font-family: monospace; min-width: 36px;"
         )
+        _ev_badge(a.get("ev_pct"), compact=True)
         odds_bits: list[str] = []
         if o_odds is not None:
             odds_bits.append(f"O {_odds_str(o_odds)}")
