@@ -547,7 +547,61 @@ def get_player_gamelog(
 
 def get_today_prop(player_name: str) -> Optional[dict]:
     """Return the highest-confidence prop prediction for *player_name* today.
-    Returns None if props are unavailable or the player has no line today."""
+
+    Resolution order
+    ----------------
+    1. Already-scored picks in ``data/daily_picks.json`` (``prop_picks`` list).
+       These were scored by ``_collect_props()`` in the same worker process that
+       ran analysis, so they reflect a consistent model state.  Reading them
+       here avoids re-scoring and guarantees the side shown on the player page
+       matches what the model selected.
+
+    2. Live re-score fallback — used when the player is not in the top-5
+       daily props or the daily_picks file is stale/absent.  Before calling
+       ``predict()``, we inject the correct ``is_home`` from today's pitcher
+       schedule so the model uses today's game context instead of the
+       training-snapshot's (potentially stale) home/away value.  Without this
+       injection the feature vector may differ from the one used on the Props
+       page (which may have run on a different Railway worker with a different
+       in-memory snapshot), causing the side to flip.
+
+    Returns None if props are unavailable or the player has no line today.
+    """
+    name_lower = player_name.strip().lower()
+
+    # ── Part 1: read from already-scored daily prop_picks ─────────────────────
+    # Prefer the cached scored result so the player page shows exactly the
+    # same pick that _collect_props() selected, without re-running predict().
+    try:
+        from .daily_picks import load_daily_picks
+        daily     = load_daily_picks()
+        prop_picks = (daily.get("picks") or {}).get("prop_picks") or []
+        for pp in prop_picks:
+            if (pp.get("player") or "").strip().lower() == name_lower:
+                _log(
+                    f"get_today_prop({player_name!r}): "
+                    f"served from daily_picks cache "
+                    f"({pp.get('market')} {pp.get('side')} {pp.get('line')} "
+                    f"conf={pp.get('confidence')})"
+                )
+                return {
+                    "market":          pp.get("market"),
+                    "line":            pp.get("line"),
+                    "side":            pp.get("side"),
+                    "best_odds":       pp.get("best_odds"),
+                    "recommendation":  pp.get("recommendation"),
+                    "confidence":      pp.get("confidence"),
+                    "predicted_value": pp.get("predicted_value"),
+                }
+    except Exception as exc:
+        _log(f"get_today_prop({player_name!r}): daily_picks cache read failed: {exc}")
+
+    # ── Part 2: live re-score with correct is_home from today's schedule ───────
+    # Inject is_home into each prop dict before calling predict() so that
+    # _build_reg_vector overrides the snapshot's stale training-time value
+    # (props_model.py line: "if prop.get('is_home') is not None: vec[...] = ...").
+    # This makes the feature vector consistent regardless of which Railway
+    # worker handles the request or whether the pitcher snapshot is warm.
     try:
         from .props_client import get_client as _get_props_client
         from .props_model  import predict    as _predict
@@ -556,12 +610,15 @@ def get_today_prop(player_name: str) -> Optional[dict]:
     try:
         payload     = _get_props_client().get_today_props() or {}
         all_markets = payload.get("markets") or {}
-        name_lower  = player_name.lower()
         best: Optional[dict] = None
         for market, props in all_markets.items():
             for p in (props or []):
-                if (p.get("player_name") or "").lower() != name_lower:
+                if (p.get("player_name") or "").strip().lower() != name_lower:
                     continue
+                # Inject today's is_home so the model feature vector is
+                # consistent across workers.  For pitcher markets the schedule
+                # lookup is cheap (pitcher_client caches the schedule).
+                p = _inject_is_home(p)
                 try:
                     pred = _predict(p)
                 except Exception:
@@ -581,3 +638,38 @@ def get_today_prop(player_name: str) -> Optional[dict]:
     except Exception as exc:
         _log(f"get_today_prop({player_name!r}) failed: {exc}")
         return None
+
+
+def _inject_is_home(prop: dict) -> dict:
+    """Return a shallow copy of *prop* with ``is_home`` set from today's
+    pitcher schedule, or the original dict unchanged if the lookup fails.
+
+    Setting ``is_home`` on the prop dict causes ``_build_reg_vector`` in
+    props_model.py to override the snapshot's training-time ``is_home_i``
+    with today's correct home/away context.
+
+    Only active for pitcher markets (the field only moves the needle for
+    pitchers; batters are handled via snapshot/league-median fallback).
+    """
+    market = prop.get("market") or ""
+    if not market.startswith("pitcher_"):
+        return prop
+
+    player_name = (prop.get("player_name") or "").strip()
+    commence    = (prop.get("commence_time") or "").strip()
+    date_str    = commence[:10] if commence else None
+    if not player_name or not date_str:
+        return prop
+
+    try:
+        from .pitcher_inference_features import get_is_home_for_pitcher
+        is_home = get_is_home_for_pitcher(player_name, date_str)
+        if is_home is not None:
+            _log(
+                f"_inject_is_home: {player_name!r} {date_str} "
+                f"is_home={is_home} (market={market})"
+            )
+            return dict(prop, is_home=is_home)
+    except Exception as exc:
+        _log(f"_inject_is_home({player_name!r}) failed: {exc}")
+    return prop
