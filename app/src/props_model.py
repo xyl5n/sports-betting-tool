@@ -3,15 +3,23 @@ props_model.py
 ==============
 Per-market prediction model for MLB player props.
 
-Two model artifacts are loaded at module level:
+Two classifier artifacts are loaded at module level:
   .cache/props_model_pitcher.joblib   (xgb classifier for pitcher markets)
   .cache/props_model_batter.joblib    (xgb classifier for batter markets)
 
-Both are restored from Supabase on cold boot (the same pattern
-src.model uses for the moneyline / run-line / totals joblibs).  When
-no trained artifact is available the predictor falls back to a market-
-neutral heuristic that uses the prop line's implied probability so the
-UI always renders something rather than blanking out.
+Alongside those, per-stat XGBRegressor models produce a numeric
+predicted value:
+  .cache/props_model_pitcher_reg_{stat}.joblib  (K, ER, H, BB, outs)
+  .cache/props_model_batter_reg_{stat}.joblib   (H, TB, HR, RBI, R, BB)
+
+Feature names for the regression inference vector are loaded lazily
+from .cache/props_reg_metadata.json (written by the training script).
+
+Both classifiers are restored from Supabase on cold boot (the same
+pattern src.model uses for the moneyline / run-line / totals joblibs).
+When no trained artifact is available the predictor falls back to a
+market-neutral heuristic that uses the prop line's implied probability
+so the UI always renders something rather than blanking out.
 
 Training lives in scripts/train_props_models.py (pybaseball-driven).
 The runtime API here is read-only -- prediction + record tracking.
@@ -34,17 +42,73 @@ from .utils import _safe
 
 _CACHE_DIR = Path(".cache")
 
-# Artifact paths.  joblib because that's what BettingModel / RunLineModel
-# / TotalsModel already use, and the Supabase sync logic in
-# src.model.py + the boot mirror code in app.py can be reused as-is.
+# Classifier artifact paths.
 PITCHER_MODEL_PATH = _CACHE_DIR / "props_model_pitcher.joblib"
 BATTER_MODEL_PATH  = _CACHE_DIR / "props_model_batter.joblib"
+
+# Per-stat XGBRegressor paths (trained alongside the classifiers).
+_PITCHER_REG_STATS = ("K", "ER", "H", "BB", "outs")
+_BATTER_REG_STATS  = ("H", "TB", "HR", "RBI", "R", "BB")
+
+_PITCHER_REG_PATHS: dict[str, Path] = {
+    s: _CACHE_DIR / f"props_model_pitcher_reg_{s}.joblib" for s in _PITCHER_REG_STATS
+}
+_BATTER_REG_PATHS: dict[str, Path] = {
+    s: _CACHE_DIR / f"props_model_batter_reg_{s}.joblib" for s in _BATTER_REG_STATS
+}
+
+# Which regression stat does each prop market target?
+# Value: (bucket, stat_key) — None when no regressor is available.
+_MARKET_REG_KEY: dict[str, tuple[str, str]] = {
+    "pitcher_strikeouts":   ("pitcher", "K"),
+    "pitcher_earned_runs":  ("pitcher", "ER"),
+    "pitcher_hits_allowed": ("pitcher", "H"),
+    "pitcher_walks":        ("pitcher", "BB"),
+    "pitcher_outs":         ("pitcher", "outs"),
+    "batter_hits":          ("batter",  "H"),
+    "batter_total_bases":   ("batter",  "TB"),
+    "batter_home_runs":     ("batter",  "HR"),
+    "batter_rbis":          ("batter",  "RBI"),
+    "batter_runs_scored":   ("batter",  "R"),
+    "batter_walks":         ("batter",  "BB"),
+}
+
+# Feature-name metadata written by the training script.
+_REG_META_PATH = _CACHE_DIR / "props_reg_metadata.json"
 
 # Per-classifier picks history (mirrors xgb / lr / nn picks history
 # in /api/admin/reset/model_record so the new sinks plug into the
 # existing reset machinery).
 PITCHER_HISTORY_PATH = _CACHE_DIR / "props_pitcher_picks_history.json"
 BATTER_HISTORY_PATH  = _CACHE_DIR / "props_batter_picks_history.json"
+
+# Park factor tables (same values as train_props_models.py — kept in
+# sync manually; a mismatch shifts predictions slightly but not
+# catastrophically because park factors are small continuous signals).
+_PARK_K: dict[str, float] = {
+    "ARI": 0.96, "ATL": 0.99, "BAL": 1.00, "BOS": 0.96, "CHC": 0.97,
+    "CIN": 0.96, "CLE": 1.01, "COL": 0.88, "CWS": 0.99, "DET": 1.02,
+    "HOU": 1.00, "KC":  1.02, "LAA": 1.01, "LAD": 1.04, "MIA": 1.00,
+    "MIL": 1.00, "MIN": 1.00, "NYM": 1.03, "NYY": 0.94, "OAK": 1.04,
+    "PHI": 0.95, "PIT": 1.04, "SD":  1.05, "SEA": 1.04, "SF":  1.05,
+    "STL": 1.03, "TB":  1.03, "TEX": 0.97, "TOR": 0.99, "WSH": 1.00,
+}
+_PARK_H: dict[str, float] = {
+    "ARI": 0.97, "ATL": 0.99, "BAL": 1.01, "BOS": 1.08, "CHC": 1.05,
+    "CIN": 1.08, "CLE": 0.99, "COL": 1.25, "CWS": 1.00, "DET": 0.97,
+    "HOU": 0.99, "KC":  0.97, "LAA": 1.01, "LAD": 0.93, "MIA": 0.98,
+    "MIL": 1.00, "MIN": 1.00, "NYM": 0.95, "NYY": 1.05, "OAK": 0.96,
+    "PHI": 1.07, "PIT": 0.95, "SD":  0.90, "SEA": 0.93, "SF":  0.89,
+    "STL": 0.95, "TB":  0.97, "TEX": 1.02, "TOR": 0.99, "WSH": 1.00,
+}
+_PARK_HR: dict[str, float] = {
+    "ARI": 1.05, "ATL": 1.08, "BAL": 1.10, "BOS": 1.12, "CHC": 1.08,
+    "CIN": 1.35, "CLE": 0.95, "COL": 1.26, "CWS": 1.15, "DET": 0.85,
+    "HOU": 0.95, "KC":  0.88, "LAA": 1.05, "LAD": 0.87, "MIA": 0.85,
+    "MIL": 1.05, "MIN": 1.10, "NYM": 0.93, "NYY": 1.40, "OAK": 0.80,
+    "PHI": 1.30, "PIT": 0.82, "SD":  0.72, "SEA": 0.82, "SF":  0.60,
+    "STL": 0.90, "TB":  0.90, "TEX": 1.10, "TOR": 1.05, "WSH": 0.95,
+}
 
 
 def _log(msg: str) -> None:
@@ -114,6 +178,89 @@ class _LoadedModel:
 _pitcher_model = _LoadedModel(PITCHER_MODEL_PATH)
 _batter_model  = _LoadedModel(BATTER_MODEL_PATH)
 
+# Regression model lazy-loaders keyed by stat name.
+_pitcher_reg_models: dict[str, _LoadedModel] = {
+    s: _LoadedModel(p) for s, p in _PITCHER_REG_PATHS.items()
+}
+_batter_reg_models: dict[str, _LoadedModel] = {
+    s: _LoadedModel(p) for s, p in _BATTER_REG_PATHS.items()
+}
+
+# ── Regression metadata (feature names) ─────────────────────────────────────
+
+_reg_meta_cache: Optional[dict] = None
+
+
+def _load_reg_meta() -> dict:
+    """Lazily load props_reg_metadata.json once per process."""
+    global _reg_meta_cache
+    if _reg_meta_cache is not None:
+        return _reg_meta_cache
+    if not _REG_META_PATH.exists():
+        _reg_meta_cache = {}
+        return {}
+    try:
+        _reg_meta_cache = json.loads(_REG_META_PATH.read_text(encoding="utf-8"))
+        _log(f"reg metadata loaded: {len(_reg_meta_cache.get('pitcher_feature_names', []))} "
+             f"pitcher feats, {len(_reg_meta_cache.get('batter_feature_names', []))} batter feats")
+    except Exception as exc:                                               # noqa: BLE001
+        _log(f"reg metadata load failed: {exc}")
+        _reg_meta_cache = {}
+    return _reg_meta_cache
+
+
+def _build_reg_vector(prop: dict, bucket: str) -> tuple[Optional[list[float]], Optional[list[str]]]:
+    """Build a feature vector for a regression model inference call.
+
+    Uses the feature names saved at training time (props_reg_metadata.json)
+    to construct a zero vector of the correct length, then fills in the fields
+    available from the prop payload.  Missing fields stay zero — the same
+    convention used during training for inference-time placeholder features.
+
+    Returns (vector, feature_names) or (None, None) when metadata unavailable.
+    """
+    meta = _load_reg_meta()
+    fn_key = f"{bucket}_feature_names"
+    feature_names: Optional[list[str]] = meta.get(fn_key)
+    if not feature_names:
+        return None, None
+
+    fn_idx = {name: i for i, name in enumerate(feature_names)}
+    vec    = [0.0] * len(feature_names)
+
+    line = float(prop.get("line") or 0.0)
+
+    # Use prop line as a proxy for season-to-date and rolling averages.
+    # This is the best available signal at inference time: the sportsbook
+    # line itself reflects the expected per-game stat total.
+    for fname in feature_names:
+        if fname.startswith(("szn_", "r7_", "r14_")):
+            idx = fn_idx.get(fname)
+            if idx is not None:
+                vec[idx] = line
+
+    # is_home_i — whether this player is at home
+    is_home = bool(prop.get("is_home"))
+    if "is_home_i" in fn_idx:
+        vec[fn_idx["is_home_i"]] = float(is_home)
+
+    # Park team = always the home team's stadium, regardless of which side
+    # the player is on.
+    park_team = (prop.get("home_team") or "").strip().upper()[:3]
+
+    if "ballpark_factor_k" in fn_idx:
+        vec[fn_idx["ballpark_factor_k"]] = _PARK_K.get(park_team, 1.0)
+    if "ballpark_factor_hits" in fn_idx:
+        vec[fn_idx["ballpark_factor_hits"]] = _PARK_H.get(park_team, 1.0)
+    if "ballpark_factor_hr" in fn_idx:
+        vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
+
+    # days_since_last_start: neutral default (~5 days rest for starters)
+    if "days_since_last_start" in fn_idx:
+        vec[fn_idx["days_since_last_start"]] = 5.0
+
+    return vec, feature_names
+
 
 def restore_models_from_supabase() -> dict:
     """Mirror of the existing model joblib restore (see app.py boot
@@ -131,11 +278,17 @@ def restore_models_from_supabase() -> dict:
     except Exception:                                                     # noqa: BLE001
         return {"supabase": False}
 
-    pairs = (
+    all_pairs = [
         ("props_model_pitcher", PITCHER_MODEL_PATH),
         ("props_model_batter",  BATTER_MODEL_PATH),
-    )
-    for key, path in pairs:
+    ] + [
+        (f"props_model_pitcher_reg_{s}", p)
+        for s, p in _PITCHER_REG_PATHS.items()
+    ] + [
+        (f"props_model_batter_reg_{s}", p)
+        for s, p in _BATTER_REG_PATHS.items()
+    ]
+    for key, path in all_pairs:
         if path.exists():
             out[key] = "local"
             continue
@@ -178,11 +331,17 @@ def push_models_to_supabase() -> dict:
         return {"supabase": False}
 
     import base64
-    pairs = (
+    all_pairs = [
         ("props_model_pitcher", PITCHER_MODEL_PATH),
         ("props_model_batter",  BATTER_MODEL_PATH),
-    )
-    for key, path in pairs:
+    ] + [
+        (f"props_model_pitcher_reg_{s}", p)
+        for s, p in _PITCHER_REG_PATHS.items()
+    ] + [
+        (f"props_model_batter_reg_{s}", p)
+        for s, p in _BATTER_REG_PATHS.items()
+    ]
+    for key, path in all_pairs:
         if not path.exists():
             out[key] = "no_local_file"
             continue
@@ -228,12 +387,13 @@ def predict(prop: dict) -> dict:
 
     Output shape:
         {
-          recommendation: "Over" | "Under" | "Pass",
-          confidence:    float,    # 0..1
-          model_prob:    float,    # raw P(Over)
-          market_prob:   float,    # de-vigged P(Over) from the line
-          edge:          float,    # model_prob - market_prob, signed
-          source:        "joblib"  | "heuristic",
+          recommendation:  "Over" | "Under" | "Pass",
+          confidence:      float,          # 0..1
+          model_prob:      float,          # raw P(Over)
+          market_prob:     float,          # de-vigged P(Over) from the line
+          edge:            float,          # model_prob - market_prob, signed
+          source:          "joblib" | "heuristic",
+          predicted_value: float | None,   # numeric stat prediction (regressor)
         }
 
     Heuristic fallback (when joblib missing):  market_prob is used
@@ -284,13 +444,32 @@ def predict(prop: dict) -> dict:
     # Confidence = how far the model is from the market.  Multiplied
     # by 2 so a 50% model on a 35% market = 30% confidence (sane scale).
     confidence = min(0.99, max(0.50, abs(over_prob - market_prob) * 2.0 + 0.50))
+
+    # ── Regression: predicted numeric stat value ─────────────────────────
+    predicted_value: Optional[float] = None
+    reg_info = _MARKET_REG_KEY.get(prop.get("market", ""))
+    if reg_info is not None:
+        reg_bucket, reg_stat = reg_info
+        reg_loaders = _pitcher_reg_models if reg_bucket == "pitcher" else _batter_reg_models
+        reg_model = reg_loaders.get(reg_stat, _LoadedModel(Path("_nonexistent_"))).load()
+        if reg_model is not None:
+            try:
+                import numpy as np  # noqa: PLC0415
+                vec, _ = _build_reg_vector(prop, reg_bucket)
+                if vec is not None:
+                    X_reg = np.array([vec], dtype=float)
+                    predicted_value = round(float(reg_model.predict(X_reg)[0]), 2)
+            except Exception as exc:                                      # noqa: BLE001
+                _log(f"regression predict failed for {prop.get('market')}: {exc}")
+
     return {
-        "recommendation": recommendation,
-        "confidence":     round(confidence, 4),
-        "model_prob":     round(over_prob, 4),
-        "market_prob":    round(market_prob, 4),
-        "edge":           round(edge, 4),
-        "source":         source,
+        "recommendation":  recommendation,
+        "confidence":      round(confidence, 4),
+        "model_prob":      round(over_prob, 4),
+        "market_prob":     round(market_prob, 4),
+        "edge":            round(edge, 4),
+        "source":          source,
+        "predicted_value": predicted_value,
     }
 
 
