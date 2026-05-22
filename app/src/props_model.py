@@ -662,6 +662,32 @@ def restore_models_from_supabase() -> dict:
             out["props_reg_metadata"] = f"error: {exc}"
             _log(f"restore props_reg_metadata failed: {exc}")
 
+    # Restore pitcher_rolling_snapshots.json -- same wire format as the
+    # batter snapshot below (base64-encoded JSON pushed by training).
+    if not _PITCHER_SNAPSHOTS_PATH.exists():
+        try:
+            from . import db as _db
+            row = _db.cache_get("pitcher_rolling_snapshots")
+            if isinstance(row, dict):
+                data = row.get("data") if isinstance(row.get("data"), dict) else row
+                b64 = (data or {}).get("b64")
+                if b64:
+                    _PITCHER_SNAPSHOTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    _PITCHER_SNAPSHOTS_PATH.write_bytes(base64.b64decode(b64))
+                    out["pitcher_rolling_snapshots"] = "restored"
+                    _log(
+                        f"restore pitcher_rolling_snapshots: wrote "
+                        f"{_PITCHER_SNAPSHOTS_PATH} "
+                        f"({_PITCHER_SNAPSHOTS_PATH.stat().st_size} bytes)"
+                    )
+                else:
+                    out["pitcher_rolling_snapshots"] = "no_b64"
+            else:
+                out["pitcher_rolling_snapshots"] = "missing"
+        except Exception as exc:                                          # noqa: BLE001
+            out["pitcher_rolling_snapshots"] = f"error: {exc}"
+            _log(f"restore pitcher_rolling_snapshots failed: {exc}")
+
     # Restore batter_rolling_snapshots.json (training-script pushes it base64-
     # encoded alongside the joblibs, so the same b64 unwrap works).
     if not _BATTER_SNAPSHOTS_PATH.exists():
@@ -739,6 +765,18 @@ def push_models_to_supabase() -> dict:
         except Exception as exc:                                          # noqa: BLE001
             out["props_reg_metadata"] = f"error: {exc}"
             _log(f"push props_reg_metadata failed: {exc}")
+
+    # Push pitcher_rolling_snapshots.json -- same wire format as batter.
+    if _PITCHER_SNAPSHOTS_PATH.exists():
+        try:
+            from . import db as _db
+            b64 = base64.b64encode(_PITCHER_SNAPSHOTS_PATH.read_bytes()).decode("ascii")
+            _db.cache_set("pitcher_rolling_snapshots", None, "models", {"b64": b64})
+            out["pitcher_rolling_snapshots"] = "pushed"
+            _log(f"push pitcher_rolling_snapshots: uploaded {_PITCHER_SNAPSHOTS_PATH}")
+        except Exception as exc:                                          # noqa: BLE001
+            out["pitcher_rolling_snapshots"] = f"error: {exc}"
+            _log(f"push pitcher_rolling_snapshots failed: {exc}")
 
     # Push batter_rolling_snapshots.json as base64 so restore matches the
     # joblib code path.  Snapshots are small (~200 KB) so encoding overhead
