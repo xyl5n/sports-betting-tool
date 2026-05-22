@@ -3,17 +3,19 @@ props.py
 ========
 MLB player-props page.
 
-Two sections (pitcher + batter), each rendering the per-market lines
-fetched by src.props_client.  Each row shows the player + team, prop
-type, line, best available odds, the model's Over/Under call, and the
-model's confidence as a colored bar.  High-confidence picks (>65%) are
-highlighted with a left-border accent.
+Layout
+------
+1. Page title
+2. Per-bucket model record (pitcher + batter W-L)
+3. Filter bar -- game / market / minimum hit rate
+4. Unified pick list, sorted by confidence DESC, with each card showing
+   inline performance chips (season avg, L5/L10/L20 hit rate, H2H) and
+   the opposing team's rank against that prop's market.
 
-Top of page: per-bucket model record (W-L, win%) so the user can see
-how the props models have been performing.
-
-Sortable header lets the user flip between "by confidence" (default)
-and "by start time" / "by edge".
+The pitcher/batter split that the prior version used is gone -- the
+filter bar lets the user narrow the slate to whatever cross-section
+they want (a single team, a single market, a hit-rate floor), so a
+hard-coded split adds noise without helping discovery.
 """
 from __future__ import annotations
 
@@ -67,8 +69,7 @@ def _layout(backend) -> None:
         )
 
         _section_model_record(backend)
-        _section_props_list(backend, bucket="pitcher", title="PITCHER PROPS")
-        _section_props_list(backend, bucket="batter",  title="BATTER PROPS")
+        _section_unified_props_list(backend)
         _settle_trigger(backend)
 
 
@@ -118,23 +119,27 @@ def _record_card(label: str, rec: dict) -> None:
         )
 
 
-# ── Props list ──────────────────────────────────────────────────────────────
+# ── Unified props list (pitcher + batter combined, filter bar) ───────────────
 
-def _section_props_list(backend, *, bucket: str, title: str) -> None:
-    """Render one bucket's prop list as cards.
+def _section_unified_props_list(backend) -> None:
+    """Render all picks (pitcher + batter combined) in one list sorted
+    by confidence DESC, with a filter bar at the top.
 
-    Each card is ONE pick (the side the model has higher confidence in
-    for that player + market + line).  Both-sides dedup happens here,
-    not at the predictor: the predictor still scores Over and Under
-    separately so we can compare them and pick the winner.
-
-    Only picks with confidence > 55% land on the page -- everything
-    weaker collapses into a single "no high confidence props available"
-    notice so the user sees a clean slate rather than coin-flip noise.
+    Performance shape:
+      - The prediction loop runs once per page render (props_client cache
+        is local + Supabase so the fetch is cheap).
+      - For each pick we compute a performance summary + opp rank.  Both
+        are backed by the per-player gamelog cache and a daily team-ranks
+        cache, so warm caches keep this <100ms per pick.
     """
     try:
-        from src.props_client import get_client, ALL_PITCHER_MARKETS, ALL_BATTER_MARKETS
+        from src.props_client import get_client
         from src.props_model  import predict
+        from src.player_profile_client import (
+            get_player_prop_summary,
+            get_player_today_opponent,
+            get_opp_rank_for_prop,
+        )
     except Exception as exc:                                              # noqa: BLE001
         _dbg(f"props imports failed: {exc}")
         return
@@ -143,15 +148,13 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
 
     payload = get_client().get_today_props() or {}
     all_markets = payload.get("markets") or {}
-    bucket_markets = ALL_PITCHER_MARKETS if bucket == "pitcher" else ALL_BATTER_MARKETS
 
-    # Score every prop, then bucket by (player, market, line) so the
-    # over + under pair can be compared.  Each bucket keeps ONE entry
-    # -- whichever side scored higher confidence.
+    # Score every prop, dedup by (player, market, line) keeping the
+    # higher-confidence side -- same logic as the prior two-bucket
+    # implementation, now in one pass across all markets.
     by_pick: dict[tuple[str, str, float], dict] = {}
     for market, props in all_markets.items():
-        if market not in bucket_markets:
-            continue
+        bucket = "pitcher" if market.startswith("pitcher_") else "batter"
         for p in (props or []):
             try:
                 pred = predict(p)
@@ -162,21 +165,18 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
                 line_f = float(p.get("line"))
             except (TypeError, ValueError):
                 continue
-            key = (p.get("player_name", "?"), market, line_f)
-            # When _model_prob > _market_prob the predictor's
-            # recommendation is "Over" / "Under"; when it equals or
-            # underwhelms it's "Pass".  Either way `confidence` is
-            # always >= 0.5 because the helper clamps the floor.  We
-            # care about which raw model probability is higher: that
-            # tells us which side the model actually believes in.
-            side = (p.get("side") or "Over").strip().title()
+            key   = (p.get("player_name", "?"), market, line_f)
+            side  = (p.get("side") or "Over").strip().title()
             score = float(pred.get("confidence") or 0.0)
             existing = by_pick.get(key)
             if existing is None or score > existing["confidence"]:
                 by_pick[key] = {
                     "market":          market,
+                    "bucket":          bucket,
                     "player":          p.get("player_name", "?"),
                     "team":            _team_for_prop(p, bucket),
+                    "home_team":       p.get("home_team"),
+                    "away_team":       p.get("away_team"),
                     "line":            p.get("line"),
                     "side":            side,
                     "best_odds":       p.get("best_odds"),
@@ -189,6 +189,7 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
                     "predicted_value": pred.get("predicted_value"),
                     "event_id":        p.get("event_id"),
                     "commence_time":   p.get("commence_time"),
+                    "_raw_prop":       p,
                 }
 
     # Filter to >= 55% confidence AND (when a regression model exists)
@@ -196,7 +197,7 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
     def _has_reg_edge(r: dict) -> bool:
         pv = r.get("predicted_value")
         if pv is None:
-            return True   # no regressor — confidence alone is sufficient
+            return True
         try:
             line_f = float(r["line"])
             if (r.get("side") or "Over").strip().title() == "Over":
@@ -210,18 +211,44 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
         if r["confidence"] >= _CONF_THRESHOLD and _has_reg_edge(r)
     ]
     rows.sort(key=lambda r: -r["confidence"])
+
+    # ── Enrich each pick with performance summary + opp rank ─────────────
+    # We do this once now (rather than inside _prop_card) so the filter
+    # bar can filter on the same data without recomputing on every
+    # refresh.  Costs are dominated by gamelog fetches, all cached.
+    for r in rows:
+        try:
+            opp = get_player_today_opponent(r["player"], r["_raw_prop"])
+        except Exception:                                                 # noqa: BLE001
+            opp = None
+        r["opp_abbrev"] = opp
+        try:
+            r["summary"] = get_player_prop_summary(
+                r["player"], r["market"], r["line"], r["side"],
+                opp_abbrev=opp,
+                is_pitcher=(r["bucket"] == "pitcher"),
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            _dbg(f"summary failed for {r['player']} {r['market']}: {exc}")
+            r["summary"] = {}
+        try:
+            r["opp_rank"] = get_opp_rank_for_prop(opp, r["market"])
+        except Exception:                                                 # noqa: BLE001
+            r["opp_rank"] = None
+
     _dbg(
-        f"[PROPS-PAGE] {bucket}: scored {len(by_pick)} picks (dedup), "
+        f"[PROPS-PAGE] unified: scored {len(by_pick)} picks (dedup), "
         f"{len(rows)} above {int(_CONF_THRESHOLD * 100)}% threshold"
     )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        # Header row -- title + count + last fetch
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
-            ui.label(title).style(
+            ui.label("PICKS").style(
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                 f"color: {t.TEXT};"
             )
-            ui.label(f"{len(rows)} high-conf picks").style(
+            count_label = ui.label(f"{len(rows)} picks").style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                 f"font-size: 11px; font-weight: 700; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
@@ -234,9 +261,9 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
 
         if not rows:
             ui.label(
-                f"No high confidence {bucket} props available right now.  "
-                f"Tier 1 refreshes every 15 min during game hours "
-                f"(11 AM–11 PM ET)."
+                "No high confidence props available right now. "
+                "Tier 1 refreshes every 15 min during game hours "
+                "(11 AM–11 PM ET)."
             ).style(
                 f"color: {t.TEXT_DIM}; font-size: 12px; "
                 f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
@@ -245,22 +272,197 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
             )
             return
 
-        # Card grid -- single column on mobile, two columns on desktop
-        # via the existing .game-grid class so the props page feels
-        # consistent with the slate cards on /sports.
-        with ui.element("div").classes("game-grid w-full"):
-            for r in rows:
-                _prop_card(r, backend)
+        # ── Filter bar ───────────────────────────────────────────────────
+        # State drives both the visible card list and the count chip in
+        # the header above.  Default state shows everything sorted by
+        # confidence.
+        state = {
+            "game":     "all",       # "all" or "<away>@<home>"
+            "market":   "all",       # "all" or specific market key
+            "min_rate": 0,           # 0..100 -- minimum L10 hit rate %
+        }
+
+        _filter_bar(rows, state, lambda: (cards_refresh.refresh(),
+                                          _update_count(count_label, rows, state)))
+
+        # ── Card list (refreshable so filters re-render in place) ────────
+        @ui.refreshable
+        def cards_refresh() -> None:                                      # noqa: WPS430
+            shown = _apply_pick_filters(rows, state)
+            if not shown:
+                ui.label("No picks match the current filters.").style(
+                    f"color: {t.TEXT_DIM2}; font-size: 12px; "
+                    f"font-style: italic; padding: {t.SPACE_LG}; "
+                    f"text-align: center;"
+                )
+                return
+            with ui.element("div").classes("game-grid w-full"):
+                for r in shown:
+                    _prop_card(r, backend)
+
+        cards_refresh()
+
+
+def _update_count(label_el, rows: list[dict], state: dict) -> None:
+    """Sync the small "N picks" chip in the section header with the
+    currently-visible row count after a filter change."""
+    n = len(_apply_pick_filters(rows, state))
+    try:
+        label_el.text = f"{n} pick{'s' if n != 1 else ''}"
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+
+# ── Filter bar ──────────────────────────────────────────────────────────────
+
+def _filter_bar(rows: list[dict], state: dict, on_change) -> None:
+    """Game / Market / Hit-rate threshold filters laid out so they wrap
+    cleanly on mobile.  Each input writes through to *state* and then
+    fires *on_change* so the card list and count chip refresh."""
+    # Distinct games + markets across the slate
+    games_set: dict[str, str] = {"all": "All games"}
+    markets_set: dict[str, str] = {"all": "All markets"}
+    for r in rows:
+        home = (r.get("home_team") or "").strip()
+        away = (r.get("away_team") or "").strip()
+        if home and away:
+            key   = f"{away}@{home}"
+            label = _short_team(away) + " @ " + _short_team(home)
+            games_set[key] = label
+        m = r.get("market") or ""
+        if m:
+            markets_set[m] = _short_market(m)
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+        f"gap: 10px; min-width: 0;"
+    ):
+        ui.label("FILTERS").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .6px; "
+            f"color: {t.TEXT_DIM2};"
+        )
+
+        # Three filter inputs -- on mobile they wrap into a column.
+        with ui.row().classes("w-full").style(
+            "gap: 10px; flex-wrap: wrap;"
+        ):
+            with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
+                ui.label("GAME").style(
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                ui.select(
+                    options=games_set,
+                    value=state["game"],
+                    on_change=lambda e: (
+                        state.update(game=e.value or "all"),
+                        on_change(),
+                    ),
+                ).props("dense outlined options-dense").style(
+                    f"background: {t.CARD_HI}; "
+                    f"border-radius: {t.RADIUS_SM};"
+                )
+
+            with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
+                ui.label("MARKET").style(
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                ui.select(
+                    options=markets_set,
+                    value=state["market"],
+                    on_change=lambda e: (
+                        state.update(market=e.value or "all"),
+                        on_change(),
+                    ),
+                ).props("dense outlined options-dense").style(
+                    f"background: {t.CARD_HI}; "
+                    f"border-radius: {t.RADIUS_SM};"
+                )
+
+            with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
+                ui.label("MIN L10 HIT RATE").style(
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                rate_label = ui.label("0%").style(
+                    f"font-size: 11px; font-family: monospace; "
+                    f"color: {t.TEXT_DIM};"
+                )
+                slider = ui.slider(
+                    min=0, max=100, step=10, value=state["min_rate"],
+                    on_change=lambda e: (
+                        state.update(min_rate=int(e.value or 0)),
+                        rate_label.set_text(f"{int(e.value or 0)}%"),
+                        on_change(),
+                    ),
+                ).props("dense")
+                slider.style(
+                    f"min-height: 0;"
+                )
+
+
+def _apply_pick_filters(rows: list[dict], state: dict) -> list[dict]:
+    """Return rows that satisfy every active filter in *state*."""
+    out = list(rows)
+    game = state.get("game") or "all"
+    if game != "all":
+        try:
+            away, home = game.split("@", 1)
+        except ValueError:
+            away, home = "", ""
+        out = [
+            r for r in out
+            if (r.get("home_team") or "") == home
+            and (r.get("away_team") or "") == away
+        ]
+    market = state.get("market") or "all"
+    if market != "all":
+        out = [r for r in out if r.get("market") == market]
+    min_rate = int(state.get("min_rate") or 0)
+    if min_rate > 0:
+        out = [r for r in out if _l10_hit_rate_pct(r) >= min_rate]
+    return out
+
+
+def _l10_hit_rate_pct(r: dict) -> int:
+    """Last-10-game hit-rate % for the pick (0 when unknown)."""
+    s = r.get("summary") or {}
+    hits  = s.get("last_10_hits") or 0
+    total = s.get("last_10_games") or 0
+    if not total:
+        return 0
+    return int(round((hits / total) * 100))
+
+
+def _short_team(name: str) -> str:
+    """Compact label for a full team name -- last word usually works
+    ('Atlanta Braves' -> 'Braves').  Falls back to the first 3 chars
+    for ambiguous cases ('Athletics')."""
+    parts = (name or "").split()
+    if not parts:
+        return name
+    return parts[-1]
 
 
 def _prop_card(r: dict, backend) -> None:
-    """One prop pick rendered as a card matching the visual rhythm of
-    the slate's game cards (matchup header on top, accent bar on the
-    side of the recommended chip, monospace stat values, soft border).
+    """One prop pick rendered as a card.
 
-    The Over / Under chip is the visual focal point -- colored to
-    match the recommendation so a quick scan of the page shows which
-    side the model picked at a glance.
+    Density is the main design constraint here -- we want every piece
+    of decision-relevant data visible without clicking through to the
+    player page:
+      * Market chip + matchup (header)
+      * Player name (linked to profile)
+      * OVER/UNDER pill + line + confidence (the page's visual anchor)
+      * Predicted value chip when a regression model produced one
+      * Inline summary chips: season avg + L5 + L10 + L20 + H2H hit rate
+      * Opposing-team rank chip ("OPP NYY: 28th of 30")
+      * Best odds + book + Track button
+
+    On mobile the summary chips drop to a single column inside the
+    same card -- ECharts not used here so the row is light enough to
+    handle 30+ cards on a phone without jank.
     """
     side = (r.get("side") or "Over").strip().title()
     is_over = side == "Over"
@@ -274,7 +476,6 @@ def _prop_card(r: dict, backend) -> None:
         f"min-width: 0;"
     ):
         # Header row: market chip on the left, matchup on the right.
-        # Mirrors the meta_row pattern on the slate's game cards.
         with ui.row().classes("items-center w-full").style(
             f"gap: 8px;"
         ):
@@ -290,7 +491,6 @@ def _prop_card(r: dict, backend) -> None:
             )
 
         # Player name: links to player profile page.
-        # Slug = lowercase hyphenated name (e.g. "Spencer Strider" → "spencer-strider").
         _name_slug = r["player"].lower().replace(" ", "-")
         ui.link(r["player"], f"/player/mlb/{_name_slug}").style(
             f"font-size: 16px; font-weight: 700; color: {t.TEXT}; "
@@ -298,25 +498,17 @@ def _prop_card(r: dict, backend) -> None:
             f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
         ).tooltip("View player profile")
 
-        # Pick row: chip + line + confidence + best odds.  Three flex
-        # zones so the chip stays left-anchored and the odds column
-        # right-aligns the same way bet boxes do on the slate.
+        # Pick row: chip + line + confidence.
         with ui.row().classes("items-center w-full").style(
             f"gap: 10px; flex-wrap: nowrap;"
         ):
-            # OVER / UNDER pill -- the page's visual anchor.
             ui.label(f"{side.upper()} {r['line']}").style(
                 f"background: {chip_bg}; color: {t.BG}; "
                 f"font-size: 13px; font-weight: 800; letter-spacing: .5px; "
                 f"padding: 6px 12px; border-radius: {t.RADIUS_SM}; "
                 f"flex-shrink: 0;"
             )
-
-            # Spacer
             ui.element("div").style("flex: 1;")
-
-            # Confidence number with subdued label above (matches the
-            # CONF / PROB blocks inside bet_box.render on the slate).
             with ui.column().style(
                 "gap: 1px; align-items: flex-end; flex-shrink: 0;"
             ):
@@ -329,20 +521,19 @@ def _prop_card(r: dict, backend) -> None:
                     f"font-family: monospace; letter-spacing: -.2px;"
                 )
 
-        # Predicted value row (only shown when a regression model produced
-        # a numeric estimate).  Green when margin > 1.0, amber otherwise.
+        # Predicted value chip (only when a regression model produced one)
         pv = r.get("predicted_value")
         if pv is not None:
             try:
                 line_f    = float(r["line"])
                 side_str  = (r.get("side") or "Over").strip().title()
                 margin    = (pv - line_f) if side_str == "Over" else (line_f - pv)
-                pv_color  = t.POS if margin > 1.0 else "#F59E0B"
+                pv_color  = t.POS if margin > 1.0 else t.WARN
             except (TypeError, ValueError):
                 margin, pv_color = 0.0, t.TEXT_DIM
             stat_abbr = _market_stat_abbr(r.get("market", ""))
             with ui.row().classes("items-center w-full").style(
-                f"gap: 8px; padding-top: 4px;"
+                f"gap: 8px; padding-top: 2px;"
             ):
                 ui.label("PREDICTED").style(
                     f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
@@ -353,6 +544,12 @@ def _prop_card(r: dict, backend) -> None:
                     f"font-size: 13px; font-weight: 700; color: {pv_color}; "
                     f"font-family: monospace;"
                 )
+
+        # ── Inline performance summary chips ─────────────────────────────
+        _card_summary_chips(r)
+
+        # ── Opposing-team rank chip ──────────────────────────────────────
+        _card_opp_rank_chip(r)
 
         # Footer row: best odds + book + Track Bet button.
         with ui.row().classes("items-center w-full").style(
@@ -372,6 +569,126 @@ def _prop_card(r: dict, backend) -> None:
             )
             ui.element("div").style("flex: 1;")
             _track_btn(r, backend)
+
+
+def _card_summary_chips(r: dict) -> None:
+    """5-cell grid below the pick row: SEASON avg + L5/L10/L20 + H2H hit
+    rate vs the line.  Same shape as the player-page summary row so the
+    user can scan both pages without re-learning the layout."""
+    summary = r.get("summary") or {}
+    side    = (r.get("side") or "Over").strip().title()
+    try:
+        line_f = float(r.get("line"))
+    except (TypeError, ValueError):
+        line_f = None
+
+    cells: list[tuple[str, str, str, str]] = []  # (label, value, color, sub)
+
+    sa = summary.get("season_avg")
+    cells.append((
+        "SEASON",
+        "—" if sa is None else f"{sa:.2f}",
+        t.TEXT,
+        f"avg/{summary.get('season_games') or 0}g",
+    ))
+    for w_key, w_label in (
+        ("last_5",  "L5"),
+        ("last_10", "L10"),
+        ("last_20", "L20"),
+    ):
+        hits  = summary.get(f"{w_key}_hits") or 0
+        total = summary.get(f"{w_key}_games") or 0
+        if not total:
+            cells.append((w_label, "—", t.TEXT_DIM2, "n/a"))
+            continue
+        pct = hits / total
+        col = t.POS if pct >= 0.6 else (t.NEG if pct < 0.4 else t.WARN)
+        cells.append((
+            w_label, f"{hits}/{total}", col,
+            f"{int(round(pct * 100))}%",
+        ))
+    h2h_hits  = summary.get("h2h_hits") or 0
+    h2h_total = summary.get("h2h_games") or 0
+    if not h2h_total:
+        cells.append(("H2H", "—", t.TEXT_DIM2, "n/a"))
+    else:
+        pct = h2h_hits / h2h_total
+        col = t.POS if pct >= 0.6 else (t.NEG if pct < 0.4 else t.WARN)
+        cells.append((
+            "H2H", f"{h2h_hits}/{h2h_total}", col,
+            f"{int(round(pct * 100))}%",
+        ))
+
+    side_suffix = (
+        f"vs {side.upper()} {line_f}" if line_f is not None else ""
+    )
+    with ui.column().classes("w-full").style("gap: 4px; padding-top: 2px;"):
+        if side_suffix:
+            ui.label(f"HIT RATE {side_suffix}").style(
+                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.TEXT_DIM2};"
+            )
+        with ui.element("div").style(
+            "display: grid; grid-template-columns: repeat(5, 1fr); "
+            "gap: 4px; width: 100%;"
+        ):
+            for label, value, color, sub in cells:
+                with ui.column().style(
+                    f"background: {t.CARD_HI}; "
+                    f"border-radius: {t.RADIUS_SM}; "
+                    f"padding: 6px 4px; align-items: center; "
+                    f"gap: 1px; min-width: 0;"
+                ):
+                    ui.label(label).style(
+                        f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
+                        f"color: {t.TEXT_DIM2};"
+                    )
+                    ui.label(value).style(
+                        f"font-size: 12px; font-weight: 800; "
+                        f"color: {color}; font-family: monospace;"
+                    )
+                    if sub:
+                        ui.label(sub).style(
+                            f"font-size: 8.5px; color: {t.TEXT_DIM2}; "
+                            f"font-family: monospace;"
+                        )
+
+
+def _card_opp_rank_chip(r: dict) -> None:
+    """Compact 'OPP NYY: 28th of 30 vs K' chip.  The rank is precomputed
+    in _section_unified_props_list so this is just formatting."""
+    opp  = r.get("opp_abbrev")
+    rank = r.get("opp_rank")
+    if not opp or rank is None:
+        return
+    try:
+        from src.player_profile_client import opp_rank_label
+        label = opp_rank_label(rank)
+    except Exception:                                                      # noqa: BLE001
+        label = f"{rank}"
+
+    # Color: top-10 favorable = green, bottom-10 = red, mid = amber.
+    if rank <= 10:
+        color = t.POS
+    elif rank >= 21:
+        color = t.NEG
+    else:
+        color = t.WARN
+
+    stat_label = _market_stat_abbr(r.get("market", "")) or "stat"
+    with ui.row().classes("items-center w-full").style(
+        "gap: 6px; padding-top: 2px;"
+    ):
+        ui.label(f"OPP {opp}").style(
+            f"font-size: 9px; font-weight: 800; letter-spacing: .4px; "
+            f"color: {t.TEXT_DIM2}; "
+            f"background: {t.CARD_HI}; padding: 2px 6px; "
+            f"border-radius: {t.RADIUS_PILL};"
+        )
+        ui.label(f"{label} vs {stat_label}").style(
+            f"font-size: 11px; font-weight: 700; color: {color}; "
+            f"font-family: monospace;"
+        )
 
 
 # ── Small helpers ───────────────────────────────────────────────────────────

@@ -500,6 +500,7 @@ def get_player_gamelog(
                         "BB":            int(st.get("baseOnBalls") or 0),
                         "SO":            int(st.get("strikeOuts") or 0),
                         "TB":            int(st.get("totalBases") or 0),
+                        "SB":            int(st.get("stolenBases") or 0),
                         "PA":            int(st.get("plateAppearances") or 0),
                         "batting_order": int(st.get("battingOrder") or 0),
                     }
@@ -793,3 +794,430 @@ def _inject_is_home(prop: dict) -> dict:
     except Exception as exc:
         _log(f"_inject_is_home({player_name!r}) failed: {exc}")
     return prop
+
+
+# ---------------------------------------------------------------------------
+# Player prop performance summary
+# ---------------------------------------------------------------------------
+#
+# Both the player profile page (tabbed market view) and the props page
+# (inline card summaries) need the same shape of summary: how often a
+# player has hit the OVER/UNDER on a given line across recent windows
+# and head-to-head vs the day's opponent.  Centralising the helper here
+# keeps the math in one place and means the pages just consume a flat
+# dict of numbers.
+
+# Market -> gamelog stat key.  Mirrors _MARKET_TO_STAT in pages/player.py
+# but lives in the data client so the props page can share it without
+# importing from the page module.
+_MARKET_TO_GAMELOG_STAT: dict[str, str] = {
+    "pitcher_strikeouts":   "K",
+    "pitcher_earned_runs":  "ER",
+    "pitcher_hits_allowed": "H",
+    "pitcher_walks":        "BB",
+    "pitcher_outs":         "outs",
+    "batter_hits":          "H",
+    "batter_total_bases":   "TB",
+    "batter_home_runs":     "HR",
+    "batter_rbis":          "RBI",
+    "batter_runs_scored":   "R",
+    "batter_walks":         "BB",
+    "batter_strikeouts":    "SO",
+    "batter_stolen_bases":  "SB",
+}
+
+_EMPTY_SUMMARY: dict = {
+    "stat_key":      None,
+    "line":          None,
+    "side":          None,
+    "season_avg":    None,
+    "season_games":  0,
+    "last_5_avg":    None,
+    "last_5_hits":   0,
+    "last_5_games":  0,
+    "last_10_avg":   None,
+    "last_10_hits":  0,
+    "last_10_games": 0,
+    "last_20_avg":   None,
+    "last_20_hits":  0,
+    "last_20_games": 0,
+    "h2h_avg":       None,
+    "h2h_hits":      0,
+    "h2h_games":     0,
+}
+
+
+def gamelog_stat_value(game: dict, stat_key: str) -> float:
+    """Numeric value for *stat_key* in a single gamelog row.
+
+    ``outs`` is derived from innings pitched (IP * 3 rounded) because the
+    gamelog stores IP but not raw outs.  Missing fields return 0.0 so
+    aggregations never trip on sparse rows.
+    """
+    if stat_key == "outs":
+        ip = game.get("IP")
+        return float(round((ip if ip is not None else 0.0) * 3))
+    raw = game.get(stat_key)
+    try:
+        return float(raw if raw is not None else 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _hit_count(values: list[float], line, side: str) -> int:
+    """Number of entries in *values* that hit the side vs the line.
+
+    Equal-to-line is a push and does NOT count as a hit.  Matches how
+    sportsbooks settle most player-prop wagers (push refunds, not graded
+    as a win for either side).
+    """
+    if not values:
+        return 0
+    try:
+        line_f = float(line)
+    except (TypeError, ValueError):
+        return 0
+    s = (side or "Over").strip().lower()
+    if s == "under":
+        return sum(1 for v in values if v < line_f)
+    return sum(1 for v in values if v > line_f)
+
+
+def _avg(values: list[float]) -> Optional[float]:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def get_player_prop_summary(
+    player_name: str,
+    market: str,
+    line,
+    side: str = "Over",
+    *,
+    opp_abbrev: Optional[str] = None,
+    is_pitcher: Optional[bool] = None,
+    games: Optional[list[dict]] = None,
+) -> dict:
+    """Compute season + recent-window performance for a (player, market, line).
+
+    Used by:
+      - pages/props.py to render inline summary chips inside each pick card
+      - pages/player.py (multi-tab market view) to show season/L5/L10/L20/H2H
+        snapshots above each prop's chart
+
+    *games* may be supplied by the caller to avoid a duplicate fetch; if
+    omitted we resolve the player_id and pull the cached gamelog.
+    """
+    stat_key = _MARKET_TO_GAMELOG_STAT.get(market)
+    if stat_key is None:
+        return dict(_EMPTY_SUMMARY)
+
+    if games is None:
+        pid = search_player_by_name(player_name)
+        if not pid:
+            return dict(_EMPTY_SUMMARY, stat_key=stat_key, line=line, side=side)
+        if is_pitcher is None:
+            info = get_player_info(pid)
+            is_pitcher = (info.get("position_code") or "") == "1"
+        games = get_player_gamelog(pid, _CURRENT_SEASON, is_pitcher=is_pitcher) or []
+        if is_pitcher:
+            games = [g for g in games if g.get("games_started", 0) > 0]
+
+    if not games:
+        return dict(_EMPTY_SUMMARY, stat_key=stat_key, line=line, side=side)
+
+    season_values = [gamelog_stat_value(g, stat_key) for g in games]
+    last_5  = season_values[-5:]
+    last_10 = season_values[-10:]
+    last_20 = season_values[-20:]
+
+    if opp_abbrev:
+        opp_u = opp_abbrev.strip().upper()
+        h2h_games = [g for g in games if (g.get("opp") or "").upper() == opp_u]
+    else:
+        h2h_games = []
+    h2h_values = [gamelog_stat_value(g, stat_key) for g in h2h_games]
+
+    return {
+        "stat_key":      stat_key,
+        "line":          line,
+        "side":          side,
+        "season_avg":    _avg(season_values),
+        "season_games":  len(season_values),
+        "season_hits":   _hit_count(season_values, line, side),
+        "last_5_avg":    _avg(last_5),
+        "last_5_hits":   _hit_count(last_5, line, side),
+        "last_5_games":  len(last_5),
+        "last_10_avg":   _avg(last_10),
+        "last_10_hits":  _hit_count(last_10, line, side),
+        "last_10_games": len(last_10),
+        "last_20_avg":   _avg(last_20),
+        "last_20_hits":  _hit_count(last_20, line, side),
+        "last_20_games": len(last_20),
+        "h2h_avg":       _avg(h2h_values),
+        "h2h_hits":      _hit_count(h2h_values, line, side),
+        "h2h_games":     len(h2h_values),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Team name -> abbrev + opponent helpers
+# ---------------------------------------------------------------------------
+#
+# The Odds API returns full team names ("Atlanta Braves"); the MLB Stats
+# API gamelog stores 3-letter abbreviations ("ATL").  Static map of all
+# 30 teams keeps the cross-source join free of network calls.
+
+_TEAM_NAME_TO_ABBREV: dict[str, str] = {
+    "arizona diamondbacks":  "ARI",
+    "atlanta braves":        "ATL",
+    "baltimore orioles":     "BAL",
+    "boston red sox":        "BOS",
+    "chicago cubs":           "CHC",
+    "chicago white sox":     "CWS",
+    "cincinnati reds":       "CIN",
+    "cleveland guardians":   "CLE",
+    "colorado rockies":      "COL",
+    "detroit tigers":        "DET",
+    "houston astros":        "HOU",
+    "kansas city royals":    "KC",
+    "los angeles angels":    "LAA",
+    "los angeles dodgers":   "LAD",
+    "miami marlins":         "MIA",
+    "milwaukee brewers":     "MIL",
+    "minnesota twins":       "MIN",
+    "new york mets":         "NYM",
+    "new york yankees":      "NYY",
+    "oakland athletics":     "OAK",
+    "athletics":             "ATH",
+    "philadelphia phillies": "PHI",
+    "pittsburgh pirates":    "PIT",
+    "san diego padres":      "SD",
+    "san francisco giants":  "SF",
+    "seattle mariners":      "SEA",
+    "st. louis cardinals":   "STL",
+    "st louis cardinals":    "STL",
+    "tampa bay rays":        "TB",
+    "texas rangers":         "TEX",
+    "toronto blue jays":     "TOR",
+    "washington nationals":  "WSH",
+}
+
+
+def team_name_to_abbrev(name: str) -> Optional[str]:
+    """Best-effort lookup; returns None if the team isn't recognised."""
+    if not name:
+        return None
+    return _TEAM_NAME_TO_ABBREV.get(name.strip().lower())
+
+
+def get_player_today_opponent(player_name: str, prop: dict) -> Optional[str]:
+    """Return the 3-letter abbreviation of the player's opponent today,
+    or None when we can't determine which side of the matchup they're on.
+
+    The prop dict from props_client carries the full names of both teams
+    (home_team, away_team).  We resolve the player's currentTeam name
+    via the MLB Stats API and pick the OTHER side.
+    """
+    home_full = (prop.get("home_team") or "").strip()
+    away_full = (prop.get("away_team") or "").strip()
+    if not home_full or not away_full:
+        return None
+    pid = search_player_by_name(player_name)
+    if not pid:
+        return None
+    info = get_player_info(pid)
+    team_name = (info.get("team_name") or "").strip().lower()
+    if not team_name:
+        return None
+    if team_name == home_full.lower():
+        return team_name_to_abbrev(away_full)
+    if team_name == away_full.lower():
+        return team_name_to_abbrev(home_full)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Opposing-team rank vs each prop market
+# ---------------------------------------------------------------------------
+#
+# To answer "facing a team that's 28th in opposing K's allowed" we pull
+# the league-wide team season stats once per day and rank.  For pitcher
+# markets we rank teams by HOW MUCH OF THE STAT THEY GENERATE FACING
+# A PITCHER (hitting-side stats); for batter markets we rank by HOW
+# MUCH OF THE STAT THE TEAM ALLOWS (pitching-side stats).
+#
+# Rank 1 = MOST favorable for the OVER bettor (highest stat output /
+# allowed).  Rank 30 = least favorable.
+
+# Per-market source: ("hitting"|"pitching", stat field on the splits[].stat object)
+_MARKET_TO_TEAM_STAT: dict[str, tuple[str, str]] = {
+    "pitcher_strikeouts":   ("hitting",  "strikeOuts"),
+    "pitcher_outs":         ("hitting",  "atBats"),       # more ABs faced = more outs in play
+    "pitcher_hits_allowed": ("hitting",  "hits"),
+    "pitcher_walks":        ("hitting",  "baseOnBalls"),
+    "pitcher_earned_runs":  ("hitting",  "runs"),
+    "batter_hits":          ("pitching", "hits"),
+    "batter_total_bases":   ("pitching", "totalBases"),
+    "batter_home_runs":     ("pitching", "homeRuns"),
+    "batter_rbis":          ("pitching", "earnedRuns"),
+    "batter_runs_scored":   ("pitching", "runs"),
+    "batter_walks":         ("pitching", "baseOnBalls"),
+    "batter_strikeouts":    ("pitching", "strikeOuts"),
+}
+
+_TEAM_RANKS_CACHE_KEY = "team_prop_ranks_{season}"
+
+
+def _fetch_team_stats(group: str, season: int) -> list[dict]:
+    """Fetch the league-wide team aggregate for *group* in *season*.
+
+    Returns a list of {"abbrev": str, "stat": dict} entries, one per
+    team.  Empty list on any failure.
+    """
+    url = (
+        f"{_STATS_BASE}/teams/stats"
+        f"?stats=season&group={group}&season={season}&sportIds=1"
+    )
+    data = _fetch_json(url, label=f"_fetch_team_stats({group}, {season})")
+    if not data:
+        return []
+    try:
+        splits = (data.get("stats") or [{}])[0].get("splits") or []
+        out: list[dict] = []
+        for sp in splits:
+            team = sp.get("team") or {}
+            abbrev = team.get("abbreviation") or team.get("triCode") or ""
+            if not abbrev:
+                # Some endpoint variants drop abbreviation -- skip silently;
+                # the rank table just won't include that team.
+                continue
+            stat = sp.get("stat") or {}
+            out.append({"abbrev": abbrev.upper(), "stat": stat})
+        return out
+    except Exception as exc:                                                  # noqa: BLE001
+        _log(f"_fetch_team_stats({group}, {season}) parse error: {exc}")
+        return []
+
+
+def _compute_ranks_for_market(
+    market: str,
+    team_hitting: list[dict],
+    team_pitching: list[dict],
+) -> dict[str, int]:
+    """Return {abbrev: rank} for *market*.  Rank 1 = most favorable for
+    the OVER bettor (highest stat output for the opposing-team side).
+    """
+    spec = _MARKET_TO_TEAM_STAT.get(market)
+    if spec is None:
+        return {}
+    group, stat_field = spec
+    source = team_hitting if group == "hitting" else team_pitching
+    rows: list[tuple[str, float]] = []
+    for r in source:
+        try:
+            val = float(r["stat"].get(stat_field) or 0.0)
+        except (TypeError, ValueError):
+            val = 0.0
+        rows.append((r["abbrev"], val))
+    # Descending: best opportunity first (most K's batters strike out,
+    # most hits pitchers allow, etc.)
+    rows.sort(key=lambda kv: -kv[1])
+    return {abbrev: i + 1 for i, (abbrev, _) in enumerate(rows)}
+
+
+def get_team_prop_ranks(season: Optional[int] = None) -> dict[str, dict[str, int]]:
+    """Return {abbrev: {market: rank}} for every team + supported market.
+
+    Cached for 24h in Supabase + local file under
+    ``team_prop_ranks_{season}``.  On any failure the previous day's
+    snapshot is reused.
+    """
+    season = season or _CURRENT_SEASON
+    cache_key = _TEAM_RANKS_CACHE_KEY.format(season=season)
+    local_path = _CACHE_DIR / f"{cache_key}.json"
+    today = _today_str()
+
+    # 1. Local cache (today)
+    try:
+        if local_path.exists():
+            payload = json.loads(local_path.read_text(encoding="utf-8"))
+            if payload.get("date") == today and isinstance(payload.get("ranks"), dict):
+                return payload["ranks"]
+    except Exception as exc:                                                  # noqa: BLE001
+        _log(f"get_team_prop_ranks local cache read failed: {exc}")
+
+    # 2. Supabase cache (today)
+    try:
+        row = _db.cache_get(cache_key)
+        if row and row.get("date") == today:
+            ranks = (row.get("data") or {}).get("ranks") or {}
+            if ranks:
+                try:
+                    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    local_path.write_text(
+                        json.dumps({"date": today, "ranks": ranks}),
+                        encoding="utf-8",
+                    )
+                except Exception:                                             # noqa: BLE001
+                    pass
+                return ranks
+    except Exception as exc:                                                  # noqa: BLE001
+        _log(f"get_team_prop_ranks supabase read failed: {exc}")
+
+    # 3. Live fetch
+    team_hitting  = _fetch_team_stats("hitting",  season)
+    team_pitching = _fetch_team_stats("pitching", season)
+    if not team_hitting and not team_pitching:
+        # 4. Stale local fallback
+        try:
+            if local_path.exists():
+                payload = json.loads(local_path.read_text(encoding="utf-8"))
+                if isinstance(payload.get("ranks"), dict):
+                    return payload["ranks"]
+        except Exception:                                                     # noqa: BLE001
+            pass
+        return {}
+
+    ranks: dict[str, dict[str, int]] = {}
+    for market in _MARKET_TO_TEAM_STAT:
+        per_market = _compute_ranks_for_market(market, team_hitting, team_pitching)
+        for abbrev, rank in per_market.items():
+            ranks.setdefault(abbrev, {})[market] = rank
+
+    # Persist
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        local_path.write_text(
+            json.dumps({"date": today, "ranks": ranks}),
+            encoding="utf-8",
+        )
+    except Exception as exc:                                                  # noqa: BLE001
+        _log(f"get_team_prop_ranks local write failed: {exc}")
+    try:
+        _db.cache_set(cache_key, "mlb", today, {"ranks": ranks})
+    except Exception as exc:                                                  # noqa: BLE001
+        _log(f"get_team_prop_ranks supabase write failed: {exc}")
+
+    _log(f"get_team_prop_ranks computed for {len(ranks)} teams, season={season}")
+    return ranks
+
+
+def get_opp_rank_for_prop(opp_abbrev: Optional[str], market: str) -> Optional[int]:
+    """Convenience: rank of *opp_abbrev* for *market*, or None.  Returns
+    a value 1..N where 1 = most favorable matchup for the OVER bettor."""
+    if not opp_abbrev:
+        return None
+    table = get_team_prop_ranks()
+    return (table.get(opp_abbrev.upper()) or {}).get(market)
+
+
+def opp_rank_label(rank: Optional[int], total: int = 30) -> str:
+    """Format an integer rank as '28th of 30'.  Returns '—' when None."""
+    if rank is None:
+        return "—"
+    suffix = "th"
+    if rank % 100 not in (11, 12, 13):
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank % 10, "th")
+    return f"{rank}{suffix} of {total}"
