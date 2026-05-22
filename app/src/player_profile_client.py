@@ -549,30 +549,50 @@ def get_player_gamelog(
 def get_today_prop(player_name: str) -> Optional[dict]:
     """Return the highest-confidence prop prediction for *player_name* today.
 
+    PURE CACHE READER.  This function MUST NOT call ``predict()`` -- the
+    Bubba Chandler / Michael Harris II side-flip bug was caused by the
+    player page independently re-scoring a prop and getting a different
+    side than the props page (different feature snapshot per worker
+    process).  The scored cache populated by the scheduler is the
+    single source of truth; both pages now read from it.
+
     Resolution order
     ----------------
-    1. Already-scored picks in ``data/daily_picks.json`` (``prop_picks`` list).
-       These were scored by ``_collect_props()`` in the same worker process that
-       ran analysis, so they reflect a consistent model state.  Reading them
-       here avoids re-scoring and guarantees the side shown on the player page
-       matches what the model selected.
-
-    2. Live re-score fallback — used when the player is not in the top-5
-       daily props or the daily_picks file is stale/absent.  Before calling
-       ``predict()``, we inject the correct ``is_home`` from today's pitcher
-       schedule so the model uses today's game context instead of the
-       training-snapshot's (potentially stale) home/away value.  Without this
-       injection the feature vector may differ from the one used on the Props
-       page (which may have run on a different Railway worker with a different
-       in-memory snapshot), causing the side to flip.
-
-    Returns None if props are unavailable or the player has no line today.
+    1. ``src.props_scored_cache.load_scored_props()`` -- every primary
+       pick the scheduler has scored above the 55% confidence + reg-edge
+       threshold.  This is what the props page reads, so the side here
+       is guaranteed to match.
+    2. ``data/daily_picks.json`` prop_picks -- top-5 by confidence from
+       the most recent /api/analyze run.  Used as a fallback for the
+       window between Railway deploys (scored cache empty) and the
+       first scheduler tick.
+    3. ``None`` -- no cached pick for the player today; the hero card
+       suppresses the TODAY chip entirely rather than fabricating one.
     """
     name_lower = player_name.strip().lower()
 
-    # ── Part 1: read from already-scored daily prop_picks ─────────────────────
-    # Prefer the cached scored result so the player page shows exactly the
-    # same pick that _collect_props() selected, without re-running predict().
+    # ── 1. Scored cache (single source of truth, matches /props page) ─────
+    try:
+        from .props_scored_cache import load_scored_props
+        cached = load_scored_props() or {}
+        best: Optional[dict] = None
+        for pick in (cached.get("picks") or []):
+            if (pick.get("player") or "").strip().lower() != name_lower:
+                continue
+            score = float(pick.get("confidence") or 0.0)
+            if best is None or score > float(best.get("confidence") or 0.0):
+                best = _scored_cache_to_entry(pick)
+        if best is not None:
+            _log(
+                f"get_today_prop({player_name!r}): served from scored_cache "
+                f"({best.get('market')} {best.get('side')} {best.get('line')} "
+                f"conf={best.get('confidence')})"
+            )
+            return best
+    except Exception as exc:
+        _log(f"get_today_prop({player_name!r}): scored_cache read failed: {exc}")
+
+    # ── 2. daily_picks fallback (covers post-deploy gap before next tick) ─
     try:
         from .daily_picks import load_daily_picks
         daily     = load_daily_picks()
@@ -580,8 +600,7 @@ def get_today_prop(player_name: str) -> Optional[dict]:
         for pp in prop_picks:
             if (pp.get("player") or "").strip().lower() == name_lower:
                 _log(
-                    f"get_today_prop({player_name!r}): "
-                    f"served from daily_picks cache "
+                    f"get_today_prop({player_name!r}): served from daily_picks "
                     f"({pp.get('market')} {pp.get('side')} {pp.get('line')} "
                     f"conf={pp.get('confidence')})"
                 )
@@ -593,53 +612,38 @@ def get_today_prop(player_name: str) -> Optional[dict]:
                     "recommendation":  pp.get("recommendation"),
                     "confidence":      pp.get("confidence"),
                     "predicted_value": pp.get("predicted_value"),
+                    "ev_pct":          _calc_ev(
+                        pp.get("confidence"), pp.get("best_odds"),
+                    ),
                 }
     except Exception as exc:
-        _log(f"get_today_prop({player_name!r}): daily_picks cache read failed: {exc}")
+        _log(f"get_today_prop({player_name!r}): daily_picks read failed: {exc}")
 
-    # ── Part 2: live re-score with correct is_home from today's schedule ───────
-    # Inject is_home into each prop dict before calling predict() so that
-    # _build_reg_vector overrides the snapshot's stale training-time value
-    # (props_model.py line: "if prop.get('is_home') is not None: vec[...] = ...").
-    # This makes the feature vector consistent regardless of which Railway
-    # worker handles the request or whether the pitcher snapshot is warm.
-    try:
-        from .props_client import get_client as _get_props_client
-        from .props_model  import predict    as _predict
-    except Exception:
-        return None
-    try:
-        payload     = _get_props_client().get_today_props() or {}
-        all_markets = payload.get("markets") or {}
-        best: Optional[dict] = None
-        for market, props in all_markets.items():
-            for p in (props or []):
-                if (p.get("player_name") or "").strip().lower() != name_lower:
-                    continue
-                # Inject today's is_home so the model feature vector is
-                # consistent across workers.  For pitcher markets the schedule
-                # lookup is cheap (pitcher_client caches the schedule).
-                p = _inject_is_home(p)
-                try:
-                    pred = _predict(p)
-                except Exception:
-                    continue
-                score = float(pred.get("confidence") or 0.0)
-                if best is None or score > best["confidence"]:
-                    best = {
-                        "market":          market,
-                        "line":            p.get("line"),
-                        "side":            (p.get("side") or "Over").strip().title(),
-                        "best_odds":       p.get("best_odds"),
-                        "recommendation":  pred.get("recommendation"),
-                        "confidence":      round(score, 4),
-                        "predicted_value": pred.get("predicted_value"),
-                        "ev_pct":          _calc_ev(score, p.get("best_odds")),
-                    }
-        return best
-    except Exception as exc:
-        _log(f"get_today_prop({player_name!r}) failed: {exc}")
-        return None
+    # ── 3. No cached pick for this player -- bail without fabricating ─────
+    return None
+
+
+def _scored_cache_to_entry(pick: dict) -> dict:
+    """Project a scored_cache row into the dict shape the player page
+    consumes.  Same fields the props page reads, plus the
+    ``source="scored_cache"`` marker so log lines can attribute where
+    the pick came from."""
+    return {
+        "market":          pick.get("market"),
+        "line":            pick.get("line"),
+        "side":            pick.get("side"),
+        "best_odds":       pick.get("best_odds"),
+        "best_book":       pick.get("best_book"),
+        "recommendation":  pick.get("recommendation"),
+        "confidence":      pick.get("confidence"),
+        "predicted_value": pick.get("predicted_value"),
+        "edge":            pick.get("edge"),
+        "model_prob":      pick.get("model_prob"),
+        "ev_pct":          pick.get("ev_pct"),
+        "line_type":       pick.get("line_type", "main"),
+        "is_primary":      bool(pick.get("is_primary", True)),
+        "source":          "scored_cache",
+    }
 
 
 def _calc_ev(confidence, american_odds):
@@ -653,136 +657,47 @@ def _calc_ev(confidence, american_odds):
 
 
 def get_today_props_for_player(player_name: str) -> list[dict]:
-    """Return EVERY prop prediction for *player_name* today, one per
-    (market, line, side) combination, with the model's recommendation
-    + confidence + predicted_value attached.
+    """Return EVERY prop prediction for *player_name* today.
 
-    Used by the player profile page so a starting pitcher with a
-    strikeouts line AND an outs line AND a hits-allowed line shows
-    three separate charts -- not just the highest-confidence one.
+    PURE CACHE READER -- never calls ``predict()`` (see the docstring
+    on ``get_today_prop`` for why; same Bubba Chandler / Michael
+    Harris II side-flip story).  Reads from the same scored cache
+    the /props page reads so the side, confidence and EV displayed
+    here are guaranteed to match.
 
-    Resolution order mirrors get_today_prop(), but instead of returning
-    only the best entry it deduplicates by (market, line, side) and
-    returns every match.
-
-    Returns [] when no props are available for the player today.
+    Resolution order
+    ----------------
+    1. ``src.props_scored_cache.load_scored_props()`` -- every primary
+       pick above threshold for the player.  One entry per
+       ``(player, market)`` since the scheduler already dedupes.
+    2. ``data/daily_picks.json`` -- fills markets the scored cache
+       doesn't cover (rare; mostly the window after a Railway redeploy
+       before the first scheduler tick).
+    3. ``[]`` -- no cached pick for this player today; the page falls
+       back to its "no props posted yet" empty state instead of
+       fabricating one with an independent predict() call.
     """
     name_lower = player_name.strip().lower()
     out: list[dict] = []
-    seen: set[tuple] = set()
+    markets_seen: set[str] = set()
 
-    def _key(entry: dict) -> tuple:
-        return (
-            entry.get("market") or "",
-            entry.get("line"),
-            (entry.get("side") or "").strip().lower(),
-        )
-
-    # ── Part 1 + Part 2 ordering ──────────────────────────────────────────────
-    # Part 2 (classified live re-score) runs FIRST so we can pin the
-    # "right" line per (player, market) before falling back to the
-    # daily_picks cache (which may contain alt-line entries selected
-    # by the pre-classifier scoring pass).  Part 1 then only fills
-    # markets Part 2 didn't cover, preventing the page from showing
-    # both an alt tab and a main tab for the same prop.
-    markets_seen_in_p2: set[str] = set()
-
-    # ── Part 2: every live prop, re-scored ────────────────────────────────────
-    # Loops every (market, props) bucket from props_client and predicts
-    # one row per side, so a player with Over+Under listings yields a single
-    # consolidated entry per (market, line) keyed by the side the model
-    # actually recommends (highest score wins between the two sides).
+    # ── 1. Scored cache (canonical) ───────────────────────────────────────
     try:
-        from .props_client import (
-            get_client as _get_props_client,
-            ALL_PITCHER_MARKETS,
-            ALL_BATTER_MARKETS,
-        )
-        from .props_model  import predict as _predict
-    except Exception:
-        return out
-
-    try:
-        from .props_line_classifier import classify_lines_for_market
-    except Exception:                                                     # noqa: BLE001
-        classify_lines_for_market = None    # type: ignore[assignment]
-
-    try:
-        payload     = _get_props_client().get_today_props() or {}
-        all_markets = payload.get("markets") or {}
-        # Bucket per (market, line) so over+under collapse into one entry,
-        # keeping whichever side has the higher model confidence.  Matches
-        # how pages/props.py renders dedup'd rows.
-        per_line: dict[tuple, dict] = {}
-        # Per-market classification so we can tag each (market, line) with
-        # its line_type and surface only the primary line per market on
-        # the player page (alts are dropped here -- the props page is the
-        # place where the "Show Alt Lines" toggle reveals them).
-        per_market_class: dict[str, dict[tuple, dict]] = {}
-        for market, props in all_markets.items():
-            if classify_lines_for_market is not None:
-                # Only the rows belonging to this player are needed for
-                # the player-page classification -- keeps the helper
-                # cheap when the slate has hundreds of players.
-                player_rows = [
-                    p for p in (props or [])
-                    if (p.get("player_name") or "").strip().lower() == name_lower
-                ]
-                per_market_class[market] = classify_lines_for_market(player_rows)
-            for p in (props or []):
-                if (p.get("player_name") or "").strip().lower() != name_lower:
-                    continue
-                try:
-                    line_f = float(p.get("line"))
-                except (TypeError, ValueError):
-                    continue
-                p = _inject_is_home(p)
-                try:
-                    pred = _predict(p)
-                except Exception:
-                    continue
-                score = float(pred.get("confidence") or 0.0)
-                key   = (market, line_f)
-                class_info = (per_market_class.get(market) or {}).get(
-                    ((p.get("player_name") or "").strip(), line_f), {}
-                )
-                existing = per_line.get(key)
-                if existing is None or score > float(existing["confidence"] or 0.0):
-                    per_line[key] = {
-                        "market":          market,
-                        "line":            line_f,
-                        "side":            (p.get("side") or "Over").strip().title(),
-                        "best_odds":       p.get("best_odds"),
-                        "best_book":       p.get("best_book"),
-                        "recommendation":  pred.get("recommendation"),
-                        "confidence":      round(score, 4),
-                        "predicted_value": pred.get("predicted_value"),
-                        "source":          "live",
-                        "line_type":       class_info.get("line_type", "alt"),
-                        "is_primary":      bool(class_info.get("is_primary")),
-                        "ev_pct":          _calc_ev(score, p.get("best_odds")),
-                    }
-
-        for entry in per_line.values():
-            # Player page only ever shows the primary line per (market) --
-            # drops 5-line "alt" packs that would otherwise produce a
-            # tab per shoulder line and give the user inflated confidence
-            # signals on lines no sportsbook would actually trade at.
-            if not entry.get("is_primary"):
+        from .props_scored_cache import load_scored_props
+        cached = load_scored_props() or {}
+        for pick in (cached.get("picks") or []):
+            if (pick.get("player") or "").strip().lower() != name_lower:
                 continue
-            k = _key(entry)
-            if k not in seen:
-                seen.add(k)
-                out.append(entry)
-                markets_seen_in_p2.add(entry.get("market") or "")
+            entry = _scored_cache_to_entry(pick)
+            out.append(entry)
+            markets_seen.add(entry.get("market") or "")
     except Exception as exc:
-        _log(f"get_today_props_for_player({player_name!r}) live re-score failed: {exc}")
+        _log(
+            f"get_today_props_for_player({player_name!r}): "
+            f"scored_cache read failed: {exc}"
+        )
 
-    # ── Part 1 (fallback): daily_picks cache ──────────────────────────────────
-    # Only fills markets Part 2 didn't cover -- if Part 2 already
-    # produced a (player, market) entry, we trust its classification
-    # and skip the daily_picks version (which may be an alt due to
-    # _collect_props's pre-classifier scoring pass).
+    # ── 2. daily_picks fallback for any market the scored cache missed ───
     try:
         from .daily_picks import load_daily_picks
         daily      = load_daily_picks()
@@ -791,7 +706,7 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
             if (pp.get("player") or "").strip().lower() != name_lower:
                 continue
             market_name = pp.get("market") or ""
-            if market_name in markets_seen_in_p2:
+            if market_name in markets_seen:
                 continue
             entry = {
                 "market":          market_name,
@@ -802,63 +717,32 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
                 "confidence":      pp.get("confidence"),
                 "predicted_value": pp.get("predicted_value"),
                 "source":          "daily_picks",
-                # daily_picks rows predate the classifier; assume main so
-                # the player page renders them.  If the line is actually
-                # an alt, the next Part-2 re-score will overwrite this
-                # entry once the relevant market is in props_client cache.
+                # daily_picks rows are pre-classifier; assume main since
+                # they survived top-5 dedup.  If the line was actually
+                # alt, the next scored_cache write overrides.
                 "line_type":       "main",
                 "is_primary":      True,
                 "ev_pct":          _calc_ev(
                     pp.get("confidence"), pp.get("best_odds"),
                 ),
             }
-            k = _key(entry)
-            if k not in seen:
-                seen.add(k)
-                out.append(entry)
+            out.append(entry)
+            markets_seen.add(market_name)
     except Exception as exc:
-        _log(f"get_today_props_for_player({player_name!r}): daily_picks read failed: {exc}")
+        _log(
+            f"get_today_props_for_player({player_name!r}): "
+            f"daily_picks read failed: {exc}"
+        )
 
-    # Sort by confidence DESC so the strongest pick lands first on the page.
+    # Sort by confidence DESC so the strongest pick lands first.
     out.sort(key=lambda e: -float(e.get("confidence") or 0.0))
     _log(
         f"get_today_props_for_player({player_name!r}): "
         f"{len(out)} prop(s) "
-        f"[markets={[e.get('market') for e in out]}]"
+        f"[markets={[e.get('market') for e in out]} "
+        f"sources={[e.get('source') for e in out]}]"
     )
     return out
-
-
-def _inject_is_home(prop: dict) -> dict:
-    """Return a shallow copy of *prop* with ``is_home`` set from today's
-    pitcher schedule, or the original dict unchanged if the lookup fails.
-
-    Setting ``is_home`` on the prop dict causes ``_build_reg_vector`` in
-    props_model.py to override the snapshot's training-time ``is_home_i``
-    with today's correct home/away context.
-
-    Only active for pitcher markets (the field only moves the needle for
-    pitchers; batters are handled via snapshot/league-median fallback).
-    """
-    market = prop.get("market") or ""
-    if not market.startswith("pitcher_"):
-        return prop
-
-    player_name = (prop.get("player_name") or "").strip()
-    commence    = (prop.get("commence_time") or "").strip()
-    date_str    = commence[:10] if commence else None
-    if not player_name or not date_str:
-        return prop
-
-    try:
-        from .pitcher_inference_features import get_is_home_for_pitcher
-        is_home = get_is_home_for_pitcher(player_name, date_str)
-        if is_home is not None:
-            # Per-pick log removed (fired once per pitcher prop scored).
-            return dict(prop, is_home=is_home)
-    except Exception as exc:
-        _log(f"_inject_is_home({player_name!r}) failed: {exc}")
-    return prop
 
 
 # ---------------------------------------------------------------------------
