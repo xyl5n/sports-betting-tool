@@ -7188,6 +7188,84 @@ def track_prop():
     })
 
 
+@app.route("/api/props/track", methods=["POST"])
+def track_prop_pick():
+    """Track a player-prop pick from the Props page.
+
+    Body (JSON):
+        player          str   — player full name
+        market          str   — e.g. "pitcher_strikeouts"
+        line            float — the prop line
+        side            str   — "Over" or "Under"
+        odds            int   — American odds (e.g. -115)
+        confidence      float — model confidence 0..1
+        predicted_value float — model's numeric prediction (may be null)
+        team            str   — team label string
+        event_id        str   — Odds API event id (may be null)
+        commence_time   str   — ISO-8601 game start (may be null)
+
+    Returns {"success": true, "id": "<uuid>"} or an error dict.
+    """
+    data = request.get_json() or {}
+
+    player  = (data.get("player") or "").strip()
+    market  = (data.get("market") or "").strip()
+    side    = (data.get("side")   or "Over").strip().title()
+    if not player or not market:
+        return jsonify({"error": "player and market are required"}), 400
+
+    try:
+        line = float(data["line"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "line must be a number"}), 400
+
+    try:
+        from src.props_ledger import get_props_ledger
+        pl = get_props_ledger()
+        pl.reload()   # always read the freshest state before writing
+
+        event_id = data.get("event_id")
+        if pl.has_prop_bet(player, market, line, side, event_id):
+            return jsonify({"error": "This pick is already tracked"}), 409
+
+        bet_id = pl.add_prop_bet(
+            player          = player,
+            market          = market,
+            line            = line,
+            side            = side,
+            odds            = data.get("odds"),
+            confidence      = float(data.get("confidence") or 0),
+            predicted_value = data.get("predicted_value"),
+            team            = data.get("team") or "",
+            event_id        = event_id,
+            commence_time   = data.get("commence_time"),
+        )
+        return jsonify({"success": True, "id": bet_id})
+    except Exception as exc:                                                # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"PROPS-TRACK: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/props/settle_open", methods=["POST"])
+def settle_open_props():
+    """Attempt to auto-settle all open props bets whose games have finished.
+
+    Safe to call repeatedly — bets with no game-log row yet stay open.
+    Returns {"settled": [<bet dicts>]}.
+    """
+    try:
+        from src.props_ledger import get_props_ledger
+        pl = get_props_ledger()
+        pl.reload()
+        newly = pl.settle_open_bets()
+        return jsonify({"success": True, "settled": len(newly), "bets": newly})
+    except Exception as exc:                                                # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"PROPS-SETTLE: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/ledger/settle_manual/<bet_id>", methods=["POST"])
 def settle_manual(bet_id: str):
     """Manually settle a bet: result must be 'win', 'loss', or 'push'."""
@@ -9222,6 +9300,26 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         voided = _void_postponed_mlb_bets()
     except Exception as _exc:
         _eprint(f"AUTO-SETTLE: postponed check error: {type(_exc).__name__}: {_exc}")
+
+    # ── Props bets (player props tracked from the Props page) ────────────────
+    props_settled: list = []
+    try:
+        from src.props_ledger import get_props_ledger as _get_pl
+        _pl = _get_pl()
+        _pl.reload()
+        props_settled = _pl.settle_open_bets()
+        if props_settled:
+            _eprint(
+                f"AUTO-SETTLE: settled {len(props_settled)} prop bet(s) — "
+                + ", ".join(
+                    f"{b.get('player')} {b.get('side')} {b.get('line')} "
+                    f"→ {(b.get('result') or '?').upper()}"
+                    for b in props_settled[:5]
+                )
+                + (" ..." if len(props_settled) > 5 else "")
+            )
+    except Exception as _pe:
+        _eprint(f"AUTO-SETTLE: props settle error: {type(_pe).__name__}: {_pe}")
 
     # ── Terminal summary ──────────────────────────────────────────────────────
     wins   = sum(1 for s in settled if s.get("result") == "win")
