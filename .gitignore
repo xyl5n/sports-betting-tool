@@ -26,3 +26,9 @@ env/
 
 # Runtime artifacts
 *.log
+
+# Props backtest output — per-run snapshots and the rolling baseline are
+# developer/Railway artifacts, not source.  Keep them out of the repo;
+# Supabase is the cross-environment persistence layer for cross-PR diffs.
+**/.cache/backtest_results_*.json
+**/.cache/backtest_baseline.json
