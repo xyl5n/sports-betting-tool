@@ -561,6 +561,32 @@ def _game_log_table(
         f"border-bottom: 1px solid {t.BORDER};"
     )
 
+    def _safe_str(raw) -> str:
+        """Return the string value of *raw*, or '—' if it is None/empty."""
+        if raw is None:
+            return "—"
+        s = str(raw).strip()
+        return s if s else "—"
+
+    def _safe_num(raw) -> str:
+        """Return the numeric value of *raw* as a string, or '—' if None."""
+        if raw is None:
+            return "—"
+        return str(raw)
+
+    def _safe_ip(game: dict) -> str:
+        """Format innings-pitched as '6.0', falling back to the raw string."""
+        raw_str = game.get("IP_raw")
+        if raw_str is not None:
+            return _safe_str(raw_str)
+        ip_val = game.get("IP")
+        if ip_val is None:
+            return "—"
+        try:
+            return f"{float(ip_val):.1f}"
+        except (TypeError, ValueError):
+            return _safe_str(ip_val)
+
     with ui.element("div").style("overflow-x: auto; width: 100%;"):
         with ui.element("table").style(
             f"width: 100%; border-collapse: collapse; "
@@ -577,42 +603,49 @@ def _game_log_table(
                             + f";'>{col}</th>"
                         )
             # Rows (reversed so newest is first)
+            # Each row is wrapped in try-except so a single bad game dict
+            # cannot take down the whole table — bad rows are skipped with
+            # a warning instead.
             with ui.element("tbody"):
                 for g in reversed(games):
-                    with ui.element("tr").style(
-                        f"transition: background .1s; "
-                        f":hover {{ background: {t.CARD_HI}; }}"
-                    ):
+                    try:
                         opp_flag = "@" if not g.get("is_home") else "vs"
-                        for col in cols:
-                            if col == "Date":
-                                val = g.get("date", "")[-5:] or "—"
-                                ui.html(
-                                    f"<td style='font-size:12px; color:{t.TEXT_DIM2}; "
-                                    f"padding:6px 10px; "
-                                    f"border-bottom:1px solid {t.BORDER_SOFT}; "
-                                    f"font-family:monospace; white-space:nowrap;'>{val}</td>"
-                                )
-                            elif col == "OPP":
-                                val = g.get("opp", "—")
-                                ui.html(
-                                    f"<td style='font-size:12px; color:{t.TEXT_DIM}; "
-                                    f"padding:6px 10px; "
-                                    f"border-bottom:1px solid {t.BORDER_SOFT}; "
-                                    f"font-family:monospace; white-space:nowrap;'>"
-                                    f"{opp_flag} {val}</td>"
-                                )
-                            elif col == "IP":
-                                val = g.get("IP_raw") or f"{g.get('IP', 0.0):.1f}"
-                                ui.html(
-                                    f"<td style='{_cell_style(col)}'>{val}</td>"
-                                )
-                            else:
-                                raw_key = col_stat_map.get(col, col)
-                                val = g.get(raw_key, 0)
-                                ui.html(
-                                    f"<td style='{_cell_style(col)}'>{val}</td>"
-                                )
+                        with ui.element("tr").style(
+                            f"transition: background .1s; "
+                            f":hover {{ background: {t.CARD_HI}; }}"
+                        ):
+                            for col in cols:
+                                if col == "Date":
+                                    raw_date = g.get("date")
+                                    val = (raw_date[-5:] if raw_date else None) or "—"
+                                    ui.html(
+                                        f"<td style='font-size:12px; color:{t.TEXT_DIM2}; "
+                                        f"padding:6px 10px; "
+                                        f"border-bottom:1px solid {t.BORDER_SOFT}; "
+                                        f"font-family:monospace; white-space:nowrap;'>{val}</td>"
+                                    )
+                                elif col == "OPP":
+                                    val = _safe_str(g.get("opp"))
+                                    ui.html(
+                                        f"<td style='font-size:12px; color:{t.TEXT_DIM}; "
+                                        f"padding:6px 10px; "
+                                        f"border-bottom:1px solid {t.BORDER_SOFT}; "
+                                        f"font-family:monospace; white-space:nowrap;'>"
+                                        f"{opp_flag} {val}</td>"
+                                    )
+                                elif col == "IP":
+                                    val = _safe_ip(g)
+                                    ui.html(
+                                        f"<td style='{_cell_style(col)}'>{val}</td>"
+                                    )
+                                else:
+                                    raw_key = col_stat_map.get(col, col)
+                                    val = _safe_num(g.get(raw_key))
+                                    ui.html(
+                                        f"<td style='{_cell_style(col)}'>{val}</td>"
+                                    )
+                    except Exception as _row_exc:                           # noqa: BLE001
+                        _log(f"game log row skipped ({type(_row_exc).__name__}: {_row_exc})")
 
 
 # ── Not found ────────────────────────────────────────────────────────────────
@@ -637,10 +670,16 @@ def _not_found(slug: str) -> None:
 # ── Small helpers ─────────────────────────────────────────────────────────────
 
 def _stat_value(game: dict, stat_key: str) -> float:
-    """Extract the numeric value for *stat_key* from a game dict."""
+    """Extract the numeric value for *stat_key* from a game dict.
+
+    Returns 0.0 for any field that is missing or None so the chart never
+    crashes on sparse game-log data from the Stats API.
+    """
     if stat_key == "outs":
-        return float(round(game.get("IP", 0.0) * 3))
-    return float(game.get(stat_key, 0) or 0)
+        ip = game.get("IP")
+        return float(round((ip if ip is not None else 0.0) * 3))
+    raw = game.get(stat_key)
+    return float(raw if raw is not None else 0)
 
 
 def _bar_color(stat_key: str, values: list[float], prop_line: Optional[float]) -> str:
