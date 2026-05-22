@@ -152,6 +152,7 @@ def _layout(player_id_slug: str) -> None:
 
         _log(f"rendering {info['name']} (id={player_id}, pitcher={is_pitcher}, "
              f"games={len(games)}, today_prop={today_prop is not None})")
+        _log(f"player_page game dict keys: {list(games[0].keys()) if games else 'no games'}")
 
         # ── Sections ──────────────────────────────────────────────────────
         _section_hero(info, is_pitcher, today_prop)
@@ -587,6 +588,10 @@ def _game_log_table(
         except (TypeError, ValueError):
             return _safe_str(ip_val)
 
+    # Inject hover style once per table render via a real stylesheet rule.
+    # NiceGUI's .style() cannot handle pseudo-classes — they must go here.
+    ui.add_css(f".game-log-row:hover {{ background: {t.CARD_HI} !important; }}")
+
     with ui.element("div").style("overflow-x: auto; width: 100%;"):
         with ui.element("table").style(
             f"width: 100%; border-collapse: collapse; "
@@ -606,14 +611,19 @@ def _game_log_table(
             # Each row is wrapped in try-except so a single bad game dict
             # cannot take down the whole table — bad rows are skipped with
             # a warning instead.
+            #
+            # NOTE: NiceGUI's .style() only accepts inline CSS property
+            # declarations (e.g. "color: red;").  Pseudo-classes like
+            # ":hover { ... }" get split on ";" by NiceGUI's parser, leaving
+            # a bare " }" segment with no ":" which throws:
+            #   ValueError: not enough values to unpack (expected 2, got 1)
+            # on every single row.  Hover effect is injected once via
+            # ui.add_css() with a class name on the <tr> instead.
             with ui.element("tbody"):
                 for g in reversed(games):
                     try:
                         opp_flag = "@" if not g.get("is_home") else "vs"
-                        with ui.element("tr").style(
-                            f"transition: background .1s; "
-                            f":hover {{ background: {t.CARD_HI}; }}"
-                        ):
+                        with ui.element("tr").classes("game-log-row"):
                             for col in cols:
                                 if col == "Date":
                                     raw_date = g.get("date")
