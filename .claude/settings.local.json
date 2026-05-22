@@ -48,7 +48,9 @@
       "Bash(git checkout *)",
       "Bash(git commit -m ' *)",
       "Bash(git push *)",
-      "Bash(gh pr create --title 'Expand props model training: multi-season data, 40+ new features, SHAP analysis' --body ' *)"
+      "Bash(gh pr create --title 'Expand props model training: multi-season data, 40+ new features, SHAP analysis' --body ' *)",
+      "Bash(git add *)",
+      "Bash(where gh *)"
     ]
   }
 }
