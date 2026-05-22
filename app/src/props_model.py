@@ -110,6 +110,72 @@ _PARK_HR: dict[str, float] = {
     "STL": 0.90, "TB":  0.90, "TEX": 1.10, "TOR": 1.05, "WSH": 0.95,
 }
 
+# Full team name → 3-letter abbreviation used by _PARK_* tables above.
+# props_client.py populates `home_team` with The Odds API's full name
+# (e.g. "New York Yankees"), so a naive `.upper()[:3]` produced "NEW"
+# and silently fell through to the 1.00 default — wiping out the park
+# factor signal the model was trained on.  Map full names here.
+TEAM_NAME_TO_ABBREV: dict[str, str] = {
+    "Arizona Diamondbacks":  "ARI",
+    "Atlanta Braves":        "ATL",
+    "Baltimore Orioles":     "BAL",
+    "Boston Red Sox":        "BOS",
+    "Chicago Cubs":          "CHC",
+    "Cincinnati Reds":       "CIN",
+    "Cleveland Guardians":   "CLE",
+    "Colorado Rockies":      "COL",
+    "Chicago White Sox":     "CWS",
+    "Detroit Tigers":        "DET",
+    "Houston Astros":        "HOU",
+    "Kansas City Royals":    "KC",
+    "Los Angeles Angels":    "LAA",
+    "Los Angeles Dodgers":   "LAD",
+    "Miami Marlins":         "MIA",
+    "Milwaukee Brewers":     "MIL",
+    "Minnesota Twins":       "MIN",
+    "New York Mets":         "NYM",
+    "New York Yankees":      "NYY",
+    "Oakland Athletics":     "OAK",
+    "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates":    "PIT",
+    "San Diego Padres":      "SD",
+    "Seattle Mariners":      "SEA",
+    "San Francisco Giants":  "SF",
+    "St. Louis Cardinals":   "STL",
+    "Tampa Bay Rays":        "TB",
+    "Texas Rangers":         "TEX",
+    "Toronto Blue Jays":     "TOR",
+    "Washington Nationals":  "WSH",
+}
+
+# Module-load invariant: every abbrev we map to must exist in all three
+# park-factor tables.  A typo here (e.g. "WAS" vs "WSH") would silently
+# revert that team to the 1.00 default again — assert so we fail loud.
+assert set(TEAM_NAME_TO_ABBREV.values()) <= _PARK_K.keys(), \
+    f"TEAM_NAME_TO_ABBREV maps to abbrevs missing from _PARK_K: " \
+    f"{set(TEAM_NAME_TO_ABBREV.values()) - _PARK_K.keys()}"
+assert set(TEAM_NAME_TO_ABBREV.values()) <= _PARK_H.keys(), \
+    f"TEAM_NAME_TO_ABBREV maps to abbrevs missing from _PARK_H: " \
+    f"{set(TEAM_NAME_TO_ABBREV.values()) - _PARK_H.keys()}"
+assert set(TEAM_NAME_TO_ABBREV.values()) <= _PARK_HR.keys(), \
+    f"TEAM_NAME_TO_ABBREV maps to abbrevs missing from _PARK_HR: " \
+    f"{set(TEAM_NAME_TO_ABBREV.values()) - _PARK_HR.keys()}"
+
+
+def _team_to_abbrev(home_team: str) -> str:
+    """Normalize a home_team string to its 3-letter park-factor key.
+    Accepts both full names ("New York Yankees") and already-abbreviated
+    inputs ("NYY"); empty/unknown → "" so callers fall back to 1.00."""
+    if not home_team:
+        return ""
+    s = home_team.strip()
+    if s in TEAM_NAME_TO_ABBREV:
+        return TEAM_NAME_TO_ABBREV[s]
+    upper = s.upper()
+    if upper in _PARK_K:
+        return upper
+    return ""
+
 
 # ── Hardcoded feature name lists (must match train_props_models.py) ──────────
 # These are duplicated here so inference never requires props_reg_metadata.json
@@ -353,8 +419,10 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
     if "is_home_i" in fn_idx:
         vec[fn_idx["is_home_i"]] = float(is_home)
 
-    # Park factors — home_team drives the ballpark.
-    park_team = (prop.get("home_team") or "").strip().upper()[:3]
+    # Park factors — home_team drives the ballpark.  Odds API passes
+    # full team names ("New York Yankees") so we normalize through the
+    # TEAM_NAME_TO_ABBREV map before hitting the 3-letter tables.
+    park_team = _team_to_abbrev(prop.get("home_team") or "")
     if "ballpark_factor_k" in fn_idx:
         vec[fn_idx["ballpark_factor_k"]] = _PARK_K.get(park_team, 1.0)
     if "ballpark_factor_hits" in fn_idx:
