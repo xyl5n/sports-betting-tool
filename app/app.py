@@ -4557,6 +4557,30 @@ def analyze():
         _save_analysis_cache(serialized, parlays, sport, n_completed,
                              cv_acc, lr_cv_acc, nn_val_acc, analyzed_at=_ts)
         _write_analysis_timestamp("mlb", _ts)
+        # Dedicated per-sport Supabase key -- written synchronously so
+        # Railway log confirms it fired and the admin "Last analyzed" line
+        # survives a redeploy even if the shared analysis_timestamps key
+        # had a silent async write failure.
+        try:
+            from zoneinfo import ZoneInfo as _ZI_ts
+            _ts_et_mlb = datetime.now(_ZI_ts("America/New_York")).isoformat()
+        except Exception:
+            _ts_et_mlb = _ts.isoformat()
+        try:
+            from src import db as _db_ts
+            _db_ts.cache_set(
+                "last_analyzed_at_mlb", "mlb", _ts.date().isoformat(),
+                {"ts": _ts_et_mlb},
+            )
+            print(
+                f"ANALYSIS-TIMESTAMP: updated mlb last_analyzed_at to {_ts_et_mlb}",
+                flush=True, file=sys.stderr,
+            )
+        except Exception as _tse:
+            print(
+                f"ANALYSIS-TIMESTAMP: dedicated mlb key write failed (ignored): {_tse}",
+                flush=True, file=sys.stderr,
+            )
         _write_daily_snapshot(sport, {
             "results":         serialized,
             "parlays":         parlays,
@@ -6237,9 +6261,29 @@ def admin_status():
         mlb_ts  = _to_iso(_analysis_state.get("last_analyzed_at"))
         wnba_ts = _to_iso(_wnba_analysis_state.get("last_analyzed_at"))
 
-        # Tier 2 -- local file (with Supabase fallback inside the helper).
-        # Only consulted for the sport(s) the in-memory state doesn't
-        # know about yet (cold boot, never-analyzed-in-this-worker).
+        # Tier 2a -- dedicated per-sport Supabase keys written synchronously
+        # by each analyze route.  These are more reliable than the shared
+        # analysis_timestamps key because they use a direct _db.cache_set
+        # call (not a background thread) and survive a Railway redeploy.
+        if mlb_ts is None or wnba_ts is None:
+            try:
+                from src import db as _db_status
+                if _db_status.is_supabase():
+                    if mlb_ts is None:
+                        _row = _db_status.cache_get("last_analyzed_at_mlb")
+                        if isinstance(_row, dict):
+                            _data = _row.get("data") or _row
+                            mlb_ts = (_data.get("ts") if isinstance(_data, dict) else None)
+                    if wnba_ts is None:
+                        _row = _db_status.cache_get("last_analyzed_at_wnba")
+                        if isinstance(_row, dict):
+                            _data = _row.get("data") or _row
+                            wnba_ts = (_data.get("ts") if isinstance(_data, dict) else None)
+            except Exception:                                               # noqa: BLE001
+                pass
+
+        # Tier 2b -- local file (with Supabase fallback inside the helper).
+        # Consulted last; covers deployments that predate the dedicated keys.
         if mlb_ts is None or wnba_ts is None:
             ts_store = _read_analysis_timestamps()
             if mlb_ts is None:
@@ -8405,6 +8449,27 @@ def analyze_wnba():
         _save_wnba_analysis_cache(serialized, parlays, n_completed, cv_acc, lr_cv_acc,
                                   analyzed_at=_ts)
         _write_analysis_timestamp("wnba", _ts)
+        # Dedicated per-sport Supabase key -- same rationale as the MLB block.
+        try:
+            from zoneinfo import ZoneInfo as _ZI_ts
+            _ts_et_wnba = datetime.now(_ZI_ts("America/New_York")).isoformat()
+        except Exception:
+            _ts_et_wnba = _ts.isoformat()
+        try:
+            from src import db as _db_ts
+            _db_ts.cache_set(
+                "last_analyzed_at_wnba", "wnba", _ts.date().isoformat(),
+                {"ts": _ts_et_wnba},
+            )
+            print(
+                f"ANALYSIS-TIMESTAMP: updated wnba last_analyzed_at to {_ts_et_wnba}",
+                flush=True, file=sys.stderr,
+            )
+        except Exception as _tse:
+            print(
+                f"ANALYSIS-TIMESTAMP: dedicated wnba key write failed (ignored): {_tse}",
+                flush=True, file=sys.stderr,
+            )
         _write_daily_snapshot("wnba", {
             "results":        serialized,
             "parlays":        parlays,
@@ -9827,33 +9892,53 @@ except Exception as _pe:
 # Analysis-timestamps boot restore.  data/analysis_timestamps.json
 # powers the admin "Last analyzed" line; Railway redeploys wipe the
 # file so without this restore the admin label would show a "—" until
-# the next analyze run.  The local file gets rewritten by
-# _read_analysis_timestamps' Supabase fallback path, but pre-warming it
-# here means the FIRST poll after boot has data instead of having to
-# round-trip to Supabase synchronously.
+# the next analyze run.
+#
+# Two-tier seed strategy:
+#   1. Dedicated per-sport Supabase keys (last_analyzed_at_mlb /
+#      last_analyzed_at_wnba) written synchronously by each analyze
+#      route.  These are the most reliable source.
+#   2. Shared analysis_timestamps key (legacy) as a fallback for
+#      deployments that predate the dedicated keys.
 try:
+    _ts_boot_direct: dict[str, str | None] = {"mlb": None, "wnba": None}
+    try:
+        from src import db as _db_boot
+        if _db_boot.is_supabase():
+            for _bk, _bsport in (("last_analyzed_at_mlb", "mlb"),
+                                  ("last_analyzed_at_wnba", "wnba")):
+                _brow = _db_boot.cache_get(_bk)
+                if isinstance(_brow, dict):
+                    _bdata = _brow.get("data") or _brow
+                    _bts   = _bdata.get("ts") if isinstance(_bdata, dict) else None
+                    if _bts:
+                        _ts_boot_direct[_bsport] = _bts
+    except Exception as _dbe:
+        print(f"STARTUP: dedicated key read failed (ignored): {_dbe}",
+              flush=True, file=sys.stderr)
+
+    # Fall back to shared key for any sport the dedicated key didn't cover
     _ts_boot = _read_analysis_timestamps()
     print(
         f"STARTUP: timestamps boot restore -- "
-        f"mlb={(_ts_boot.get('mlb') or {}).get('analyzed_at') or 'none'}  "
-        f"wnba={(_ts_boot.get('wnba') or {}).get('analyzed_at') or 'none'}",
+        f"mlb_dedicated={_ts_boot_direct.get('mlb') or 'none'}  "
+        f"mlb_shared={(_ts_boot.get('mlb') or {}).get('analyzed_at') or 'none'}  "
+        f"wnba_dedicated={_ts_boot_direct.get('wnba') or 'none'}  "
+        f"wnba_shared={(_ts_boot.get('wnba') or {}).get('analyzed_at') or 'none'}",
         flush=True, file=sys.stderr,
     )
-    # Seed the in-memory state from the restored row so the admin
-    # status endpoint's tier-1 read works on the very first request
-    # after a cold boot.  Both states are seeded -- nothing harmful
-    # if a sport never ran, the value just stays None.
+    # Seed the in-memory state: prefer dedicated key, fall back to shared.
     for _sp_key, _state in (
         ("mlb",  _analysis_state),
         ("wnba", _wnba_analysis_state),
     ):
-        _saved = (_ts_boot.get(_sp_key) or {}).get("analyzed_at")
+        _saved = _ts_boot_direct.get(_sp_key) or (_ts_boot.get(_sp_key) or {}).get("analyzed_at")
         if _saved and _state.get("last_analyzed_at") is None:
             try:
                 _state["last_analyzed_at"] = datetime.fromisoformat(_saved)
                 print(
                     f"STARTUP: in-memory last_analyzed_at[{_sp_key}] "
-                    f"seeded from Supabase: {_saved}",
+                    f"seeded: {_saved}",
                     flush=True, file=sys.stderr,
                 )
             except Exception as _se:                                       # noqa: BLE001
