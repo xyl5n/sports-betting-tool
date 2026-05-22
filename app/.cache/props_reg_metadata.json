@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-22T16:53:15.152525Z",
+  "generated_at": "2026-05-22T17:17:46.894348Z",
   "pitcher_feature_names": [
     "szn_K",
     "szn_BB",
@@ -30,6 +30,12 @@
     "k_rate_vs_lhb",
     "era_vs_rhb",
     "k_rate_vs_rhb",
+    "opp_team_k_rate",
+    "opp_team_woba",
+    "opp_team_lhb_pct",
+    "career_k_per_9",
+    "career_bb_per_9",
+    "career_ip",
     "lineup_avg_k_rate",
     "lineup_lhb_count",
     "lineup_rhb_count",
