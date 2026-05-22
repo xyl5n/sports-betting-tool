@@ -746,6 +746,125 @@ def _section_model_bets(backend, refresh) -> None:
             refresh_status=refresh,
         )
 
+        # Train Props Models -- long-running so it can't use the
+        # standard _async_button wrapper.  POSTs to start, then polls
+        # /api/admin/train_props_status every 5s and writes the latest
+        # `stage` into the inline status label until status flips to
+        # complete or error.  Same inline label pattern as the rest
+        # of /admin so mobile users don't see a blocking popup.
+        ui.label("Props Models").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2}; margin-top: 10px;"
+        )
+        _train_props_button(backend)
+
+
+def _train_props_button(backend) -> None:
+    """Train Props Models button + inline status that polls the
+    background training thread.  Stays out of the standard wrappers
+    because the request returns immediately while the work continues
+    in a thread on the backend; we need a poller, not a single
+    response handler."""
+    with ui.column().classes("w-full").style(
+        "gap: 2px; min-width: 0; flex: 1 1 auto;"
+    ):
+        btn = ui.button("Train Props Models").props("no-caps unelevated") \
+            .style(_btn_style("primary"))
+        status = _make_status_holder()
+
+    # Closure-captured timer reference so the poller can cancel itself.
+    poller: dict[str, object | None] = {"timer": None}
+
+    def _kill_poller() -> None:
+        timer = poller.get("timer")
+        if timer is not None:
+            try:
+                timer.deactivate()
+            except Exception:                                              # noqa: BLE001
+                pass
+            poller["timer"] = None
+
+    async def _poll() -> None:
+        try:
+            ok, data, _ = await asyncio.to_thread(
+                _call, backend, "GET", "/api/admin/train_props_status",
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            _show_inline_status(
+                status, f"Status poll error: {exc}", "warning",
+            )
+            return
+        if not ok:
+            _show_inline_status(
+                status,
+                f"Status poll failed: {data.get('error') or 'unknown'}",
+                "warning",
+            )
+            return
+        s = (data.get("status") or "").lower()
+        stage = data.get("stage") or s
+        if s == "running":
+            _show_inline_status(status, f"{stage}", "info")
+            return
+        if s == "complete":
+            summary = data.get("summary") or {}
+            p_acc = summary.get("pitcher_oof_acc")
+            b_acc = summary.get("batter_oof_acc")
+            msg = (
+                "Complete -- "
+                f"pitcher_cv={('?' if p_acc is None else f'{p_acc * 100:.1f}%')}  "
+                f"batter_cv={('?' if b_acc is None else f'{b_acc * 100:.1f}%')}"
+            )
+            _show_inline_status(status, msg, "success")
+            btn.enable(); btn.props(remove="loading")
+            _kill_poller()
+            return
+        if s == "error":
+            _show_inline_status(
+                status, f"Training failed: {data.get('error') or 'unknown'}",
+                "error",
+            )
+            btn.enable(); btn.props(remove="loading")
+            _kill_poller()
+            return
+        # idle -- training never started or finished + state was reset.
+        _show_inline_status(status, f"Status: {s or 'idle'}", "info")
+
+    async def _click() -> None:
+        print("[ADMIN-BTN] Train Props Models click",
+              flush=True, file=sys.stderr)
+        btn.props("loading"); btn.disable()
+        _show_inline_status(status, "Training started -- preparing...", "info")
+        try:
+            ok, data, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/admin/train_props_models", {},
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            _show_inline_status(
+                status, f"Train Props Models crashed: {exc}", "error",
+            )
+            btn.enable(); btn.props(remove="loading")
+            return
+        if not ok:
+            err = data.get("error") or "unknown error"
+            _show_inline_status(
+                status, f"Train Props Models failed: {err}", "error",
+            )
+            btn.enable(); btn.props(remove="loading")
+            return
+        # Kick off the 5 s poller.  Replaces any previous active timer
+        # so back-to-back clicks (e.g. retry after error) stay sane.
+        _kill_poller()
+        poller["timer"] = ui.timer(5.0, _poll)
+        # Fire one immediate poll so the user sees the first stage
+        # without waiting 5 seconds.
+        try:
+            await _poll()
+        except Exception:                                                  # noqa: BLE001
+            pass
+
+    btn.on("click", _click)
+
 
 # ───────────────────────────────────────────────────────────────────────────
 #  Section: MY BETS

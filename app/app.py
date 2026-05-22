@@ -8986,6 +8986,190 @@ def admin_settle_now():
                         "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+# ────────────────────────────────────────────────────────────────────────────
+#  Admin: Train Props Models
+#
+#  Long-running pipeline (pybaseball pull + 5-fold CV + joblib write +
+#  Supabase push) wrapped in a background thread so /admin's Train Props
+#  Models button doesn't time out the HTTP request.  Status is streamed
+#  back through a module-level dict the UI polls every 5 s.
+# ────────────────────────────────────────────────────────────────────────────
+
+import threading as _props_threading_mod
+
+_props_training_state: dict = {
+    "running":   False,
+    "status":    "idle",   # idle | running | complete | error
+    "stage":     None,     # human-readable label like "fitting pitcher model"
+    "progress":  [],       # list[dict]  -- last 50 status callback events
+    "summary":   None,     # set after the complete stage fires
+    "error":     None,     # set on error
+    "started_at":  None,
+    "finished_at": None,
+}
+_props_training_lock = _props_threading_mod.Lock()
+
+
+def _props_training_record(stage: str, **details) -> None:
+    """status_callback impl threaded into src.props_training.run_training.
+
+    Translates the training pipeline's stage names into UI-friendly
+    sentences so the admin label can render them verbatim.  Also keeps
+    the last 50 events in `_props_training_state["progress"]` so a
+    poller that joined late can replay the timeline.
+    """
+    pretty = {
+        "started":       "Training started -- preparing pybaseball pulls",
+        "fetching":      lambda d: (
+            f"Fetching 2025 {d.get('target') or '?'} data via pybaseball"
+        ),
+        "features":      lambda d: (
+            f"Built {d.get('target') or '?'} features: "
+            f"{d.get('rows', 0)} rows, "
+            f"positive rate {(d.get('positive_rate', 0) * 100):.1f}%"
+        ),
+        "fold":          lambda d: (
+            f"{(d.get('target') or '?').title()} model -- fold "
+            f"{d.get('fold')}/5  acc={d.get('acc', 0):.3f}"
+        ),
+        "trained":       lambda d: (
+            f"{(d.get('target') or '?').title()} model trained -- "
+            f"OOF accuracy {(d.get('oof_acc') or 0) * 100:.1f}%"
+        ),
+        "skipped":       lambda d: (
+            f"Skipped {d.get('target') or '?'} model: {d.get('reason') or ''}"
+        ),
+        "supabase_push": "Uploading joblibs to Supabase",
+        "complete":      "Complete",
+        "error":         lambda d: f"Error: {d.get('message') or 'unknown'}",
+    }
+    label = pretty.get(stage, stage)
+    if callable(label):
+        try:
+            label = label(details)
+        except Exception:                                                  # noqa: BLE001
+            label = stage
+    with _props_training_lock:
+        _props_training_state["stage"] = label
+        progress = _props_training_state["progress"]
+        progress.append({
+            "stage": stage,
+            "label": label,
+            "details": details,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        if len(progress) > 50:
+            del progress[: len(progress) - 50]
+    _eprint(f"PROPS-TRAIN: stage={stage}  label={label}  details={details}")
+
+
+def _props_training_thread_target(season: int) -> None:
+    """Background thread body.  Wraps run_training in try/except so
+    a crash sets status=error rather than killing the worker."""
+    _eprint(f"PROPS-TRAIN: training started in background  season={season}")
+    try:
+        from src.props_training import run_training
+        summary = run_training(
+            season=season,
+            push=True,
+            status_callback=_props_training_record,
+        )
+        with _props_training_lock:
+            _props_training_state["status"]      = "complete"
+            _props_training_state["summary"]     = summary
+            _props_training_state["finished_at"] = datetime.now(timezone.utc).isoformat()
+        # Mirror what the user spec asked for, exactly: the deploy log
+        # gets a single line summarizing both CV accuracies on success.
+        p_acc = summary.get("pitcher_oof_acc")
+        b_acc = summary.get("batter_oof_acc")
+        _eprint(
+            f"PROPS-TRAIN: complete  "
+            f"pitcher_cv={'?' if p_acc is None else f'{p_acc * 100:.1f}%'}  "
+            f"batter_cv={'?' if b_acc is None else f'{b_acc * 100:.1f}%'}"
+        )
+        # Bump the runtime predictor so the next predict() call sees the
+        # freshly-saved joblibs without a worker restart.
+        try:
+            from src import props_model as _pm
+            _pm._pitcher_model = _pm._LoadedModel(_pm.PITCHER_MODEL_PATH)
+            _pm._batter_model  = _pm._LoadedModel(_pm.BATTER_MODEL_PATH)
+            _eprint("PROPS-TRAIN: runtime predictor models reloaded")
+        except Exception as _re:                                          # noqa: BLE001
+            _eprint(f"PROPS-TRAIN: predictor reload failed: {_re}")
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(
+            f"PROPS-TRAIN: FATAL {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
+        with _props_training_lock:
+            _props_training_state["status"]      = "error"
+            _props_training_state["error"]       = f"{type(exc).__name__}: {exc}"
+            _props_training_state["finished_at"] = datetime.now(timezone.utc).isoformat()
+    finally:
+        with _props_training_lock:
+            _props_training_state["running"] = False
+
+
+@app.route("/api/admin/train_props_models", methods=["POST"])
+def admin_train_props_models():
+    """Kick off props model training in a background thread.  Returns
+    immediately so the request doesn't time out -- callers poll
+    /api/admin/train_props_status to watch progress."""
+    print("[ADMIN-ROUTE] /api/admin/train_props_models invoked",
+          flush=True, file=sys.stderr)
+    with _props_training_lock:
+        if _props_training_state["running"]:
+            return jsonify({
+                "success": False,
+                "running": True,
+                "error":   "Training is already in progress",
+                "status":  _props_training_state.copy(),
+            }), 409
+        body = request.get_json(silent=True) or {}
+        try:
+            season = int(body.get("season") or 2025)
+        except (TypeError, ValueError):
+            season = 2025
+        # Reset state for this run.
+        _props_training_state.update({
+            "running":     True,
+            "status":      "running",
+            "stage":       "queued",
+            "progress":    [],
+            "summary":     None,
+            "error":       None,
+            "started_at":  datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+        })
+    _eprint(f"PROPS-TRAIN: training started  season={season}")
+    th = _props_threading_mod.Thread(
+        target=_props_training_thread_target,
+        kwargs={"season": season},
+        name=f"props-train-{season}",
+        daemon=True,
+    )
+    th.start()
+    return jsonify({
+        "success": True,
+        "message": f"Training started for season {season}",
+        "season":  season,
+    })
+
+
+@app.route("/api/admin/train_props_status", methods=["GET"])
+def admin_train_props_status():
+    """Snapshot of the training thread's state for the UI poller.
+    Always returns 200 -- the status field tells the client what to
+    do (idle / running / complete / error)."""
+    with _props_training_lock:
+        # Return a shallow copy so callers can't mutate state.
+        snapshot = dict(_props_training_state)
+        # Only include the last 5 progress events so the wire payload
+        # stays small; the UI label only renders the latest anyway.
+        snapshot["progress"] = list((_props_training_state.get("progress") or [])[-5:])
+    return jsonify({"success": True, **snapshot})
+
+
 # ── Nightly retrain scheduler ─────────────────────────────────────────────────
 print("STARTUP: all routes registered — starting scheduler...", flush=True, file=sys.stderr)
 
