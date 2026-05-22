@@ -534,11 +534,37 @@ def _game_log_table(
     is_pitcher: bool,
     highlighted_stat: str,
 ) -> None:
-    """Render a styled HTML-table-like grid of the game log."""
+    """Render the game log as a single ui.html() block.
+
+    Layout rationale
+    ----------------
+    When individual <td>/<th> elements are built with ui.html() inside a
+    ui.element("tr") context, NiceGUI inserts a <div> wrapper around each
+    cell, producing:
+
+        <tr>
+          <div><td>…</td></div>   ← invalid HTML
+          <div><td>…</td></div>
+        </tr>
+
+    Browsers move those rogue <div>s out of the table, so all cells end up
+    collapsed onto one line.  Rendering the entire <table> as one ui.html()
+    string avoids this — NiceGUI adds only a single outer <div> around the
+    whole block, which is harmless.
+    """
     if is_pitcher:
         cols = ["Date", "OPP", "IP", "H", "ER", "BB", "K"]
+        col_min_w = {
+            "Date": "65px", "OPP": "76px", "IP": "52px",
+            "H": "44px", "ER": "44px", "BB": "44px", "K": "44px",
+        }
     else:
         cols = ["Date", "OPP", "AB", "H", "HR", "RBI", "R", "BB", "SO", "TB"]
+        col_min_w = {
+            "Date": "65px", "OPP": "76px", "AB": "44px",
+            "H": "44px", "HR": "44px", "RBI": "44px", "R": "44px",
+            "BB": "44px", "SO": "44px", "TB": "44px",
+        }
 
     col_stat_map = {
         "K": "K", "ER": "ER", "H": "H", "BB": "BB",
@@ -546,116 +572,119 @@ def _game_log_table(
         "SO": "SO", "AB": "AB", "PA": "PA",
     }
 
-    def _cell_style(col: str) -> str:
-        base = (
-            f"font-size: 12px; font-family: monospace; "
-            f"padding: 6px 10px; text-align: right; "
-            f"border-bottom: 1px solid {t.BORDER_SOFT}; "
-        )
-        if col_stat_map.get(col) == highlighted_stat.upper():
-            return base + f"color: {t.PRIMARY}; font-weight: 700;"
-        return base + f"color: {t.TEXT};"
-
-    header_style = (
-        f"font-size: 10px; font-weight: 800; letter-spacing: .5px; "
-        f"color: {t.TEXT_DIM2}; padding: 6px 10px; text-align: right; "
-        f"border-bottom: 1px solid {t.BORDER};"
-    )
-
-    def _safe_str(raw) -> str:
-        """Return the string value of *raw*, or '—' if it is None/empty."""
-        if raw is None:
-            return "—"
-        s = str(raw).strip()
-        return s if s else "—"
+    # ── value helpers ────────────────────────────────────────────────────────
 
     def _safe_num(raw) -> str:
-        """Return the numeric value of *raw* as a string, or '—' if None."""
-        if raw is None:
-            return "—"
-        return str(raw)
+        return "—" if raw is None else str(raw)
 
     def _safe_ip(game: dict) -> str:
-        """Format innings-pitched as '6.0', falling back to the raw string."""
         raw_str = game.get("IP_raw")
         if raw_str is not None:
-            return _safe_str(raw_str)
+            s = str(raw_str).strip()
+            return s or "—"
         ip_val = game.get("IP")
         if ip_val is None:
             return "—"
         try:
             return f"{float(ip_val):.1f}"
         except (TypeError, ValueError):
-            return _safe_str(ip_val)
+            s = str(ip_val).strip()
+            return s or "—"
 
-    # Inject hover style once per table render via a real stylesheet rule.
-    # NiceGUI's .style() cannot handle pseudo-classes — they must go here.
-    ui.add_css(f".game-log-row:hover {{ background: {t.CARD_HI} !important; }}")
+    def _opp_display(game: dict) -> str:
+        """'vs/@ TEAM' for the OPP column.
 
-    with ui.element("div").style("overflow-x: auto; width: 100%;"):
-        with ui.element("table").style(
-            f"width: 100%; border-collapse: collapse; "
-            f"background: {t.CARD}; border-radius: {t.RADIUS_MD}; "
-            f"overflow: hidden;"
-        ):
-            # Header
-            with ui.element("thead"):
-                with ui.element("tr"):
-                    for col in cols:
-                        ui.html(
-                            f"<th style='{header_style} text-align: "
-                            + ("left" if col in ("Date", "OPP") else "right")
-                            + f";'>{col}</th>"
-                        )
-            # Rows (reversed so newest is first)
-            # Each row is wrapped in try-except so a single bad game dict
-            # cannot take down the whole table — bad rows are skipped with
-            # a warning instead.
-            #
-            # NOTE: NiceGUI's .style() only accepts inline CSS property
-            # declarations (e.g. "color: red;").  Pseudo-classes like
-            # ":hover { ... }" get split on ";" by NiceGUI's parser, leaving
-            # a bare " }" segment with no ":" which throws:
-            #   ValueError: not enough values to unpack (expected 2, got 1)
-            # on every single row.  Hover effect is injected once via
-            # ui.add_css() with a class name on the <tr> instead.
-            with ui.element("tbody"):
-                for g in reversed(games):
-                    try:
-                        opp_flag = "@" if not g.get("is_home") else "vs"
-                        with ui.element("tr").classes("game-log-row"):
-                            for col in cols:
-                                if col == "Date":
-                                    raw_date = g.get("date")
-                                    val = (raw_date[-5:] if raw_date else None) or "—"
-                                    ui.html(
-                                        f"<td style='font-size:12px; color:{t.TEXT_DIM2}; "
-                                        f"padding:6px 10px; "
-                                        f"border-bottom:1px solid {t.BORDER_SOFT}; "
-                                        f"font-family:monospace; white-space:nowrap;'>{val}</td>"
-                                    )
-                                elif col == "OPP":
-                                    val = _safe_str(g.get("opp"))
-                                    ui.html(
-                                        f"<td style='font-size:12px; color:{t.TEXT_DIM}; "
-                                        f"padding:6px 10px; "
-                                        f"border-bottom:1px solid {t.BORDER_SOFT}; "
-                                        f"font-family:monospace; white-space:nowrap;'>"
-                                        f"{opp_flag} {val}</td>"
-                                    )
-                                elif col == "IP":
-                                    val = _safe_ip(g)
-                                    ui.html(
-                                        f"<td style='{_cell_style(col)}'>{val}</td>"
-                                    )
-                                else:
-                                    raw_key = col_stat_map.get(col, col)
-                                    val = _safe_num(g.get(raw_key))
-                                    ui.html(
-                                        f"<td style='{_cell_style(col)}'>{val}</td>"
-                                    )
-                    except Exception as _row_exc:                           # noqa: BLE001
-                        _log(f"game log row skipped ({type(_row_exc).__name__}: {_row_exc})")
+        Falls back to park_team when opp is None/empty, so games where
+        the opponent abbreviation is missing still show something useful.
+        """
+        prefix = "vs" if game.get("is_home") else "@"
+        opp = game.get("opp")
+        if opp and str(opp).strip():
+            return f"{prefix}&nbsp;{str(opp).strip()}"
+        park = game.get("park_team")
+        if park and str(park).strip():
+            return f"{prefix}&nbsp;{str(park).strip()}"
+        return "—"
+
+    # ── style helpers ────────────────────────────────────────────────────────
+
+    hl = highlighted_stat.upper()
+
+    th_base = (
+        f"font-size:10px; font-weight:800; letter-spacing:.5px; "
+        f"color:{t.TEXT_DIM2}; padding:6px 10px; "
+        f"border-bottom:1px solid {t.BORDER}; white-space:nowrap;"
+    )
+
+    def _td(col: str, extra: str = "") -> str:
+        """Return the full inline style string for a data cell."""
+        highlighted = col_stat_map.get(col) == hl
+        color  = t.PRIMARY if highlighted else t.TEXT
+        weight = "800" if highlighted else "400"
+        return (
+            f"font-size:12px; font-family:monospace; font-weight:{weight}; "
+            f"padding:6px 10px; text-align:right; color:{color}; "
+            f"border-bottom:1px solid {t.BORDER_SOFT}; white-space:nowrap; "
+            f"min-width:{col_min_w.get(col, '44px')}; {extra}"
+        )
+
+    # ── build HTML ───────────────────────────────────────────────────────────
+
+    # header
+    header_cells = ""
+    for col in cols:
+        align = "left" if col in ("Date", "OPP") else "right"
+        mw    = col_min_w.get(col, "44px")
+        header_cells += (
+            f"<th style='{th_base} text-align:{align}; min-width:{mw};'>{col}</th>"
+        )
+
+    # body rows (newest first)
+    body_rows = ""
+    for g in reversed(games):
+        try:
+            cells = ""
+            for col in cols:
+                if col == "Date":
+                    raw_date = g.get("date")
+                    val = (raw_date[-5:] if raw_date else None) or "—"
+                    cells += (
+                        f"<td style='font-size:12px; font-family:monospace; "
+                        f"padding:6px 10px; text-align:left; color:{t.TEXT_DIM2}; "
+                        f"border-bottom:1px solid {t.BORDER_SOFT}; white-space:nowrap; "
+                        f"min-width:{col_min_w[\"Date\"]};'>{val}</td>"
+                    )
+                elif col == "OPP":
+                    val = _opp_display(g)
+                    cells += (
+                        f"<td style='font-size:12px; font-family:monospace; "
+                        f"padding:6px 10px; text-align:left; color:{t.TEXT_DIM}; "
+                        f"border-bottom:1px solid {t.BORDER_SOFT}; white-space:nowrap; "
+                        f"min-width:{col_min_w[\"OPP\"]};'>{val}</td>"
+                    )
+                elif col == "IP":
+                    cells += f"<td style='{_td(col)}'>{_safe_ip(g)}</td>"
+                else:
+                    raw_key = col_stat_map.get(col, col)
+                    cells += f"<td style='{_td(col)}'>{_safe_num(g.get(raw_key))}</td>"
+            body_rows += f"<tr class='game-log-row'>{cells}</tr>"
+        except Exception as _row_exc:                                       # noqa: BLE001
+            _log(f"game log row skipped ({type(_row_exc).__name__}: {_row_exc})")
+
+    # hover highlight via stylesheet (pseudo-classes can't go in inline style)
+    ui.add_css(
+        f".game-log-row:hover td {{ background:{t.CARD_HI} !important; }}"
+    )
+
+    ui.html(
+        f"<div style='overflow-x:auto; width:100%;'>"
+        f"<table class='w-full table-fixed' style='width:100%; "
+        f"border-collapse:collapse; background:{t.CARD}; "
+        f"border-radius:{t.RADIUS_MD}; overflow:hidden;'>"
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{body_rows}</tbody>"
+        f"</table></div>"
+    )
 
 
 # ── Not found ────────────────────────────────────────────────────────────────
