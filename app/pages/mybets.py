@@ -3,8 +3,9 @@ My Bets page.
 
 Shows:
   - Personal bankroll snapshot (start / current / P&L)
-  - Open confirmed bets (the ones you Tracked)
-  - Recent settled history with W/L colors
+  - Tabs: MLB  |  WNBA  |  PROPS
+      MLB / WNBA: confirmed game bets (open + settled history)
+      PROPS:      player-prop picks tracked from the Props page
 
 The model's own auto-picks live on the Model page -- this page is the
 personal-bankroll side only.
@@ -31,26 +32,26 @@ def register(backend) -> None:
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
                 _personal_bankroll(backend)
-                _open_bets(backend)
-                _history(backend)
+                _tabs(backend)
         bottom_nav.render(active=t.TAB_MYBETS)
 
+
+# ── Bankroll summary ─────────────────────────────────────────────────────────
 
 def _personal_bankroll(backend) -> None:
     try:
         mlb  = backend.Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
         wnba = backend.Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
         s = mlb.get_summary()
-        start = float(s.get("personal_starting_bankroll", 1000))
+        start   = float(s.get("personal_starting_bankroll", 1000))
         current = float(s.get("personal_bankroll", start))
-        pnl = current - start
-        # Open confirmed bets across both sports
+        pnl     = current - start
         open_confirmed = (
-            [b for b in (mlb.data.get("open_bets") or [])  if b.get("confirmed")]
+            [b for b in (mlb.data.get("open_bets")  or []) if b.get("confirmed")]
             + [b for b in (wnba.data.get("open_bets") or []) if b.get("confirmed")]
         )
         at_risk = sum(float(b.get("confirmed_amount") or 0) for b in open_confirmed)
-    except Exception:                                                     # noqa: BLE001
+    except Exception:                                                      # noqa: BLE001
         start, current, pnl, at_risk = 1000.0, 1000.0, 0.0, 0.0
 
     pnl_color = t.POS if pnl >= 0 else t.NEG
@@ -61,10 +62,10 @@ def _personal_bankroll(backend) -> None:
         f"border-radius: {t.RADIUS_LG}; padding: {t.SPACE_LG}; "
         f"gap: {t.SPACE_XL};"
     ):
-        _stat("START",     f"${start:,.2f}",   t.TEXT_DIM)
-        _stat("CURRENT",   f"${current:,.2f}", t.TEXT)
-        _stat("P / L",     f"{pnl_sign}${abs(pnl):,.2f}", pnl_color)
-        _stat("AT RISK",   f"${at_risk:,.2f}", t.WARN)
+        _stat("START",   f"${start:,.2f}",            t.TEXT_DIM)
+        _stat("CURRENT", f"${current:,.2f}",           t.TEXT)
+        _stat("P / L",   f"{pnl_sign}${abs(pnl):,.2f}", pnl_color)
+        _stat("AT RISK", f"${at_risk:,.2f}",           t.WARN)
 
 
 def _stat(label: str, value: str, color: str) -> None:
@@ -79,45 +80,70 @@ def _stat(label: str, value: str, color: str) -> None:
         )
 
 
-def _open_bets(backend) -> None:
-    confirmed_open = _confirmed_bets(backend, settled=False)
-    _section("OPEN BETS", confirmed_open, settled=False)
+# ── Tabs ─────────────────────────────────────────────────────────────────────
+
+def _tabs(backend) -> None:
+    with ui.tabs().props("dense align=left").style(
+        f"border-bottom: 1px solid {t.BORDER}; "
+        f"color: {t.TEXT_DIM};"
+    ) as tabs:
+        tab_mlb   = ui.tab("MLB")
+        tab_wnba  = ui.tab("WNBA")
+        tab_props = ui.tab("PROPS")
+
+    with ui.tab_panels(tabs, value=tab_mlb).classes("w-full").style(
+        "background: transparent; padding: 0;"
+    ):
+        with ui.tab_panel(tab_mlb).style("padding: 0;"):
+            with ui.column().classes("w-full").style(f"gap: {t.SPACE_LG};"):
+                _game_open_bets(backend, sport="mlb")
+                _game_history(backend, sport="mlb")
+
+        with ui.tab_panel(tab_wnba).style("padding: 0;"):
+            with ui.column().classes("w-full").style(f"gap: {t.SPACE_LG};"):
+                _game_open_bets(backend, sport="wnba")
+                _game_history(backend, sport="wnba")
+
+        with ui.tab_panel(tab_props).style("padding: 0;"):
+            with ui.column().classes("w-full").style(f"gap: {t.SPACE_LG};"):
+                _props_record()
+                _props_open_bets()
+                _props_history()
 
 
-def _history(backend) -> None:
-    confirmed_hist = _confirmed_bets(backend, settled=True)
-    _section("RECENT HISTORY", confirmed_hist[:50], settled=True)
+# ── Game bets (MLB / WNBA) ───────────────────────────────────────────────────
+
+def _game_open_bets(backend, sport: str) -> None:
+    bets = _confirmed_game_bets(backend, sport=sport, settled=False)
+    _game_section("OPEN BETS", bets, settled=False)
 
 
-def _confirmed_bets(backend, settled: bool) -> list[dict]:
+def _game_history(backend, sport: str) -> None:
+    bets = _confirmed_game_bets(backend, sport=sport, settled=True)
+    _game_section("RECENT HISTORY", bets[:50], settled=True)
+
+
+def _confirmed_game_bets(backend, sport: str, settled: bool) -> list[dict]:
     try:
-        mlb  = backend.Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
-        wnba = backend.Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
-    except Exception:                                                     # noqa: BLE001
+        path = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
+        ledger = backend.Ledger(path=path, starting_bankroll=1000.0)
+    except Exception:                                                      # noqa: BLE001
         return []
-    if settled:
-        merged = [
-            *(b for b in (mlb.data.get("history") or [])  if b.get("confirmed")),
-            *(b for b in (wnba.data.get("history") or []) if b.get("confirmed")),
-        ]
-        merged.sort(key=lambda b: b.get("settled_at", ""), reverse=True)
-    else:
-        merged = [
-            *(b for b in (mlb.data.get("open_bets") or [])  if b.get("confirmed")),
-            *(b for b in (wnba.data.get("open_bets") or []) if b.get("confirmed")),
-        ]
-        merged.sort(key=lambda b: b.get("placed_at", ""), reverse=True)
-    return merged
+    key = "history" if settled else "open_bets"
+    bets = [b for b in (ledger.data.get(key) or []) if b.get("confirmed")]
+    rev_key = "settled_at" if settled else "placed_at"
+    bets.sort(key=lambda b: b.get(rev_key, ""), reverse=True)
+    return bets
 
 
-def _section(title: str, bets: list[dict], settled: bool) -> None:
+def _game_section(title: str, bets: list[dict], settled: bool) -> None:
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
             ui.label(title).style(
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                 f"color: {t.TEXT};"
             )
-            ui.label(f"{len(bets)}").style(
+            ui.label(str(len(bets))).style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                 f"font-size: 11px; font-weight: 700; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
@@ -130,47 +156,36 @@ def _section(title: str, bets: list[dict], settled: bool) -> None:
             )
             return
         for b in bets:
-            _bet_row(b, settled)
+            _game_bet_row(b, settled)
 
 
-def _bet_row(b: dict, settled: bool) -> None:
-    result = (b.get("result") or "").lower()
+def _game_bet_row(b: dict, settled: bool) -> None:
+    result       = (b.get("result") or "").lower()
     result_color = {
         "win": t.POS, "loss": t.NEG, "push": t.WARN, "void": t.TEXT_DIM2,
     }.get(result, t.TEXT_DIM)
 
-    sport = (b.get("sport") or "mlb").upper()
-    team = b.get("bet_team") or b.get("parlay_name") or "—"
+    sport    = (b.get("sport") or "mlb").upper()
+    team     = b.get("bet_team") or b.get("parlay_name") or "—"
     bet_type = (b.get("bet_type") or "single").upper().replace("_", " ")
-    odds = b.get("american_odds")
-    odds_s = f"+{odds}" if isinstance(odds, (int, float)) and odds > 0 else f"{odds}"
-    amount = float(b.get("confirmed_amount") or 0)
-    pnl = float(b.get("confirmed_pnl") or 0) if settled else 0.0
+    odds     = b.get("american_odds")
+    odds_s   = f"+{odds}" if isinstance(odds, (int, float)) and odds > 0 else f"{odds}"
+    amount   = float(b.get("confirmed_amount") or 0)
+    pnl      = float(b.get("confirmed_pnl")    or 0) if settled else 0.0
 
-    # Color treatment per user spec:
-    #   win   -> pick text green, dollar column shows net profit (e.g. +$30.00) in green
-    #   loss  -> pick text red,   dollar column shows stake as negative (e.g. -$20.00) in red
-    #   push  -> neutral team text, dollar column shows $0.00 (stake returned)
-    #   pending / void -> neutral white text, dollar column shows the stake as-is
     if settled and result == "win":
-        team_color  = t.POS
-        amount_text = f"+${pnl:.2f}"
-        amount_color = t.POS
+        team_color, amount_text, amount_color = t.POS, f"+${pnl:.2f}", t.POS
     elif settled and result == "loss":
-        team_color  = t.NEG
-        amount_text = f"-${amount:.2f}"
-        amount_color = t.NEG
+        team_color, amount_text, amount_color = t.NEG, f"-${amount:.2f}", t.NEG
     elif settled and result == "push":
-        team_color  = t.TEXT
-        amount_text = "$0.00"
-        amount_color = t.TEXT_DIM
+        team_color, amount_text, amount_color = t.TEXT, "$0.00", t.TEXT_DIM
     else:
-        team_color  = t.TEXT
-        amount_text = f"${amount:.2f}"
-        amount_color = t.TEXT
+        team_color, amount_text, amount_color = t.TEXT, f"${amount:.2f}", t.TEXT
 
-    border = f"1px solid {result_color}" if settled and result in ("win", "loss", "push") \
+    border = (
+        f"1px solid {result_color}" if settled and result in ("win", "loss", "push")
         else f"1px solid {t.BORDER}"
+    )
 
     with ui.row().classes("items-center w-full").style(
         f"background: {t.CARD}; border: {border}; "
@@ -204,3 +219,207 @@ def _bet_row(b: dict, settled: bool) -> None:
                     f"font-size: 10.5px; font-weight: 800; letter-spacing: .5px; "
                     f"color: {t.TEXT_DIM2};"
                 )
+
+
+# ── Props bets ───────────────────────────────────────────────────────────────
+
+_MARKET_LABEL: dict[str, str] = {
+    "pitcher_strikeouts":   "Ks",
+    "pitcher_outs":         "Outs",
+    "pitcher_hits_allowed": "H Allow",
+    "pitcher_walks":        "BB Allow",
+    "pitcher_earned_runs":  "ER",
+    "batter_hits":          "Hits",
+    "batter_total_bases":   "Total Bases",
+    "batter_home_runs":     "Home Runs",
+    "batter_rbis":          "RBIs",
+    "batter_runs_scored":   "Runs",
+    "batter_walks":         "Walks",
+    "batter_strikeouts":    "Strikeouts",
+}
+
+
+def _load_props_bets() -> tuple[list[dict], list[dict]]:
+    """Return (open_bets, history) from PropsLedger."""
+    try:
+        from src.props_ledger import get_props_ledger
+        pl = get_props_ledger()
+        pl.reload()
+        return pl.get_open_bets(), pl.get_history()
+    except Exception:                                                      # noqa: BLE001
+        return [], []
+
+
+def _props_record() -> None:
+    """Small record summary card for prop picks."""
+    try:
+        from src.props_ledger import get_props_ledger
+        rec = get_props_ledger().get_record()
+    except Exception:                                                      # noqa: BLE001
+        rec = {"wins": 0, "losses": 0, "voids": 0, "open": 0, "total": 0, "pct": None}
+
+    w, l, total = rec["wins"], rec["losses"], rec["total"]
+    pct = rec["pct"]
+    pct_s   = f"{pct * 100:.1f}%" if pct is not None else "—"
+    pct_col = t.POS if (pct or 0) >= 0.55 else (t.NEG if (pct or 0.5) < 0.50 else t.TEXT_DIM)
+
+    with ui.row().classes("w-full items-center").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: {t.SPACE_LG};"
+    ):
+        with ui.column().style("gap: 2px;"):
+            ui.label("PROPS MODEL RECORD").style(
+                f"font-size: 10px; font-weight: 800; letter-spacing: .8px; color: {t.TEXT_DIM2};"
+            )
+            ui.label(f"{w}-{l}").style(
+                f"font-size: 22px; font-weight: 800; color: {t.TEXT}; font-family: monospace;"
+            )
+        with ui.column().style("gap: 2px;"):
+            ui.label(pct_s).style(
+                f"font-size: 16px; font-weight: 800; color: {pct_col}; font-family: monospace;"
+            )
+            ui.label(f"{total} settled · {rec.get('open', 0)} open").style(
+                f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+            )
+
+
+def _props_open_bets() -> None:
+    open_bets, _ = _load_props_bets()
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label("OPEN PROPS BETS").style(
+                f"font-size: 13px; font-weight: 800; letter-spacing: .8px; color: {t.TEXT};"
+            )
+            ui.label(str(len(open_bets))).style(
+                f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                f"font-size: 11px; font-weight: 700; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+            )
+        if not open_bets:
+            ui.label(
+                "No open props bets. Track picks from the Props page."
+            ).style(
+                f"color: {t.TEXT_DIM}; font-size: 12px; "
+                f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+                f"text-align: center; font-style: italic;"
+            )
+            return
+        for b in open_bets:
+            _prop_bet_row(b, settled=False)
+
+
+def _props_history() -> None:
+    _, history = _load_props_bets()
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label("SETTLED PROPS").style(
+                f"font-size: 13px; font-weight: 800; letter-spacing: .8px; color: {t.TEXT};"
+            )
+            ui.label(str(len(history[:50]))).style(
+                f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                f"font-size: 11px; font-weight: 700; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+            )
+        if not history:
+            ui.label("No settled props bets yet.").style(
+                f"color: {t.TEXT_DIM}; font-size: 12px; "
+                f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; text-align: center;"
+            )
+            return
+        for b in history[:50]:
+            _prop_bet_row(b, settled=True)
+
+
+def _prop_bet_row(b: dict, settled: bool) -> None:
+    """Single row card for a prop pick (open or settled)."""
+    result       = (b.get("result") or "").lower()
+    result_color = {
+        "win": t.POS, "loss": t.NEG, "void": t.WARN,
+    }.get(result, t.TEXT_DIM)
+
+    side    = (b.get("side") or "Over").strip().title()
+    is_over = side == "Over"
+    side_bg = t.POS if is_over else t.NEG
+
+    player  = b.get("player") or "—"
+    market  = _MARKET_LABEL.get(b.get("market", ""), (b.get("market") or "").replace("_", " ").title())
+    line    = b.get("line")
+    line_s  = f"{float(line):.1f}" if line is not None else "—"
+    conf    = b.get("confidence")
+    conf_s  = f"{conf * 100:.0f}%" if conf is not None else "—"
+    pv      = b.get("predicted_value")
+    pv_s    = f"{pv:.1f}" if pv is not None else None
+    actual  = b.get("actual_value")
+    actual_s = f"{float(actual):.1f}" if actual is not None else None
+    odds    = b.get("odds")
+    odds_s  = (f"+{odds}" if odds > 0 else str(odds)) if isinstance(odds, int) else "—"
+    team    = b.get("team") or ""
+
+    border = (
+        f"1px solid {result_color}" if settled and result in ("win", "loss", "void")
+        else f"1px solid {t.BORDER}"
+    )
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: {border}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 6px;"
+    ):
+        # Header: market label + team + result/pending badge
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label(market.upper()).style(
+                f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+            )
+            if team:
+                ui.label(team).style(
+                    f"font-size: 10.5px; color: {t.TEXT_DIM2}; font-family: monospace;"
+                )
+            ui.element("div").style("flex: 1;")
+            if settled:
+                badge_label = result.upper() if result else "—"
+                ui.label(badge_label).style(
+                    f"font-size: 10px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {result_color};"
+                )
+            else:
+                ui.label("PENDING").style(
+                    f"font-size: 10px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+
+        # Player name + side chip
+        with ui.row().classes("items-center w-full").style("gap: 10px;"):
+            ui.label(player).style(
+                f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
+                f"flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            )
+            ui.label(f"{side.upper()} {line_s}").style(
+                f"background: {side_bg}; color: {t.BG}; "
+                f"font-size: 11px; font-weight: 800; "
+                f"padding: 3px 9px; border-radius: {t.RADIUS_SM}; flex-shrink: 0;"
+            )
+
+        # Stats row: confidence + predicted + actual (if settled) + odds
+        with ui.row().classes("items-center w-full").style("gap: 14px; flex-wrap: wrap;"):
+            _mini_stat("CONF", conf_s)
+            if pv_s:
+                _mini_stat("MODEL", pv_s)
+            if settled and actual_s is not None:
+                _mini_stat("ACTUAL", actual_s,
+                           t.POS if result == "win" else (t.NEG if result == "loss" else t.WARN))
+            ui.element("div").style("flex: 1;")
+            _mini_stat("ODDS", odds_s)
+
+
+def _mini_stat(label: str, value: str, value_color: str | None = None) -> None:
+    color = value_color or t.TEXT
+    with ui.column().style("gap: 1px; align-items: flex-start;"):
+        ui.label(label).style(
+            f"font-size: 9px; font-weight: 800; letter-spacing: .5px; color: {t.TEXT_DIM2};"
+        )
+        ui.label(value).style(
+            f"font-size: 12px; font-weight: 700; color: {color}; font-family: monospace;"
+        )

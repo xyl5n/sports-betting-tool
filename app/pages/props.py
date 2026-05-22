@@ -17,6 +17,7 @@ and "by start time" / "by edge".
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 
 from nicegui import ui
@@ -68,6 +69,7 @@ def _layout(backend) -> None:
         _section_model_record(backend)
         _section_props_list(backend, bucket="pitcher", title="PITCHER PROPS")
         _section_props_list(backend, bucket="batter",  title="BATTER PROPS")
+        _settle_trigger(backend)
 
 
 # ── Model record ────────────────────────────────────────────────────────────
@@ -248,10 +250,10 @@ def _section_props_list(backend, *, bucket: str, title: str) -> None:
         # consistent with the slate cards on /sports.
         with ui.element("div").classes("game-grid w-full"):
             for r in rows:
-                _prop_card(r)
+                _prop_card(r, backend)
 
 
-def _prop_card(r: dict) -> None:
+def _prop_card(r: dict, backend) -> None:
     """One prop pick rendered as a card matching the visual rhythm of
     the slate's game cards (matchup header on top, accent bar on the
     side of the recommended chip, monospace stat values, soft border).
@@ -352,8 +354,7 @@ def _prop_card(r: dict) -> None:
                     f"font-family: monospace;"
                 )
 
-        # Footer row: best odds + book.  Same row used by the slate's
-        # _track_row for symmetry.
+        # Footer row: best odds + book + Track Bet button.
         with ui.row().classes("items-center w-full").style(
             f"gap: 10px; "
             f"padding-top: 6px; border-top: 1px solid {t.BORDER_SOFT};"
@@ -367,9 +368,10 @@ def _prop_card(r: dict) -> None:
             )
             ui.label(r.get("best_book") or "").style(
                 f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                f"margin-left: auto; "
                 f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
+            ui.element("div").style("flex: 1;")
+            _track_btn(r, backend)
 
 
 # ── Small helpers ───────────────────────────────────────────────────────────
@@ -445,3 +447,87 @@ def _short_iso(iso: str) -> str:
         return dt.astimezone(ZoneInfo("America/New_York")).strftime("%H:%M ET")
     except Exception:                                                     # noqa: BLE001
         return str(iso)[:16]
+
+
+# ── Track Bet button ─────────────────────────────────────────────────────────
+
+def _track_btn(r: dict, backend) -> None:
+    """Render a small Track Bet button that POSTs the pick to /api/props/track.
+
+    Uses the same in-process Flask test-client pattern as track_button.py
+    so no HTTP hop is needed and Railway deploy constraints are respected.
+    """
+    btn = ui.button("Track").props("no-caps unelevated dense").style(
+        f"background: {t.PRIMARY}; color: {t.BG}; "
+        f"font-weight: 800; font-size: 10.5px; letter-spacing: .4px; "
+        f"padding: 4px 10px; border-radius: {t.RADIUS_SM}; min-height: 0;"
+    )
+
+    async def _click():
+        btn.props("loading")
+        btn.disable()
+        try:
+            payload = {
+                "player":          r.get("player", ""),
+                "market":          r.get("market", ""),
+                "line":            r.get("line"),
+                "side":            r.get("side", "Over"),
+                "odds":            r.get("best_odds"),
+                "confidence":      r.get("confidence"),
+                "predicted_value": r.get("predicted_value"),
+                "team":            r.get("team", ""),
+                "event_id":        r.get("event_id"),
+                "commence_time":   r.get("commence_time"),
+            }
+            ok, data, _ = await asyncio.to_thread(
+                _post_api, backend, "/api/props/track", payload
+            )
+            if ok:
+                ui.notify(
+                    f"Tracked: {r.get('player')} {r.get('side')} {r.get('line')}",
+                    type="positive",
+                )
+                btn.text = "Tracked ✓"
+                btn.props("disable")
+            else:
+                err = data.get("error") or "unknown error"
+                if "already tracked" in err.lower():
+                    btn.text = "Tracked ✓"
+                    btn.props("disable")
+                    ui.notify("Already tracked.", type="info")
+                else:
+                    ui.notify(f"Track failed: {err}", type="negative")
+        except Exception as exc:                                          # noqa: BLE001
+            ui.notify(f"Track failed: {exc}", type="negative")
+        finally:
+            btn.props(remove="loading")
+            if btn.text == "Track":
+                btn.enable()
+
+    btn.on("click", _click)
+
+
+def _settle_trigger(backend) -> None:
+    """Fire /api/props/settle_open once when the page loads so recently
+    completed games are settled without the user having to do anything."""
+    async def _try_settle():
+        try:
+            await asyncio.to_thread(
+                _post_api, backend, "/api/props/settle_open", {}
+            )
+        except Exception:                                                 # noqa: BLE001
+            pass
+
+    ui.timer(0.5, _try_settle, once=True)
+
+
+def _post_api(backend, path: str, body: dict) -> tuple[bool, dict, int]:
+    """Invoke a Flask /api/ route via the in-process test client."""
+    client = backend.app.test_client()
+    try:
+        resp = client.post(path, json=body or {})
+        data = resp.get_json(force=True, silent=True) or {}
+        ok   = resp.status_code < 400 and data.get("success", True) is not False
+        return ok, data, resp.status_code
+    except Exception as exc:                                              # noqa: BLE001
+        return False, {"error": str(exc)}, 500
