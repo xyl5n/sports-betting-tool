@@ -25,7 +25,7 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav
+from components import navbar, bottom_nav, controls
 
 
 def _dbg(msg: str) -> None:
@@ -286,58 +286,38 @@ def _filter_bar(rows: list[dict], state: dict, on_change) -> None:
             "gap: 10px; flex-wrap: wrap;"
         ):
             with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
-                ui.label("GAME").style(
-                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                    f"color: {t.TEXT_DIM2};"
-                )
-                ui.select(
-                    options=games_set,
-                    value=state["game"],
+                controls.field_label("GAME")
+                controls.styled_select(
+                    games_set, state["game"],
                     on_change=lambda e: (
                         state.update(game=e.value or "all"),
                         on_change(),
                     ),
-                ).props("dense outlined options-dense").style(
-                    f"background: {t.CARD_HI}; "
-                    f"border-radius: {t.RADIUS_SM};"
                 )
 
             with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
-                ui.label("MARKET").style(
-                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                    f"color: {t.TEXT_DIM2};"
-                )
-                ui.select(
-                    options=markets_set,
-                    value=state["market"],
+                controls.field_label("MARKET")
+                controls.styled_select(
+                    markets_set, state["market"],
                     on_change=lambda e: (
                         state.update(market=e.value or "all"),
                         on_change(),
                     ),
-                ).props("dense outlined options-dense").style(
-                    f"background: {t.CARD_HI}; "
-                    f"border-radius: {t.RADIUS_SM};"
                 )
 
             with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
-                ui.label("MIN L10 HIT RATE").style(
-                    f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                    f"color: {t.TEXT_DIM2};"
-                )
+                controls.field_label("MIN L10 HIT RATE")
                 rate_label = ui.label("0%").style(
                     f"font-size: 11px; font-family: monospace; "
                     f"color: {t.TEXT_DIM};"
                 )
-                slider = ui.slider(
+                controls.styled_slider(
                     min=0, max=100, step=10, value=state["min_rate"],
                     on_change=lambda e: (
                         state.update(min_rate=int(e.value or 0)),
                         rate_label.set_text(f"{int(e.value or 0)}%"),
                         on_change(),
                     ),
-                ).props("dense")
-                slider.style(
-                    f"min-height: 0;"
                 )
 
         # Show Alt Lines toggle -- defaults off so the user opts in
@@ -347,17 +327,14 @@ def _filter_bar(rows: list[dict], state: dict, on_change) -> None:
         with ui.row().classes("items-center w-full").style(
             "gap: 8px; padding-top: 4px;"
         ):
-            ui.label("SHOW ALT LINES").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
-            )
-            ui.switch(
+            controls.field_label("SHOW ALT LINES")
+            controls.styled_switch(
                 value=bool(state.get("show_alts")),
                 on_change=lambda e: (
                     state.update(show_alts=bool(e.value)),
                     on_change(),
                 ),
-            ).props("dense color=primary")
+            )
             ui.label(
                 "Reveal each pick's alternative line options (shoulder "
                 "lines, set far from even money)."
@@ -373,17 +350,14 @@ def _filter_bar(rows: list[dict], state: dict, on_change) -> None:
         with ui.row().classes("items-center w-full").style(
             "gap: 8px; padding-top: 4px;"
         ):
-            ui.label("SHOW NEGATIVE EV").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
-            )
-            ui.switch(
+            controls.field_label("SHOW NEGATIVE EV")
+            controls.styled_switch(
                 value=not bool(state.get("pos_ev_only", True)),
                 on_change=lambda e: (
                     state.update(pos_ev_only=not bool(e.value)),
                     on_change(),
                 ),
-            ).props("dense color=primary")
+            )
             ui.label(
                 "Include picks where the model's edge doesn't beat the "
                 "book's juice (negative expected value)."

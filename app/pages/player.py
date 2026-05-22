@@ -30,7 +30,7 @@ from typing import Optional
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav
+from components import navbar, bottom_nav, controls
 
 
 def _log(msg: str) -> None:
@@ -606,19 +606,15 @@ def _market_tab_body(
         with ui.row().classes("items-center w-full").style(
             "gap: 6px; flex-wrap: wrap;"
         ):
-            ui.label("WINDOW").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
-            )
-            ui.toggle(
+            controls.field_label("WINDOW")
+            controls.pill_toggle(
                 list(_TIME_WINDOWS),
                 value=state["window"],
                 on_change=lambda e: (
                     state.update(window=e.value or "Last 10"),
                     render_body.refresh(),
                 ),
-            ).props("dense unelevated").style(
-                "font-size: 11px;"
+                name="window",
             )
 
         # Chart container -- render_body() populates this slot and
@@ -633,22 +629,15 @@ def _market_tab_body(
         with ui.row().classes("items-center w-full").style(
             "gap: 6px; flex-wrap: wrap; padding-top: 4px;"
         ):
-            ui.label("FILTER").style(
-                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.TEXT_DIM2};"
-            )
+            controls.field_label("FILTER")
             ctx_options = _stat_context_options(is_pitcher, opp_abbrev)
-            ui.select(
-                options=ctx_options,
-                value=state["context"],
+            controls.styled_select(
+                ctx_options, state["context"],
                 on_change=lambda e: (
                     state.update(context=e.value or "all"),
                     render_body.refresh(),
                 ),
-            ).props("dense outlined options-dense").style(
-                f"min-width: 220px; "
-                f"background: {t.CARD_HI}; "
-                f"border-radius: {t.RADIUS_SM};"
+                min_width="220px",
             )
 
 
