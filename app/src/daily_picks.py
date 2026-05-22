@@ -568,49 +568,85 @@ def _collect_props(now_utc: datetime) -> list[dict]:
     Fetch today's props, score each via the props model pipeline, and return
     the top MAX_PROP_PICKS candidates ranked by confidence.
 
-    Mirrors the filtering in pages/props.py:
-      - confidence >= 55%
-      - regression edge: predicted_value clears line by ≥ 0.5 units (when a
-        regressor exists; otherwise confidence alone is sufficient)
-      - "Pass" recommendations are excluded
+    Scoring follows pages/props.py exactly:
+      1. Score every API prop with predict(p), storing ALL results in by_pick
+         keyed by (player, market, line).  "Pass" recommendations are NOT
+         filtered here — they are stored like any other result so the
+         over/under deduplication (keep highest confidence) works correctly.
+      2. Filter to confidence >= 55% AND regression edge (predicted_value
+         clears line by >= 0.5 units when a regressor is available).
+      3. Sort by confidence descending, take top MAX_PROP_PICKS.
+
+    The two bugs fixed vs the original version:
+      - "Pass" was being skipped *before* storing in by_pick, which discarded
+        both sides of a prop and produced an empty result set.
+      - `side` was being read from pred.get("recommendation"), which can be
+        "Pass"; it should come from p.get("side") (the API's own over/under
+        label, which is never "Pass").
 
     Returns [] on any failure (missing API key, no data, model unavailable).
     """
+    import sys as _sys
     _CONF_THRESHOLD = 0.55
+
+    # ── Import guard ──────────────────────────────────────────────────────────
     try:
         from .props_client import get_client, ALL_PITCHER_MARKETS, ALL_BATTER_MARKETS
         from .props_model  import predict
-    except Exception:
+    except Exception as exc:
+        print(f"PROPS-COLLECT: import failed: {exc}", file=_sys.stderr, flush=True)
         return []
 
+    # ── Fetch today's cached props ─────────────────────────────────────────────
     try:
         payload     = get_client().get_today_props() or {}
         all_markets = payload.get("markets") or {}
-    except Exception:
+    except Exception as exc:
+        print(f"PROPS-COLLECT: get_today_props failed: {exc}", file=_sys.stderr, flush=True)
         return []
 
     all_bucket_markets = set(ALL_PITCHER_MARKETS) | set(ALL_BATTER_MARKETS)
+    n_raw = sum(len(v or []) for k, v in all_markets.items() if k in all_bucket_markets)
+    print(
+        f"PROPS-COLLECT: fetched {len(all_markets)} markets, "
+        f"{n_raw} props in target markets "
+        f"({len(ALL_PITCHER_MARKETS)} pitcher + {len(ALL_BATTER_MARKETS)} batter market keys)",
+        file=_sys.stderr, flush=True,
+    )
 
-    # Score every prop; keep one entry per (player, market, line) — the side
-    # with the higher confidence wins (mirrors pages/props.py dedup logic).
+    # ── Score + dedup ─────────────────────────────────────────────────────────
+    # Store ALL results in by_pick keyed by (player, market, line).  Keep the
+    # side with higher confidence.  "Pass" recommendations are NOT filtered
+    # here — filtering happens after dedup via the confidence threshold below,
+    # matching pages/props.py exactly.  (Filtering "Pass" inside the loop was
+    # the original bug: it dropped both the Over and Under before they could
+    # compete in the dedup, so by_pick ended up empty.)
     by_pick: dict[tuple, dict] = {}
+    n_scored = n_predict_err = 0
     for market, props in all_markets.items():
         if market not in all_bucket_markets:
             continue
         for p in (props or []):
             try:
                 pred = predict(p)
-            except Exception:
-                continue
-            # Skip "Pass" — the model found no exploitable edge.
-            if pred.get("recommendation") == "Pass":
+                n_scored += 1
+            except Exception as exc:
+                n_predict_err += 1
+                print(
+                    f"PROPS-COLLECT: predict() failed for "
+                    f"{market}/{p.get('player_name')}: {exc}",
+                    file=_sys.stderr, flush=True,
+                )
                 continue
             try:
                 line_f = float(p.get("line"))
             except (TypeError, ValueError):
                 continue
-            key  = (p.get("player_name", "?"), market, line_f)
-            side = (pred.get("recommendation") or "Over").strip().title()
+
+            key = (p.get("player_name", "?"), market, line_f)
+            # Use p.get("side") — the raw API label ("Over" / "Under") —
+            # NOT pred.get("recommendation"), which can be "Pass".
+            side  = (p.get("side") or "Over").strip().title()
             score = float(pred.get("confidence") or 0.0)
             existing = by_pick.get(key)
             if existing is None or score > existing["confidence"]:
@@ -623,6 +659,7 @@ def _collect_props(now_utc: datetime) -> list[dict]:
                     ),
                     "line":            line_f,
                     "side":            side,
+                    "recommendation":  pred.get("recommendation"),
                     "best_odds":       p.get("best_odds"),
                     "confidence":      round(score, 4),
                     "edge":            round(float(pred.get("edge") or 0.0), 4),
@@ -632,27 +669,44 @@ def _collect_props(now_utc: datetime) -> list[dict]:
                     "sport":           "mlb",
                 }
 
+    print(
+        f"PROPS-COLLECT: scored {n_scored} props ({n_predict_err} errors), "
+        f"{len(by_pick)} after dedup by (player, market, line)",
+        file=_sys.stderr, flush=True,
+    )
+
+    # ── Filter: confidence threshold + regression edge ────────────────────────
     def _has_reg_edge(r: dict) -> bool:
         pv = r.get("predicted_value")
         if pv is None:
             return True   # no regressor — confidence alone is sufficient
         try:
             lf = float(r["line"])
-            if r.get("side", "Over") == "Over":
+            if (r.get("side") or "Over").strip().title() == "Over":
                 return pv >= lf + 0.5
             return pv <= lf - 0.5
         except (TypeError, ValueError):
             return True
 
+    n_pass_conf = sum(1 for r in by_pick.values() if r["confidence"] >= _CONF_THRESHOLD)
     rows = [
         r for r in by_pick.values()
         if r["confidence"] >= _CONF_THRESHOLD and _has_reg_edge(r)
     ]
     rows.sort(key=lambda r: -r["confidence"])
     print(
-        f"  [picks diag] PROPS: scored {len(by_pick)} dedup props, "
-        f"{len(rows)} above {int(_CONF_THRESHOLD * 100)}% threshold"
+        f"PROPS-COLLECT: {n_pass_conf} pass confidence>={int(_CONF_THRESHOLD*100)}%, "
+        f"{len(rows)} also pass regression-edge filter → "
+        f"returning top {min(len(rows), MAX_PROP_PICKS)}",
+        file=_sys.stderr, flush=True,
     )
+    if rows:
+        top = rows[0]
+        print(
+            f"PROPS-COLLECT: top pick: {top['player']} {top['market']} "
+            f"{top['side']} {top['line']} conf={top['confidence']:.3f}",
+            file=_sys.stderr, flush=True,
+        )
 
     result: list[dict] = []
     for rank, r in enumerate(rows[:MAX_PROP_PICKS], 1):
