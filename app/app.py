@@ -666,11 +666,63 @@ def _eprint(*args, **kwargs) -> None:
 
 
 def _read_analysis_timestamps() -> dict:
-    """Read the timestamps file; return {} on any error."""
+    """Read the timestamps file; return {} on any error.
+
+    Three-tier read so the admin "Last analyzed" line stays accurate
+    across Railway redeploys (which wipe the local file but leave the
+    Supabase mirror intact):
+
+      1. Local data/analysis_timestamps.json (fast path)
+      2. Supabase app_cache row keyed "analysis_timestamps" (durable)
+      3. Empty dict (cold boot, never analyzed)
+
+    Writes through to the local file on a Supabase hit so subsequent
+    reads in this worker take the fast path.
+    """
+    # Tier 1 -- local file
     try:
-        return json.loads(_ANALYSIS_TIMESTAMPS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        data = json.loads(_ANALYSIS_TIMESTAMPS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data:
+            return data
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    # Tier 2 -- Supabase mirror.  _write_analysis_timestamp pushes to
+    # this key on every successful analyze; pull it back when the local
+    # file is missing.
+    try:
+        from src import db as _db
+        if _db.is_supabase():
+            row = _db.cache_get("analysis_timestamps")
+            payload = None
+            if isinstance(row, dict):
+                payload = row.get("data") if isinstance(row.get("data"), dict) else row
+            if isinstance(payload, dict) and payload:
+                # Strip the wrapper fields cache_set writes around the
+                # data so the returned shape matches the local file.
+                clean = {
+                    k: v for k, v in payload.items()
+                    if isinstance(v, dict) and "analyzed_at" in v
+                }
+                if clean:
+                    try:
+                        Path("data").mkdir(exist_ok=True)
+                        _ANALYSIS_TIMESTAMPS_FILE.write_text(
+                            json.dumps(clean, indent=2), encoding="utf-8",
+                        )
+                        print(
+                            f"TIMESTAMP-READ: restored "
+                            f"{list(clean.keys())} from Supabase mirror",
+                            flush=True, file=sys.stderr,
+                        )
+                    except Exception:                                      # noqa: BLE001
+                        pass
+                    return clean
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"TIMESTAMP-READ: Supabase fallback failed: {exc}",
+              flush=True, file=sys.stderr)
+
+    return {}
 
 
 def _write_analysis_timestamp(sport: str, ts: datetime) -> None:
@@ -697,6 +749,11 @@ def _write_analysis_timestamp(sport: str, ts: datetime) -> None:
         # views can read it even after the local file is wiped.
         _supabase_cache_set(
             "analysis_timestamps", None, ts.date().isoformat(), data,
+        )
+        print(
+            f"TIMESTAMP-WRITE: {sport.upper()}  analyzed_at={ts.isoformat()}  "
+            f"local + Supabase synced",
+            flush=True, file=sys.stderr,
         )
     except Exception as exc:                                              # noqa: BLE001
         print(f"TIMESTAMP write error (ignored): {exc}",
@@ -6149,22 +6206,58 @@ def odds_approve_additional():
 
 @app.route("/api/admin/status", methods=["GET"])
 def admin_status():
-    """Single endpoint the Admin sub-page polls for header status fields."""
+    """Single endpoint the Admin sub-page polls for header status fields.
+
+    Picks the freshest `last_analyzed_at` available per sport from THREE
+    sources in priority order:
+
+      1. _analysis_state["last_analyzed_at"] -- in-memory, stamped by
+         the analyze route in the SAME request that just finished.
+         Always wins because nothing else can be fresher.
+      2. _read_analysis_timestamps() -- local file (with Supabase
+         fallback baked in; see the helper).
+      3. None -- never analyzed in this container's lifetime.
+
+    The in-memory path is the bug fix: the admin label used to read
+    only the local file, so right after `Run MLB Analysis` clicked the
+    timestamp didn't move because the file write happens just before
+    the response returns and the admin poller raced ahead.  Live state
+    is updated atomically inside the route well before the file write.
+    """
     try:
-        ts = _read_analysis_timestamps()
-        mlb_ts  = (ts.get("mlb")  or {}).get("analyzed_at")
-        wnba_ts = (ts.get("wnba") or {}).get("analyzed_at")
+        # Tier 1 -- live in-memory state.  Wins because nothing on disk
+        # can be fresher than what the analyze route just stamped.
+        def _to_iso(value) -> str | None:
+            if value is None:
+                return None
+            if hasattr(value, "isoformat"):
+                return value.isoformat()
+            return str(value) or None
+
+        mlb_ts  = _to_iso(_analysis_state.get("last_analyzed_at"))
+        wnba_ts = _to_iso(_wnba_analysis_state.get("last_analyzed_at"))
+
+        # Tier 2 -- local file (with Supabase fallback inside the helper).
+        # Only consulted for the sport(s) the in-memory state doesn't
+        # know about yet (cold boot, never-analyzed-in-this-worker).
+        if mlb_ts is None or wnba_ts is None:
+            ts_store = _read_analysis_timestamps()
+            if mlb_ts is None:
+                mlb_ts  = (ts_store.get("mlb")  or {}).get("analyzed_at")
+            if wnba_ts is None:
+                wnba_ts = (ts_store.get("wnba") or {}).get("analyzed_at")
+
         try:
             from src import db as _db
             db_status = _db.status()
-        except Exception:
+        except Exception:                                                 # noqa: BLE001
             db_status = {"mode": "json"}
         return jsonify({
             "mlb_analyzed_at":  mlb_ts,
             "wnba_analyzed_at": wnba_ts,
             "db":               db_status,
         })
-    except Exception as exc:
+    except Exception as exc:                                              # noqa: BLE001
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
@@ -9729,6 +9822,45 @@ try:
     )
 except Exception as _pe:
     print(f"STARTUP WARNING: props joblib restore failed: {_pe}",
+          flush=True, file=sys.stderr)
+
+# Analysis-timestamps boot restore.  data/analysis_timestamps.json
+# powers the admin "Last analyzed" line; Railway redeploys wipe the
+# file so without this restore the admin label would show a "—" until
+# the next analyze run.  The local file gets rewritten by
+# _read_analysis_timestamps' Supabase fallback path, but pre-warming it
+# here means the FIRST poll after boot has data instead of having to
+# round-trip to Supabase synchronously.
+try:
+    _ts_boot = _read_analysis_timestamps()
+    print(
+        f"STARTUP: timestamps boot restore -- "
+        f"mlb={(_ts_boot.get('mlb') or {}).get('analyzed_at') or 'none'}  "
+        f"wnba={(_ts_boot.get('wnba') or {}).get('analyzed_at') or 'none'}",
+        flush=True, file=sys.stderr,
+    )
+    # Seed the in-memory state from the restored row so the admin
+    # status endpoint's tier-1 read works on the very first request
+    # after a cold boot.  Both states are seeded -- nothing harmful
+    # if a sport never ran, the value just stays None.
+    for _sp_key, _state in (
+        ("mlb",  _analysis_state),
+        ("wnba", _wnba_analysis_state),
+    ):
+        _saved = (_ts_boot.get(_sp_key) or {}).get("analyzed_at")
+        if _saved and _state.get("last_analyzed_at") is None:
+            try:
+                _state["last_analyzed_at"] = datetime.fromisoformat(_saved)
+                print(
+                    f"STARTUP: in-memory last_analyzed_at[{_sp_key}] "
+                    f"seeded from Supabase: {_saved}",
+                    flush=True, file=sys.stderr,
+                )
+            except Exception as _se:                                       # noqa: BLE001
+                print(f"STARTUP: in-memory seed[{_sp_key}] parse failed: {_se}",
+                      flush=True, file=sys.stderr)
+except Exception as _te:
+    print(f"STARTUP WARNING: timestamps boot restore failed: {_te}",
           flush=True, file=sys.stderr)
 
 print("STARTUP: app ready", flush=True, file=sys.stderr)
