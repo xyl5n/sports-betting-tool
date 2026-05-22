@@ -354,7 +354,23 @@ class _LoadedModel:
         try:
             import joblib  # type: ignore
             self._loaded = joblib.load(self.path)
-            _log(f"joblib loaded {self.path}")
+            # Log the loaded object's class so the props_pitcher /
+            # props_batter joblibs can be confirmed at runtime as the
+            # CalibratedClassifierCV wrapper rather than a raw
+            # XGBClassifier.  Audit during the 100%-confidence
+            # investigation traced the issue to the confidence formula
+            # (not calibration), but keeping this log line makes
+            # future calibration regressions trivial to spot.
+            cls_name = type(self._loaded).__name__
+            extra = ""
+            try:
+                inner = getattr(self._loaded, "estimator", None) \
+                        or getattr(self._loaded, "base_estimator", None)
+                if inner is not None:
+                    extra = f" (inner={type(inner).__name__})"
+            except Exception:                                             # noqa: BLE001
+                pass
+            _log(f"joblib loaded {self.path}  cls={cls_name}{extra}")
         except Exception as exc:                                          # noqa: BLE001
             _log(f"joblib load failed for {self.path}: {exc}")
             self._loaded = None
@@ -1260,9 +1276,35 @@ def predict(prop: dict) -> dict:
     if   edge >  0.03: recommendation = side
     elif edge < -0.03: recommendation = other_side
     else:               recommendation = "Pass"
-    # Confidence formula unchanged; the only difference is the upper
-    # bound is now 1.0 instead of the old 0.85 hard ceiling.
-    confidence = min(1.0, max(0.50, abs(edge) * 2.0 + 0.50))
+
+    # Confidence = the model's natural win probability for the side it
+    # actually recommends (clamped to [0.50, 1.0]).
+    #
+    # Why we changed the formula
+    # --------------------------
+    # The previous ``abs(edge) * 2.0 + 0.50`` formula saturated at 1.0
+    # whenever the model-market gap reached 0.25, which a calibrated
+    # isotonic classifier hits on most balanced-juice props.  The slate
+    # ended up dominated by 100% picks even when the model's actual win
+    # probability was 65-75% -- misleading on the card and silently
+    # inflating EV calcs (which feed off this same number).
+    #
+    # New formula uses ``over_prob`` after the flip, which is
+    # P_model(this side).  When the model recommends THIS side, that's
+    # the win probability of the pick we're showing.  When the model
+    # recommends the OTHER side, the recommended-side probability is
+    # 1 - over_prob -- the dedup in score_today_props prefers entries
+    # where side==recommendation so the displayed confidence is the
+    # recommended-side probability in either case.  Floor at 0.50 so a
+    # "Pass" with near-coin-flip probability still looks reasonable on
+    # the small admin overview tooltip.
+    if recommendation == side:
+        confidence = over_prob
+    elif recommendation == other_side:
+        confidence = 1.0 - over_prob
+    else:  # Pass -- show whichever side has the higher model_prob
+        confidence = max(over_prob, 1.0 - over_prob)
+    confidence = max(0.50, min(1.0, confidence))
 
     return {
         "recommendation":  recommendation,
@@ -1333,8 +1375,14 @@ def predict_pair(over_prop: dict, under_prop: dict) -> tuple[dict, dict]:
         if   edge >  0.03: rec = side
         elif edge < -0.03: rec = other_side
         else:               rec = "Pass"
-        # Confidence saturates at 1.0 (was capped at _CONF_CAP=0.85).
-        conf = min(1.0, max(0.50, abs(edge) * 2.0 + 0.50))
+        # Confidence = recommended-side win probability (see predict()
+        # for the rationale -- ``abs(edge)*2 + 0.5`` saturated at 1.0
+        # for any reasonable calibrated edge and turned the slate into
+        # an all-100% list).
+        if   rec == side:        conf = model_p
+        elif rec == other_side:  conf = 1.0 - model_p
+        else:                    conf = max(model_p, 1.0 - model_p)
+        conf = max(0.50, min(1.0, conf))
         return {
             "recommendation":  rec,
             "confidence":      round(conf, 4),

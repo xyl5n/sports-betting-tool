@@ -244,7 +244,29 @@ def score_today_props() -> dict:
                 (p.get("player_name", "") or "", line_f), {}
             )
             existing = by_pick.get(key)
-            if existing is None or score > existing["confidence"]:
+            # Tiebreak rule: when both the existing and the new entry
+            # are equally confident, prefer the one whose ``side``
+            # matches its ``recommendation``.  Both sides of a
+            # (player, market, line) typically tie on confidence (the
+            # new formula uses the recommended-side win probability,
+            # which is the same for both Over and Under predictions
+            # of the same line).  Keeping the side==rec match guards
+            # against the Michael-Harris-II-style cross-page flip
+            # where /props and /player would read different fields
+            # off an entry whose ``side`` was iterated-order-arbitrary.
+            new_match = side == (pred.get("recommendation") or "")
+            replace = False
+            if existing is None:
+                replace = True
+            else:
+                existing_match = existing["side"] == (
+                    existing.get("recommendation") or ""
+                )
+                if new_match and not existing_match:
+                    replace = True
+                elif new_match == existing_match and score > existing["confidence"]:
+                    replace = True
+            if replace:
                 by_pick[key] = {
                     "market":          market,
                     "bucket":          bucket,
@@ -374,6 +396,29 @@ def score_today_props() -> dict:
         f"main={n_main_kept} alt={n_alt_kept} "
         f"alts_attached={n_alts_attached} elapsed={elapsed_ms}ms"
     )
+    # Confidence distribution summary -- the easy "is the calibration
+    # working?" check.  After the formula change, a healthy slate
+    # should show a spread (e.g. min=0.55, median=0.62, max=0.85,
+    # pct_above_90 around a few percent).  If we see median=1.0 or
+    # pct_above_90 over ~50%, calibration is broken upstream -- the
+    # CalibratedClassifierCV wrapper is probably missing and a raw
+    # XGBClassifier is being loaded instead (the boot log line
+    # "joblib loaded ... cls=XGBClassifier" would also flag that).
+    if rows:
+        confs = sorted(float(r.get("confidence") or 0.0) for r in rows)
+        n      = len(confs)
+        mean   = sum(confs) / n
+        median = confs[n // 2]
+        p25    = confs[max(0, n // 4 - 1)]
+        p75    = confs[min(n - 1, (3 * n) // 4)]
+        above_90 = sum(1 for c in confs if c >= 0.90) / n
+        _log(
+            f"conf_dist: n={n} "
+            f"min={confs[0]:.3f} p25={p25:.3f} median={median:.3f} "
+            f"mean={mean:.3f} p75={p75:.3f} max={confs[-1]:.3f} "
+            f"pct_>=0.90={above_90:.1%}"
+        )
+
     # Per-top-pick line-type breakdown so an alt sneaking into the top
     # of the slate is obvious at a glance in Railway logs.  Only the
     # top 10 are listed; ranked by confidence desc to match the page
