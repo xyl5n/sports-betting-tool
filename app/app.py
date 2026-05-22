@@ -9409,6 +9409,61 @@ def admin_settle_now():
                         "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+@app.route("/api/admin/props/refresh_now", methods=["POST"])
+def admin_props_refresh_now():
+    """Run the same Tier-1 refresh + scoring pass that auto_props_refresh
+    fires every 15 minutes, on demand.
+
+    Synchronous from Flask's perspective (which is what the test-client
+    pattern in pages/admin.py expects).  The admin button wraps the
+    call in ``asyncio.to_thread`` so NiceGUI's event loop stays
+    responsive while it runs, even on slates with thousands of props.
+
+    Returns a summary dict the admin button uses to render the
+    ``Done -- X picks above threshold`` status line.
+    """
+    import time as _time
+    started = _time.monotonic()
+    print("[ADMIN-ROUTE] /api/admin/props/refresh_now invoked",
+          flush=True, file=sys.stderr)
+    try:
+        from src.props_client import run_tier_1_refresh
+        from src.props_scored_cache import load_scored_props
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"FORCE-PROPS import failed: {type(exc).__name__}: {exc}")
+        return jsonify({"success": False,
+                        "error": f"import failed: {exc}"}), 500
+    try:
+        # run_tier_1_refresh() runs the raw-line fetch AND the scoring
+        # pass (the scheduler hook added in the props-scored-cache PR),
+        # so by the time it returns the cache is already updated.
+        run_tier_1_refresh()
+        payload    = load_scored_props() or {}
+        picks      = payload.get("picks") or []
+        summary    = payload.get("summary") or {}
+        elapsed_ms = int((_time.monotonic() - started) * 1000)
+        result = {
+            "success":      True,
+            "kept":         len(picks),
+            "scored":       int(summary.get("scored") or 0),
+            "deduped":      int(summary.get("deduped") or 0),
+            "predict_err":  int(summary.get("predict_err") or 0),
+            "generated_at": payload.get("generated_at"),
+            "elapsed_ms":   elapsed_ms,
+        }
+        _eprint(
+            f"FORCE-PROPS complete  kept={result['kept']}  "
+            f"scored={result['scored']}  deduped={result['deduped']}  "
+            f"elapsed={elapsed_ms}ms"
+        )
+        return jsonify(result)
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"FORCE-PROPS FAILED: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}")
+        return jsonify({"success": False,
+                        "error": f"{type(exc).__name__}: {exc}"}), 500
+
+
 # ── Nightly retrain scheduler ─────────────────────────────────────────────────
 print("STARTUP: all routes registered — starting scheduler...", flush=True, file=sys.stderr)
 
