@@ -1008,10 +1008,12 @@ def _pitcher_card(sp: dict, side_label: str, fallback_team: str) -> None:
             "gap: 8px; flex-wrap: wrap;"
         ):
             if has_pitcher:
-                ui.label(pitcher_name).style(
+                _name_slug = pitcher_name.lower().replace(" ", "-")
+                ui.link(pitcher_name, f"/player/mlb/{_name_slug}").style(
                     f"font-size: 17px; font-weight: 800; color: {t.TEXT}; "
-                    f"letter-spacing: -.1px; min-width: 0;"
-                )
+                    f"letter-spacing: -.1px; min-width: 0; "
+                    f"text-decoration: none;"
+                ).tooltip("View player profile")
             else:
                 ui.label("TBD").style(
                     f"font-size: 17px; font-weight: 800; color: {t.TEXT_DIM}; "
