@@ -727,8 +727,124 @@ def collect_multi_season_data(
 #     across the entire training horizon.  Stable signal that smooths over
 #     small-sample season variance.
 
-_HANDEDNESS_CACHE_PATH = _CACHE_DIR / "batter_handedness.json"
-_TEAM_BASELINES_PATH   = _CACHE_DIR / "team_baselines.json"
+_HANDEDNESS_CACHE_PATH    = _CACHE_DIR / "batter_handedness.json"
+_TEAM_BASELINES_PATH      = _CACHE_DIR / "team_baselines.json"
+_BATTER_TEAMS_CACHE_PATH  = _CACHE_DIR / "batter_teams.json"
+
+
+# Full team-name → 3-letter abbreviation map (mirror of TEAM_NAME_TO_ABBREV
+# in props_model.py).  The cached game logs store opp_team / park_team as
+# *full names* ("Cincinnati Reds") because the MLB Stats API's opponent
+# field falls back to `name` when `abbreviation` is missing.  Without
+# normalizing on read, the PARK_FACTORS_K lookups always miss and the model
+# trains on ballpark_factor=1.00 for every row — a silent latent bug
+# separate from the inference-side park lookup fix.
+_TEAM_NAME_TO_ABBREV: dict[str, str] = {
+    "Arizona Diamondbacks":  "ARI",
+    "Atlanta Braves":        "ATL",
+    "Baltimore Orioles":     "BAL",
+    "Boston Red Sox":        "BOS",
+    "Chicago Cubs":          "CHC",
+    "Cincinnati Reds":       "CIN",
+    "Cleveland Guardians":   "CLE",
+    "Colorado Rockies":      "COL",
+    "Chicago White Sox":     "CWS",
+    "Detroit Tigers":        "DET",
+    "Houston Astros":        "HOU",
+    "Kansas City Royals":    "KC",
+    "Los Angeles Angels":    "LAA",
+    "Los Angeles Dodgers":   "LAD",
+    "Miami Marlins":         "MIA",
+    "Milwaukee Brewers":     "MIL",
+    "Minnesota Twins":       "MIN",
+    "New York Mets":         "NYM",
+    "New York Yankees":      "NYY",
+    "Oakland Athletics":     "OAK",
+    "Athletics":             "OAK",   # mid-cache rebrand; same franchise
+    "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates":    "PIT",
+    "San Diego Padres":      "SD",
+    "Seattle Mariners":      "SEA",
+    "San Francisco Giants":  "SF",
+    "St. Louis Cardinals":   "STL",
+    "Tampa Bay Rays":        "TB",
+    "Texas Rangers":         "TEX",
+    "Toronto Blue Jays":     "TOR",
+    "Washington Nationals":  "WSH",
+}
+
+
+def _to_abbrev(team_str) -> str:
+    """Normalize a team string to its 3-letter abbreviation.
+
+    Accepts both full names ("New York Yankees" → "NYY") and already
+    abbreviated inputs ("NYY"); empty / unknown → "".
+    """
+    if not team_str:
+        return ""
+    s = str(team_str).strip()
+    if s in _TEAM_NAME_TO_ABBREV:
+        return _TEAM_NAME_TO_ABBREV[s]
+    upper = s.upper()
+    if upper in PARK_FACTORS_K:
+        return upper
+    return ""
+
+
+def collect_batter_teams(seasons: list[int], *, refresh: bool = False) -> dict[str, str]:
+    """Fetch {"<season>:<player_id>" -> "<team_abbrev>"} via per-team rosters.
+
+    The cached game logs don't store batter team per-row, and the player-
+    level `team` field is empty for most batters (MLB API quirk).  One
+    roster call per (team, season) gives us a definitive mapping stable
+    enough to anchor team_baselines aggregation.  ~90 calls on first run
+    (30 teams × 3 seasons); cached.
+    """
+    cache: dict[str, str] = {}
+    if _BATTER_TEAMS_CACHE_PATH.exists() and not refresh:
+        try:
+            cache = json.loads(_BATTER_TEAMS_CACHE_PATH.read_text(encoding="utf-8"))
+            _log(f"batter teams cache: {len(cache)} (season, player) entries")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"batter teams cache read failed ({exc}) -- refetching")
+
+    if cache and not refresh:
+        return cache
+
+    teams_data = _fetch_json(f"{_STATS_BASE}/teams?sportId=1", label="teams")
+    if not teams_data:
+        _log("batter teams: /teams fetch failed -- empty map")
+        return cache
+    team_ids: list[tuple[int, str]] = []
+    for t in (teams_data.get("teams") or []):
+        tid = t.get("id")
+        abbrev = (t.get("abbreviation") or "").strip().upper()
+        if tid and abbrev in PARK_FACTORS_K:
+            team_ids.append((int(tid), abbrev))
+    _log(f"batter teams: discovered {len(team_ids)} active MLB teams")
+
+    for season in seasons:
+        for tid, abbrev in team_ids:
+            url = (f"{_STATS_BASE}/teams/{tid}/roster"
+                   f"?rosterType=fullSeason&season={season}")
+            data = _fetch_json(url, label=f"roster t={abbrev} s={season}")
+            if not data:
+                continue
+            for entry in (data.get("roster") or []):
+                pid = (entry.get("person") or {}).get("id")
+                if pid:
+                    cache[f"{season}:{int(pid)}"] = abbrev
+            time.sleep(_HTTP_SLEEP)
+
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _BATTER_TEAMS_CACHE_PATH.write_text(
+            json.dumps(cache, ensure_ascii=False), encoding="utf-8",
+        )
+        _log(f"batter teams saved: {_BATTER_TEAMS_CACHE_PATH} ({len(cache)} entries)")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"batter teams cache write failed: {exc}")
+    return cache
 
 
 def collect_batter_handedness(payload: dict, *, refresh: bool = False) -> dict[int, str]:
@@ -800,6 +916,7 @@ def collect_batter_handedness(payload: dict, *, refresh: bool = False) -> dict[i
 def compute_team_baselines(
     payload: dict,
     handedness: dict[int, str],
+    batter_teams: Optional[dict[str, str]] = None,
 ) -> dict[str, dict[str, float]]:
     """Aggregate per-(season, team) batter stats from cached game logs.
 
@@ -814,18 +931,34 @@ def compute_team_baselines(
     *team_lhb_pct* = sum(PA) by LHB / sum(PA) total.  Switch hitters are
         counted as LHB (see collect_batter_handedness docstring).
 
+    Batter→team mapping:
+      1. *batter_teams* roster lookup keyed by (season, batter_id) (definitive)
+      2. Player-level `team` field on the cache entry (often empty)
+      3. The first non-empty opp_team in the player's game logs is *NOT* the
+         batter's team; we can't reliably derive teams without the roster lookup
+         for batters whose cache `team` is blank.
+
     Keyed as "<season>:<team>" so a single dict survives multi-season pooling.
     Inference looks up by the opposing batting team for the prop's game.
     """
     agg: dict[tuple[int, str], dict[str, float]] = {}
+    skipped_no_team = 0
     for b in (payload.get("batters") or []):
         season = int(b.get("season") or 0)
-        team   = (b.get("team") or "").strip().upper()
         bid    = int(b.get("id") or 0)
-        if not (season and team and bid):
+        if not (season and bid):
             continue
         hand = handedness.get(bid, "R")  # default to RHB when handedness unknown
         is_lhb = hand in ("L", "S")
+        # Resolve batter's team: roster map first, then cache field.
+        team = ""
+        if batter_teams:
+            team = (batter_teams.get(f"{season}:{bid}") or "").strip().upper()
+        if not team:
+            team = _to_abbrev((b.get("team") or "").strip())
+        if not team:
+            skipped_no_team += 1
+            continue
         key = (season, team)
         bucket = agg.setdefault(key, {
             "SO": 0.0, "PA": 0.0, "H": 0.0, "BB": 0.0,
@@ -850,6 +983,8 @@ def compute_team_baselines(
             if is_lhb:
                 bucket["PA_LHB"] += pa
 
+    if skipped_no_team:
+        _log(f"team baselines: skipped {skipped_no_team} batters with no derivable team")
     out: dict[str, dict[str, float]] = {}
     for (season, team), b in agg.items():
         pa = max(b["PA"], 1.0)
@@ -1055,7 +1190,7 @@ def _build_pitcher_dataset(
 
         # Ballpark strikeout factor — park_team is guaranteed to exist above
         df["ballpark_factor_k"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_K.get(str(t) if t else "", 1.0)
+            lambda t: PARK_FACTORS_K.get(_to_abbrev(t), 1.0)
         )
 
         # Drop rows that lack rolling averages (first 2 appearances)
@@ -1094,7 +1229,7 @@ def _build_pitcher_dataset(
             record["era_vs_rhb"]    = float(splits.get("era_vs_rhb", 4.50))
             record["k_rate_vs_rhb"] = float(splits.get("k_rate_vs_rhb", 0.215))
             # ── Opponent context (per-row, varies with opp_team) ─────────────
-            opp = (row.get("opp_team") or "").strip().upper()
+            opp = _to_abbrev(row.get("opp_team") or "")
             opp_key = f"{int(season)}:{opp}"
             opp_stats = (team_baselines or {}).get(opp_key, OPP_DEFAULTS)
             record["opp_team_k_rate"]  = float(opp_stats.get("opp_team_k_rate",
@@ -1308,10 +1443,10 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
 
         # Ballpark factors — park_team is guaranteed to exist above
         df["ballpark_factor_hits"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_H.get(str(t) if t else "", 1.0)
+            lambda t: PARK_FACTORS_H.get(_to_abbrev(t), 1.0)
         )
         df["ballpark_factor_hr"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_HR.get(str(t) if t else "", 1.0)
+            lambda t: PARK_FACTORS_HR.get(_to_abbrev(t), 1.0)
         )
 
         df = df.dropna(subset=[f"szn_{roll_stats[0]}", f"r7_{roll_stats[0]}"])
@@ -1833,8 +1968,9 @@ def main() -> int:
     team_baselines:   dict[str, dict[str, float]] = {}
     career_baselines: dict[int, dict[str, float]] = {}
     if not args.skip_pitcher:
-        handedness = collect_batter_handedness(payload, refresh=args.refresh_data)
-        team_baselines   = compute_team_baselines(payload, handedness)
+        handedness    = collect_batter_handedness(payload, refresh=args.refresh_data)
+        batter_teams  = collect_batter_teams(seasons, refresh=args.refresh_data)
+        team_baselines   = compute_team_baselines(payload, handedness, batter_teams=batter_teams)
         career_baselines = compute_career_baselines(payload)
         try:
             _TEAM_BASELINES_PATH.write_text(
