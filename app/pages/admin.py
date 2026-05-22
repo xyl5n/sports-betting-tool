@@ -59,6 +59,7 @@ def register(backend) -> None:
                 _refresh = lambda: _render_status(backend, status_holder)
 
                 _section_analysis(backend, _refresh)
+                _section_props(backend, _refresh)
                 _section_models(backend, _refresh)
                 _section_model_bets(backend, _refresh)
                 _section_my_bets(backend, _refresh)
@@ -571,6 +572,43 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
 # ───────────────────────────────────────────────────────────────────────────
 #  Section: MODELS
 # ───────────────────────────────────────────────────────────────────────────
+
+# ───────────────────────────────────────────────────────────────────────────
+#  Section: PROPS  (manual refresh of the props_scored cache)
+# ───────────────────────────────────────────────────────────────────────────
+
+def _section_props(backend, refresh) -> None:
+    """One-button forced refresh of the props_scored cache.
+
+    Fires the same code path as the auto_props_refresh APScheduler job
+    that runs every 15 min during 11 AM–11 PM ET -- raw-line fetch
+    (Tier 1) followed by the scoring + enrichment pass that populates
+    .cache/props_scored_mlb_{date}.json and the matching Supabase row.
+
+    Useful right after a deploy: until the next scheduled tick the
+    /props page would otherwise show the "Props loading" empty state
+    because the local cache is wiped on Railway redeploys.  Clicking
+    Refresh Props Now repopulates it in one shot.
+    """
+    with _card(
+        "PROPS",
+        "Force-run the same refresh + scoring pass that auto_props_refresh "
+        "fires every 15 minutes.  Use after a redeploy so /props doesn't "
+        "wait on the next scheduled tick.",
+    ):
+        _async_button(
+            backend, "Refresh Props Now",
+            "POST", "/api/admin/props/refresh_now",
+            spinner_msg="Refreshing… fetching Tier-1 lines and scoring all props.",
+            done_msg=lambda d: (
+                f"Done — {d.get('kept', 0)} picks above threshold "
+                f"({d.get('scored', 0)} scored, "
+                f"{d.get('deduped', 0)} after dedup, "
+                f"{d.get('elapsed_ms', 0)} ms)."
+            ),
+            refresh_status=refresh,
+        )
+
 
 def _section_models(backend, refresh) -> None:
     with _card("MODELS", "Re-run predictions against cached odds; clear today's snapshot."):
