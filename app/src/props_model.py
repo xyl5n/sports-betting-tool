@@ -82,6 +82,11 @@ _REG_META_PATH = _CACHE_DIR / "props_reg_metadata.json"
 _PITCHER_SNAPSHOTS_PATH = _CACHE_DIR / "pitcher_rolling_snapshots.json"
 _BATTER_SNAPSHOTS_PATH  = _CACHE_DIR / "batter_rolling_snapshots.json"
 
+# PR4 (audit #10): batter handedness map drives the bat-hand HR park
+# factor lookup at inference time.  Written by collect_batter_handedness
+# in the training script (.cache/batter_handedness.json).
+_BATTER_HANDEDNESS_PATH = _CACHE_DIR / "batter_handedness.json"
+
 # Per (season, team) opponent-context baselines (k_rate, woba, lhb_pct)
 # computed from cached batter game logs.  Used by the pitcher inference path
 # to look up the opposing batting team's offensive profile.
@@ -120,6 +125,46 @@ _PARK_HR: dict[str, float] = {
     "PHI": 1.30, "PIT": 0.82, "SD":  0.72, "SEA": 0.82, "SF":  0.60,
     "STL": 0.90, "TB":  0.90, "TEX": 1.10, "TOR": 1.05, "WSH": 0.95,
 }
+
+# PR4 (audit #10): handedness-split HR park factors.  The single _PARK_HR
+# table above was washing out big asymmetries — Yankee Stadium's short
+# porch is +60% HR for LHB / +20% for RHB; Fenway's Green Monster flips
+# the asymmetry the other way (RHB helped, LHB hurt).  Values mirror the
+# train-side PARK_HR_LHB / PARK_HR_RHB tables — keep these two in sync.
+_PARK_HR_LHB: dict[str, float] = {
+    "ARI": 1.08, "ATL": 1.08, "BAL": 1.15, "BOS": 0.90, "CHC": 1.05,
+    "CIN": 1.45, "CLE": 0.95, "COL": 1.30, "CWS": 1.20, "DET": 0.82,
+    "HOU": 0.95, "KC":  0.85, "LAA": 1.05, "LAD": 0.90, "MIA": 0.85,
+    "MIL": 1.05, "MIN": 1.10, "NYM": 0.95, "NYY": 1.60, "OAK": 0.78,
+    "PHI": 1.40, "PIT": 0.85, "SD":  0.78, "SEA": 0.85, "SF":  0.55,
+    "STL": 0.92, "TB":  0.92, "TEX": 1.12, "TOR": 1.08, "WSH": 0.98,
+}
+_PARK_HR_RHB: dict[str, float] = {
+    "ARI": 1.02, "ATL": 1.08, "BAL": 1.05, "BOS": 1.30, "CHC": 1.10,
+    "CIN": 1.25, "CLE": 0.95, "COL": 1.22, "CWS": 1.10, "DET": 0.88,
+    "HOU": 0.95, "KC":  0.92, "LAA": 1.05, "LAD": 0.85, "MIA": 0.85,
+    "MIL": 1.05, "MIN": 1.10, "NYM": 0.92, "NYY": 1.20, "OAK": 0.82,
+    "PHI": 1.20, "PIT": 0.80, "SD":  0.68, "SEA": 0.80, "SF":  0.65,
+    "STL": 0.88, "TB":  0.88, "TEX": 1.08, "TOR": 1.02, "WSH": 0.92,
+}
+
+
+def _park_hr_for_batter(park_abbrev: str, bat_hand: str) -> float:
+    """Pick the right HR park factor given a batter's bat-hand.
+
+    Switch hitters ("S") bucket as LHB — they bat from the left side vs
+    the majority of starters (RHP), and that's what drives the platoon-
+    asymmetric park effect.  Unknown / blank bat-hand falls back to the
+    switch-hitter-blind _PARK_HR table for safety.
+    """
+    if not park_abbrev:
+        return 1.0
+    h = (bat_hand or "").upper()
+    if h in ("L", "S"):
+        return _PARK_HR_LHB.get(park_abbrev, _PARK_HR.get(park_abbrev, 1.0))
+    if h == "R":
+        return _PARK_HR_RHB.get(park_abbrev, _PARK_HR.get(park_abbrev, 1.0))
+    return _PARK_HR.get(park_abbrev, 1.0)
 
 # Full team name → 3-letter abbreviation used by _PARK_* tables above.
 # props_client.py populates `home_team` with The Odds API's full name
@@ -231,13 +276,15 @@ _BATTER_FEATURE_NAMES: list[str] = (
         "opp_pitcher_szn_k_per_9", "opp_pitcher_szn_era", "opp_pitcher_throws_lhp",
     ]  # 11
     + ["ops_vs_lhp", "obp_vs_lhp", "slg_vs_lhp", "ops_vs_rhp", "obp_vs_rhp", "slg_vs_rhp"]  # 6
-    + [
-        "whiff_pct", "chase_pct", "hard_hit_rate", "barrel_rate", "sprint_speed",
-        "platoon_matchup_flag", "weather_temp", "weather_wind_speed", "time_of_day",
-        "ba_vs_breaking", "ba_vs_fastball", "ba_vs_offspeed",
-        "h2h_career_ab", "h2h_career_avg", "h2h_career_k_rate", "implied_total",
-    ]  # 16
-)  # 14+14+14+2+11+6+16 = 77
+    # PR4 (audit #3): the 16 inference-time placeholder features below were
+    # trained as zero for every row, SHAP-confirmed at zero importance, and
+    # then filled with non-zero league-average defaults at predict time —
+    # a pure-noise-injection anti-pattern.  Dropped entirely:
+    #   whiff_pct, chase_pct, hard_hit_rate, barrel_rate, sprint_speed,
+    #   platoon_matchup_flag, weather_temp, weather_wind_speed, time_of_day,
+    #   ba_vs_breaking, ba_vs_fastball, ba_vs_offspeed,
+    #   h2h_career_ab, h2h_career_avg, h2h_career_k_rate, implied_total
+)  # 14+14+14+2+11+6 = 61
 
 # Neutral inference-time defaults for features that require live data
 # (lineup, weather, umpire stats, etc.).  These match league-average
@@ -283,22 +330,11 @@ _BATTER_DEFAULTS: dict[str, float] = {
     "opp_pitcher_szn_k_per_9":  8.50,
     "opp_pitcher_szn_era":      4.30,
     "opp_pitcher_throws_lhp":   0.30,   # ~30% of MLB starters are LHP
-    "whiff_pct":           0.245,
-    "chase_pct":           0.295,
-    "hard_hit_rate":       0.370,
-    "barrel_rate":         0.075,
-    "sprint_speed":       27.0,
-    "platoon_matchup_flag": 0.0,
-    "weather_temp":        72.0,
-    "weather_wind_speed":   8.0,
-    "time_of_day":          1.0,
-    "ba_vs_breaking":      0.235,
-    "ba_vs_fastball":      0.265,
-    "ba_vs_offspeed":      0.255,
-    "h2h_career_ab":       12.0,
-    "h2h_career_avg":       0.255,
-    "h2h_career_k_rate":    0.220,
-    "implied_total":        8.5,
+    # PR4 (audit #3): the 16 placeholder defaults below this comment were
+    # whiff_pct/chase_pct/hard_hit_rate/barrel_rate/sprint_speed,
+    # platoon_matchup_flag, weather_*/time_of_day, ba_vs_*, h2h_career_*,
+    # and implied_total.  All trained as zero -> SHAP-zero importance ->
+    # the non-zero defaults injected pure noise at predict time.  Dropped.
 }
 
 
@@ -560,6 +596,65 @@ _batter_snapshots_by_name: dict[str, dict] = {}
 _batter_league_medians:    dict[str, float] = {}
 
 
+# PR4 (audit #10): batter handedness cache, lazy-loaded once per process.
+# Maps str(player_id) -> "L" / "R" / "S".  Used by _build_reg_vector to
+# pick the right HR park factor at inference time.
+_batter_handedness_cache: Optional[dict[str, str]] = None
+
+
+def _load_batter_handedness() -> dict[str, str]:
+    """Lazily load batter_handedness.json once per process."""
+    global _batter_handedness_cache
+    if _batter_handedness_cache is not None:
+        return _batter_handedness_cache
+    if not _BATTER_HANDEDNESS_PATH.exists():
+        _batter_handedness_cache = {}
+        return {}
+    try:
+        raw = json.loads(_BATTER_HANDEDNESS_PATH.read_text(encoding="utf-8"))
+        _batter_handedness_cache = {str(k): str(v) for k, v in raw.items() if v}
+        _log(f"batter handedness loaded: {len(_batter_handedness_cache)} players")
+    except Exception as exc:                                                   # noqa: BLE001
+        _log(f"batter handedness load failed: {exc}")
+        _batter_handedness_cache = {}
+    return _batter_handedness_cache
+
+
+def _lookup_batter_bat_hand(prop: dict, snap: Optional[dict] = None) -> str:
+    """Resolve the bat-hand ("L" / "R" / "S") for the batter on this prop.
+
+    Resolution chain:
+      1. snap["bat_hand"] when the snapshot already carries it (cheapest).
+      2. snap["id"] -> batter_handedness.json lookup.
+      3. player_name -> MLB ID via search_player_by_name, then handedness.
+
+    Falls back to "R" as the league plurality default — matches the
+    behaviour of the training script's _park_hr_for_batter when bat-hand
+    is unknown.  Returning a non-empty default keeps the park-factor
+    lookup deterministic instead of falling through to the
+    switch-hitter-blind _PARK_HR table on the first ambiguous batter.
+    """
+    snap = snap or {}
+    direct = (snap.get("bat_hand") or "").strip().upper()
+    if direct in ("L", "R", "S"):
+        return direct
+    handedness = _load_batter_handedness()
+    snap_id = snap.get("id")
+    if snap_id and str(snap_id) in handedness:
+        return handedness[str(snap_id)]
+    # Last resort: name -> id via the existing search helper.
+    name = (prop.get("player_name") or "").strip()
+    if name:
+        try:
+            from .player_profile_client import search_player_by_name
+            pid = search_player_by_name(name)
+            if pid is not None and str(pid) in handedness:
+                return handedness[str(pid)]
+        except Exception:                                                      # noqa: BLE001
+            pass
+    return "R"
+
+
 def _load_batter_snapshots() -> dict:
     """Lazily load batter_rolling_snapshots.json once per process."""
     global _batter_snapshot_cache, _batter_snapshots_by_id
@@ -759,11 +854,16 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
     snapshot_feats: dict[str, float] = {}
     league_medians: dict[str, float] = {}
     snap_source = "none"
+    # Hold a reference to the FULL snapshot dict (not just .features) so the
+    # PR4 bat-hand park factor lookup below has access to snap["id"] /
+    # snap["bat_hand"] when available.
+    batter_snap_full: Optional[dict] = None
     if bucket == "batter":
         snap = _lookup_batter_snapshot(prop)
         if isinstance(snap, dict):
             snapshot_feats = snap.get("features") or {}
             snap_source = "player"
+            batter_snap_full = snap
         league_medians = _batter_league_medians or {}
         if not snapshot_feats and league_medians:
             snap_source = "league_median"
@@ -830,7 +930,14 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
     if "ballpark_factor_hits" in fn_idx:
         vec[fn_idx["ballpark_factor_hits"]] = _PARK_H.get(park_team, 1.0)
     if "ballpark_factor_hr" in fn_idx:
-        vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
+        # PR4 (audit #10): bat-hand-specific park factor for batter props.
+        # Pitcher predictions don't carry this feature, so the bucket guard
+        # keeps the lookup cheap on the pitcher path.
+        if bucket == "batter":
+            bat_hand = _lookup_batter_bat_hand(prop, batter_snap_full)
+            vec[fn_idx["ballpark_factor_hr"]] = _park_hr_for_batter(park_team, bat_hand)
+        else:
+            vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
 
     # ── PR3 opp-pitcher lookup (batter only) ──────────────────────────────
     # For a batter prop, the opposing pitcher is the probable starter for
