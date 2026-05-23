@@ -25,7 +25,7 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav, controls
+from components import navbar, bottom_nav
 
 
 def _dbg(msg: str) -> None:
@@ -68,8 +68,9 @@ def _layout(backend) -> None:
             f"font-size: 22px; font-weight: 800; color: {t.TEXT};"
         )
 
-        _section_model_record(backend)
         _section_unified_props_list(backend)
+        # Model trackers moved to the bottom, below all the pick cards.
+        _section_model_record(backend)
         _settle_trigger(backend)
 
 
@@ -156,7 +157,7 @@ def _section_unified_props_list(backend) -> None:
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                 f"color: {t.TEXT};"
             )
-            count_label = ui.label(f"{len(rows)} picks").style(
+            ui.label(f"{len(rows)} picks").style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                 f"font-size: 11px; font-weight: 700; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
@@ -171,48 +172,23 @@ def _section_unified_props_list(backend) -> None:
             _empty_state_message()
             return
 
-        # ── Filter bar ───────────────────────────────────────────────────
-        # State drives both the visible card list and the count chip in
-        # the header above.  Default state hides negative-EV picks and
-        # the alt-line rows.  Both toggles are reachable from the
-        # filter bar below.
-        state = {
-            "game":         "all",   # "all" or "<away>@<home>"
-            "market":       "all",   # "all" or specific market key
-            "min_rate":     0,       # 0..100 -- minimum L10 hit rate %
-            "show_alts":    False,   # reveal alt-line rows under primaries
-            "pos_ev_only":  True,    # hide picks where ev_pct < 0
-        }
+        # ── Sort pills ───────────────────────────────────────────────────
+        # Single row of 6 pills (L5 / L10 / L20 / H2H / Proj / Edge).
+        # Only the sort order changes -- every pick stays visible -- so
+        # the count chip above is static.  Default sort is Proj (biggest
+        # model-vs-book gap first).
+        state = {"sort": "proj"}
 
-        _filter_bar(rows, state, lambda: (cards_refresh.refresh(),
-                                          _update_count(count_label, rows, state)))
-
-        # ── Card list (refreshable so filters re-render in place) ────────
+        # ── Card list (refreshable so the sort re-renders in place) ──────
         @ui.refreshable
         def cards_refresh() -> None:                                      # noqa: WPS430
-            shown = _apply_pick_filters(rows, state)
-            if not shown:
-                ui.label("No picks match the current filters.").style(
-                    f"color: {t.TEXT_DIM2}; font-size: 12px; "
-                    f"font-style: italic; padding: {t.SPACE_LG}; "
-                    f"text-align: center;"
-                )
-                return
+            shown = _sorted_picks(rows, state)
             with ui.element("div").classes("game-grid w-full"):
                 for r in shown:
-                    _prop_card(r, backend, show_alts=state.get("show_alts", False))
+                    _prop_card(r, backend)
 
+        _sort_pills(state, cards_refresh.refresh)
         cards_refresh()
-
-
-def _update_count(label_el, rows: list[dict], state: dict) -> None:
-    """Sync the small "N picks" chip in the section header with the
-    currently-visible row count after a filter change."""
-    n = len(_apply_pick_filters(rows, state))
-    try:
-        label_el.text = f"{n} pick{'s' if n != 1 else ''}"
-    except Exception:                                                     # noqa: BLE001
-        pass
 
 
 def _empty_state_message() -> None:
@@ -251,179 +227,109 @@ def _empty_state_message() -> None:
         )
 
 
-# ── Filter bar ──────────────────────────────────────────────────────────────
+# ── Sort pills ───────────────────────────────────────────────────────────────
+# A single row of six mutually-exclusive pills.  Each is a SORT (every
+# pick stays visible -- only the order changes).  Default is "proj".
 
-def _filter_bar(rows: list[dict], state: dict, on_change) -> None:
-    """Game / Market / Hit-rate threshold filters laid out so they wrap
-    cleanly on mobile.  Each input writes through to *state* and then
-    fires *on_change* so the card list and count chip refresh."""
-    # Distinct games + markets across the slate
-    games_set: dict[str, str] = {"all": "All games"}
-    markets_set: dict[str, str] = {"all": "All markets"}
-    for r in rows:
-        home = (r.get("home_team") or "").strip()
-        away = (r.get("away_team") or "").strip()
-        if home and away:
-            key   = f"{away}@{home}"
-            label = _short_team(away) + " @ " + _short_team(home)
-            games_set[key] = label
-        m = r.get("market") or ""
-        if m:
-            markets_set[m] = _short_market(m)
+_SORT_PILLS: tuple[tuple[str, str], ...] = (
+    ("l5",   "L5"),
+    ("l10",  "L10"),
+    ("l20",  "L20"),
+    ("h2h",  "H2H"),
+    ("proj", "Proj"),
+    ("edge", "Edge"),
+)
 
-    with ui.column().classes("w-full").style(
-        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
-        f"gap: 10px; min-width: 0;"
-    ):
-        ui.label("FILTERS").style(
-            f"font-size: 10px; font-weight: 800; letter-spacing: .6px; "
-            f"color: {t.TEXT_DIM2};"
-        )
 
-        # Three filter inputs -- on mobile they wrap into a column.
-        with ui.row().classes("w-full").style(
-            "gap: 10px; flex-wrap: wrap;"
+def _sort_pills(state: dict, on_change) -> None:
+    """Render the six sort pills in one horizontal row, no title label.
+    Active pill is highlighted green; clicking sets state['sort'] and
+    refreshes the card list."""
+    @ui.refreshable
+    def render() -> None:                                                 # noqa: WPS430
+        with ui.row().classes("items-stretch w-full").style(
+            "gap: 6px; flex-wrap: nowrap;"
         ):
-            with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
-                controls.field_label("GAME")
-                controls.styled_select(
-                    games_set, state["game"],
-                    on_change=lambda e: (
-                        state.update(game=e.value or "all"),
-                        on_change(),
-                    ),
-                )
-
-            with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
-                controls.field_label("MARKET")
-                controls.styled_select(
-                    markets_set, state["market"],
-                    on_change=lambda e: (
-                        state.update(market=e.value or "all"),
-                        on_change(),
-                    ),
-                )
-
-            with ui.column().style("gap: 4px; flex: 1 1 200px; min-width: 0;"):
-                controls.field_label("MIN L10 HIT RATE")
-                rate_label = ui.label("0%").style(
-                    f"font-size: 11px; font-family: monospace; "
-                    f"color: {t.TEXT_DIM};"
-                )
-                controls.styled_slider(
-                    min=0, max=100, step=10, value=state["min_rate"],
-                    on_change=lambda e: (
-                        state.update(min_rate=int(e.value or 0)),
-                        rate_label.set_text(f"{int(e.value or 0)}%"),
-                        on_change(),
-                    ),
-                )
-
-        # Show Alt Lines toggle -- defaults off so the user opts in
-        # before the alt rows expand beneath each primary card.  Sits
-        # in its own row so it doesn't crowd the three primary filters
-        # above on narrow screens.
-        with ui.row().classes("items-center w-full").style(
-            "gap: 8px; padding-top: 4px;"
-        ):
-            controls.field_label("SHOW ALT LINES")
-            controls.styled_switch(
-                value=bool(state.get("show_alts")),
-                on_change=lambda e: (
-                    state.update(show_alts=bool(e.value)),
-                    on_change(),
-                ),
-            )
-            ui.label(
-                "Reveal each pick's alternative line options (shoulder "
-                "lines, set far from even money)."
-            ).style(
-                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                f"font-style: italic;"
-            )
-
-        # Show Negative EV toggle -- defaults off so the list shows
-        # only picks with positive (or unknown) expected value.  We
-        # phrase it as "show negative" rather than "filter to positive"
-        # so the user can flip it on without thinking about polarity.
-        with ui.row().classes("items-center w-full").style(
-            "gap: 8px; padding-top: 4px;"
-        ):
-            controls.field_label("SHOW NEGATIVE EV")
-            controls.styled_switch(
-                value=not bool(state.get("pos_ev_only", True)),
-                on_change=lambda e: (
-                    state.update(pos_ev_only=not bool(e.value)),
-                    on_change(),
-                ),
-            )
-            ui.label(
-                "Include picks where the model's edge doesn't beat the "
-                "book's juice (negative expected value)."
-            ).style(
-                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                f"font-style: italic;"
-            )
+            for key, label in _SORT_PILLS:
+                _sort_pill(label, key, state.get("sort") == key,
+                           state, on_change, render.refresh)
+    render()
 
 
-def _apply_pick_filters(rows: list[dict], state: dict) -> list[dict]:
-    """Return rows that satisfy every active filter in *state*."""
-    out = list(rows)
-    game = state.get("game") or "all"
-    if game != "all":
-        try:
-            away, home = game.split("@", 1)
-        except ValueError:
-            away, home = "", ""
-        out = [
-            r for r in out
-            if (r.get("home_team") or "") == home
-            and (r.get("away_team") or "") == away
-        ]
-    market = state.get("market") or "all"
-    if market != "all":
-        out = [r for r in out if r.get("market") == market]
-    min_rate = int(state.get("min_rate") or 0)
-    if min_rate > 0:
-        out = [r for r in out if _l10_hit_rate_pct(r) >= min_rate]
-    if state.get("pos_ev_only"):
-        # Hide negative-EV picks but keep ev_pct=None rows visible --
-        # those are picks where the cache pre-dates the EV computation
-        # and we'd rather show them than disappear them silently.
-        def _keep(r: dict) -> bool:
-            ev = r.get("ev_pct")
-            if ev is None:
-                return True
-            try:
-                return float(ev) >= 0.0
-            except (TypeError, ValueError):
-                return True
-        out = [r for r in out if _keep(r)]
-    return out
+def _sort_pill(label: str, key: str, active: bool, state: dict,
+               on_change, refresh) -> None:
+    if active:
+        bg, fg, border = t.POS, t.BG, t.POS
+        shadow = "0 0 12px rgba(16, 185, 129, .35)"
+    else:
+        bg, fg, border = "transparent", t.TEXT_DIM, t.BORDER
+        shadow = "none"
+
+    def _click() -> None:
+        state["sort"] = key
+        on_change()
+        refresh()
+
+    ui.button(label, on_click=_click).props("no-caps unelevated dense").style(
+        f"background: {bg} !important; color: {fg} !important; "
+        f"border: 1px solid {border}; flex: 1 1 0; min-width: 0; "
+        f"min-height: 32px; padding: 4px 0; "
+        f"font-size: 11.5px; font-weight: 800; letter-spacing: .4px; "
+        f"border-radius: {t.RADIUS_PILL}; box-shadow: {shadow} !important;"
+    )
 
 
-def _l10_hit_rate_pct(r: dict) -> int:
-    """Last-10-game hit-rate % for the pick (0 when unknown)."""
+# ── Sorting ───────────────────────────────────────────────────────────────────
+
+def _window_hit_rate(r: dict, window: str) -> float:
+    """Hit rate (0..1) for a summary window key prefix.  Returns -1.0
+    when the pick has no games in that window so it sorts last."""
     s = r.get("summary") or {}
-    hits  = s.get("last_10_hits") or 0
-    total = s.get("last_10_games") or 0
-    if not total:
-        return 0
-    return int(round((hits / total) * 100))
+    hits  = s.get(f"{window}_hits") or 0
+    games = s.get(f"{window}_games") or 0
+    if not games:
+        return -1.0
+    return hits / games
 
 
-def _short_team(name: str) -> str:
-    """Compact label for a full team name -- last word usually works
-    ('Atlanta Braves' -> 'Braves').  Falls back to the first 3 chars
-    for ambiguous cases ('Athletics')."""
-    parts = (name or "").split()
-    if not parts:
-        return name
-    return parts[-1]
+def _proj_gap(r: dict) -> float:
+    """Absolute gap between model projection and the book line.  The
+    bigger the gap, the more the model disagrees with the book.
+    Returns -1.0 when either value is missing so it sorts last."""
+    pv   = r.get("predicted_value")
+    line = r.get("line")
+    if pv is None or line is None:
+        return -1.0
+    try:
+        return abs(float(pv) - float(line))
+    except (TypeError, ValueError):
+        return -1.0
 
 
-def _prop_card(r: dict, backend, *, show_alts: bool = False) -> None:
+def _edge_ev(r: dict) -> float:
+    """EV% for the pick.  Missing EV sorts to the very bottom."""
+    ev = r.get("ev_pct")
+    if ev is None:
+        return float("-inf")
+    try:
+        return float(ev)
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _sorted_picks(rows: list[dict], state: dict) -> list[dict]:
+    """Return *rows* ordered by the active sort pill, highest first."""
+    sort = state.get("sort") or "proj"
+    if   sort == "l5":   key = lambda r: _window_hit_rate(r, "last_5")
+    elif sort == "l10":  key = lambda r: _window_hit_rate(r, "last_10")
+    elif sort == "l20":  key = lambda r: _window_hit_rate(r, "last_20")
+    elif sort == "h2h":  key = lambda r: _window_hit_rate(r, "h2h")
+    elif sort == "edge": key = _edge_ev
+    else:                key = _proj_gap            # "proj" default
+    return sorted(rows, key=key, reverse=True)
+
+
+def _prop_card(r: dict, backend) -> None:
     """One prop pick rendered as a card.
 
     Density is the main design constraint here -- we want every piece
@@ -436,7 +342,6 @@ def _prop_card(r: dict, backend, *, show_alts: bool = False) -> None:
       * Inline summary chips: season avg + L5 + L10 + L20 + H2H hit rate
       * Opposing-team rank chip ("OPP NYY: 28th of 30")
       * Best odds + book + Track button
-      * Alt lines block (only when *show_alts* is True)
 
     On mobile the summary chips drop to a single column inside the
     same card -- ECharts not used here so the row is light enough to
@@ -550,14 +455,6 @@ def _prop_card(r: dict, backend, *, show_alts: bool = False) -> None:
             ui.element("div").style("flex: 1;")
             _track_btn(r, backend)
 
-        # ── Alt-line rows ────────────────────────────────────────────────
-        # Only rendered when the "Show Alt Lines" toggle is on.  Each row
-        # shows the alt line + side + model confidence + odds pair so
-        # the user can see the shoulder-line context the model also
-        # scored without those lines competing as primary picks.
-        if show_alts:
-            _card_alt_lines_block(r)
-
 
 def _ev_badge(ev_pct, *, compact: bool = False) -> None:
     """Render a small ``+12.4% EV`` chip beside the confidence number.
@@ -605,68 +502,6 @@ def _card_line_type_chip(r: dict) -> None:
         f"color: {fg}; background: {t.CARD_HI}; "
         f"padding: 2px 6px; border-radius: {t.RADIUS_PILL};"
     )
-
-
-def _card_alt_lines_block(r: dict) -> None:
-    """Render each alt line attached to the primary pick *r* as a
-    compact one-row strip.  Each strip shows line + side + confidence
-    + over/under odds pair so the user can compare the alt confidence
-    to the primary's at a glance.
-
-    Skipped silently when *r* has no ``alt_picks`` (most picks won't,
-    since The Odds API only surfaces alts for a subset of markets).
-    """
-    alts = r.get("alt_picks") or []
-    if not alts:
-        return
-    with ui.column().classes("w-full").style(
-        f"gap: 4px; padding-top: 8px; "
-        f"border-top: 1px dashed {t.BORDER_SOFT};"
-    ):
-        ui.label(f"ALT LINES  ({len(alts)})").style(
-            f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
-            f"color: {t.TEXT_DIM2};"
-        )
-        for a in alts:
-            _alt_row(a)
-
-
-def _alt_row(a: dict) -> None:
-    """One compact row in the alt-lines block.  Mirrors the primary
-    card's pick-row layout (side pill + confidence + odds) but at a
-    smaller scale so several can stack inside one parent card without
-    overwhelming the page."""
-    side    = (a.get("side") or "Over").strip().title()
-    is_over = side == "Over"
-    pill_bg = t.POS if is_over else t.NEG
-    try:
-        conf_pct = float(a.get("confidence") or 0.0) * 100
-    except (TypeError, ValueError):
-        conf_pct = 0.0
-    o_odds = a.get("over_odds")
-    u_odds = a.get("under_odds")
-    with ui.row().classes("items-center w-full").style(
-        "gap: 8px; flex-wrap: nowrap;"
-    ):
-        ui.label(f"{side.upper()} {a.get('line')}").style(
-            f"background: {pill_bg}; color: {t.BG}; "
-            f"font-size: 10.5px; font-weight: 800; letter-spacing: .3px; "
-            f"padding: 3px 8px; border-radius: {t.RADIUS_SM}; flex-shrink: 0;"
-        )
-        ui.label(f"{conf_pct:.0f}%").style(
-            f"font-size: 11px; font-weight: 800; color: {pill_bg}; "
-            f"font-family: monospace; min-width: 36px;"
-        )
-        _ev_badge(a.get("ev_pct"), compact=True)
-        odds_bits: list[str] = []
-        if o_odds is not None:
-            odds_bits.append(f"O {_odds_str(o_odds)}")
-        if u_odds is not None:
-            odds_bits.append(f"U {_odds_str(u_odds)}")
-        ui.label(" · ".join(odds_bits) if odds_bits else "—").style(
-            f"font-size: 10.5px; color: {t.TEXT_DIM}; "
-            f"font-family: monospace; margin-left: auto;"
-        )
 
 
 def _card_summary_chips(r: dict) -> None:
