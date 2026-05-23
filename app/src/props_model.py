@@ -221,10 +221,13 @@ _BATTER_FEATURE_NAMES: list[str] = (
     [f"szn_{c}" for c in _B_ROLL]   # 14
     + [f"r7_{c}"  for c in _B_ROLL] # 14
     + [f"r14_{c}" for c in _B_ROLL] # 14
+    + ["r30_HR", "r30_BB"]          # 2  (PR3 sparse-count smoothing)
     + [
         "k_pct_7d", "k_pct_14d", "babip_7d", "babip_14d",
         "batting_order", "is_home_i", "ballpark_factor_hits", "ballpark_factor_hr",
-    ]  # 8
+        # PR3: opposing-pitcher context (real features, not placeholders).
+        "opp_pitcher_szn_k_per_9", "opp_pitcher_szn_era", "opp_pitcher_throws_lhp",
+    ]  # 11
     + ["ops_vs_lhp", "obp_vs_lhp", "slg_vs_lhp", "ops_vs_rhp", "obp_vs_rhp", "slg_vs_rhp"]  # 6
     + [
         "whiff_pct", "chase_pct", "hard_hit_rate", "barrel_rate", "sprint_speed",
@@ -232,7 +235,7 @@ _BATTER_FEATURE_NAMES: list[str] = (
         "ba_vs_breaking", "ba_vs_fastball", "ba_vs_offspeed",
         "h2h_career_ab", "h2h_career_avg", "h2h_career_k_rate", "implied_total",
     ]  # 16
-)  # 14+14+14+8+6+16 = 72
+)  # 14+14+14+2+11+6+16 = 77
 
 # Neutral inference-time defaults for features that require live data
 # (lineup, weather, umpire stats, etc.).  These match league-average
@@ -272,12 +275,21 @@ _BATTER_DEFAULTS: dict[str, float] = {
     "babip_7d":            0.295,
     "babip_14d":           0.295,
     "batting_order":       5.0,
+    # PR3: 30-game windows for sparse counts.  League per-game means.
+    "r30_HR":              0.13,
+    "r30_BB":              0.36,
     "ops_vs_lhp":          0.720,
     "obp_vs_lhp":          0.315,
     "slg_vs_lhp":          0.405,
     "ops_vs_rhp":          0.720,
     "obp_vs_rhp":          0.315,
     "slg_vs_rhp":          0.405,
+    # PR3: opposing-pitcher context.  League-average neutrals — used when
+    # the inference resolver can't find a probable starter for the prop's
+    # game.  Real values come from a (date, batter_team) snapshot lookup.
+    "opp_pitcher_szn_k_per_9":  8.50,
+    "opp_pitcher_szn_era":      4.30,
+    "opp_pitcher_throws_lhp":   0.30,   # ~30% of MLB starters are LHP
     "whiff_pct":           0.245,
     "chase_pct":           0.295,
     "hard_hit_rate":       0.370,
@@ -611,6 +623,102 @@ def _lookup_batter_snapshot(prop: dict) -> Optional[dict]:
     return None
 
 
+def _resolve_and_apply_opp_pitcher(
+    prop: dict,
+    vec: list[float],
+    fn_idx: dict[str, int],
+    *,
+    snap: dict,
+) -> None:
+    """For batter props: resolve the opposing pitcher from the day's
+    probable-starters schedule and stamp opp_pitcher_szn_k_per_9 /
+    opp_pitcher_szn_era / opp_pitcher_throws_lhp into *vec* in-place.
+
+    Resolution chain:
+      1. Batter's team from their snapshot dict (`snap["team"]`, captured
+         at training time).  Required to know which side of the matchup
+         we're looking for the opposing starter on.
+      2. Daily schedule via PitcherClient._get_schedule(date).  The
+         schedule lists home_pitcher + away_pitcher per game with
+         {fullName, id, pitchHand}.  Cached on disk by the client so this
+         is in-memory after the first slate view.
+      3. opp_pitcher = whichever side has team != batter's team.
+      4. opp pitcher's snapshot (pitcher_rolling_snapshots) gives
+         szn_k_per_9; szn_ER and szn_IP combine into ERA.
+
+    Silently returns without modifying *vec* when any step misses; the
+    league-average defaults already in *vec* (from _BATTER_DEFAULTS) are
+    the correct fallback.  We don't want a missing schedule fetch to
+    crash the predictor.
+    """
+    # Quick exit if the model wasn't trained with these features.
+    feat_keys = ("opp_pitcher_szn_k_per_9", "opp_pitcher_szn_era", "opp_pitcher_throws_lhp")
+    if not any(k in fn_idx for k in feat_keys):
+        return
+
+    # 1. Batter team from snapshot — required to pick the opposing side.
+    batter_team = ((snap or {}).get("team") or "").strip().upper()
+    if not batter_team:
+        return  # let defaults stand
+
+    # 2. Fetch daily schedule (cached on disk; in-memory after first call)
+    commence = (prop.get("commence_time") or "").strip()
+    if not commence:
+        return
+    date_str = commence[:10]
+    schedule: list[dict] = []
+    try:
+        from .pitcher_client import get_pitcher_client
+        schedule = get_pitcher_client()._get_schedule(date_str) or []  # noqa: SLF001
+    except Exception:                                                          # noqa: BLE001
+        return
+
+    # 3. Find the game involving batter_team; opp_pitcher is the side != batter_team.
+    opp_pid: Optional[int] = None
+    opp_throws: Optional[str] = None
+    for entry in schedule:
+        home_team = (entry.get("home_team_abbr") or entry.get("home_team") or "").strip().upper()
+        away_team = (entry.get("away_team_abbr") or entry.get("away_team") or "").strip().upper()
+        if batter_team not in (home_team, away_team):
+            continue
+        if batter_team == home_team:
+            opp = entry.get("away_pitcher") or {}
+        else:
+            opp = entry.get("home_pitcher") or {}
+        opp_pid    = int(opp.get("id") or 0) or None
+        opp_throws = ((opp.get("pitchHand") or {}).get("code") or "").strip().upper() \
+                     if isinstance(opp.get("pitchHand"), dict) \
+                     else (opp.get("pitchHand") or "").strip().upper()
+        break
+
+    # 4. Pull pitcher snapshot's szn_k_per_9 / szn_ER / szn_IP for k_per_9 + ERA
+    if opp_pid is not None:
+        try:
+            _load_pitcher_snapshots()
+            opp_snap = _pitcher_snapshots_by_id.get(str(opp_pid)) or {}
+            opp_feats = (opp_snap.get("features") or {}) if isinstance(opp_snap, dict) else {}
+        except Exception:                                                      # noqa: BLE001
+            opp_feats = {}
+
+        k9 = opp_feats.get("szn_k_per_9")
+        if k9 is not None and "opp_pitcher_szn_k_per_9" in fn_idx:
+            vec[fn_idx["opp_pitcher_szn_k_per_9"]] = float(k9)
+
+        # ERA = szn_ER per game * 9 / szn_IP per game (both are rolling means).
+        szn_er = opp_feats.get("szn_ER")
+        szn_ip = opp_feats.get("szn_IP")
+        if (
+            szn_er is not None and szn_ip is not None
+            and float(szn_ip) > 0.01
+            and "opp_pitcher_szn_era" in fn_idx
+        ):
+            vec[fn_idx["opp_pitcher_szn_era"]] = float(szn_er) * 9.0 / float(szn_ip)
+
+    # Handedness — independent of snapshot; the schedule itself carries it.
+    if opp_throws in ("L", "R") and "opp_pitcher_throws_lhp" in fn_idx:
+        vec[fn_idx["opp_pitcher_throws_lhp"]] = 1.0 if opp_throws == "L" else 0.0
+
+
 def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
     """Build a full-length feature vector for a regression or classifier call.
 
@@ -730,6 +838,24 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
         vec[fn_idx["ballpark_factor_hits"]] = _PARK_H.get(park_team, 1.0)
     if "ballpark_factor_hr" in fn_idx:
         vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
+
+    # ── PR3 opp-pitcher lookup (batter only) ──────────────────────────────
+    # For a batter prop, the opposing pitcher is the probable starter for
+    # whichever team ISN'T the batter's team.  Resolution path:
+    #   1. Batter's team from their snapshot (snap_obj.team).
+    #   2. Probable starters from PitcherClient's daily schedule cache
+    #      (already populated for the prop's commence_time when the slate
+    #      has been viewed).
+    #   3. Match by team -> opp_pitcher_id + handedness.
+    #   4. opp_pitcher_szn_k_per_9 / _era from pitcher_rolling_snapshots.
+    #
+    # Falls through to _BATTER_DEFAULTS neutrals when any step fails, so
+    # missing schedule data degrades gracefully rather than crashing.
+    if bucket == "batter":
+        try:
+            _resolve_and_apply_opp_pitcher(prop, vec, fn_idx, snap=snapshot_feats)
+        except Exception as exc:                                              # noqa: BLE001
+            _log(f"opp_pitcher resolution failed: {exc}")
 
     # ── PR #2 opponent-context lookup (pitcher only) ─────────────────────────
     # The opposing batting team is whichever side ISN'T the pitcher's team.
