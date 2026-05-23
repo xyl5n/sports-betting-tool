@@ -54,6 +54,7 @@ Data sources
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import Optional
 
@@ -298,6 +299,9 @@ def _render_market_view(
         )
         _section_matchup_insights(
             info, prop, market, line_f, summary, opp_abbrev, is_pitcher, games,
+        )
+        _section_matchup_tabs(
+            info, prop, market, line_f, summary, opp_abbrev, is_pitcher,
         )
         _section_recent_trends(games, is_pitcher, market, line_f, summary)
 
@@ -701,19 +705,14 @@ def _section_matchup_insights(
             f"color: {t.TEXT_DIM2};"
         )
 
-        # Insight rows
+        # Insight rows.  (The team-matchup card moved to the "vs Team"
+        # tab in _section_matchup_tabs below.)
         with ui.column().classes("w-full").style(
             f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
             f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; gap: 10px;"
         ):
             for tag, tag_color, text in insights:
                 _insight_row(tag, tag_color, text)
-
-        # Team matchup card
-        if opp_abbrev:
-            _section_team_matchup_card(
-                prop, market, summary, opp_abbrev, line_f,
-            )
 
 
 def _insight_row(tag: str, tag_color: str, text: str) -> None:
@@ -930,6 +929,243 @@ def _section_team_matchup_card(
                         f"font-size: 13px; font-weight: 800; color: {color}; "
                         f"font-family: monospace;"
                     )
+
+
+# ── Section: matchup tabs (vs Team + vs Lineup / vs Pitcher) ────────────────
+
+def _section_matchup_tabs(
+    info: dict,
+    prop: dict,
+    market: str,
+    line_f: Optional[float],
+    summary: dict,
+    opp_abbrev: Optional[str],
+    is_pitcher: bool,
+) -> None:
+    """Two tabs below the matchup insights:
+
+      * "vs Team"   -- the opponent-rank donut + stat-column card.
+      * "vs Lineup" (pitchers) -- opposing batting order + per-batter
+        stat relevant to the prop market.
+      * "vs Pitcher" (batters) -- head-to-head vs today's starter.
+
+    The type-specific tab is lazy-loaded: its data (a multi-call MLB
+    Stats API fan-out) is only fetched when the user opens the tab, on
+    a background thread so the event loop stays responsive.  Results
+    are day-cached in player_profile_client.
+    """
+    player_name = info.get("name") or ""
+    type_label  = "vs Lineup" if is_pitcher else "vs Pitcher"
+    state = {"loaded": False, "data": None}
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        ui.label("MATCHUP").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2};"
+        )
+
+        with ui.tabs().props("dense align=left").classes(
+            "player-market-tabs w-full"
+        ).style(
+            f"border-bottom: 1px solid {t.BORDER}; min-height: 38px;"
+        ) as tabs:
+            team_tab = ui.tab("vs Team")
+            type_tab = ui.tab(type_label)
+
+        @ui.refreshable
+        def type_panel() -> None:                                         # noqa: WPS430
+            if not state["loaded"]:
+                ui.label("Loading matchup data…").style(
+                    f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
+                    f"font-style: italic; padding: 16px 4px;"
+                )
+                return
+            if is_pitcher:
+                _render_vs_lineup(state["data"])
+            else:
+                _render_vs_pitcher(state["data"], line_f)
+
+        async def _on_change(e) -> None:                                  # noqa: WPS430
+            if str(getattr(e, "value", "")) != type_label or state["loaded"]:
+                return
+            state["loaded"] = True
+            type_panel.refresh()   # show the "Loading…" placeholder
+            try:
+                from src.player_profile_client import (
+                    get_opposing_lineup, get_batter_vs_pitcher,
+                )
+                if is_pitcher:
+                    state["data"] = await asyncio.to_thread(
+                        get_opposing_lineup, prop, player_name, market)
+                else:
+                    state["data"] = await asyncio.to_thread(
+                        get_batter_vs_pitcher, prop, player_name)
+            except Exception as exc:                                      # noqa: BLE001
+                _log(f"matchup tab load failed: {exc}")
+                state["data"] = None
+            type_panel.refresh()
+
+        with ui.tab_panels(tabs, value=team_tab, on_change=_on_change).classes(
+            "w-full"
+        ).style("background: transparent; padding: 0;"):
+            with ui.tab_panel(team_tab).style(f"padding: {t.SPACE_MD} 0 0 0;"):
+                if opp_abbrev:
+                    _section_team_matchup_card(prop, market, summary, opp_abbrev, line_f)
+                else:
+                    ui.label("Opponent not determined yet.").style(
+                        f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
+                        f"font-style: italic; padding: 16px 4px;"
+                    )
+            with ui.tab_panel(type_tab).style(f"padding: {t.SPACE_MD} 0 0 0;"):
+                type_panel()
+
+
+def _render_vs_lineup(data: Optional[dict]) -> None:
+    """Opposing batting order table for a pitcher's matchup."""
+    from src.utils import strip_formatting
+    if not data or not data.get("available"):
+        note = (data or {}).get("note") or "Lineup not available yet."
+        ui.label(strip_formatting(note)).style(
+            f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic; "
+            f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; padding: 16px; "
+            f"text-align: center; width: 100%;"
+        )
+        return
+
+    stat_label = strip_formatting(data.get("stat_label") or "STAT")
+    batters    = data.get("batters") or []
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 6px 4px; gap: 0;"
+    ):
+        # Header row
+        _lineup_grid_row(
+            "#", "BATTER", "POS", "B", stat_label.upper(),
+            header=True,
+        )
+        for i, b in enumerate(batters, 1):
+            _lineup_grid_row(
+                str(i),
+                strip_formatting(b.get("name") or "—"),
+                strip_formatting(b.get("position") or "—"),
+                strip_formatting(b.get("hand") or "—"),
+                strip_formatting(str(b.get("stat") or "—")),
+            )
+
+
+def _lineup_grid_row(
+    num: str, name: str, pos: str, hand: str, stat: str,
+    *, header: bool = False,
+) -> None:
+    """One row of the opposing-lineup grid."""
+    fg     = t.TEXT_DIM2 if header else t.TEXT
+    weight = "800" if header else "600"
+    fsize  = "9.5px" if header else "12px"
+    border = "" if header else f"border-top: 1px solid {t.BORDER_SOFT};"
+    with ui.element("div").classes("w-full").style(
+        "display: grid; "
+        "grid-template-columns: 24px 1fr 42px 28px 56px; "
+        f"gap: 6px; align-items: center; padding: 7px 8px; {border}"
+    ):
+        ui.label(num).style(
+            f"font-size: {fsize}; font-weight: {weight}; color: {t.TEXT_DIM2}; "
+            f"font-family: monospace;"
+        )
+        ui.label(name).style(
+            f"font-size: {fsize}; font-weight: {weight}; color: {fg}; "
+            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+        )
+        ui.label(pos).style(
+            f"font-size: {fsize}; font-weight: {weight}; color: {t.TEXT_DIM}; "
+            f"font-family: monospace; text-align: center;"
+        )
+        ui.label(hand).style(
+            f"font-size: {fsize}; font-weight: {weight}; color: {t.TEXT_DIM}; "
+            f"font-family: monospace; text-align: center;"
+        )
+        ui.label(stat).style(
+            f"font-size: {fsize}; font-weight: 800; "
+            f"color: {(t.TEXT_DIM2 if header else t.PRIMARY_HI)}; "
+            f"font-family: monospace; text-align: right;"
+        )
+
+
+def _render_vs_pitcher(data: Optional[dict], line_f: Optional[float]) -> None:
+    """Head-to-head card for a batter vs today's starting pitcher."""
+    from src.utils import strip_formatting
+    if not data:
+        ui.label("Matchup data unavailable.").style(
+            f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic; "
+            f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; padding: 16px; "
+            f"text-align: center; width: 100%;"
+        )
+        return
+
+    pitcher_name = strip_formatting(data.get("pitcher_name") or "today's starter")
+    pitcher_hand = strip_formatting(data.get("pitcher_hand") or "")
+    hand_suffix  = f" ({pitcher_hand}HP)" if pitcher_hand else ""
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 10px;"
+    ):
+        ui.label(f"vs {pitcher_name}{hand_suffix}").style(
+            f"font-size: 14px; font-weight: 800; color: {t.TEXT};"
+        )
+
+        if not data.get("available"):
+            ui.label(strip_formatting(data.get("note") or "No prior history.")).style(
+                f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic;"
+            )
+            return
+
+        games_n = int(data.get("games") or 0)
+        if games_n < 5:
+            ui.label("Limited H2H data").style(
+                f"font-size: 11px; font-weight: 800; letter-spacing: .4px; "
+                f"color: {t.WARN}; background: rgba(245, 158, 11, .08); "
+                f"padding: 3px 8px; border-radius: {t.RADIUS_PILL}; "
+                f"align-self: flex-start;"
+            )
+
+        # Career aggregate stat cells (per-game H2H isn't exposed by a
+        # clean MLB endpoint, so we surface career AB / AVG / OPS etc.).
+        cells = [
+            ("G",   str(games_n)),
+            ("AB",  str(data.get("ab") or 0)),
+            ("H",   str(data.get("h") or 0)),
+            ("HR",  str(data.get("hr") or 0)),
+            ("AVG", strip_formatting(str(data.get("avg") or "—"))),
+            ("OPS", strip_formatting(str(data.get("ops") or "—"))),
+        ]
+        with ui.element("div").classes("w-full").style(
+            "display: grid; grid-template-columns: repeat(6, 1fr); "
+            "gap: 6px;"
+        ):
+            for label, value in cells:
+                with ui.column().style(
+                    f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM}; "
+                    f"padding: 8px 4px; gap: 2px; align-items: center; min-width: 0;"
+                ):
+                    ui.label(label).style(
+                        f"font-size: 9px; font-weight: 800; letter-spacing: .4px; "
+                        f"color: {t.TEXT_DIM2};"
+                    )
+                    ui.label(value).style(
+                        f"font-size: 13px; font-weight: 800; color: {t.TEXT}; "
+                        f"font-family: monospace;"
+                    )
+
+        so_bb = (
+            f"{data.get('so') or 0} K · {data.get('bb') or 0} BB in "
+            f"{data.get('ab') or 0} AB career"
+        )
+        ui.label(strip_formatting(so_bb)).style(
+            f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+        )
 
 
 # ── Section: recent trends ──────────────────────────────────────────────────
@@ -1372,9 +1608,11 @@ def _section_game_log(
     is_pitcher: bool,
     today_props: list[dict],
 ) -> None:
-    """Game log table at the very bottom of the page (full season, not
-    per-market).  Highlights the column corresponding to the strongest
-    prop's stat when one exists."""
+    """Collapsible game log at the very bottom of the page.
+
+    Hidden by default behind a pill toggle ("Game Log ▼"); tapping
+    expands the full table ("Game Log ▲") and tapping again collapses
+    it.  Highlights the column matching the strongest prop's stat."""
     if not games:
         return
     if today_props:
@@ -1383,12 +1621,29 @@ def _section_game_log(
     else:
         highlighted = "K" if is_pitcher else "H"
 
-    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
-        ui.label("GAME LOG").style(
-            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
-            f"color: {t.TEXT_DIM2};"
+    state = {"open": False}
+
+    @ui.refreshable
+    def render() -> None:                                                 # noqa: WPS430
+        arrow = "▲" if state["open"] else "▼"
+        ui.button(
+            f"Game Log  {arrow}", on_click=_toggle,
+        ).props("no-caps unelevated dense").style(
+            f"background: {t.CARD}; color: {t.TEXT}; "
+            f"border: 1px solid {t.BORDER}; "
+            f"font-size: 11px; font-weight: 800; letter-spacing: .6px; "
+            f"padding: 8px 14px; border-radius: {t.RADIUS_PILL}; "
+            f"align-self: flex-start; min-height: 0;"
         )
-        _game_log_table(games, is_pitcher, highlighted)
+        if state["open"]:
+            _game_log_table(games, is_pitcher, highlighted)
+
+    def _toggle() -> None:
+        state["open"] = not state["open"]
+        render.refresh()
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        render()
 
 
 def _game_log_table(

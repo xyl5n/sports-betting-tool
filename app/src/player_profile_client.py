@@ -1026,6 +1026,300 @@ def get_player_today_opponent(player_name: str, prop: dict) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Matchup data: opposing lineup (for pitchers) + batter-vs-pitcher H2H
+# ---------------------------------------------------------------------------
+#
+# Both fetchers degrade gracefully: any network/parse failure or
+# not-yet-posted lineup returns an "available: False" payload + a
+# human note, never raises.  Assembled results are cached for the day
+# (local file + Supabase) so the per-batter stat fan-out only happens
+# once per game.
+
+def _find_todays_game(prop: dict, player_name: str) -> Optional[dict]:
+    """Resolve the player's game today from the schedule (lineups +
+    probable pitchers hydrated) and return a normalised dict, or None.
+
+    Shape::
+        {
+          "game_pk":     int,
+          "date":        "YYYY-MM-DD",
+          "player_side": "home" | "away",
+          "opp_side":    "home" | "away",
+          "lineups":     {"home": [player...], "away": [player...]},
+          "pitchers":    {"home": {...}|None, "away": {...}|None},
+        }
+
+    Each lineup *player* is ``{id, name, position, hand, order}``; each
+    pitcher is ``{id, name, hand}``.
+    """
+    commence = (prop.get("commence_time") or "").strip()
+    date_str = commence[:10] if commence else _today_str()
+    home_full = (prop.get("home_team") or "").strip()
+    away_full = (prop.get("away_team") or "").strip()
+    if not home_full or not away_full:
+        return None
+
+    # Which side is the player on?
+    pid = search_player_by_name(player_name)
+    if not pid:
+        return None
+    info = get_player_info(pid)
+    team_name = (info.get("team_name") or "").strip().lower()
+    if team_name == home_full.lower():
+        player_side, opp_side = "home", "away"
+    elif team_name == away_full.lower():
+        player_side, opp_side = "away", "home"
+    else:
+        return None
+
+    url = (
+        f"{_STATS_BASE}/schedule?sportId=1&date={date_str}"
+        f"&hydrate=lineups,probablePitcher(note,pitchHand)"
+    )
+    data = _fetch_json(url, label=f"_find_todays_game({date_str})")
+    if not data:
+        return None
+
+    def _parse_lineup(players: list) -> list[dict]:
+        out: list[dict] = []
+        for i, p in enumerate(players or []):
+            out.append({
+                "id":       p.get("id"),
+                "name":     p.get("fullName") or "",
+                "position": (p.get("primaryPosition") or {}).get("abbreviation") or "",
+                "hand":     (p.get("batSide") or {}).get("code") or "",
+                "order":    i + 1,
+            })
+        return out
+
+    def _parse_pitcher(side_block: dict) -> Optional[dict]:
+        pp = side_block.get("probablePitcher") or {}
+        if not pp.get("id"):
+            return None
+        return {
+            "id":   pp.get("id"),
+            "name": pp.get("fullName") or "",
+            "hand": (pp.get("pitchHand") or {}).get("code") or "",
+        }
+
+    try:
+        for day in data.get("dates") or []:
+            for game in day.get("games") or []:
+                teams = game.get("teams") or {}
+                g_home = ((teams.get("home") or {}).get("team") or {}).get("name", "")
+                g_away = ((teams.get("away") or {}).get("team") or {}).get("name", "")
+                if g_home.lower() != home_full.lower() or g_away.lower() != away_full.lower():
+                    continue
+                lineups = game.get("lineups") or {}
+                return {
+                    "game_pk":     game.get("gamePk"),
+                    "date":        date_str,
+                    "player_side": player_side,
+                    "opp_side":    opp_side,
+                    "lineups": {
+                        "home": _parse_lineup(lineups.get("homePlayers")),
+                        "away": _parse_lineup(lineups.get("awayPlayers")),
+                    },
+                    "pitchers": {
+                        "home": _parse_pitcher(teams.get("home") or {}),
+                        "away": _parse_pitcher(teams.get("away") or {}),
+                    },
+                }
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"_find_todays_game parse error: {exc}")
+    return None
+
+
+# Per-market lineup stat: (column label, season_stats key, formatter).
+# The formatter turns the raw season_stats dict into a display string.
+def _lineup_stat_spec(market: str):
+    def _rate(num_key: str):
+        def fmt(s: dict) -> str:
+            pa = float(s.get("pa") or 0)
+            n  = float(s.get(num_key) or 0)
+            return f"{(n / pa * 100):.0f}%" if pa else "—"
+        return fmt
+
+    def _contact(s: dict) -> str:
+        pa = float(s.get("pa") or 0)
+        k  = float(s.get("strikeouts") or 0)
+        return f"{((pa - k) / pa * 100):.0f}%" if pa else "—"
+
+    def _avg3(key: str):
+        def fmt(s: dict) -> str:
+            v = s.get(key)
+            return f"{float(v):.3f}".lstrip("0") if v else "—"
+        return fmt
+
+    if market == "pitcher_strikeouts":
+        return ("K%", _rate("strikeouts"))
+    if market == "pitcher_outs":
+        return ("Contact%", _contact)
+    if market == "pitcher_walks":
+        return ("BB%", _rate("walks"))
+    if market == "pitcher_earned_runs":
+        return ("OPS", _avg3("ops"))
+    # pitcher_hits_allowed + default
+    return ("AVG", _avg3("avg"))
+
+
+def get_opposing_lineup(prop: dict, player_name: str, market: str) -> dict:
+    """Return the opposing team's batting order with the stat relevant
+    to *market* for a pitcher's matchup view.
+
+    Returns::
+        {"available": bool, "note": str, "stat_label": str,
+         "batters": [{name, position, hand, stat}]}
+
+    Cached per (game_pk, market) for the ET day -- the per-batter
+    season-stat fan-out (up to 9 calls) runs once, then reads are a
+    single cache hit.
+    """
+    stat_label, stat_fmt = _lineup_stat_spec(market)
+    empty = {"available": False, "note": "Lineup not posted yet.",
+             "stat_label": stat_label, "batters": []}
+
+    game = _find_todays_game(prop, player_name)
+    if not game or not game.get("game_pk"):
+        return dict(empty, note="Game not found on today's schedule.")
+
+    opp_lineup = (game.get("lineups") or {}).get(game["opp_side"]) or []
+    if not opp_lineup:
+        return empty   # lineup not posted yet
+
+    cache_key = f"lineup_{game['game_pk']}_{game['opp_side']}_{market}"
+    today = _today_str()
+    # Local + Supabase day cache
+    try:
+        row = _db.cache_get(cache_key)
+        if row and row.get("date") == today:
+            cached = (row.get("data") or {})
+            if cached.get("batters"):
+                return cached
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    batters: list[dict] = []
+    for p in opp_lineup[:9]:
+        bid = p.get("id")
+        stat_str = "—"
+        if bid:
+            try:
+                s = get_season_stats(int(bid), is_pitcher=False)
+                stat_str = stat_fmt(s)
+            except Exception:                                             # noqa: BLE001
+                stat_str = "—"
+        batters.append({
+            "name":     p.get("name") or "—",
+            "position": p.get("position") or "—",
+            "hand":     p.get("hand") or "—",
+            "stat":     stat_str,
+        })
+
+    result = {"available": True, "note": "", "stat_label": stat_label,
+              "batters": batters}
+    try:
+        _db.cache_set(cache_key, "mlb", today, result)
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return result
+
+
+def get_batter_vs_pitcher(prop: dict, player_name: str) -> dict:
+    """Career head-to-head aggregate of the batter vs today's opposing
+    starting pitcher (MLB Stats API ``vsPlayer`` stat type).
+
+    Returns::
+        {"available": bool, "note": str, "pitcher_name": str,
+         "pitcher_hand": str, "ab": int, "h": int, "avg": str,
+         "obp": str, "slg": str, "ops": str, "hr": int, "so": int,
+         "bb": int, "games": int}
+
+    Cached per (batter_id, pitcher_id) for the day.  Per-game H2H
+    splits aren't exposed by a clean MLB endpoint, so this surfaces
+    the career aggregate -- which is exactly the "Limited H2H data"
+    fallback content (career AB / AVG / OPS) the UI shows.
+    """
+    empty = {"available": False, "note": "No opposing starter announced yet.",
+             "pitcher_name": "", "pitcher_hand": ""}
+
+    game = _find_todays_game(prop, player_name)
+    if not game:
+        return dict(empty, note="Game not found on today's schedule.")
+    pitcher = (game.get("pitchers") or {}).get(game["opp_side"])
+    if not pitcher or not pitcher.get("id"):
+        return empty
+
+    batter_id = search_player_by_name(player_name)
+    if not batter_id:
+        return dict(empty, note="Could not resolve batter.",
+                    pitcher_name=pitcher.get("name", ""),
+                    pitcher_hand=pitcher.get("hand", ""))
+
+    cache_key = f"bvp_{batter_id}_{pitcher['id']}"
+    today = _today_str()
+    try:
+        row = _db.cache_get(cache_key)
+        if row and row.get("date") == today and (row.get("data") or {}).get("available") is not None:
+            return row["data"]
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    url = (
+        f"{_STATS_BASE}/people/{batter_id}/stats"
+        f"?stats=vsPlayer&opposingPlayerId={pitcher['id']}&group=hitting"
+    )
+    data = _fetch_json(url, label=f"get_batter_vs_pitcher({batter_id} vs {pitcher['id']})")
+    out = {
+        "available":    False,
+        "note":         "No prior plate appearances vs this pitcher.",
+        "pitcher_name": pitcher.get("name", ""),
+        "pitcher_hand": pitcher.get("hand", ""),
+        "ab": 0, "h": 0, "hr": 0, "so": 0, "bb": 0, "games": 0,
+        "avg": "—", "obp": "—", "slg": "—", "ops": "—",
+    }
+    try:
+        # vsPlayer returns career + per-season splits; the split with
+        # the most plate appearances is the career total.
+        splits = ((data or {}).get("stats") or [{}])[0].get("splits") or []
+        best = None
+        for sp in splits:
+            st = sp.get("stat") or {}
+            ab = int(st.get("atBats") or 0)
+            if best is None or ab > best[0]:
+                best = (ab, st)
+        if best and best[0] > 0:
+            st = best[1]
+            def _fmt3(v):
+                try:
+                    return f"{float(v):.3f}".lstrip("0") or ".000"
+                except (TypeError, ValueError):
+                    return "—"
+            out.update({
+                "available": True,
+                "note":      "",
+                "ab":        int(st.get("atBats") or 0),
+                "h":         int(st.get("hits") or 0),
+                "hr":        int(st.get("homeRuns") or 0),
+                "so":        int(st.get("strikeOuts") or 0),
+                "bb":        int(st.get("baseOnBalls") or 0),
+                "games":     int(st.get("gamesPlayed") or 0),
+                "avg":       _fmt3(st.get("avg")),
+                "obp":       _fmt3(st.get("obp")),
+                "slg":       _fmt3(st.get("slg")),
+                "ops":       _fmt3(st.get("ops")),
+            })
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"get_batter_vs_pitcher parse error: {exc}")
+
+    try:
+        _db.cache_set(cache_key, "mlb", today, out)
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Opposing-team rank vs each prop market
 # ---------------------------------------------------------------------------
 #
