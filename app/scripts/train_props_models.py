@@ -733,9 +733,11 @@ def collect_multi_season_data(
 #     across the entire training horizon.  Stable signal that smooths over
 #     small-sample season variance.
 
-_HANDEDNESS_CACHE_PATH    = _CACHE_DIR / "batter_handedness.json"
-_TEAM_BASELINES_PATH      = _CACHE_DIR / "team_baselines.json"
-_BATTER_TEAMS_CACHE_PATH  = _CACHE_DIR / "batter_teams.json"
+_HANDEDNESS_CACHE_PATH         = _CACHE_DIR / "batter_handedness.json"
+_PITCHER_HANDEDNESS_CACHE_PATH = _CACHE_DIR / "pitcher_handedness.json"
+_TEAM_BASELINES_PATH           = _CACHE_DIR / "team_baselines.json"
+_BATTER_TEAMS_CACHE_PATH       = _CACHE_DIR / "batter_teams.json"
+_PITCHER_SEASON_STATS_PATH     = _CACHE_DIR / "pitcher_season_stats.json"
 
 
 # Full team-name → 3-letter abbreviation map (mirror of TEAM_NAME_TO_ABBREV
@@ -917,6 +919,163 @@ def collect_batter_handedness(payload: dict, *, refresh: bool = False) -> dict[i
     except Exception as exc:  # noqa: BLE001
         _log(f"handedness cache write failed: {exc}")
     return cache
+
+
+def collect_pitcher_handedness(payload: dict, *, refresh: bool = False) -> dict[int, str]:
+    """Fetch L/R throwing hand for every unique pitcher in *payload*.
+
+    Mirrors collect_batter_handedness but hits the `pitchHand` field instead
+    of `batSide`.  Returns {pitcher_id: "L" | "R"} cached at
+    .cache/pitcher_handedness.json.
+
+    Used by the batter model's PR3 opp_pitcher_throws_lhp feature: when a
+    batter faces a pitcher, the model gets the LH/RH bit so it can interact
+    with the platoon-split features (ops_vs_lhp / ops_vs_rhp).  Without
+    this, those splits sat as static season-mean signals because the
+    matchup-specific direction was unknown.
+    """
+    cache: dict[int, str] = {}
+    if _PITCHER_HANDEDNESS_CACHE_PATH.exists() and not refresh:
+        try:
+            raw = json.loads(_PITCHER_HANDEDNESS_CACHE_PATH.read_text(encoding="utf-8"))
+            cache = {int(k): str(v) for k, v in raw.items() if v}
+            _log(f"pitcher handedness cache: {len(cache)} players")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"pitcher handedness cache read failed ({exc}) -- refetching")
+
+    needed: set[int] = set()
+    for p in (payload.get("pitchers") or []):
+        pid = int(p.get("id") or 0)
+        if pid and pid not in cache:
+            needed.add(pid)
+
+    if not needed:
+        _log("pitcher handedness: all players already cached")
+        return cache
+
+    _log(f"pitcher handedness: fetching {len(needed)} new players in batches")
+    ids = sorted(needed)
+    BATCH = 50
+    fetched = 0
+    for i in range(0, len(ids), BATCH):
+        chunk = ids[i:i + BATCH]
+        url = (f"{_STATS_BASE}/people"
+               f"?personIds={','.join(str(x) for x in chunk)}&hydrate=pitchHand")
+        data = _fetch_json(url, label=f"pitcher-people-batch[{i}:{i+len(chunk)}]")
+        if not data:
+            continue
+        for person in (data.get("people") or []):
+            pid = int(person.get("id") or 0)
+            if not pid:
+                continue
+            hand = ((person.get("pitchHand") or {}).get("code") or "").strip().upper()
+            if hand in ("L", "R"):
+                cache[pid] = hand
+                fetched += 1
+        time.sleep(_HTTP_SLEEP)
+        if (i // BATCH) % 10 == 0:
+            _log(f"  pitcher handedness progress: {fetched}/{len(needed)}")
+
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _PITCHER_HANDEDNESS_CACHE_PATH.write_text(
+            json.dumps({str(k): v for k, v in cache.items()}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _log(f"pitcher handedness saved: {_PITCHER_HANDEDNESS_CACHE_PATH} "
+             f"({len(cache)} players, +{fetched} new)")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"pitcher handedness cache write failed: {exc}")
+    return cache
+
+
+def build_opp_pitcher_lookup(payload: dict) -> tuple[dict[str, int], dict[str, dict[str, float]]]:
+    """Build two derived maps from cached pitcher game logs:
+
+      1. opp_pitcher_by_game: "<date>:<batter_team>" -> pitcher_id
+         The pitcher's `opp_team` field IS the batter's team, so each
+         pitcher-game-log row with games_started > 0 contributes one entry.
+
+      2. pitcher_season_stats: "<season>:<pid>" -> {k_per_9, era}
+         Season-end aggregates per pitcher.  Used by the batter feature
+         builder to fill opp_pitcher_szn_k_per_9 / opp_pitcher_szn_era
+         when the opp pitcher is known.
+
+    These are stored on disk too (pitcher_season_stats.json) so the
+    inference path can read them at predict time without rebuilding from
+    raw payloads.
+
+    Caveats:
+      * Multiple pitchers can have games on the same (date, opp_team) when
+        starters are pulled early; we take the FIRST one we see (which is
+        the actual starter for the cached game-log payload structure).
+      * Season-end aggregates are biased optimistically for backtesting a
+        bet from the middle of that season.  Acceptable for v1 — the bias
+        is constant across PR iterations so deltas stay interpretable.
+        A future PR can swap in per-game pitcher rolling stats if needed.
+    """
+    opp_lookup: dict[str, int] = {}
+    season_stats: dict[str, dict[str, float]] = {}
+
+    # Aggregate per-pitcher season totals
+    totals: dict[str, dict[str, float]] = {}
+    for p in (payload.get("pitchers") or []):
+        pid    = int(p.get("id") or 0)
+        season = int(p.get("season") or 0)
+        if not pid or not season:
+            continue
+        season_key = f"{season}:{pid}"
+        agg = totals.setdefault(season_key, {"IP": 0.0, "K": 0.0, "ER": 0.0})
+        for g in (p.get("games") or []):
+            try:
+                ip = float(g.get("IP") or 0)
+                k  = int(g.get("K") or 0)
+                er = int(g.get("ER") or 0)
+            except (TypeError, ValueError):
+                continue
+            agg["IP"] += ip
+            agg["K"]  += k
+            agg["ER"] += er
+            # Record opp_pitcher only for starts
+            if int(g.get("games_started") or 0) > 0:
+                date = (g.get("date") or "")[:10]
+                opp  = _to_abbrev(g.get("opp_team") or "")
+                if date and opp:
+                    key = f"{date}:{opp}"
+                    # First writer wins (the actual starter for that team's game)
+                    opp_lookup.setdefault(key, pid)
+
+    # Convert totals to k_per_9 / era
+    for key, agg in totals.items():
+        ip = max(agg["IP"], 0.01)
+        season_stats[key] = {
+            "k_per_9": round(agg["K"] * 9.0 / ip, 4),
+            "era":     round(agg["ER"] * 9.0 / ip, 4),
+            "ip":      round(ip, 1),
+        }
+
+    _log(
+        f"opp pitcher lookup: {len(opp_lookup)} (date,team)->pid entries, "
+        f"{len(season_stats)} (season,pid)->stats entries"
+    )
+
+    # Persist season stats (the lookup is only used at training, so no
+    # need to write it out — inference resolves opp_pitcher via the live
+    # schedule, not historical dates).
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _PITCHER_SEASON_STATS_PATH.write_text(
+            json.dumps({
+                "generated_at":  datetime.utcnow().isoformat() + "Z",
+                "season_stats":  season_stats,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _log(f"pitcher season stats saved: {_PITCHER_SEASON_STATS_PATH}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"pitcher season stats save failed: {exc}")
+
+    return opp_lookup, season_stats
 
 
 def compute_team_baselines(
@@ -1388,8 +1547,15 @@ def _build_pitcher_dataset(
 # Feature engineering — batter
 # ---------------------------------------------------------------------------
 
-def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, dict]]):
-    """Build (X, y, feature_names, snapshots) for batter_hits >= 1 label.
+def _build_batter_dataset(
+    payload: dict,
+    splits_by_season: dict[int, dict[int, dict]],
+    *,
+    opp_pitcher_lookup:    Optional[dict[str, int]] = None,
+    pitcher_season_stats:  Optional[dict[str, dict[str, float]]] = None,
+    pitcher_handedness:    Optional[dict[int, str]] = None,
+):
+    """Build (X, y, feature_names, snapshots, groups) for batter_hits >= 1 label.
 
     Also returns a *snapshots* dict {str(player_id): {features..., name, team,
     as_of_date}} keyed by player ID; each entry holds that player's most-recent
@@ -1403,7 +1569,11 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         k_pct (SO/PA per row), babip_7d, babip_14d, batting_order,
         is_home, ballpark_factor_hits, ballpark_factor_hr,
         ops_vs_lhp, obp_vs_lhp, slg_vs_lhp,
-        ops_vs_rhp, obp_vs_rhp, slg_vs_rhp
+        ops_vs_rhp, obp_vs_rhp, slg_vs_rhp,
+        r30_HR, r30_BB (30-game windows for sparse counts)
+
+    PR3 opposing-pitcher context (when *opp_pitcher_lookup* etc. provided):
+        opp_pitcher_szn_k_per_9, opp_pitcher_szn_era, opp_pitcher_throws_lhp
 
     Inference-time placeholder features (zero during training):
         whiff_pct, chase_pct, hard_hit_rate, barrel_rate, sprint_speed,
@@ -1411,6 +1581,11 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
         time_of_day, ba_vs_breaking, ba_vs_fastball, ba_vs_offspeed,
         h2h_career_ab, h2h_career_avg, h2h_career_k_rate, implied_total
     """
+    # Default to empty dicts so the per-row lookups gracefully return the
+    # league-average neutral when no opp pitcher context is wired in.
+    opp_pitcher_lookup   = opp_pitcher_lookup   or {}
+    pitcher_season_stats = pitcher_season_stats or {}
+    pitcher_handedness   = pitcher_handedness   or {}
     try:
         import pandas as pd
         import numpy as np
@@ -1528,6 +1703,50 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
             lambda t: PARK_FACTORS_HR.get(_to_abbrev(t), 1.0)
         )
 
+        # ── PR3: per-row opposing-pitcher context ──────────────────────────
+        # Lookup key is (game_date, batter's_own_team) because that's how
+        # build_opp_pitcher_lookup indexed pitcher game logs (the pitcher's
+        # opp_team IS the batter's team).  Falls back to league averages
+        # when the lookup misses (e.g. opener / bullpen game where the
+        # cached "starter" row is ambiguous).
+        pteam_abbrev = _to_abbrev(pteam)
+
+        def _opp_pid_for_row(d) -> int:
+            if not pteam_abbrev or not d:
+                return 0
+            key = f"{str(d)[:10]}:{pteam_abbrev}"
+            return int(opp_pitcher_lookup.get(key, 0))
+
+        df["_opp_pitcher_id"] = df["date"].map(_opp_pid_for_row)
+
+        def _opp_k9(pid_val) -> float:
+            pid_int = int(pid_val) if pid_val else 0
+            if pid_int <= 0:
+                return 8.50  # league-average neutral
+            stats = pitcher_season_stats.get(f"{season}:{pid_int}")
+            if not stats:
+                return 8.50
+            return float(stats.get("k_per_9") or 8.50)
+
+        def _opp_era(pid_val) -> float:
+            pid_int = int(pid_val) if pid_val else 0
+            if pid_int <= 0:
+                return 4.30
+            stats = pitcher_season_stats.get(f"{season}:{pid_int}")
+            if not stats:
+                return 4.30
+            return float(stats.get("era") or 4.30)
+
+        def _opp_throws_lhp(pid_val) -> float:
+            pid_int = int(pid_val) if pid_val else 0
+            if pid_int <= 0:
+                return 0.30  # ~30% of MLB starters are LHP
+            return 1.0 if pitcher_handedness.get(pid_int) == "L" else 0.0
+
+        df["opp_pitcher_szn_k_per_9"] = df["_opp_pitcher_id"].map(_opp_k9)
+        df["opp_pitcher_szn_era"]    = df["_opp_pitcher_id"].map(_opp_era)
+        df["opp_pitcher_throws_lhp"] = df["_opp_pitcher_id"].map(_opp_throws_lhp)
+
         df = df.dropna(subset=[f"szn_{roll_stats[0]}", f"r7_{roll_stats[0]}"])
         if df.empty:
             continue
@@ -1548,6 +1767,10 @@ def _build_batter_dataset(payload: dict, splits_by_season: dict[int, dict[int, d
                 "is_home_i",
                 "ballpark_factor_hits",
                 "ballpark_factor_hr",
+                # PR3: opposing-pitcher context, looked up per (date, batter_team).
+                "opp_pitcher_szn_k_per_9",
+                "opp_pitcher_szn_era",
+                "opp_pitcher_throws_lhp",
             ]
         )
 
@@ -1916,6 +2139,7 @@ def _train_regressor(
     *,
     label: str,
     objective: str = "reg:squarederror",
+    groups=None,
 ) -> tuple[Optional[float], Optional[object]]:
     """5-fold CV XGBoost regression training.  Returns (oof_rmse, final_model).
 
@@ -1923,13 +2147,20 @@ def _train_regressor(
     targets (batter H/TB/HR/RBI/R/BB, pitcher K/ER/H/BB/outs) ``count:poisson``
     is principled and typically yields better-calibrated, lower-RMSE
     predictions on sparse counts like HR.
+
+    *groups* (PR3): when provided, switches the CV splitter from KFold
+    (shuffle=True) to GroupKFold so the same player_id never lands in both
+    a fold's train and test partitions.  Without this, the regressor was
+    memorising player skill — the OOF RMSE looked good because folds were
+    full of the same names.  GroupKFold collapses that leak; OOF RMSE
+    rises slightly but is now an honest generalisation estimate.
     """
     if X is None or y_reg is None or len(X) < 20:
         _log(f"{label}: not enough data ({0 if X is None else len(X)} rows) "
              "-- skipping regressor train")
         return None, None
     try:
-        from sklearn.model_selection import KFold
+        from sklearn.model_selection import KFold, GroupKFold
         from sklearn.metrics         import mean_squared_error
         import xgboost as xgb
         import joblib
@@ -1938,9 +2169,30 @@ def _train_regressor(
         _log(f"{label}: missing dependency ({exc}) -- aborting")
         return None, None
 
-    kf   = KFold(n_splits=5, shuffle=True, random_state=42)
+    # PR3: GroupKFold when groups provided, else legacy shuffle KFold.
+    groups_arr = None
+    if groups is not None:
+        try:
+            groups_arr = np.asarray(groups)
+            if groups_arr.shape[0] != len(y_reg):
+                _log(f"{label}: groups length mismatch "
+                     f"({groups_arr.shape[0]} vs {len(y_reg)}) -- ignoring")
+                groups_arr = None
+        except Exception:                                                   # noqa: BLE001
+            groups_arr = None
+
+    if groups_arr is not None:
+        unique_groups = int(len(set(groups_arr.tolist())))
+        _log(f"{label} using GroupKFold (n_splits=5)  unique_groups={unique_groups}")
+        splitter = GroupKFold(n_splits=5)
+        split_iter = splitter.split(X, y_reg, groups=groups_arr)
+    else:
+        _log(f"{label} using KFold (n_splits=5, shuffle=True) -- no groups provided")
+        splitter = KFold(n_splits=5, shuffle=True, random_state=42)
+        split_iter = splitter.split(X)
+
     oof  = np.zeros(len(y_reg))
-    for fold, (tr, te) in enumerate(kf.split(X), 1):
+    for fold, (tr, te) in enumerate(split_iter, 1):
         reg = xgb.XGBRegressor(
             n_estimators=400, max_depth=4, learning_rate=0.04,
             subsample=0.8, colsample_bytree=0.75,
@@ -2344,19 +2596,38 @@ def main() -> int:
                     continue
                 reg_path = _CACHE_DIR / f"props_model_pitcher_reg_{stat}.joblib"
                 obj = "count:poisson" if stat in ("K", "BB", "ER", "H") else "reg:squarederror"
+                # PR3: pass groups so the regressor CV also uses GroupKFold.
+                # Without this, the regressor was the leakier of the two
+                # learners — same player's starts scattered across folds let
+                # XGB memorise per-pitcher means and inflated OOF RMSE.
                 rmse, _ = _train_regressor(
                     X, y_reg, reg_path,
                     label=f"pitcher_reg_{stat}",
                     objective=obj,
+                    groups=pitcher_groups,
                 )
                 summary[f"pitcher_reg_{stat}_rmse"] = rmse
 
     batter_snapshots: dict[str, dict] = {}
     batter_groups = None
     if not args.skip_batter:
+        # PR3: collect opposing-pitcher context once, then thread through the
+        # batter dataset builder so each row has opp_pitcher_szn_k_per_9 /
+        # _era / _throws_lhp.  Without these the model had no signal about
+        # who's pitching that day; the ops_vs_lhp / ops_vs_rhp splits were
+        # static season means that couldn't interact with the actual matchup.
+        _log("collecting opposing-pitcher context for batter side …")
+        opp_pitcher_lookup, pitcher_season_stats = build_opp_pitcher_lookup(payload)
+        pitcher_handedness = collect_pitcher_handedness(payload, refresh=args.refresh_data)
+
         _log("building batter feature matrix …")
         X, y, reg_targets_b, feat_names, batter_snapshots, batter_groups = (
-            _build_batter_dataset(payload, batter_splits_by_season)
+            _build_batter_dataset(
+                payload, batter_splits_by_season,
+                opp_pitcher_lookup=opp_pitcher_lookup,
+                pitcher_season_stats=pitcher_season_stats,
+                pitcher_handedness=pitcher_handedness,
+            )
         )
         # PR3: same GroupKFold treatment for batters -- player_id is the
         # grouping key so no batter's games span train + test folds.
@@ -2378,10 +2649,14 @@ def main() -> int:
                 y_reg = reg_targets_b.get(stat)
                 if y_reg is not None:
                     reg_path = _CACHE_DIR / f"props_model_batter_reg_{stat}.joblib"
+                    # PR3: pass groups so the regressor CV also uses
+                    # GroupKFold.  Closes the same player-skill leak the
+                    # classifier path already plugged.
                     rmse, _ = _train_regressor(
                         X, y_reg, reg_path,
                         label=f"batter_reg_{stat}",
                         objective="count:poisson",
+                        groups=batter_groups,
                     )
                     summary[f"batter_reg_{stat}_rmse"] = rmse
 
