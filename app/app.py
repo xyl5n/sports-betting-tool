@@ -5628,6 +5628,7 @@ _PICKS_HISTORY_FILES = (
     Path(".cache/xgb_picks_history.json"),
     Path(".cache/lr_picks_history.json"),
     Path("data/nn_picks_history.json"),
+    Path(".cache/props_picks_history.json"),
 )
 _ENSEMBLE_PICKS_FILE = Path("data/ensemble_picks_today.json")
 _DAILY_PICKS_FILE    = Path("data/daily_picks.json")
@@ -7233,15 +7234,11 @@ def track_prop_pick():
         return jsonify({"error": "line must be a number"}), 400
 
     try:
-        from src.props_ledger import get_props_ledger
-        pl = get_props_ledger()
-        pl.reload()   # always read the freshest state before writing
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()   # always read the freshest state before writing
 
         event_id = data.get("event_id")
-        if pl.has_prop_bet(player, market, line, side, event_id):
-            return jsonify({"error": "This pick is already tracked"}), 409
-
-        bet_id = pl.add_prop_bet(
+        pick_id = _ppt.record_prop_pick(
             player          = player,
             market          = market,
             line            = line,
@@ -7253,7 +7250,9 @@ def track_prop_pick():
             event_id        = event_id,
             commence_time   = data.get("commence_time"),
         )
-        return jsonify({"success": True, "id": bet_id})
+        if pick_id is None:
+            return jsonify({"error": "This pick is already tracked"}), 409
+        return jsonify({"success": True, "id": pick_id})
     except Exception as exc:                                                # noqa: BLE001
         import traceback as _tb
         _eprint(f"PROPS-TRACK: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
@@ -7262,17 +7261,15 @@ def track_prop_pick():
 
 @app.route("/api/props/settle_open", methods=["POST"])
 def settle_open_props():
-    """Attempt to auto-settle all open props bets whose games have finished.
-
-    Safe to call repeatedly — bets with no game-log row yet stay open.
-    Returns {"settled": [<bet dicts>]}.
+    """Attempt to auto-settle all pending props picks whose games have
+    finished.  Safe to call repeatedly — picks with no game-log row yet
+    stay pending.  Returns the settle summary from props_picks_tracker.
     """
     try:
-        from src.props_ledger import get_props_ledger
-        pl = get_props_ledger()
-        pl.reload()
-        newly = pl.settle_open_bets()
-        return jsonify({"success": True, "settled": len(newly), "bets": newly})
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        summary = _ppt.settle_pending()
+        return jsonify({"success": True, **summary})
     except Exception as exc:                                                # noqa: BLE001
         import traceback as _tb
         _eprint(f"PROPS-SETTLE: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
@@ -9404,25 +9401,33 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     except Exception as _exc:
         _eprint(f"AUTO-SETTLE: postponed check error: {type(_exc).__name__}: {_exc}")
 
-    # ── Props bets (player props tracked from the Props page) ────────────────
-    props_settled: list = []
+    # ── Props picks (tracked from the Props page → props_picks_history) ──────
+    # New props tracker (src.props_picks_tracker) replaces the old
+    # props_ledger; it settles pending picks against the player's actual
+    # box-score stat and books model P/L into the props bankroll.
+    props_summary = {"settled": 0, "won": 0, "lost": 0, "void": 0,
+                     "pnl": 0.0, "bankroll": 0.0, "still_pending": 0}
     try:
-        from src.props_ledger import get_props_ledger as _get_pl
-        _pl = _get_pl()
-        _pl.reload()
-        props_settled = _pl.settle_open_bets()
-        if props_settled:
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        props_summary = _ppt.settle_pending()
+        if props_summary.get("settled"):
             _eprint(
-                f"AUTO-SETTLE: settled {len(props_settled)} prop bet(s) — "
-                + ", ".join(
-                    f"{b.get('player')} {b.get('side')} {b.get('line')} "
-                    f"→ {(b.get('result') or '?').upper()}"
-                    for b in props_settled[:5]
-                )
-                + (" ..." if len(props_settled) > 5 else "")
+                f"PROPS-SETTLE: settled {props_summary['settled']} prop pick(s) — "
+                f"{props_summary['won']}W / {props_summary['lost']}L / "
+                f"{props_summary['void']}V | "
+                f"P/L ${props_summary['pnl']:+.2f} | "
+                f"bankroll ${props_summary['bankroll']:.2f} | "
+                f"{props_summary['still_pending']} still pending"
+            )
+        else:
+            _eprint(
+                f"PROPS-SETTLE: no props newly settled "
+                f"({props_summary.get('still_pending', 0)} still pending)"
             )
     except Exception as _pe:
-        _eprint(f"AUTO-SETTLE: props settle error: {type(_pe).__name__}: {_pe}")
+        _eprint(f"PROPS-SETTLE: error: {type(_pe).__name__}: {_pe}")
+    props_settled = props_summary.get("settled", 0)
 
     # ── Terminal summary ──────────────────────────────────────────────────────
     wins   = sum(1 for s in settled if s.get("result") == "win")
@@ -9450,12 +9455,11 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         _eprint("AUTO-SETTLE: no newly settled bets")
 
     # ── Total model P/L across everything settled this pass ─────────────────
-    # game-pick P/L is on each settled bet's "model_pnl"; prop P/L is on
-    # each settled prop bet's "model_pnl" too (props_ledger mirrors the
-    # field name).  Summing both gives the day's realized model P/L for
-    # the JOB 1 summary line.
+    # game-pick P/L is on each settled game bet's "model_pnl"; prop P/L
+    # comes from the props_picks_tracker settle summary.  Summing both
+    # gives the day's realized model P/L for the JOB 1 summary line.
     game_pnl  = sum(float(s.get("model_pnl") or 0.0) for s in settled)
-    props_pnl = sum(float(b.get("model_pnl") or 0.0) for b in props_settled)
+    props_pnl = float(props_summary.get("pnl") or 0.0)
     total_pnl = game_pnl + props_pnl
 
     # ── Update state ──────────────────────────────────────────────────────────
@@ -9473,7 +9477,10 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         "wins":          wins,
         "losses":        losses,
         "voided":        len(voided),
-        "props_settled": len(props_settled),
+        "props_settled": int(props_summary.get("settled") or 0),
+        "props_won":     int(props_summary.get("won") or 0),
+        "props_lost":    int(props_summary.get("lost") or 0),
+        "props_bankroll": float(props_summary.get("bankroll") or 0.0),
         "game_pnl":      round(game_pnl, 2),
         "props_pnl":     round(props_pnl, 2),
         "total_pnl":     round(total_pnl, 2),
