@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from nicegui import ui
 
@@ -68,6 +69,37 @@ def _personal_bankroll(backend) -> None:
         _stat("CURRENT", f"${current:,.2f}",           t.TEXT)
         _stat("P / L",   f"{pnl_sign}${abs(pnl):,.2f}", pnl_color)
         _stat("AT RISK", f"${at_risk:,.2f}",           t.WARN)
+
+    # Today's conservative bet budget (FIX 4).
+    budget = _todays_budget(current)
+    ui.label(
+        f"Today's Budget: ${budget['total']:,.2f} total "
+        f"/ ${budget['max_per_bet']:,.2f} max per bet"
+    ).style(
+        f"font-size: 12px; font-weight: 700; color: {t.TEXT_DIM}; "
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 8px 12px; width: 100%;"
+    ).tooltip(
+        "Conservative daily cap: 20% of your bankroll across all bets, "
+        "5% on any single bet. Recalculated each night at 2 AM ET."
+    )
+
+
+def _todays_budget(current_bankroll: float) -> dict:
+    """Today's persisted budget from Supabase, or a live fallback computed
+    off the current personal bankroll when none is stored yet."""
+    from src.ledger import compute_daily_budget
+    try:
+        from src import db
+        row = db.cache_get("daily_budget")
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        if (isinstance(row, dict) and row.get("date") == today
+                and isinstance(row.get("data"), dict)
+                and "total" in row["data"]):
+            return row["data"]
+    except Exception:                                                      # noqa: BLE001
+        pass
+    return compute_daily_budget(current_bankroll)
 
 
 def _stat(label: str, value: str, color: str) -> None:
@@ -432,6 +464,9 @@ def _post_prop(backend, body: dict) -> tuple[bool, dict, int]:
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
 def _tabs(backend) -> None:
+    # Current personal bankroll, read once and threaded into every row so
+    # all Kelly recommendations size off the same number (FIX 3).
+    bankroll = _current_personal_bankroll(backend)
     with ui.tabs().props("dense align=left").style(
         f"border-bottom: 1px solid {t.BORDER}; "
         f"color: {t.TEXT_DIM};"
@@ -445,31 +480,43 @@ def _tabs(backend) -> None:
     ):
         with ui.tab_panel(tab_mlb).style("padding: 0;"):
             with ui.column().classes("w-full").style(f"gap: {t.SPACE_LG};"):
-                _game_open_bets(backend, sport="mlb")
-                _game_history(backend, sport="mlb")
+                _game_open_bets(backend, sport="mlb", bankroll=bankroll)
+                _game_history(backend, sport="mlb", bankroll=bankroll)
 
         with ui.tab_panel(tab_wnba).style("padding: 0;"):
             with ui.column().classes("w-full").style(f"gap: {t.SPACE_LG};"):
-                _game_open_bets(backend, sport="wnba")
-                _game_history(backend, sport="wnba")
+                _game_open_bets(backend, sport="wnba", bankroll=bankroll)
+                _game_history(backend, sport="wnba", bankroll=bankroll)
 
         with ui.tab_panel(tab_props).style("padding: 0;"):
             with ui.column().classes("w-full").style(f"gap: {t.SPACE_LG};"):
                 _props_record()
-                _props_open_bets()
-                _props_history()
+                _props_open_bets(bankroll=bankroll)
+                _props_history(bankroll=bankroll)
+
+
+def _current_personal_bankroll(backend) -> float:
+    try:
+        led = backend.Ledger(path="data/ledger.json", starting_bankroll=1000.0)
+        return float(
+            led.data.get("personal_bankroll")
+            or led.data.get("personal_starting_bankroll")
+            or 0.0
+        )
+    except Exception:                                                      # noqa: BLE001
+        return 0.0
 
 
 # ── Game bets (MLB / WNBA) ───────────────────────────────────────────────────
 
-def _game_open_bets(backend, sport: str) -> None:
+def _game_open_bets(backend, sport: str, bankroll: float = 0.0) -> None:
     bets = _confirmed_game_bets(backend, sport=sport, settled=False)
-    _game_section("OPEN BETS", bets, settled=False)
+    _game_section("OPEN BETS", bets, settled=False, bankroll=bankroll)
 
 
-def _game_history(backend, sport: str) -> None:
+def _game_history(backend, sport: str, bankroll: float = 0.0) -> None:
     bets = _confirmed_game_bets(backend, sport=sport, settled=True)
-    _game_section("RECENT HISTORY", bets[:50], settled=True)
+    _game_section("RECENT HISTORY", bets[:50], settled=True, bankroll=bankroll)
 
 
 def _confirmed_game_bets(backend, sport: str, settled: bool) -> list[dict]:
@@ -485,7 +532,8 @@ def _confirmed_game_bets(backend, sport: str, settled: bool) -> list[dict]:
     return bets
 
 
-def _game_section(title: str, bets: list[dict], settled: bool) -> None:
+def _game_section(title: str, bets: list[dict], settled: bool,
+                  bankroll: float = 0.0) -> None:
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
             ui.label(title).style(
@@ -505,7 +553,7 @@ def _game_section(title: str, bets: list[dict], settled: bool) -> None:
             )
             return
         for b in bets:
-            _game_bet_row(b, settled)
+            _game_bet_row(b, settled, bankroll)
 
 
 def _bet_type_label(bet_type: str) -> str:
@@ -559,7 +607,7 @@ def _placed_date(b: dict) -> str:
         return ""
 
 
-def _game_bet_row(b: dict, settled: bool) -> None:
+def _game_bet_row(b: dict, settled: bool, bankroll: float = 0.0) -> None:
     result       = (b.get("result") or "").lower()
     result_color = {
         "win": t.POS, "loss": t.NEG, "push": t.WARN, "void": t.TEXT_DIM2,
@@ -567,7 +615,7 @@ def _game_bet_row(b: dict, settled: bool) -> None:
 
     sport    = (b.get("sport") or "mlb").upper()
     team     = b.get("bet_team") or b.get("parlay_name") or "—"
-    type_lbl = _bet_type_label(b.get("bet_type") or "single")
+    bet_type = (b.get("bet_type") or "single").lower()
     line_s   = _bet_line_str(b)
     odds_s   = _odds_str(b.get("american_odds"))
     conf     = _confidence_pct(b)
@@ -575,35 +623,42 @@ def _game_bet_row(b: dict, settled: bool) -> None:
     amount   = float(b.get("confirmed_amount") or 0)
     pnl      = float(b.get("confirmed_pnl")    or 0) if settled else 0.0
 
-    if settled and result == "win":
-        team_color, amount_text, amount_color = t.POS, f"+${pnl:.2f}", t.POS
-    elif settled and result == "loss":
-        team_color, amount_text, amount_color = t.NEG, f"-${amount:.2f}", t.NEG
-    elif settled and result == "push":
-        team_color, amount_text, amount_color = t.TEXT, "$0.00", t.TEXT_DIM
+    # Primary line: the actual pick (FIX 2).  Totals already bake the
+    # side+line into `team` ("Over 8.5"); ML gets an explicit "ML" tag;
+    # run line / spread append the signed handicap ("Kansas City +1.5").
+    if bet_type == "single":
+        pick_str = f"{team} ML"
+    elif bet_type in ("run_line", "spread") and line_s:
+        pick_str = f"{team} {line_s}"
     else:
-        team_color, amount_text, amount_color = t.TEXT, f"${amount:.2f}", t.TEXT
+        pick_str = team
+
+    # Secondary line: matchup + model confidence (FIX 2).
+    matchup = _matchup_str(b)
+    sub_parts: list[str] = []
+    if matchup:
+        sub_parts.append(matchup)
+    if conf is not None:
+        sub_parts.append(f"{conf}% confidence")
+    if odds_s != "—":
+        sub_parts.append(odds_s)
+    if date_s:
+        sub_parts.append(date_s)
+    sub_line = "  ·  ".join(sub_parts)
+
+    if settled and result == "win":
+        pick_color, amount_text, amount_color = t.POS, f"+${pnl:.2f}", t.POS
+    elif settled and result == "loss":
+        pick_color, amount_text, amount_color = t.NEG, f"-${amount:.2f}", t.NEG
+    elif settled and result == "push":
+        pick_color, amount_text, amount_color = t.TEXT, "$0.00", t.TEXT_DIM
+    else:
+        pick_color, amount_text, amount_color = t.TEXT, f"${amount:.2f}", t.TEXT
 
     border = (
         f"1px solid {result_color}" if settled and result in ("win", "loss", "push")
         else f"1px solid {t.BORDER}"
     )
-
-    # Build the full detail line, e.g.
-    #   "Run Line +1.5 (-110) — 67% confidence — May 23"
-    detail_parts: list[str] = [type_lbl]
-    if line_s:
-        detail_parts.append(line_s)
-    detail = " ".join(detail_parts)
-    if odds_s != "—":
-        detail += f" ({odds_s})"
-    tail: list[str] = []
-    if conf is not None:
-        tail.append(f"{conf}% confidence")
-    if date_s:
-        tail.append(date_s)
-    if tail:
-        detail += "  —  " + "  —  ".join(tail)
 
     with ui.row().classes("items-center w-full").style(
         f"background: {t.CARD}; border: {border}; "
@@ -615,14 +670,16 @@ def _game_bet_row(b: dict, settled: bool) -> None:
             f"padding: 2px 7px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
         )
         with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
-            ui.label(team).style(
-                f"font-size: 13px; font-weight: 700; color: {team_color}; "
+            ui.label(pick_str).style(
+                f"font-size: 16px; font-weight: 800; color: {pick_color}; "
                 f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
-            ui.label(detail).style(
-                f"font-size: 11px; color: {t.TEXT_DIM}; "
-                f"font-family: monospace; white-space: normal;"
-            )
+            if sub_line:
+                ui.label(sub_line).style(
+                    f"font-size: 11px; color: {t.TEXT_DIM}; "
+                    f"font-family: monospace; white-space: normal;"
+                )
+            _kelly_rec_label(b.get("model_prob"), b.get("american_odds"), bankroll)
         with ui.column().style("gap: 2px; text-align: right; align-items: flex-end; flex-shrink: 0;"):
             ui.label(amount_text).style(
                 f"font-size: 13px; font-weight: 700; "
@@ -638,6 +695,34 @@ def _game_bet_row(b: dict, settled: bool) -> None:
                     f"font-size: 10.5px; font-weight: 800; letter-spacing: .5px; "
                     f"color: {t.TEXT_DIM2};"
                 )
+
+
+def _matchup_str(b: dict) -> str:
+    away = b.get("away_team") or ""
+    home = b.get("home_team") or ""
+    if away and home:
+        return f"{away} @ {home}"
+    return b.get("game") or ""
+
+
+def _kelly_rec_label(prob, american_odds, bankroll: float) -> None:
+    """Small 'Rec ½K $X' line under a tracked bet (FIX 3).  Shows the
+    half-Kelly stake off the current bankroll, '$1 min' when a real edge
+    rounds to zero, or 'Edge too small to bet' when there's no edge."""
+    from src.kelly import tracked_bet_kelly
+    dollars, flag = tracked_bet_kelly(prob, american_odds, bankroll)
+    if flag == "invalid":
+        return
+    if flag == "no_edge":
+        ui.label("Rec ½-Kelly: Edge too small to bet").style(
+            f"font-size: 10.5px; font-weight: 700; color: {t.TEXT_DIM2}; "
+            f"font-family: monospace;"
+        )
+        return
+    ui.label(f"Rec ½-Kelly: ${dollars:,.0f}").style(
+        f"font-size: 10.5px; font-weight: 800; color: {t.PRIMARY_HI}; "
+        f"font-family: monospace;"
+    )
 
 
 # ── Props bets ───────────────────────────────────────────────────────────────
@@ -703,7 +788,7 @@ def _props_record() -> None:
             )
 
 
-def _props_open_bets() -> None:
+def _props_open_bets(bankroll: float = 0.0) -> None:
     open_bets, _ = _load_props_bets()
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
@@ -726,10 +811,10 @@ def _props_open_bets() -> None:
             )
             return
         for b in open_bets:
-            _prop_bet_row(b, settled=False)
+            _prop_bet_row(b, settled=False, bankroll=bankroll)
 
 
-def _props_history() -> None:
+def _props_history(bankroll: float = 0.0) -> None:
     _, history = _load_props_bets()
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
@@ -749,10 +834,10 @@ def _props_history() -> None:
             )
             return
         for b in history[:50]:
-            _prop_bet_row(b, settled=True)
+            _prop_bet_row(b, settled=True, bankroll=bankroll)
 
 
-def _prop_bet_row(b: dict, settled: bool) -> None:
+def _prop_bet_row(b: dict, settled: bool, bankroll: float = 0.0) -> None:
     """Single row card for a prop pick (open or settled)."""
     result       = (b.get("result") or "").lower()
     # New tracker uses won/lost/void/pending; map both the new and the
@@ -838,6 +923,13 @@ def _prop_bet_row(b: dict, settled: bool) -> None:
                     else (t.NEG if result in ("lost", "loss") else t.WARN)
                 )
                 _mini_stat("ACTUAL", actual_s, _actual_color)
+            # Half-Kelly recommended stake off the current bankroll (FIX 3).
+            from src.kelly import tracked_bet_kelly
+            _k_dollars, _k_flag = tracked_bet_kelly(conf, odds, bankroll)
+            if _k_flag == "no_edge":
+                _mini_stat("REC ½K", "too small", t.TEXT_DIM2)
+            elif _k_flag is None:
+                _mini_stat("REC ½K", f"${_k_dollars:,.0f}", t.PRIMARY_HI)
             ui.element("div").style("flex: 1;")
             _mini_stat("ODDS", odds_s)
 

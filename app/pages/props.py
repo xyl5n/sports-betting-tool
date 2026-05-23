@@ -358,10 +358,12 @@ def _prop_card(r: dict, backend) -> None:
         f"padding: {t.SPACE_MD}; gap: {t.SPACE_SM}; "
         f"min-width: 0;"
     ):
-        # Header row: market chip on the left, matchup on the right.
+        # Header row: player headshot + market chip on the left, matchup
+        # on the right.
         with ui.row().classes("items-center w-full").style(
             f"gap: 8px;"
         ):
+            _card_avatar(r)
             ui.label(_short_market(r["market"]).upper()).style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                 f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
@@ -455,149 +457,52 @@ def _prop_card(r: dict, backend) -> None:
             ui.element("div").style("flex: 1;")
             _track_btn(r, backend)
 
-        # ── "See similar" expandable panel ───────────────────────────────
-        _card_similar_panel(r)
+
+def _headshot_url(player_id) -> str:
+    """MLB Stats API headshot URL.  The d_people:generic default transform
+    makes it fall back to a generic silhouette for unknown/invalid ids."""
+    return (
+        f"https://img.mlbstatic.com/mlb-photos/image/upload/"
+        f"d_people:generic:headshot:67:current.png/w_213,q_auto:best/"
+        f"v1/people/{player_id}/headshot/67/current"
+    )
 
 
-def _card_similar_panel(r: dict) -> None:
-    """Compact 'See similar' toggle that reveals the top 2-3 players in
-    the same similarity cluster for this market, with their L10 hit
-    rate.  Lazy: the cluster lookup + per-player hit-rate enrichment
-    only runs when the user expands the panel."""
-    market = r.get("market") or ""
-    player = r.get("player") or ""
-    try:
-        line = float(r.get("line"))
-    except (TypeError, ValueError):
-        line = None
-    side = (r.get("side") or "Over").strip().title()
-
-    state = {"open": False, "loaded": False, "rows": None}
-
-    @ui.refreshable
-    def panel() -> None:                                                  # noqa: WPS430
-        arrow = "▲" if state["open"] else "▼"
-        ui.button(
-            f"See similar  {arrow}", on_click=_toggle,
-        ).props("flat dense no-caps").style(
-            f"color: {t.PRIMARY_HI}; font-size: 10.5px; font-weight: 700; "
-            f"min-height: 0; padding: 2px 4px; align-self: flex-start;"
-        )
-        if not state["open"]:
-            return
-        if not state["loaded"]:
-            ui.label("Loading…").style(
-                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                f"font-style: italic; padding: 4px;"
-            )
-            return
-        rows = state["rows"] or []
-        if not rows:
-            ui.label("Not enough data to compare for this market yet.").style(
-                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                f"font-style: italic; padding: 4px;"
-            )
-            return
-        with ui.column().classes("w-full").style(
-            f"gap: 4px; padding: 4px 0;"
-        ):
-            for s in rows:
-                _similar_inline_row(s)
-
-    async def _toggle() -> None:                                         # noqa: WPS430
-        state["open"] = not state["open"]
-        panel.refresh()
-        if state["open"] and not state["loaded"]:
-            try:
-                state["rows"] = await asyncio.to_thread(
-                    _similar_inline_data, market, player, line, side,
-                )
-            except Exception as exc:                                      # noqa: BLE001
-                _dbg(f"see-similar load failed: {exc}")
-                state["rows"] = []
-            state["loaded"] = True
-            panel.refresh()
-
-    panel()
+def _avatar_img_html(player_id, name: str) -> str:
+    url = _headshot_url(player_id)
+    return (
+        f'<img src="{url}" alt="{name}" '
+        f'style="width:34px; height:34px; border-radius:50%; '
+        f'object-fit:cover; background:{t.CARD_HI}; '
+        f'border:1px solid {t.BORDER}; flex-shrink:0;" '
+        f'onerror="this.style.opacity=\'.35\';"/>'
+    )
 
 
-def _similar_inline_data(market: str, player: str, line, side: str) -> list[dict]:
-    """Background-thread: top-3 similar players for this market with
-    season avg + L10 hit rate vs the line.  Cached gamelog reads."""
-    try:
-        from src.player_similarity import get_similar_players
-        from src.player_profile_client import (
-            get_player_gamelog, get_player_prop_summary, _CURRENT_SEASON,
-        )
-    except Exception:                                                     # noqa: BLE001
-        return []
-    is_pitcher = market.startswith("pitcher_")
-    sims = get_similar_players(market, player, limit=3)
-    out: list[dict] = []
-    for s in sims:
-        pid = s.get("id")
-        games: list[dict] = []
-        if pid:
-            try:
-                games = get_player_gamelog(int(pid), _CURRENT_SEASON, is_pitcher=is_pitcher) or []
-                if is_pitcher:
-                    games = [g for g in games if g.get("games_started", 0) > 0]
-            except Exception:                                             # noqa: BLE001
-                games = []
-        summ: dict = {}
+def _card_avatar(r: dict) -> None:
+    """Small circular player headshot on the left of a prop card (FIX 6),
+    matching the player-profile header style.  Uses the player_id stamped
+    on the pick when present; otherwise shows the generic silhouette and
+    resolves the real id lazily on a background thread (cached) so the
+    page never blocks on a name->id lookup."""
+    name = r.get("player") or ""
+    pid  = r.get("player_id")
+    if pid:
+        ui.html(_avatar_img_html(pid, name)).style("flex-shrink: 0;")
+        return
+    holder = ui.html(_avatar_img_html("generic", name)).style("flex-shrink: 0;")
+
+    async def _resolve() -> None:                                         # noqa: WPS430
         try:
-            summ = get_player_prop_summary(
-                s.get("name") or "", market, line, side,
-                is_pitcher=is_pitcher, games=games,
-            ) or {}
+            from src.player_profile_client import search_player_by_name
+            rid = await asyncio.to_thread(search_player_by_name, name)
         except Exception:                                                 # noqa: BLE001
-            summ = {}
-        out.append({
-            "name":      s.get("name") or "—",
-            "team":      s.get("team") or "",
-            "score":     s.get("score"),
-            "l10_hits":  summ.get("last_10_hits") or 0,
-            "l10_games": summ.get("last_10_games") or 0,
-        })
-    return out
+            rid = None
+        if rid:
+            holder.set_content(_avatar_img_html(rid, name))
 
-
-def _similar_inline_row(s: dict) -> None:
-    """One compact row inside the 'See similar' panel."""
-    name = _strip(s.get("name") or "—")
-    team = _strip(s.get("team") or "")
-    slug = (s.get("name") or "").lower().replace(" ", "-")
-    try:
-        score_pct = f"{float(s.get('score')) * 100:.0f}%"
-    except (TypeError, ValueError):
-        score_pct = "—"
-    hits  = int(s.get("l10_hits") or 0)
-    games = int(s.get("l10_games") or 0)
-    if games:
-        rate = hits / games
-        hit_str   = f"{int(round(rate * 100))}% L10"
-        hit_color = t.POS if rate >= 0.5 else t.NEG
-    else:
-        hit_str, hit_color = "— L10", t.TEXT_DIM2
-
-    with ui.row().classes("items-center w-full").style("gap: 8px; flex-wrap: nowrap;"):
-        ui.link(name, f"/player/mlb/{slug}").style(
-            f"font-size: 11.5px; font-weight: 700; color: {t.TEXT}; "
-            f"text-decoration: none; white-space: nowrap; overflow: hidden; "
-            f"text-overflow: ellipsis; flex: 1; min-width: 0;"
-        )
-        if team:
-            ui.label(team).style(
-                f"font-size: 9.5px; color: {t.TEXT_DIM2}; font-family: monospace;"
-            )
-        ui.label(hit_str).style(
-            f"font-size: 11px; font-weight: 800; color: {hit_color}; "
-            f"font-family: monospace;"
-        )
-        ui.label(f"sim {score_pct}").style(
-            f"font-size: 9.5px; font-weight: 700; color: {t.PRIMARY_HI}; "
-            f"font-family: monospace;"
-        )
+    if name:
+        ui.timer(0.05, _resolve, once=True)
 
 
 def _strip(text: str) -> str:

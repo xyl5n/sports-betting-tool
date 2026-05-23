@@ -70,6 +70,27 @@ def _settle_model_trackers(game_id: str, home_score: int, away_score: int) -> No
 
 DAILY_EXPOSURE_PCT = 0.50   # 50 % of starting bankroll per day (hard ceiling)
 
+# Conservative daily betting budget for the personal bankroll (FIX 4):
+# total staked across all of today's picks should stay under 20 % of the
+# bankroll, and no single bet should exceed 5 %.  Computed nightly at the
+# 2 AM ET reset and displayed at the top of the My Bets page.
+DAILY_BUDGET_TOTAL_PCT   = 0.20
+DAILY_BUDGET_MAX_BET_PCT = 0.05
+
+
+def compute_daily_budget(personal_bankroll: float) -> dict:
+    """Return the conservative daily budget for *personal_bankroll*:
+    ``{"bankroll", "total", "max_per_bet"}`` (all rounded dollars)."""
+    try:
+        bk = max(0.0, float(personal_bankroll or 0.0))
+    except (TypeError, ValueError):
+        bk = 0.0
+    return {
+        "bankroll":    round(bk, 2),
+        "total":       round(bk * DAILY_BUDGET_TOTAL_PCT, 2),
+        "max_per_bet": round(bk * DAILY_BUDGET_MAX_BET_PCT, 2),
+    }
+
 # ── Permanent archive (never cleared by reset) ────────────────────────────────
 _ARCHIVE_PATH = Path("data/bet_history_archive.json")
 

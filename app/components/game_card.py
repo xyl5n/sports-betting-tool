@@ -71,6 +71,18 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
     )
     state = live_score.state_of(live)            # 'live' | 'final' | 'scheduled'
 
+    # Fallback (FIX 1): when the live cache misses (its only keys are gamePk
+    # and an exact team-name pair, which the Odds-API names often don't
+    # match), use the live state + score stamped on the row from the MLB
+    # schedule itself so an in-progress game never shows its tip time.
+    if state == "scheduled":
+        sched_state = live_score.state_from_schedule(g.get("_sched"))
+        if sched_state in ("live", "final"):
+            synth = live_score.synth_from_schedule(g.get("_sched"))
+            if synth is not None:
+                live = live or synth
+                state = sched_state
+
     with ui.column().style(
         f"background: {t.CARD}; "
         f"border: 1px solid {t.BORDER}; "
