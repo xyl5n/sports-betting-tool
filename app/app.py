@@ -9115,6 +9115,17 @@ def _run_job3_games_prefetch() -> None:
         _eprint(f"NIGHTLY JOB 3 (games prefetch): FAILED: "
                 f"{type(_exc).__name__}: {_exc}\n{traceback.format_exc()}")
 
+    # Recompute prop-market player-similarity clusters from the rolling
+    # snapshots (refreshed by the nightly training run earlier).  Cheap
+    # numpy distance work over the cached snapshots -- no API calls.
+    try:
+        from src.player_similarity import recompute_clusters
+        res = recompute_clusters()
+        _eprint(f"NIGHTLY JOB 3 (similarity): recompute -> {res.get('summary') or res}")
+    except Exception as _se:                                              # noqa: BLE001
+        _eprint(f"NIGHTLY JOB 3 (similarity): FAILED: "
+                f"{type(_se).__name__}: {_se}")
+
 
 def get_todays_schedule(sport: str) -> list[dict]:
     """Public accessor for the home/sports pages: today's prefetched

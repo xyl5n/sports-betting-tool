@@ -304,6 +304,7 @@ def _render_market_view(
             info, prop, market, line_f, summary, opp_abbrev, is_pitcher,
         )
         _section_recent_trends(games, is_pitcher, market, line_f, summary)
+        _section_similar_players(info, prop, market, line_f, is_pitcher)
 
 
 # ── Section: player header (per-market) ─────────────────────────────────────
@@ -1311,6 +1312,201 @@ def _mini_bar_chart_options(
             } if mark_line else None),
         }],
     }
+
+
+# ── Section: similar players (prop-market specific) ─────────────────────────
+
+def _section_similar_players(
+    info: dict,
+    prop: dict,
+    market: str,
+    line_f: Optional[float],
+    is_pitcher: bool,
+) -> None:
+    """Show 3-5 players in the same similarity cluster for THIS market.
+
+    Labelled "Similar by <market>" so it's clear the comparison is
+    prop-specific.  The cluster lookup is a cheap cache read; the
+    per-similar-player stat enrichment (gamelog -> season avg + L10
+    hit rate + last-5 mini chart) is lazy-loaded on a background
+    thread so it never blocks the initial page render.
+    """
+    from pages.props import _short_market
+    player_name  = info.get("name") or ""
+    side         = (prop.get("side") or "Over").strip().title()
+    market_label = _short_market(market)
+
+    try:
+        from src.player_similarity import get_similar_players
+        sims = get_similar_players(market, player_name, limit=5)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"similar lookup failed: {exc}")
+        sims = []
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        ui.label(f"SIMILAR BY {market_label.upper()}").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.TEXT_DIM2};"
+        )
+        if not sims:
+            ui.label("Not enough data to compare players for this market yet.").style(
+                f"font-size: 11.5px; color: {t.TEXT_DIM2}; font-style: italic; "
+                f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                f"border-radius: {t.RADIUS_MD}; padding: 14px; "
+                f"text-align: center; width: 100%;"
+            )
+            return
+
+        body = ui.column().classes("w-full").style("gap: 8px;")
+        with body:
+            ui.label("Loading similar players…").style(
+                f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
+                f"font-style: italic; padding: 8px 4px;"
+            )
+
+        async def _load() -> None:                                        # noqa: WPS430
+            try:
+                enriched = await asyncio.to_thread(
+                    _enrich_similar, sims, market, prop.get("line"), side, is_pitcher,
+                )
+            except Exception as exc:                                      # noqa: BLE001
+                _log(f"similar enrich failed: {exc}")
+                enriched = []
+            body.clear()
+            with body:
+                if not enriched:
+                    ui.label("Similar player data unavailable right now.").style(
+                        f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
+                        f"font-style: italic; padding: 8px 4px;"
+                    )
+                    return
+                for s in enriched:
+                    _similar_player_row(s, line_f)
+
+        ui.timer(0.05, _load, once=True)
+
+
+def _enrich_similar(
+    sims: list[dict], market: str, line, side: str, is_pitcher: bool,
+) -> list[dict]:
+    """Background-thread enrichment: attach season avg + L10 hit rate +
+    last-5 games for each similar player.  Cached gamelog reads only."""
+    from src.player_profile_client import (
+        get_player_gamelog, get_player_prop_summary, _CURRENT_SEASON,
+    )
+    stat_key = _MARKET_TO_STAT.get(market) or ("K" if is_pitcher else "H")
+    out: list[dict] = []
+    for s in sims:
+        pid = s.get("id")
+        games: list[dict] = []
+        if pid:
+            try:
+                games = get_player_gamelog(int(pid), _CURRENT_SEASON, is_pitcher=is_pitcher) or []
+                if is_pitcher:
+                    games = [g for g in games if g.get("games_started", 0) > 0]
+            except Exception:                                             # noqa: BLE001
+                games = []
+        summ: dict = {}
+        try:
+            summ = get_player_prop_summary(
+                s.get("name") or "", market, line, side,
+                is_pitcher=is_pitcher, games=games,
+            ) or {}
+        except Exception:                                                 # noqa: BLE001
+            summ = {}
+        out.append({
+            "name":       s.get("name") or "—",
+            "team":       s.get("team") or "",
+            "score":      s.get("score"),
+            "season_avg": summ.get("season_avg"),
+            "l10_hits":   summ.get("last_10_hits") or 0,
+            "l10_games":  summ.get("last_10_games") or 0,
+            "last5":      games[-5:],
+            "stat_key":   stat_key,
+        })
+    return out
+
+
+def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
+    """One similar-player card: name + team + similarity score, season
+    avg, L10 hit rate vs the line, and a last-5 mini bar chart."""
+    from src.utils import strip_formatting
+    name = strip_formatting(s.get("name") or "—")
+    team = strip_formatting(s.get("team") or "")
+    slug = (s.get("name") or "").lower().replace(" ", "-")
+    stat_key = s.get("stat_key") or "H"
+
+    score = s.get("score")
+    try:
+        score_pct = f"{float(score) * 100:.0f}%"
+    except (TypeError, ValueError):
+        score_pct = "—"
+
+    season_avg = s.get("season_avg")
+    avg_str = f"{season_avg:.2f}" if isinstance(season_avg, (int, float)) else "—"
+
+    l10_hits  = int(s.get("l10_hits") or 0)
+    l10_games = int(s.get("l10_games") or 0)
+    if l10_games:
+        rate = l10_hits / l10_games
+        l10_str   = f"{l10_hits}/{l10_games} ({int(round(rate * 100))}%)"
+        l10_color = t.POS if rate >= 0.5 else t.NEG
+    else:
+        l10_str, l10_color = "—", t.TEXT_DIM2
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 8px; "
+        f"min-width: 0;"
+    ):
+        # Header: name (link) + team + similarity chip
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.link(name, f"/player/mlb/{slug}").style(
+                f"font-size: 13.5px; font-weight: 800; color: {t.TEXT}; "
+                f"text-decoration: none; white-space: nowrap; overflow: hidden; "
+                f"text-overflow: ellipsis; flex: 1; min-width: 0;"
+            )
+            if team:
+                ui.label(team).style(
+                    f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                    f"font-family: monospace;"
+                )
+            ui.label(f"sim {score_pct}").style(
+                f"background: {t.CARD_HI}; color: {t.PRIMARY_HI}; "
+                f"font-size: 9.5px; font-weight: 800; letter-spacing: .3px; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL}; "
+                f"font-family: monospace;"
+            )
+
+        # Stats + mini chart
+        with ui.row().classes("items-center w-full").style(
+            "gap: 12px; flex-wrap: nowrap;"
+        ):
+            with ui.column().style("gap: 2px; flex-shrink: 0;"):
+                ui.label("AVG").style(
+                    f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                ui.label(f"{avg_str} {stat_key}").style(
+                    f"font-size: 12px; font-weight: 800; color: {t.TEXT}; "
+                    f"font-family: monospace;"
+                )
+            with ui.column().style("gap: 2px; flex-shrink: 0;"):
+                ui.label("L10 HIT").style(
+                    f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
+                    f"color: {t.TEXT_DIM2};"
+                )
+                ui.label(l10_str).style(
+                    f"font-size: 12px; font-weight: 800; color: {l10_color}; "
+                    f"font-family: monospace;"
+                )
+            last5 = s.get("last5") or []
+            if last5:
+                ui.echart(_mini_bar_chart_options(
+                    last5, stat_key, line_f,
+                )).style("flex: 1; min-width: 0; height: 56px;")
+            else:
+                ui.element("div").style("flex: 1;")
 
 
 # ── Donut gauge ────────────────────────────────────────────────────────────
