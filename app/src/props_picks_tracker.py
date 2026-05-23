@@ -419,6 +419,7 @@ def update_pick(
     *,
     odds=None,
     line=None,
+    amount=None,      # noqa: ARG001 (props are flat-stake; accepted + ignored)
     actual_payout=None,
     notes=None,
 ) -> Optional[dict]:

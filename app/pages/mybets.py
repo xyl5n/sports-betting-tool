@@ -520,11 +520,14 @@ def _bet_line_value(b: dict):
 def _edit_panel(backend, *, kind: str, bet: dict, sport: str, settled: bool,
                 on_saved, on_cancel) -> None:
     """Inline edit form rendered on a card.  Fields: odds, line (when the
-    bet has one), actual payout (settled only), notes."""
+    bet has one), bet amount/stake (game bets), actual payout (settled only)."""
     is_prop = kind == "prop"
     cur_odds = bet.get("odds") if is_prop else bet.get("american_odds")
     cur_line = bet.get("line") if is_prop else _bet_line_value(bet)
     has_line = is_prop or (bet.get("bet_type") or "single").lower() != "single"
+    # Stake editing applies to OPEN game bets (props are a flat-stake
+    # tracker; settled bets use the actual-payout field instead).
+    has_amount = (not is_prop) and (not settled)
 
     with ui.column().classes("w-full").style(
         f"gap: 8px; margin-top: 8px; padding-top: 8px; "
@@ -537,14 +540,18 @@ def _edit_panel(backend, *, kind: str, bet: dict, sport: str, settled: bool,
             if has_line:
                 line_in = ui.number(label="Line", value=cur_line, format="%.1f") \
                     .props(_INPUT_PROPS).style(_input_style() + "flex: 1;")
+            amount_in = None
+            if has_amount:
+                amount_in = ui.number(
+                    label="Bet amount ($)",
+                    value=bet.get("confirmed_amount"), format="%.2f",
+                ).props(_INPUT_PROPS).style(_input_style() + "flex: 1;")
             payout_in = None
             if settled:
                 payout_in = ui.number(
                     label="Actual payout ($)",
                     value=bet.get("actual_payout"), format="%.2f",
                 ).props(_INPUT_PROPS).style(_input_style() + "flex: 1;")
-        notes_in = ui.input(label="Notes", value=bet.get("notes") or "") \
-            .props(_INPUT_PROPS).style(_input_style() + "width: 100%;")
 
         async def _save() -> None:
             body = {
@@ -552,10 +559,11 @@ def _edit_panel(backend, *, kind: str, bet: dict, sport: str, settled: bool,
                 "id":    bet.get("id"),
                 "sport": sport,
                 "odds":  odds_in.value,
-                "notes": notes_in.value or "",
             }
             if line_in is not None and line_in.value is not None:
                 body["line"] = line_in.value
+            if amount_in is not None and amount_in.value is not None:
+                body["amount"] = amount_in.value
             if payout_in is not None and payout_in.value is not None:
                 body["actual_payout"] = payout_in.value
             ok, data, _ = await asyncio.to_thread(
@@ -797,8 +805,6 @@ def _game_bet_row(backend, b: dict, settled: bool, bankroll: float = 0.0) -> Non
             sub_parts.append(odds_s)
         if date_s:
             sub_parts.append(date_s)
-        if bet.get("notes"):
-            sub_parts.append(f"📝 {bet['notes']}")
         sub_line = "  ·  ".join(sub_parts)
 
         if settled and result == "win":
@@ -1096,10 +1102,6 @@ def _prop_bet_row(backend, b: dict, settled: bool, bankroll: float = 0.0) -> Non
                     _mini_stat("REC ½K", f"${_k_dollars:,.0f}", t.PRIMARY_HI)
                 ui.element("div").style("flex: 1;")
                 _mini_stat("ODDS", odds_s)
-
-            if bet.get("notes"):
-                ui.label(f"📝 {bet['notes']}").style(
-                    f"font-size: 10.5px; color: {t.TEXT_DIM}; font-family: monospace;")
 
             if st["editing"]:
                 _edit_panel(
