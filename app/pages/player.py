@@ -61,7 +61,7 @@ from typing import Optional
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav, controls
+from components import navbar, bottom_nav, controls, live_score
 
 
 def _log(msg: str) -> None:
@@ -129,7 +129,7 @@ def register(backend) -> None:
             ui.add_head_html(t.page_head_css())
             ui.add_head_html(_local_css())
             navbar.render(active=t.TAB_PROPS)
-            _layout(player_id_slug)
+            _layout(backend, player_id_slug)
             bottom_nav.render(active=t.TAB_PROPS)
         except Exception as exc:                                          # noqa: BLE001
             import traceback as _tb
@@ -178,7 +178,7 @@ def _local_css() -> str:
 
 # ── Layout driver ────────────────────────────────────────────────────────────
 
-def _layout(player_id_slug: str) -> None:
+def _layout(backend, player_id_slug: str) -> None:
     with ui.column().classes("page-content w-full").style(
         f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; "
         f"gap: {t.SPACE_MD}; padding: {t.SPACE_LG}; min-width: 0;"
@@ -222,7 +222,19 @@ def _layout(player_id_slug: str) -> None:
         else:
             games = list(raw_games)
 
-        today_props_all = get_today_props_for_player(info["name"]) or []
+        # Only show props for games that have NOT started yet (FIX 1).
+        today_props_raw = get_today_props_for_player(info["name"]) or []
+        today_props_all = [
+            p for p in today_props_raw
+            if not live_score.game_has_started(
+                backend,
+                commence_time=p.get("commence_time"),
+                home_team=p.get("home_team"),
+                away_team=p.get("away_team"),
+                sport="mlb",
+            )
+        ]
+        started_filtered = bool(today_props_raw) and not today_props_all
         today_prop      = today_props_all[0] if today_props_all else get_today_prop(info["name"])
 
         opp_abbrev: Optional[str] = None
@@ -237,7 +249,18 @@ def _layout(player_id_slug: str) -> None:
         # No-props fallback: render the basic header + game log only.
         if not today_props_all:
             _section_player_header(info, today_prop, opp_abbrev, prop=None, grade=None)
-            _empty_state_message(info, raw_games, is_pitcher)
+            if started_filtered:
+                ui.label(
+                    "No upcoming props — this player's game has already started. "
+                    "Check back tomorrow."
+                ).style(
+                    f"font-size: 13px; font-weight: 700; color: {t.TEXT_DIM}; "
+                    f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+                    f"text-align: center; width: 100%;"
+                )
+            else:
+                _empty_state_message(info, raw_games, is_pitcher)
             _section_game_log(games, is_pitcher, [])
             return
 

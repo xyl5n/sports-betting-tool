@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar, bottom_nav, track_button
+from components import navbar, sidebar, bottom_nav, track_button, live_score
 
 
 def register(backend) -> None:
@@ -183,8 +183,8 @@ def _recommendations_section(backend) -> None:
                     )
             if total == 0:
                 ui.label(
-                    "No untracked model picks for today. Run analysis from "
-                    "the home page, or you've already tracked everything."
+                    "No upcoming recommendations for today. Picks appear here "
+                    "for games that haven't started yet."
                 ).style(
                     f"color: {t.TEXT_DIM}; font-size: 12px; "
                     f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
@@ -232,6 +232,15 @@ def _build_recommendations(backend) -> list[dict]:
                 continue
             gid = g.get("id") or g.get("game_id")
             if not gid:
+                continue
+            # Only recommend games that haven't started yet (FIX 2).
+            if live_score.game_has_started(
+                backend,
+                commence_time=g.get("commence_time"),
+                home_team=g.get("home_team"),
+                away_team=g.get("away_team"),
+                sport=sport,
+            ):
                 continue
             tracked = track_button.tracked_bet_types(backend, gid, sport)
             matchup = f"{g.get('away_team', '')} @ {g.get('home_team', '')}".strip(" @")
@@ -340,6 +349,15 @@ def _build_prop_recommendations(backend) -> list[dict]:
     out: list[dict] = []
     for r in picks:
         if _key(r) in open_keys:
+            continue
+        # Only recommend props for games that haven't started yet (FIX 2).
+        if live_score.game_has_started(
+            backend,
+            commence_time=r.get("commence_time"),
+            home_team=r.get("home_team"),
+            away_team=r.get("away_team"),
+            sport="mlb",
+        ):
             continue
         out.append({
             "player":  r.get("player"),

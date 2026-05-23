@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -193,6 +193,82 @@ def synth_from_schedule(sched: Optional[dict]) -> Optional[dict]:
             },
         },
     }
+
+
+# ── "Has this game started?" filter (props + recommendations) ───────────────
+# Used to hide props / recommendations once a game is underway.  A game has
+# started when its scheduled commence time has passed OR the schedule marks
+# it Live/Final.  The per-game Live/Final states are cached in-process for
+# _STARTED_TTL seconds (keyed by sport) so the filter never re-fetches the
+# schedule on every render.
+_STARTED:    dict[str, set] = {}
+_STARTED_TS: dict[str, float] = {}
+_STARTED_TTL = 60.0
+
+
+def _norm_team_pair(backend, home: str, away: str) -> tuple:
+    """Normalized (home, away) key.  Prefers the backend's _team_key (the
+    same normaliser the schedule->analysis join uses) so Odds-API team
+    names line up with MLB-schedule names; falls back to lowercase."""
+    tk = getattr(backend, "_team_key", None)
+    if callable(tk):
+        try:
+            return (tk(home or ""), tk(away or ""))
+        except Exception:                                                  # noqa: BLE001
+            pass
+    return ((home or "").strip().lower(), (away or "").strip().lower())
+
+
+def _started_team_pairs(backend, sport: str = "mlb") -> set:
+    """Team-pair keys for today's games that are Live/Final, from the
+    already-cached schedule.  Memoised per sport for _STARTED_TTL seconds."""
+    sport = (sport or "mlb").lower()
+    now_ts = datetime.now().timestamp()
+    if sport in _STARTED and (now_ts - _STARTED_TS.get(sport, 0.0)) < _STARTED_TTL:
+        return _STARTED[sport]
+    pairs: set = set()
+    try:
+        games = backend._fetch_raw_schedule(sport, backend._today_et()) or []
+        for g in games:
+            status = (g.get("status") or "").lower()
+            coded  = (g.get("coded_status") or "").upper()
+            if g.get("is_live") or status in ("live", "final") or coded in ("i", "f", "I", "F"):
+                pairs.add(_norm_team_pair(backend, g.get("home_team"), g.get("away_team")))
+    except Exception:                                                      # noqa: BLE001
+        pass
+    _STARTED[sport] = pairs
+    _STARTED_TS[sport] = now_ts
+    return pairs
+
+
+def commence_passed(commence_time: Optional[str]) -> bool:
+    """True when an ISO-8601 commence_time is at/before now (UTC)."""
+    if not commence_time:
+        return False
+    try:
+        ct = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        return ct <= datetime.now(timezone.utc)
+    except Exception:                                                      # noqa: BLE001
+        return False
+
+
+def game_has_started(
+    backend,
+    *,
+    commence_time: Optional[str] = None,
+    home_team: Optional[str] = None,
+    away_team: Optional[str] = None,
+    sport: str = "mlb",
+) -> bool:
+    """True when this game is no longer "upcoming": its start time has
+    passed, OR the cached schedule marks it Live/Final.  No new API call --
+    reuses the in-process schedule cache + a 60s in-memory memo."""
+    if commence_passed(commence_time):
+        return True
+    if home_team and away_team:
+        if _norm_team_pair(backend, home_team, away_team) in _started_team_pairs(backend, sport):
+            return True
+    return False
 
 
 def render_score_block(live: dict, sport: str) -> None:
