@@ -2706,11 +2706,92 @@ def wnba_schedule_proxy():
 #   - When date > today_et:   no picks (future-dated -- no analysis
 #     has run yet).
 
+def _et_date_of(iso: str) -> str:
+    """Return the ET calendar date (YYYY-MM-DD) of an ISO timestamp,
+    or '' on failure.  Used to group schedule games by the day they're
+    actually played in Eastern time."""
+    if not iso:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.astimezone(_ZI("America/New_York")).date().isoformat()
+    except Exception:                                                     # noqa: BLE001
+        return str(iso)[:10]
+
+
+def _schedule_is_postponed(e: dict) -> bool:
+    ds = (e.get("detailed_status") or "").lower()
+    return "postpon" in ds or (e.get("coded_status") or "") in ("D", "DR", "PR")
+
+
+def _schedule_priority(e: dict) -> int:
+    """Higher = the entry we'd rather keep when two represent the same
+    game.  Postponed twins lose to a live/final/rescheduled entry."""
+    if _schedule_is_postponed(e):
+        return 0
+    if e.get("is_live"):
+        return 4
+    st = (e.get("status") or "")
+    ds = (e.get("detailed_status") or "").lower()
+    if st == "Final" or "final" in ds:
+        return 3
+    if e.get("rescheduled_from"):
+        return 2
+    return 1
+
+
+def _dedup_schedule_games(rows: list[dict]) -> list[dict]:
+    """Collapse duplicate schedule rows for the same game.
+
+    Handles the postponed-and-rescheduled case (BUG: a game PPD'd from
+    5/22 to 5/23 comes back under both date blocks): when a non-
+    postponed entry exists for a matchup, every postponed entry for
+    that same matchup is dropped, so only the rescheduled game on its
+    new date survives.  Then collapses exact gamePk dupes and same-
+    matchup-same-ET-date dupes, keeping the highest-priority entry.
+    Two legitimately separate games (same teams on different days of a
+    series) stay distinct because their ET dates differ.
+    """
+    def mk(e: dict) -> tuple:
+        return ((e.get("away_team") or "").strip().lower(),
+                (e.get("home_team") or "").strip().lower())
+
+    # Drop postponed twins of a matchup that also has a non-postponed entry.
+    non_ppd_matchups = {mk(e) for e in rows if not _schedule_is_postponed(e)}
+    rows = [e for e in rows
+            if not (_schedule_is_postponed(e) and mk(e) in non_ppd_matchups)]
+
+    # Pass 1: collapse exact gamePk dupes.
+    by_id: dict[str, dict] = {}
+    no_id: list[dict] = []
+    for e in rows:
+        gid = e.get("id")
+        if not gid:
+            no_id.append(e)
+            continue
+        if gid not in by_id or _schedule_priority(e) > _schedule_priority(by_id[gid]):
+            by_id[gid] = e
+    stage = list(by_id.values()) + no_id
+
+    # Pass 2: collapse same matchup + same ET calendar date.
+    by_md: dict[tuple, dict] = {}
+    for e in stage:
+        key = (mk(e), _et_date_of(e.get("commence_time")))
+        if key not in by_md or _schedule_priority(e) > _schedule_priority(by_md[key]):
+            by_md[key] = e
+    return list(by_md.values())
+
+
 def _normalize_mlb_schedule(raw: dict) -> list[dict]:
     """Convert a raw MLB Stats API schedule response into the same
     flat list the UI consumes for The Odds API games.  Each game gets
     a stable id, home/away team names, commence_time ISO string, and
     status flags.
+
+    Captures codedGameState + rescheduledFrom so the dedup pass can
+    drop postponed-and-rescheduled twins, and an ``is_live`` flag so
+    the UI can show a live score instead of the scheduled tip time.
     """
     out: list[dict] = []
     for date_block in raw.get("dates") or []:
@@ -2722,17 +2803,22 @@ def _normalize_mlb_schedule(raw: dict) -> list[dict]:
             ls     = g.get("linescore") or {}
             home_runs = ((ls.get("teams") or {}).get("home") or {}).get("runs")
             away_runs = ((ls.get("teams") or {}).get("away") or {}).get("runs")
+            abstract = status.get("abstractGameState") or "Preview"
+            coded    = status.get("codedGameState") or ""
             out.append({
-                "id":             str(g.get("gamePk") or ""),
-                "home_team":      home.get("name") or "",
-                "away_team":      away.get("name") or "",
-                "commence_time":  g.get("gameDate") or "",
-                "status":         status.get("abstractGameState") or "Preview",
+                "id":              str(g.get("gamePk") or ""),
+                "home_team":       home.get("name") or "",
+                "away_team":       away.get("name") or "",
+                "commence_time":   g.get("gameDate") or "",
+                "status":          abstract,
+                "coded_status":    coded,
                 "detailed_status": status.get("detailedState") or "",
-                "home_score":     home_runs,
-                "away_score":     away_runs,
+                "rescheduled_from": g.get("rescheduledFrom") or g.get("rescheduledFromDate") or "",
+                "is_live":         (abstract == "Live") or (coded == "I"),
+                "home_score":      home_runs,
+                "away_score":      away_runs,
             })
-    return out
+    return _dedup_schedule_games(out)
 
 
 def _normalize_wnba_schedule(raw: dict) -> list[dict]:
@@ -2749,17 +2835,22 @@ def _normalize_wnba_schedule(raw: dict) -> list[dict]:
             ls     = g.get("linescore") or {}
             home_pts = ((ls.get("teams") or {}).get("home") or {}).get("runs")
             away_pts = ((ls.get("teams") or {}).get("away") or {}).get("runs")
+            abstract = status.get("abstractGameState") or "Preview"
+            coded    = status.get("codedGameState") or ""
             out.append({
-                "id":             str(g.get("gamePk") or ""),
-                "home_team":      home.get("name") or "",
-                "away_team":      away.get("name") or "",
-                "commence_time":  g.get("gameDate") or "",
-                "status":         status.get("abstractGameState") or "Preview",
+                "id":              str(g.get("gamePk") or ""),
+                "home_team":       home.get("name") or "",
+                "away_team":       away.get("name") or "",
+                "commence_time":   g.get("gameDate") or "",
+                "status":          abstract,
+                "coded_status":    coded,
                 "detailed_status": status.get("detailedState") or "",
-                "home_score":     home_pts,
-                "away_score":     away_pts,
+                "rescheduled_from": g.get("rescheduledFrom") or g.get("rescheduledFromDate") or "",
+                "is_live":         (abstract == "Live") or (coded == "I"),
+                "home_score":      home_pts,
+                "away_score":      away_pts,
             })
-    return out
+    return _dedup_schedule_games(out)
 
 
 def _schedule_cache_key(sport: str, date_str: str) -> str:
