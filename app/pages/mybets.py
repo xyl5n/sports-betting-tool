@@ -17,7 +17,7 @@ from datetime import datetime
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, sidebar, bottom_nav
+from components import navbar, sidebar, bottom_nav, track_button
 
 
 def register(backend) -> None:
@@ -32,6 +32,7 @@ def register(backend) -> None:
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
                 _personal_bankroll(backend)
+                _recommendations_section(backend)
                 _tabs(backend)
         bottom_nav.render(active=t.TAB_MYBETS)
 
@@ -77,6 +78,141 @@ def _stat(label: str, value: str, color: str) -> None:
         ui.label(value).classes("stat-value").style(
             f"font-size: 20px; font-weight: 800; color: {color}; "
             f"font-family: monospace; letter-spacing: -.2px;"
+        )
+
+
+# ── Today's Recommendations ──────────────────────────────────────────────────
+
+def _recommendations_section(backend) -> None:
+    """Section at the top of the page listing every model pick for today
+    that hasn't been tracked yet -- the same picks shown on the home
+    page game cards.  Each row has its own Track button; tracking a pick
+    refreshes the section so it drops out (and appears in the tracked
+    list once the user switches tabs / reloads)."""
+    try:
+        backend.hydrate_state()
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    @ui.refreshable
+    def render() -> None:                                                  # noqa: WPS430
+        picks = _build_recommendations(backend)
+        with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+            with ui.row().classes("items-center w-full").style("gap: 8px;"):
+                ui.label("TODAY'S RECOMMENDATIONS").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                ui.label(str(len(picks))).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 11px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+            if not picks:
+                ui.label(
+                    "No untracked model picks for today. Run analysis from "
+                    "the home page, or you've already tracked everything."
+                ).style(
+                    f"color: {t.TEXT_DIM}; font-size: 12px; "
+                    f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+                    f"text-align: center; font-style: italic;"
+                )
+                return
+            for p in picks:
+                _recommendation_row(backend, p, on_tracked=render.refresh)
+
+    render()
+
+
+def _build_recommendations(backend) -> list[dict]:
+    """Flatten today's model picks (both sports) into per-pick dicts,
+    dropping any that are already tracked.  Sorted by confidence DESC."""
+    out: list[dict] = []
+    states = (
+        ("mlb",  getattr(backend, "_analysis_state", {}) or {}),
+        ("wnba", getattr(backend, "_wnba_analysis_state", {}) or {}),
+    )
+    for sport, state in states:
+        for g in (state.get("results") or []):
+            if g.get("_no_model") or g.get("_no_odds"):
+                continue
+            gid = g.get("id") or g.get("game_id")
+            if not gid:
+                continue
+            tracked = track_button.tracked_bet_types(backend, gid, sport)
+            matchup = f"{g.get('away_team', '')} @ {g.get('home_team', '')}".strip(" @")
+
+            # Moneyline (both sports)
+            if g.get("pick_team") and "single" not in tracked:
+                out.append({
+                    "sport": sport, "game_id": gid, "bet_type": "ml",
+                    "team": g.get("pick_team"), "line": "",
+                    "odds": g.get("pick_odds"), "conf": g.get("pick_prob"),
+                    "matchup": matchup, "type_label": "Moneyline",
+                })
+
+            if sport != "mlb":
+                continue   # RL / totals tracking is MLB-only
+
+            rl = g.get("run_line") or {}
+            if rl.get("pick_team") and "run_line" not in tracked:
+                pt = rl.get("run_line_point")
+                line = f"{float(pt):+g}" if isinstance(pt, (int, float)) else ""
+                out.append({
+                    "sport": sport, "game_id": gid, "bet_type": "rl",
+                    "team": rl.get("pick_team"), "line": line,
+                    "odds": rl.get("pick_odds"), "conf": rl.get("pick_prob"),
+                    "matchup": matchup, "type_label": "Run Line",
+                })
+
+            tot = g.get("totals") or {}
+            if tot.get("total_line") and "totals" not in tracked:
+                direction = (tot.get("direction") or "over").title()
+                out.append({
+                    "sport": sport, "game_id": gid, "bet_type": "total",
+                    "team": f"{direction} {tot.get('total_line')}", "line": "",
+                    "odds": tot.get("pick_odds"), "conf": tot.get("pick_prob"),
+                    "matchup": matchup, "type_label": "Total",
+                })
+
+    out.sort(key=lambda p: -float(p.get("conf") or 0.0))
+    return out
+
+
+def _recommendation_row(backend, p: dict, *, on_tracked) -> None:
+    """One untracked-pick row: team + matchup + detail + Track button."""
+    sport   = p.get("sport") or "mlb"
+    conf    = p.get("conf")
+    conf_s  = f"{int(round(float(conf) * 100))}%" if isinstance(conf, (int, float)) else "—"
+    odds_s  = _odds_str(p.get("odds"))
+    detail  = p.get("type_label") or ""
+    if p.get("line"):
+        detail += f" {p['line']}"
+    if odds_s != "—":
+        detail += f" ({odds_s})"
+
+    with ui.row().classes("items-center w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 10px;"
+    ):
+        ui.label(sport.upper()).style(
+            f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+            f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+            f"padding: 2px 7px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
+        )
+        with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
+            ui.label(p.get("team") or "—").style(
+                f"font-size: 13px; font-weight: 800; color: {t.TEXT}; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            )
+            ui.label(f"{detail}  ·  {conf_s}  ·  {p.get('matchup', '')}").style(
+                f"font-size: 11px; color: {t.TEXT_DIM}; "
+                f"font-family: monospace; white-space: normal;"
+            )
+        track_button.render(
+            backend, game_id=p.get("game_id"), sport=sport, size="sm",
+            bet_type=p.get("bet_type", "ml"), on_tracked=on_tracked,
         )
 
 
@@ -159,6 +295,57 @@ def _game_section(title: str, bets: list[dict], settled: bool) -> None:
             _game_bet_row(b, settled)
 
 
+def _bet_type_label(bet_type: str) -> str:
+    """Human label for a ledger bet_type."""
+    return {
+        "single":   "Moneyline",
+        "run_line": "Run Line",
+        "spread":   "Spread",
+        "totals":   "Total",
+    }.get((bet_type or "single").lower(), (bet_type or "").replace("_", " ").title())
+
+
+def _odds_str(odds) -> str:
+    if not isinstance(odds, (int, float)):
+        return "—"
+    return f"+{int(odds)}" if odds > 0 else str(int(odds))
+
+
+def _bet_line_str(b: dict) -> str:
+    """The handicap/line for a tracked bet, signed.  Empty for ML and
+    for totals (the line is already baked into the team string, e.g.
+    'Over 8.5')."""
+    bt = (b.get("bet_type") or "single").lower()
+    if bt in ("run_line", "spread"):
+        pl = b.get("prop_line")
+        if pl is None:
+            return ""
+        try:
+            # Run-line settlement threshold is stored as -run_line_point;
+            # flip it back to the bettor-facing point (+1.5 / -1.5).
+            point = -float(pl)
+            return f"{point:+g}"
+        except (TypeError, ValueError):
+            return ""
+    return ""
+
+
+def _confidence_pct(b: dict) -> Optional[int]:
+    p = b.get("model_prob")
+    if not isinstance(p, (int, float)):
+        return None
+    return int(round(float(p) * 100))
+
+
+def _placed_date(b: dict) -> str:
+    iso = b.get("placed_at") or b.get("commence_time") or ""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.strftime("%b %-d")
+    except Exception:                                                      # noqa: BLE001
+        return ""
+
+
 def _game_bet_row(b: dict, settled: bool) -> None:
     result       = (b.get("result") or "").lower()
     result_color = {
@@ -167,9 +354,11 @@ def _game_bet_row(b: dict, settled: bool) -> None:
 
     sport    = (b.get("sport") or "mlb").upper()
     team     = b.get("bet_team") or b.get("parlay_name") or "—"
-    bet_type = (b.get("bet_type") or "single").upper().replace("_", " ")
-    odds     = b.get("american_odds")
-    odds_s   = f"+{odds}" if isinstance(odds, (int, float)) and odds > 0 else f"{odds}"
+    type_lbl = _bet_type_label(b.get("bet_type") or "single")
+    line_s   = _bet_line_str(b)
+    odds_s   = _odds_str(b.get("american_odds"))
+    conf     = _confidence_pct(b)
+    date_s   = _placed_date(b)
     amount   = float(b.get("confirmed_amount") or 0)
     pnl      = float(b.get("confirmed_pnl")    or 0) if settled else 0.0
 
@@ -187,6 +376,22 @@ def _game_bet_row(b: dict, settled: bool) -> None:
         else f"1px solid {t.BORDER}"
     )
 
+    # Build the full detail line, e.g.
+    #   "Run Line +1.5 (-110) — 67% confidence — May 23"
+    detail_parts: list[str] = [type_lbl]
+    if line_s:
+        detail_parts.append(line_s)
+    detail = " ".join(detail_parts)
+    if odds_s != "—":
+        detail += f" ({odds_s})"
+    tail: list[str] = []
+    if conf is not None:
+        tail.append(f"{conf}% confidence")
+    if date_s:
+        tail.append(date_s)
+    if tail:
+        detail += "  —  " + "  —  ".join(tail)
+
     with ui.row().classes("items-center w-full").style(
         f"background: {t.CARD}; border: {border}; "
         f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 10px;"
@@ -194,17 +399,18 @@ def _game_bet_row(b: dict, settled: bool) -> None:
         ui.label(sport).style(
             f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
             f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
-            f"padding: 2px 7px; border-radius: {t.RADIUS_PILL};"
+            f"padding: 2px 7px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
         )
         with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
             ui.label(team).style(
                 f"font-size: 13px; font-weight: 700; color: {team_color}; "
                 f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             )
-            ui.label(f"{bet_type} · {odds_s}").style(
-                f"font-size: 11px; color: {t.TEXT_DIM}; font-family: monospace;"
+            ui.label(detail).style(
+                f"font-size: 11px; color: {t.TEXT_DIM}; "
+                f"font-family: monospace; white-space: normal;"
             )
-        with ui.column().style("gap: 2px; text-align: right; align-items: flex-end;"):
+        with ui.column().style("gap: 2px; text-align: right; align-items: flex-end; flex-shrink: 0;"):
             ui.label(amount_text).style(
                 f"font-size: 13px; font-weight: 700; "
                 f"color: {amount_color}; font-family: monospace;"
