@@ -1652,6 +1652,14 @@ def _build_batter_dataset(
     -> inference filled them with non-zero league-average defaults,
     which was noise injection on every prediction.  Dropping them
     shrinks the feature vector from 77 -> 61 and removes that noise.
+
+    PR6 (audit #2): rolling windows (r7, r14, r30, babip_*, k_pct_*) now
+    span SEASON BOUNDARIES.  Payload entries are grouped by pid first;
+    a player's games across 2023->2024->2025 are concatenated in
+    chronological order before the rolling computations.  An April-2025
+    row therefore carries 30 games of late-2024 production in r30_H
+    instead of NaN.  Season-to-date (szn_*) features remain strictly
+    within-season — they reset at every season boundary via groupby.
     """
     # Default to empty dicts so the per-row lookups gracefully return the
     # league-average neutral when no opp pitcher context is wired in.
@@ -1669,40 +1677,63 @@ def _build_batter_dataset(
     rows: list[dict] = []
     reg_rows: list[dict] = []
     # Per-player snapshots: most-recent engineered row across all seasons.
-    # Since collect_multi_season_data appends seasons in chronological order,
-    # the last assignment wins (= most recent season the player appeared in).
     snapshots: dict[str, dict] = {}
+
+    # PR6 (audit #2): group payload entries by pid so we can concatenate
+    # each player's games chronologically across 2023->2024->2025 before
+    # computing rolling windows.  Before this, every (player, season) was
+    # processed independently — a batter with 3 games in early 2025 saw
+    # r30 features computed from only those 3 games (NaN-dominated) even
+    # though we had 162 games of 2024 data on disk.
+    batters_by_pid: dict[int, list[dict]] = {}
     for p in (payload.get("batters") or []):
-        games  = p.get("games") or []
-        season = p.get("season", 2025)
-        pid    = p["id"]
-        pname  = p.get("name", "")
-        pteam  = p.get("team", "")
-        if not games:
+        pid = int(p.get("id") or 0)
+        if pid:
+            batters_by_pid.setdefault(pid, []).append(p)
+
+    _DEFAULT_SPLITS = {
+        "ops_vs_lhp": 0.720, "obp_vs_lhp": 0.315, "slg_vs_lhp": 0.405,
+        "ops_vs_rhp": 0.720, "obp_vs_rhp": 0.315, "slg_vs_rhp": 0.405,
+    }
+
+    for pid, season_entries in batters_by_pid.items():
+        # Order entries chronologically by season so the concatenated df is
+        # already monotonic in date once we sort by date below.
+        season_entries.sort(key=lambda e: int(e.get("season") or 0))
+
+        # ── Build one cross-season df per player, tagged with row-level
+        # _season and _player_team (team can change mid-career via trades,
+        # so we need the per-season team for the opp-pitcher lookup).
+        all_game_rows: list[dict] = []
+        for entry in season_entries:
+            e_season = int(entry.get("season") or 2025)
+            e_team   = (entry.get("team") or "").strip()
+            for g in (entry.get("games") or []):
+                all_game_rows.append({
+                    **g,
+                    "_season":      e_season,
+                    "_player_team": e_team,
+                })
+        if not all_game_rows:
             continue
 
-        season_splits = splits_by_season.get(season, {})
-        splits = season_splits.get(pid, {
-            "ops_vs_lhp": 0.720, "obp_vs_lhp": 0.315, "slg_vs_lhp": 0.405,
-            "ops_vs_rhp": 0.720, "obp_vs_rhp": 0.315, "slg_vs_rhp": 0.405,
-        })
+        # Display metadata for the snapshot: latest season's team/name.
+        last_entry = season_entries[-1]
+        pname = last_entry.get("name", "")
+        pteam = last_entry.get("team", "")
 
-        df = pd.DataFrame(games).sort_values("date").reset_index(drop=True)
+        df = pd.DataFrame(all_game_rows).sort_values("date").reset_index(drop=True)
 
         # ── Defensive: ensure park_team exists ────────────────────────────
         # Old cache files lack this column; derive it from is_home + opp_team.
         if "park_team" not in df.columns:
-            player_team = p.get("team", "")
             df["park_team"] = df.apply(
-                lambda r: player_team if r.get("is_home") else (r.get("opp_team") or ""),
+                lambda r: (r.get("_player_team") or "") if r.get("is_home")
+                          else (r.get("opp_team") or ""),
                 axis=1,
             )
-
-        # ── Defensive: ensure batting_order exists ─────────────────────────
         if "batting_order" not in df.columns:
             df["batting_order"] = 0
-
-        # ── Defensive: ensure opp_team exists (should always, but guard) ───
         if "opp_team" not in df.columns:
             df["opp_team"] = ""
 
@@ -1712,11 +1743,9 @@ def _build_batter_dataset(
         df["HR_per_AB"] = (df["HR"] / df["AB"].clip(lower=1)).fillna(0.0)
         df["BB_per_PA"] = (df["BB"] / df["PA"].clip(lower=1)).fillna(0.0)
         df["SO_per_PA"] = (df["SO"] / df["PA"].clip(lower=1)).fillna(0.0)
-        # K% = strikeouts per plate appearance (this specific game, pre-lag)
-        df["k_pct"] = df["SO_per_PA"]
+        df["k_pct"]     = df["SO_per_PA"]
 
         # BABIP approximation: (H - HR) / max(AB - SO - HR, 1)
-        # Using shift(1) so we roll it leak-free below
         df["_babip_num"] = (df["H"] - df["HR"]).clip(lower=0)
         df["_babip_den"] = (df["AB"] - df["SO"] - df["HR"]).clip(lower=1)
         df["_babip"]     = df["_babip_num"] / df["_babip_den"]
@@ -1726,91 +1755,88 @@ def _build_batter_dataset(
             "H_per_AB", "TB_per_AB", "HR_per_AB", "BB_per_PA", "SO_per_PA",
         ]
 
-        # Season-to-date + rolling windows (all leak-free via shift(1))
+        # ── PR6 (audit #2): rolling windows now span seasons ──────────────
+        # r7 / r14 / r30 are computed across the player's FULL chronological
+        # history.  A batter's r30_H entering April 2025 carries 30 games
+        # of late-2024 production rather than NaN-dominated early-season noise.
         for c in roll_stats:
-            df[f"szn_{c}"] = df[c].shift(1).expanding().mean()
             df[f"r7_{c}"]  = df[c].shift(1).rolling(window=7,  min_periods=2).mean()
             df[f"r14_{c}"] = df[c].shift(1).rolling(window=14, min_periods=3).mean()
 
-        # PR3: r30 (30-game) rolling windows for sparse count stats.  HR
-        # and BB tail-events average ~0.1 / ~0.3 per game so 7- and 14-game
-        # rolling means are jumpy on a per-row basis.  A 30-game window
-        # smooths the signal toward the player's true level over a 5-6
-        # week horizon — adds two features instead of replacing the
-        # shorter windows so the model can blend them.
-        # PR5: extend r30 smoothing to all six batter prop targets.
-        # PR3 only smoothed HR and BB (the two sparsest stats).  H and TB
-        # are the highest-volume markets so a long-trend signal is the
-        # most useful there; R and RBI are mid-volume and benefit from
-        # the same dampening at ~30 games (~5-6 weeks of play).
         for c in ("H", "HR", "TB", "RBI", "R", "BB"):
             df[f"r30_{c}"] = df[c].shift(1).rolling(window=30, min_periods=5).mean()
 
-        # BABIP rolling averages (7d and 14d)
         df["babip_7d"]  = df["_babip"].shift(1).rolling(window=7,  min_periods=2).mean()
         df["babip_14d"] = df["_babip"].shift(1).rolling(window=14, min_periods=3).mean()
-
-        # K% rolling averages (7d and 14d) for trend feature
         df["k_pct_7d"]  = df["k_pct"].shift(1).rolling(window=7,  min_periods=2).mean()
         df["k_pct_14d"] = df["k_pct"].shift(1).rolling(window=14, min_periods=3).mean()
 
-        # Ballpark factors — park_team is guaranteed to exist above.
+        # ── PR6: szn_* features STRICTLY within the current season ─────────
+        # Season-to-date means must reset at every season boundary — a row's
+        # szn_H should describe THIS season's production, not include 2024.
+        # groupby("_season", group_keys=False) keeps the original row index
+        # so the assignment back to df preserves chronological order.
+        for c in roll_stats:
+            df[f"szn_{c}"] = df.groupby("_season", group_keys=False)[c].apply(
+                lambda s: s.shift(1).expanding().mean()
+            )
+
+        # Ballpark factors per row (park_team is per-row already).
         df["ballpark_factor_hits"] = df["park_team"].map(
             lambda t: PARK_FACTORS_H.get(_to_abbrev(t), 1.0)
         )
-        # PR4 (audit #10): HR park factor is bat-hand-specific.  Yankee
-        # Stadium short porch is +60% HR for LHB / +20% for RHB; Fenway's
-        # Green Monster flips the asymmetry the other way.  Single-table
-        # PARK_FACTORS_HR was washing this out.
         bat_hand = (batter_handedness.get(pid) or "R").upper()
         df["ballpark_factor_hr"] = df["park_team"].map(
             lambda t: _park_hr_for_batter(_to_abbrev(t), bat_hand)
         )
 
-        # ── PR3: per-row opposing-pitcher context ──────────────────────────
-        # Lookup key is (game_date, batter's_own_team) because that's how
-        # build_opp_pitcher_lookup indexed pitcher game logs (the pitcher's
-        # opp_team IS the batter's team).  Falls back to league averages
-        # when the lookup misses (e.g. opener / bullpen game where the
-        # cached "starter" row is ambiguous).
-        pteam_abbrev = _to_abbrev(pteam)
-
-        def _opp_pid_for_row(d) -> int:
-            if not pteam_abbrev or not d:
+        # ── Per-row opposing-pitcher context ──────────────────────────────
+        # Uses each row's own _player_team and _season — traded players have
+        # different teams in different years, and opp_pitcher_lookup is
+        # keyed on (date, batter_team), with stats stored per (season, pid).
+        def _opp_pid_for_row(d, pteam_str) -> int:
+            abbrev = _to_abbrev(pteam_str)
+            if not abbrev or not d:
                 return 0
-            key = f"{str(d)[:10]}:{pteam_abbrev}"
-            return int(opp_pitcher_lookup.get(key, 0))
+            return int(opp_pitcher_lookup.get(f"{str(d)[:10]}:{abbrev}", 0))
 
-        df["_opp_pitcher_id"] = df["date"].map(_opp_pid_for_row)
+        df["_opp_pitcher_id"] = df.apply(
+            lambda r: _opp_pid_for_row(r["date"], r["_player_team"]),
+            axis=1,
+        )
 
-        def _opp_k9(pid_val) -> float:
+        def _opp_k9(pid_val, season_val) -> float:
             pid_int = int(pid_val) if pid_val else 0
             if pid_int <= 0:
-                return 8.50  # league-average neutral
-            stats = pitcher_season_stats.get(f"{season}:{pid_int}")
-            if not stats:
                 return 8.50
-            return float(stats.get("k_per_9") or 8.50)
+            stats = pitcher_season_stats.get(f"{int(season_val)}:{pid_int}")
+            return float((stats or {}).get("k_per_9") or 8.50)
 
-        def _opp_era(pid_val) -> float:
+        def _opp_era(pid_val, season_val) -> float:
             pid_int = int(pid_val) if pid_val else 0
             if pid_int <= 0:
                 return 4.30
-            stats = pitcher_season_stats.get(f"{season}:{pid_int}")
-            if not stats:
-                return 4.30
-            return float(stats.get("era") or 4.30)
+            stats = pitcher_season_stats.get(f"{int(season_val)}:{pid_int}")
+            return float((stats or {}).get("era") or 4.30)
 
         def _opp_throws_lhp(pid_val) -> float:
             pid_int = int(pid_val) if pid_val else 0
             if pid_int <= 0:
-                return 0.30  # ~30% of MLB starters are LHP
+                return 0.30
             return 1.0 if pitcher_handedness.get(pid_int) == "L" else 0.0
 
-        df["opp_pitcher_szn_k_per_9"] = df["_opp_pitcher_id"].map(_opp_k9)
-        df["opp_pitcher_szn_era"]    = df["_opp_pitcher_id"].map(_opp_era)
+        df["opp_pitcher_szn_k_per_9"] = df.apply(
+            lambda r: _opp_k9(r["_opp_pitcher_id"], r["_season"]), axis=1,
+        )
+        df["opp_pitcher_szn_era"] = df.apply(
+            lambda r: _opp_era(r["_opp_pitcher_id"], r["_season"]), axis=1,
+        )
         df["opp_pitcher_throws_lhp"] = df["_opp_pitcher_id"].map(_opp_throws_lhp)
 
+        # Drop rows where szn_ is still NaN (game 1 of each season — szn_
+        # explicitly resets per-season).  Rolling r7 is now cross-season,
+        # so it's only NaN for the first ~2 games of the player's CAREER
+        # in our data, not the first ~2 games of each season.
         df = df.dropna(subset=[f"szn_{roll_stats[0]}", f"r7_{roll_stats[0]}"])
         if df.empty:
             continue
@@ -1822,9 +1848,6 @@ def _build_batter_dataset(
             [f"szn_{c}"  for c in roll_stats]
             + [f"r7_{c}" for c in roll_stats]
             + [f"r14_{c}" for c in roll_stats]
-            # PR5: 30-game smoothing extended to all six batter stat targets.
-            # Order matches the inference-side _BATTER_FEATURE_NAMES so the
-            # vector layout is stable across train/predict.
             + ["r30_H", "r30_HR", "r30_TB", "r30_RBI", "r30_R", "r30_BB"]
             + [
                 "k_pct_7d", "k_pct_14d",
@@ -1833,29 +1856,26 @@ def _build_batter_dataset(
                 "is_home_i",
                 "ballpark_factor_hits",
                 "ballpark_factor_hr",
-                # PR3: opposing-pitcher context, looked up per (date, batter_team).
                 "opp_pitcher_szn_k_per_9",
                 "opp_pitcher_szn_era",
                 "opp_pitcher_throws_lhp",
             ]
         )
 
+        # ── Emit records — platoon splits are keyed by EACH row's season,
+        # not a single season per outer-loop iteration (since this loop now
+        # iterates per player, not per (player, season)).
         for _, row in df.iterrows():
+            row_season = int(row["_season"])
+            splits = splits_by_season.get(row_season, {}).get(pid, _DEFAULT_SPLITS)
             record = {c: float(row[c]) for c in feat_cols}
-            # Static platoon splits
             record["ops_vs_lhp"] = float(splits.get("ops_vs_lhp", 0.720))
             record["obp_vs_lhp"] = float(splits.get("obp_vs_lhp", 0.315))
             record["slg_vs_lhp"] = float(splits.get("slg_vs_lhp", 0.405))
             record["ops_vs_rhp"] = float(splits.get("ops_vs_rhp", 0.720))
             record["obp_vs_rhp"] = float(splits.get("obp_vs_rhp", 0.315))
             record["slg_vs_rhp"] = float(splits.get("slg_vs_rhp", 0.405))
-            # PR4 (audit #3): the 16 INFER_FEATS placeholders are dropped.
-            # They trained as zero -> SHAP-zero importance -> noise at
-            # inference from non-zero league defaults.  Removing them
-            # shrinks the vector to the features the model actually uses.
             record["label"]      = int(row["label"])
-            # PR3: stamp pid on every batter row so _train_and_save can pass
-            # groups=batter_ids to GroupKFold.  Stripped from feat_cols below.
             record["_player_id"] = int(pid)
             rows.append(record)
             reg_rows.append({
@@ -1867,28 +1887,24 @@ def _build_batter_dataset(
                 "BB":  float(row["BB"]),
             })
 
-        # ── Snapshot: capture this player's MOST RECENT engineered row ───────
-        # The snapshot represents their feature state going into a hypothetical
-        # next game and is what the inference layer needs.  Last-season wins
-        # because collect_multi_season_data appends seasons in order.
+        # ── Snapshot: last chronological row across all seasons.
         last = df.iloc[-1]
+        last_season = int(last["_season"])
+        last_splits = splits_by_season.get(last_season, {}).get(pid, _DEFAULT_SPLITS)
         snap_feats = {c: float(last[c]) for c in feat_cols}
-        snap_feats["ops_vs_lhp"] = float(splits.get("ops_vs_lhp", 0.720))
-        snap_feats["obp_vs_lhp"] = float(splits.get("obp_vs_lhp", 0.315))
-        snap_feats["slg_vs_lhp"] = float(splits.get("slg_vs_lhp", 0.405))
-        snap_feats["ops_vs_rhp"] = float(splits.get("ops_vs_rhp", 0.720))
-        snap_feats["obp_vs_rhp"] = float(splits.get("obp_vs_rhp", 0.315))
-        snap_feats["slg_vs_rhp"] = float(splits.get("slg_vs_rhp", 0.405))
+        snap_feats["ops_vs_lhp"] = float(last_splits.get("ops_vs_lhp", 0.720))
+        snap_feats["obp_vs_lhp"] = float(last_splits.get("obp_vs_lhp", 0.315))
+        snap_feats["slg_vs_lhp"] = float(last_splits.get("slg_vs_lhp", 0.405))
+        snap_feats["ops_vs_rhp"] = float(last_splits.get("ops_vs_rhp", 0.720))
+        snap_feats["obp_vs_rhp"] = float(last_splits.get("obp_vs_rhp", 0.315))
+        snap_feats["slg_vs_rhp"] = float(last_splits.get("slg_vs_rhp", 0.405))
         snapshots[str(pid)] = {
             "id":          int(pid),
             "name":        pname,
             "team":        pteam,
-            "season":      int(season),
+            "season":      last_season,
             "as_of_date":  str(last.get("date", "")),
-            # PR4 (audit #10): inlined bat_hand so inference can pick
-            # _PARK_HR_LHB / _PARK_HR_RHB without round-tripping through
-            # batter_handedness.json + a search_player_by_name fallback.
-            "bat_hand":    (batter_handedness.get(pid) or "R").upper(),
+            "bat_hand":    bat_hand,
             "features":    snap_feats,
         }
 
