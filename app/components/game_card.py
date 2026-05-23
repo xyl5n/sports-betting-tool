@@ -103,14 +103,20 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
 
 
 def _track_row(backend, g: dict, sport: str) -> None:
-    """Bottom row: 'View Details →' link on the left, Track button on
-    the right.  The link navigates to /game/<sport>/<game_id> -- the
-    dedicated detail page introduced in this PR.  Track stays where
-    it always was (bottom-right) so click targets don't collide.
+    """Bottom row: 'View Details →' link on the left, per-bet-type Track
+    buttons on the right.
+
+    MLB cards get three buttons (Track ML / Track RL / Track Total),
+    each tracking only its own bet; a bet type already confirmed today
+    shows a muted "✓" chip instead.  WNBA only supports moneyline
+    tracking, so it keeps the single ML button.
     """
     gid = g.get("game_id") or g.get("id")
+    is_mlb = (sport or "").lower() == "mlb"
+    tracked = track_button.tracked_bet_types(backend, gid, sport) if gid else set()
+
     with ui.row().classes("items-center w-full").style(
-        "gap: 6px; margin-top: 4px;"
+        "gap: 6px; margin-top: 4px; flex-wrap: wrap;"
     ):
         if gid:
             ui.link("View Details →", f"/game/{sport}/{gid}").style(
@@ -118,19 +124,32 @@ def _track_row(backend, g: dict, sport: str) -> None:
                 f"font-size: 11.5px; font-weight: 700; padding: 4px 0;"
             )
         ui.element("div").style("flex: 1;")    # spacer
+
         if g.get("_no_model"):
             track_button.render(
-                backend, game_id=gid, sport=sport, size="sm",
-                label="Track",
+                backend, game_id=gid, sport=sport, size="sm", bet_type="ml",
                 disabled_reason=(
                     "No model pick available for this matchup -- "
                     "tracking would record an empty bet."
                 ),
             )
-        else:
+            return
+
+        # Moneyline -- always available.
+        track_button.render(
+            backend, game_id=gid, sport=sport, size="sm", bet_type="ml",
+            already_tracked=("single" in tracked),
+        )
+        # Run line + Total -- MLB only, and only when a pick exists.
+        if is_mlb and g.get("run_line"):
             track_button.render(
-                backend, game_id=gid, sport=sport, size="sm",
-                label="Track",
+                backend, game_id=gid, sport=sport, size="sm", bet_type="rl",
+                already_tracked=("run_line" in tracked),
+            )
+        if is_mlb and g.get("totals"):
+            track_button.render(
+                backend, game_id=gid, sport=sport, size="sm", bet_type="total",
+                already_tracked=("totals" in tracked),
             )
 
 
