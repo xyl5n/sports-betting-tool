@@ -206,16 +206,18 @@ _PITCHER_FEATURE_NAMES: list[str] = (
     + ["era_vs_lhb", "k_rate_vs_lhb", "era_vs_rhb", "k_rate_vs_rhb"]             # 4
     + [
         "opp_team_k_rate", "opp_team_woba", "opp_team_lhb_pct",                  # PR #2 opponent context
-        "career_k_per_9", "career_bb_per_9", "career_ip",                        # PR #2 career baseline
-    ]  # 6
-    + [
-        "lineup_avg_k_rate", "lineup_lhb_count", "lineup_rhb_count",
-        "weather_temp", "weather_wind_speed", "weather_wind_dir_num",
-        "time_of_day", "umpire_k_rate", "implied_total",
-        "first_inning_k_pct", "pitch_mix_fastball_pct",
-        "pitch_mix_breaking_pct", "pitch_mix_offspeed_pct",
-    ]  # 13
-)  # 7+7+7+4+4+6+13 = 48
+        "career_k_per_9", "career_bb_per_9", "career_fip", "career_ip",          # PR #2/3 career baseline
+    ]  # 7
+    # PR4 dropped 13 phantom features (lineup_avg_k_rate, lineup_lhb_count,
+    # lineup_rhb_count, weather_temp, weather_wind_speed, weather_wind_dir_num,
+    # time_of_day, umpire_k_rate, implied_total, first_inning_k_pct,
+    # pitch_mix_fastball_pct, pitch_mix_breaking_pct, pitch_mix_offspeed_pct)
+    # because they were always zero during training and XGBoost can't learn
+    # splits on constant columns -- any nonzero value supplied at inference
+    # was silently ignored.  Reintroduce one-by-one only with a real
+    # training-time signal (weather_* via Open-Meteo archive is the most
+    # viable backfill candidate).
+)  # 7+7+7+4+4+7 = 36
 
 _BATTER_FEATURE_NAMES: list[str] = (
     [f"szn_{c}" for c in _B_ROLL]   # 14
@@ -247,26 +249,17 @@ _PITCHER_DEFAULTS: dict[str, float] = {
     "k_rate_vs_lhb":           0.215,
     "era_vs_rhb":              4.50,
     "k_rate_vs_rhb":           0.215,
-    # PR #2 opponent + career baseline neutrals (modern-era league averages)
+    # PR #2/#3 opponent + career baseline neutrals (modern-era league averages)
     "opp_team_k_rate":         0.225,
     "opp_team_woba":           0.720,   # OPS proxy ≈ league-average wOBA
     "opp_team_lhb_pct":        0.420,
     "career_k_per_9":          8.50,
     "career_bb_per_9":         3.30,
+    "career_fip":              4.00,
     "career_ip":              50.0,
-    "lineup_avg_k_rate":       0.220,
-    "lineup_lhb_count":        4.0,
-    "lineup_rhb_count":        5.0,
-    "weather_temp":           72.0,
-    "weather_wind_speed":      8.0,
-    "weather_wind_dir_num":    0.0,
-    "time_of_day":             1.0,  # 1 = day, 0 = night (league avg ~0.25 day)
-    "umpire_k_rate":           0.215,
-    "implied_total":           8.5,
-    "first_inning_k_pct":      0.210,
-    "pitch_mix_fastball_pct":  0.55,
-    "pitch_mix_breaking_pct":  0.25,
-    "pitch_mix_offspeed_pct":  0.20,
+    # PR4 dropped the 13 phantom feature defaults that paired with the
+    # always-zero-at-training INFER_FEATS.  See _PITCHER_FEATURE_NAMES
+    # above for the full list of names removed.
 }
 
 _BATTER_DEFAULTS: dict[str, float] = {
