@@ -782,6 +782,15 @@ def _render_analysis(holder, text: str, *,
     )
     border = t.NEG if error else t.BORDER
     badge  = " (cached)" if from_cache else ""
+    # Strip any HTML/markdown the model emitted so tags never render as
+    # literal text.  Placeholder/error strings are app-controlled plain
+    # text, so only the real AI analysis needs cleaning.
+    if not placeholder and not error:
+        try:
+            from src.utils import strip_formatting
+            text = strip_formatting(text)
+        except Exception:                                                  # noqa: BLE001
+            pass
     with holder:
         with ui.row().classes("w-full").style(
             f"background: {t.CARD}; border: 1px solid {border}; "

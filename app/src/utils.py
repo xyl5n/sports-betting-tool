@@ -12,7 +12,37 @@ Import from here instead of defining locally:
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
+
+
+# ── Display-text sanitisation ──────────────────────────────────────────────────
+
+# One HTML tag: <b>, </b>, <i ...>, <span ...>, etc.
+_HTML_TAG_RE = re.compile(r"</?[A-Za-z][^>]*>")
+
+
+def strip_formatting(text):
+    """Return *text* with all HTML tags and markdown emphasis markers
+    removed, suitable for rendering as plain text in a ``ui.label``.
+
+    Handles the things AI-generated / templated copy tends to leak into
+    plain-text widgets: ``<b>``/``</b>``/``<i>`` and any other HTML
+    tag, ``**bold**`` / ``__bold__``, ``*italic*`` / ``_italic_``,
+    and backtick code spans.  Runs of whitespace are collapsed.
+
+    Non-string / falsy input is returned unchanged so callers can pass
+    it through defensively.  Never raises.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    s = _HTML_TAG_RE.sub("", text)          # <b>, </b>, <i ...>, <span ...>
+    s = s.replace("**", "").replace("__", "")            # md bold
+    s = re.sub(r"\*(\S(?:.*?\S)?)\*", r"\1", s)          # *italic*  -> italic
+    s = re.sub(r"_(\S(?:.*?\S)?)_", r"\1", s)            # _italic_  -> italic
+    s = s.replace("`", "")                                # code ticks
+    s = re.sub(r"[ \t]{2,}", " ", s)                      # collapse spaces
+    return s.strip()
 
 
 # ── Numeric coercion ──────────────────────────────────────────────────────────

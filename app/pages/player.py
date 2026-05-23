@@ -727,7 +727,11 @@ def _insight_row(tag: str, tag_color: str, text: str) -> None:
             f"flex-shrink: 0; line-height: 1.2; min-width: 72px; "
             f"text-align: center;"
         )
-        ui.label(text).style(
+        # Strip any stray HTML / markdown so tags never render as
+        # literal text in this plain-text label (belt-and-braces on top
+        # of the plain-text insight generation below).
+        from src.utils import strip_formatting
+        ui.label(strip_formatting(text)).style(
             f"font-size: 12px; color: {t.TEXT}; line-height: 1.45; "
             f"flex: 1; min-width: 0;"
         )
@@ -753,7 +757,7 @@ def _build_insights(
         ip_avg = sum(float(g.get("IP") or 0.0) for g in recent) / max(1, len(recent))
         out.append((
             "WORKLOAD", t.PRIMARY_HI,
-            _bold_phrase(f"{ip_avg:.1f} IP", f"average over the last {len(recent)} starts."),
+            f"{ip_avg:.1f} IP average over the last {len(recent)} starts.",
         ))
     elif games:
         orders = [int(g.get("batting_order") or 0) for g in games[-5:] if g.get("batting_order")]
@@ -761,8 +765,7 @@ def _build_insights(
             mode = max(set(orders), key=orders.count)
             out.append((
                 "LINEUP", t.PRIMARY_HI,
-                _bold_phrase(f"Hitting {_ordinal(mode)}",
-                             f"in {orders.count(mode)} of last {len(orders)} games."),
+                f"Hitting {_ordinal(mode)} in {orders.count(mode)} of last {len(orders)} games.",
             ))
 
     # 2. RECENT FORM row
@@ -772,10 +775,8 @@ def _build_insights(
         delta_word = "above" if delta > 0 else "below"
         out.append((
             "FORM", t.POS if delta > 0 else t.WARN,
-            _bold_phrase(
-                f"L5 avg {l5_avg:.2f} {stat_key}",
-                f"{abs(delta):.2f} {delta_word} the {line_f} line.",
-            ),
+            f"L5 avg {l5_avg:.2f} {stat_key}, "
+            f"{abs(delta):.2f} {delta_word} the {line_f} line.",
         ))
 
     # 3. APPROACH / ARSENAL row
@@ -786,20 +787,15 @@ def _build_insights(
         if h2h_games:
             out.append((
                 "ARSENAL", t.WARN,
-                _bold_phrase(
-                    f"H2H avg {h2h_avg:.2f} {stat_key}",
-                    f"across {h2h_games} prior meetings.",
-                ),
+                f"H2H avg {h2h_avg:.2f} {stat_key} across {h2h_games} prior meetings.",
             ))
         else:
             l20_avg = summary.get("last_20_avg")
             if l20_avg is not None:
                 out.append((
                     "ARSENAL", t.WARN,
-                    _bold_phrase(
-                        f"L20 avg {l20_avg:.2f} {stat_key}",
-                        "is the cleanest baseline absent H2H history.",
-                    ),
+                    f"L20 avg {l20_avg:.2f} {stat_key} is the cleanest baseline "
+                    "absent H2H history.",
                 ))
     else:
         # Batter -- use bats handedness + recent form
@@ -809,25 +805,16 @@ def _build_insights(
         if h2h_games:
             out.append((
                 "APPROACH", t.WARN,
-                _bold_phrase(
-                    f"{h2h_avg:.2f} avg",
-                    f"in {h2h_games} prior matchups" +
-                    (f" (bats {bats})." if bats else "."),
-                ),
+                f"{h2h_avg:.2f} avg in {h2h_games} prior matchups"
+                + (f" (bats {bats})." if bats else "."),
             ))
         elif bats:
             out.append((
                 "APPROACH", t.WARN,
-                f"Bats <b>{bats}</b>.  No prior history vs this opponent yet.",
+                f"Bats {bats}. No prior history vs this opponent yet.",
             ))
 
     return out
-
-
-def _bold_phrase(bold: str, rest: str) -> str:
-    """Inline HTML helper -- ui.label renders raw HTML when not styled
-    with white-space:pre.  Used inside _insight_row's text label."""
-    return f"<b>{bold}</b> {rest}"
 
 
 # ── Section: team matchup card ──────────────────────────────────────────────
@@ -1576,8 +1563,8 @@ def _stat_value(game: dict, stat_key: str) -> float:
 
 
 def _format_game_time(iso: Optional[str]) -> Optional[str]:
-    """ISO commence_time -> '7:05 PM ET' style label.  Returns None on
-    failure so callers can render a dash."""
+    """ISO commence_time -> '5/23 · 7:05 PM ET' (date + time in ET).
+    Returns None on failure so callers can render a dash."""
     if not iso:
         return None
     try:
@@ -1585,7 +1572,7 @@ def _format_game_time(iso: Optional[str]) -> Optional[str]:
         from zoneinfo import ZoneInfo
         dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
         et = dt.astimezone(ZoneInfo("America/New_York"))
-        return et.strftime("%-I:%M %p ET")
+        return et.strftime("%-m/%-d · %-I:%M %p ET")
     except Exception:                                                      # noqa: BLE001
         return None
 
