@@ -25,7 +25,7 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav
+from components import navbar, bottom_nav, live_score
 
 
 def _dbg(msg: str) -> None:
@@ -142,12 +142,25 @@ def _section_unified_props_list(backend) -> None:
         return
 
     cache = load_scored_props() or {}
-    rows: list[dict] = list(cache.get("picks") or [])
+    all_rows: list[dict] = list(cache.get("picks") or [])
+    # Only show props for games that have NOT started yet (FIX 1): drop any
+    # whose start time has passed or whose game is Live/Final per the
+    # schedule.  Cached in-process so this doesn't re-fetch on every render.
+    rows = [
+        r for r in all_rows
+        if not live_score.game_has_started(
+            backend,
+            commence_time=r.get("commence_time"),
+            home_team=r.get("home_team"),
+            away_team=r.get("away_team"),
+            sport="mlb",
+        )
+    ]
     rows.sort(key=lambda r: -float(r.get("confidence") or 0.0))
 
     _dbg(
-        f"[PROPS-PAGE] read scored cache: {len(rows)} picks "
-        f"(generated_at={cache.get('generated_at')})"
+        f"[PROPS-PAGE] read scored cache: {len(all_rows)} picks, "
+        f"{len(rows)} upcoming (generated_at={cache.get('generated_at')})"
     )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
@@ -169,7 +182,14 @@ def _section_unified_props_list(backend) -> None:
                 )
 
         if not rows:
-            _empty_state_message()
+            if all_rows:
+                # Had picks today, but every game has already started.
+                _no_upcoming_message(
+                    "No upcoming props",
+                    "All of today's games have already started — check back tomorrow.",
+                )
+            else:
+                _empty_state_message()
             return
 
         # ── Sort pills ───────────────────────────────────────────────────
@@ -214,6 +234,21 @@ def _empty_state_message() -> None:
         title = "Props refreshing"
         body  = "The next scored batch will appear here within a few minutes."
 
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_XL} {t.SPACE_LG}; "
+        f"gap: 6px; align-items: center;"
+    ):
+        ui.label(title).style(
+            f"font-size: 15px; font-weight: 800; color: {t.TEXT};"
+        )
+        ui.label(body).style(
+            f"font-size: 12px; color: {t.TEXT_DIM}; text-align: center;"
+        )
+
+
+def _no_upcoming_message(title: str, body: str) -> None:
+    """Placeholder shown when props exist today but all games have started."""
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
         f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_XL} {t.SPACE_LG}; "
