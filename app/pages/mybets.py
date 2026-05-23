@@ -12,6 +12,7 @@ personal-bankroll side only.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from nicegui import ui
@@ -94,21 +95,60 @@ def _recommendations_section(backend) -> None:
     except Exception:                                                      # noqa: BLE001
         pass
 
+    # Paging: show 5 game + 5 prop picks per page; "Show more" advances to
+    # the next 5 of each (each list wraps independently so a page is never
+    # empty), cycling back to the top at the end.
+    page = {"i": 0}
+    PAGE = 5
+
     @ui.refreshable
     def render() -> None:                                                  # noqa: WPS430
-        picks = _build_recommendations(backend)
+        game_picks = _build_recommendations(backend)
+        prop_picks = _build_prop_recommendations(backend)
+        total = len(game_picks) + len(prop_picks)
+
+        def _ceil_pages(n: int) -> int:
+            return max(1, -(-n // PAGE))
+
+        n_game_pages = _ceil_pages(len(game_picks))
+        n_prop_pages = _ceil_pages(len(prop_picks))
+        n_pages = max(n_game_pages, n_prop_pages)
+        if page["i"] >= n_pages:
+            page["i"] = 0
+
+        # Each list wraps on its own page count -> always full when non-empty.
+        g_start = (page["i"] % n_game_pages) * PAGE
+        p_start = (page["i"] % n_prop_pages) * PAGE
+        game_page = game_picks[g_start:g_start + PAGE]
+        prop_page = prop_picks[p_start:p_start + PAGE]
+
+        def _show_more() -> None:
+            page["i"] = (page["i"] + 1) % n_pages
+            render.refresh()
+
         with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
             with ui.row().classes("items-center w-full").style("gap: 8px;"):
                 ui.label("TODAY'S RECOMMENDATIONS").style(
                     f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                     f"color: {t.TEXT};"
                 )
-                ui.label(str(len(picks))).style(
+                ui.label(str(total)).style(
                     f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                     f"font-size: 11px; font-weight: 700; "
                     f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
                 )
-            if not picks:
+                ui.element("div").style("flex: 1;")
+                if n_pages > 1:
+                    ui.button(
+                        f"Show more · {page['i'] + 1}/{n_pages}",
+                        on_click=_show_more,
+                    ).props("no-caps unelevated dense").style(
+                        f"background: {t.CARD_HI}; color: {t.TEXT}; "
+                        f"font-size: 10.5px; font-weight: 800; "
+                        f"letter-spacing: .4px; padding: 4px 12px; "
+                        f"border-radius: {t.RADIUS_SM}; min-height: 0;"
+                    )
+            if total == 0:
                 ui.label(
                     "No untracked model picks for today. Run analysis from "
                     "the home page, or you've already tracked everything."
@@ -119,10 +159,30 @@ def _recommendations_section(backend) -> None:
                     f"text-align: center; font-style: italic;"
                 )
                 return
-            for p in picks:
-                _recommendation_row(backend, p, on_tracked=render.refresh)
+
+            if game_page:
+                _rec_subheader("GAME PICKS", len(game_picks))
+                for p in game_page:
+                    _recommendation_row(backend, p, on_tracked=render.refresh)
+            if prop_page:
+                _rec_subheader("PROP PICKS", len(prop_picks))
+                for p in prop_page:
+                    _prop_recommendation_row(backend, p, on_tracked=render.refresh)
 
     render()
+
+
+def _rec_subheader(label: str, count: int) -> None:
+    with ui.row().classes("items-center w-full").style("gap: 6px; margin-top: 4px;"):
+        ui.label(label).style(
+            f"font-size: 10.5px; font-weight: 800; letter-spacing: .6px; "
+            f"color: {t.TEXT_DIM};"
+        )
+        ui.label(str(count)).style(
+            f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+            f"font-size: 9.5px; font-weight: 700; "
+            f"padding: 1px 6px; border-radius: {t.RADIUS_PILL};"
+        )
 
 
 def _build_recommendations(backend) -> list[dict]:
@@ -214,6 +274,159 @@ def _recommendation_row(backend, p: dict, *, on_tracked) -> None:
             backend, game_id=p.get("game_id"), sport=sport, size="sm",
             bet_type=p.get("bet_type", "ml"), on_tracked=on_tracked,
         )
+
+
+def _build_prop_recommendations(backend) -> list[dict]:
+    """Today's scored player-prop picks minus those already tracked,
+    sorted by confidence DESC and normalized to the recommendation-row
+    shape.  Best-effort -- returns [] on any error."""
+    try:
+        from src.props_scored_cache import load_scored_props
+        from src import props_picks_tracker
+    except Exception:                                                      # noqa: BLE001
+        return []
+
+    try:
+        picks = (load_scored_props() or {}).get("picks") or []
+    except Exception:                                                      # noqa: BLE001
+        picks = []
+
+    def _key(d: dict) -> tuple:
+        return (
+            d.get("player"),
+            d.get("market"),
+            round(float(d.get("line") or 0), 2),
+            (d.get("side") or "").strip().title(),
+        )
+
+    try:
+        open_keys = {_key(p) for p in props_picks_tracker.get_open()}
+    except Exception:                                                      # noqa: BLE001
+        open_keys = set()
+
+    out: list[dict] = []
+    for r in picks:
+        if _key(r) in open_keys:
+            continue
+        out.append({
+            "player":  r.get("player"),
+            "market":  r.get("market"),
+            "line":    r.get("line"),
+            "side":    r.get("side"),
+            "odds":    r.get("best_odds"),
+            "conf":    r.get("confidence"),
+            "team":    r.get("team"),
+            "matchup": f"{r.get('away_team', '')} @ {r.get('home_team', '')}".strip(" @"),
+            "raw":     r,
+        })
+    out.sort(key=lambda p: -float(p.get("conf") or 0.0))
+    return out
+
+
+def _prop_recommendation_row(backend, p: dict, *, on_tracked) -> None:
+    """One untracked prop-pick row with a Track button posting to
+    /api/props/track (in-process Flask client, same as the Props page)."""
+    conf   = p.get("conf")
+    conf_s = f"{int(round(float(conf) * 100))}%" if isinstance(conf, (int, float)) else "—"
+    odds_s = _odds_str(p.get("odds"))
+    market = (p.get("market") or "").replace("_", " ").title()
+    side   = (p.get("side") or "").title()
+    line   = p.get("line")
+    detail = f"{side} {line} {market}".strip()
+    if odds_s != "—":
+        detail += f" ({odds_s})"
+
+    with ui.row().classes("items-center w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 10px;"
+    ):
+        ui.label("PROP").style(
+            f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+            f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
+            f"padding: 2px 7px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
+        )
+        with ui.column().style("flex: 1; gap: 2px; min-width: 0;"):
+            ui.label(p.get("player") or "—").style(
+                f"font-size: 13px; font-weight: 800; color: {t.TEXT}; "
+                f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            )
+            ui.label(f"{detail}  ·  {conf_s}  ·  {p.get('matchup', '')}").style(
+                f"font-size: 11px; color: {t.TEXT_DIM}; "
+                f"font-family: monospace; white-space: normal;"
+            )
+        _prop_track_button(backend, p, on_tracked=on_tracked)
+
+
+def _prop_track_button(backend, p: dict, *, on_tracked) -> None:
+    btn = ui.button("Track").props("no-caps unelevated dense").style(
+        f"background: {t.PRIMARY}; color: {t.BG}; "
+        f"font-weight: 800; font-size: 10.5px; letter-spacing: .4px; "
+        f"padding: 4px 10px; border-radius: {t.RADIUS_SM}; min-height: 0;"
+    )
+    raw = p.get("raw") or {}
+
+    async def _click():
+        btn.props("loading")
+        btn.disable()
+        try:
+            payload = {
+                "player":          p.get("player", ""),
+                "market":          p.get("market", ""),
+                "line":            p.get("line"),
+                "side":            p.get("side", "Over"),
+                "odds":            p.get("odds"),
+                "confidence":      p.get("conf"),
+                "predicted_value": raw.get("predicted_value"),
+                "team":            p.get("team", ""),
+                "event_id":        raw.get("event_id"),
+                "commence_time":   raw.get("commence_time"),
+            }
+            ok, data, _ = await asyncio.to_thread(
+                _post_prop, backend, payload
+            )
+            if ok:
+                ui.notify(
+                    f"Tracked: {p.get('player')} {p.get('side')} {p.get('line')}",
+                    type="positive",
+                )
+                btn.text = "Tracked ✓"
+                btn.props("disable")
+                if on_tracked is not None:
+                    try:
+                        on_tracked()
+                    except Exception:                                      # noqa: BLE001
+                        pass
+            else:
+                err = data.get("error") or "unknown error"
+                if "already tracked" in err.lower():
+                    ui.notify("Already tracked.", type="info")
+                    if on_tracked is not None:
+                        try:
+                            on_tracked()
+                        except Exception:                                  # noqa: BLE001
+                            pass
+                else:
+                    ui.notify(f"Track failed: {err}", type="negative")
+        except Exception as exc:                                           # noqa: BLE001
+            ui.notify(f"Track failed: {exc}", type="negative")
+        finally:
+            btn.props(remove="loading")
+            if btn.text == "Track":
+                btn.enable()
+
+    btn.on("click", _click)
+
+
+def _post_prop(backend, body: dict) -> tuple[bool, dict, int]:
+    """POST a prop pick to /api/props/track via the in-process test client."""
+    client = backend.app.test_client()
+    try:
+        resp = client.post("/api/props/track", json=body or {})
+        data = resp.get_json(force=True, silent=True) or {}
+        ok   = resp.status_code < 400 and data.get("success", True) is not False
+        return ok, data, resp.status_code
+    except Exception as exc:                                               # noqa: BLE001
+        return False, {"error": str(exc)}, 500
 
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────

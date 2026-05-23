@@ -7237,30 +7237,41 @@ def track_prop():
     if raw is None:
         return jsonify({"error": "Game not found in current analysis"}), 404
 
-    g = raw["game"]
+    g = raw.get("game") or {}
     prop_line = None
     if bet_type == "run_line":
-        pred = raw.get("rl_pred")
+        # Raw nested rows carry rl_pred; snapshot-hydrated flat rows carry
+        # the serialized "run_line" dict (same field names).  Fall back so
+        # tracking works on either shape instead of 404-ing on flat rows.
+        pred = raw.get("rl_pred") or raw.get("run_line")
         if not pred:
-            return jsonify({"error": "No run line prediction for this game"}), 404
-        side        = pred["side"]
-        team        = pred["pick_team"]
-        odds        = pred["pick_odds"]
-        model_p     = pred["pick_prob"]
-        edge        = abs(pred["edge"])
+            return jsonify({
+                "success":     False,
+                "unavailable": True,
+                "message":     "Run line prediction not available for this game",
+            }), 200
+        side        = pred.get("side")
+        team        = pred.get("pick_team")
+        odds        = pred.get("pick_odds")
+        model_p     = pred.get("pick_prob")
+        edge        = abs(pred.get("edge") or 0.0)
         label       = "run_line"
         prop_line   = -float(pred.get("run_line_point", -1.5))  # settlement threshold = -run_line_point
     elif bet_type == "totals":
-        pred = raw.get("totals_pred")
+        pred = raw.get("totals_pred") or raw.get("totals")
         if not pred:
-            return jsonify({"error": "No totals prediction for this game"}), 404
-        side        = pred["direction"]   # "over" or "under"
-        team        = f"{pred['direction'].title()} {pred['total_line']}"
-        odds        = pred["pick_odds"]
-        model_p     = pred["pick_prob"]
-        edge        = abs(pred["edge"])
+            return jsonify({
+                "success":     False,
+                "unavailable": True,
+                "message":     "Totals prediction not available for this game",
+            }), 200
+        side        = pred.get("direction")   # "over" or "under"
+        team        = f"{(pred.get('direction') or '').title()} {pred.get('total_line')}"
+        odds        = pred.get("pick_odds")
+        model_p     = pred.get("pick_prob")
+        edge        = abs(pred.get("edge") or 0.0)
         label       = "totals"
-        prop_line   = float(pred["total_line"])
+        prop_line   = float(pred.get("total_line"))
     else:
         return jsonify({"error": f"Unknown bet_type: {bet_type}"}), 400
 
