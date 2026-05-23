@@ -1950,20 +1950,54 @@ def _save_reg_metadata(
     batter_feature_names: list[str],
 ) -> None:
     """Save feature name lists so the inference layer can build correct-length
-    zero vectors without importing the training data at runtime."""
+    zero vectors without importing the training data at runtime.
+
+    MERGES with the existing file rather than overwriting it: when this run
+    used --skip-batter (so batter_feature_names is empty) the prior batter
+    list on disk is preserved, and vice versa.  Without this, every partial
+    retrain clobbered the other side's list, producing PR-merge conflicts
+    in app/.cache/props_reg_metadata.json AND breaking the hardcoded-fallback
+    invariant in props_model.py (the inference layer relies on this file
+    when it exists).
+
+    A side is treated as "this run produced names for it" only when the
+    passed list is non-empty.  An empty list -> read the prior value from
+    disk -> keep that.
+    """
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     out_path = _CACHE_DIR / "props_reg_metadata.json"
+
+    # Read the existing file so we can preserve the side this run didn't train.
+    existing: dict = {}
+    if out_path.exists():
+        try:
+            existing = json.loads(out_path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001
+            _log(f"regression metadata read failed ({exc}) -- starting from empty")
+
+    prior_pitcher = list(existing.get("pitcher_feature_names") or [])
+    prior_batter  = list(existing.get("batter_feature_names")  or [])
+
+    # An empty new list means "this run didn't train that side, keep the prior".
+    new_pitcher = pitcher_feature_names if pitcher_feature_names else prior_pitcher
+    new_batter  = batter_feature_names  if batter_feature_names  else prior_batter
+
     payload = {
         "generated_at":          datetime.utcnow().isoformat() + "Z",
-        "pitcher_feature_names": pitcher_feature_names,
-        "batter_feature_names":  batter_feature_names,
+        "pitcher_feature_names": new_pitcher,
+        "batter_feature_names":  new_batter,
     }
     try:
         out_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        _log(f"regression metadata saved: {out_path}")
+        _log(
+            f"regression metadata saved: {out_path} "
+            f"(pitcher={len(new_pitcher)} batter={len(new_batter)}; "
+            f"pitcher_source={'this_run' if pitcher_feature_names else 'prior'} "
+            f"batter_source={'this_run' if batter_feature_names else 'prior'})"
+        )
     except Exception as exc:  # noqa: BLE001
         _log(f"regression metadata save failed: {exc}")
 
