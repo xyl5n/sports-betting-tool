@@ -7500,6 +7500,253 @@ def remove_bet(bet_id: str):
     return jsonify({"success": True})
 
 
+# ── My Bets: per-card remove / edit + manual add ───────────────────────────────
+
+def _mybets_add_options() -> dict:
+    """Everything the Add-Bet flow needs for autocomplete + confidence
+    prefill: today's games (with per-bet-type model picks) and today's
+    scored props.  Built from the in-memory analysis state + scored-props
+    cache — no external API call."""
+    try:
+        hydrate_state()
+    except Exception:                                                       # noqa: BLE001
+        pass
+
+    games: list[dict] = []
+    for sport, state in (("mlb", _analysis_state), ("wnba", _wnba_analysis_state)):
+        for r in (state.get("results") or []):
+            if not isinstance(r, dict):
+                continue
+            g   = r.get("game") if isinstance(r.get("game"), dict) else {}
+            gid = r.get("game_id") or r.get("id") or g.get("id")
+            home = r.get("home_team") or g.get("home_team")
+            away = r.get("away_team") or g.get("away_team")
+            if not (gid and home and away):
+                continue
+            pred = r.get("prediction") if isinstance(r.get("prediction"), dict) else {}
+            hwp  = r.get("home_win_prob")
+            if hwp is None:
+                hwp = pred.get("home_win_prob")
+            rl  = (r.get("run_line") if isinstance(r.get("run_line"), dict)
+                   else (r.get("rl_pred") if isinstance(r.get("rl_pred"), dict) else None))
+            tot = (r.get("totals") if isinstance(r.get("totals"), dict)
+                   else (r.get("totals_pred") if isinstance(r.get("totals_pred"), dict) else None))
+            game_obj = {
+                "game_id":       str(gid),
+                "sport":         sport,
+                "home_team":     home,
+                "away_team":     away,
+                "commence_time": r.get("commence_time") or g.get("commence_time") or "",
+                "home_odds":     r.get("home_odds") or g.get("h2h_home_odds"),
+                "away_odds":     r.get("away_odds") or g.get("h2h_away_odds"),
+                "home_win_prob": hwp,
+                "pick_team":     r.get("pick_team"),
+                "pick_prob":     r.get("pick_prob"),
+            }
+            if rl:
+                game_obj["run_line"] = {
+                    "pick_team":      rl.get("pick_team"),
+                    "pick_prob":      rl.get("pick_prob"),
+                    "pick_odds":      rl.get("pick_odds"),
+                    "run_line_point": rl.get("run_line_point"),
+                }
+            if tot:
+                game_obj["totals"] = {
+                    "direction":  tot.get("direction"),
+                    "total_line": tot.get("total_line"),
+                    "pick_prob":  tot.get("pick_prob"),
+                    "over_odds":  tot.get("over_odds"),
+                    "under_odds": tot.get("under_odds"),
+                    "pick_odds":  tot.get("pick_odds"),
+                }
+            games.append(game_obj)
+
+    props: list[dict] = []
+    try:
+        from src.props_scored_cache import load_scored_props
+        for p in (load_scored_props().get("picks") or []):
+            props.append({
+                "player":          p.get("player"),
+                "team":            p.get("team"),
+                "market":          p.get("market"),
+                "line":            p.get("line"),
+                "side":            p.get("side") or p.get("recommendation") or "Over",
+                "confidence":      p.get("confidence"),
+                "predicted_value": p.get("predicted_value"),
+                "best_odds":       p.get("best_odds"),
+                "over_odds":       p.get("over_odds"),
+                "under_odds":      p.get("under_odds"),
+                "event_id":        p.get("event_id"),
+                "commence_time":   p.get("commence_time"),
+                "home_team":       p.get("home_team"),
+                "away_team":       p.get("away_team"),
+            })
+    except Exception:                                                       # noqa: BLE001
+        pass
+
+    return {"games": games, "props": props}
+
+
+@app.route("/api/mybets/add_options", methods=["POST"])
+def mybets_add_options():
+    """Return today's games + props for the Add-Bet autocomplete."""
+    return jsonify(_py(_mybets_add_options()))
+
+
+@app.route("/api/mybets/remove", methods=["POST"])
+def mybets_remove():
+    """Remove one tracked bet (game or prop) from the local file + Supabase."""
+    data   = request.get_json() or {}
+    kind   = (data.get("kind") or "game").lower()
+    bet_id = data.get("id")
+    if not bet_id:
+        return jsonify({"error": "id required"}), 400
+
+    if kind == "prop":
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        ok = _ppt.remove_pick(bet_id)
+        return (jsonify({"success": True}) if ok
+                else (jsonify({"error": "Pick not found"}), 404))
+
+    sport  = (data.get("sport") or "mlb").lower()
+    path   = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
+    ledger = Ledger(path=path, starting_bankroll=1000.0)
+    removed = ledger.remove_bet(bet_id)
+    if removed is None:
+        return jsonify({"error": "Bet not found"}), 404
+    try:
+        from src import db as _db
+        _db.delete_bet(bet_id)
+    except Exception:                                                       # noqa: BLE001
+        pass
+    return jsonify({"success": True})
+
+
+@app.route("/api/mybets/edit", methods=["POST"])
+def mybets_edit():
+    """Edit fields (odds / line / actual_payout / notes) on one tracked bet."""
+    data   = request.get_json() or {}
+    kind   = (data.get("kind") or "game").lower()
+    bet_id = data.get("id")
+    if not bet_id:
+        return jsonify({"error": "id required"}), 400
+    fields = {k: data.get(k) for k in ("odds", "line", "actual_payout", "notes")
+              if data.get(k) is not None}
+
+    if kind == "prop":
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        updated = _ppt.update_pick(bet_id, **fields)
+        return (jsonify({"success": True, "bet": _py(updated)}) if updated
+                else (jsonify({"error": "Pick not found"}), 404))
+
+    sport  = (data.get("sport") or "mlb").lower()
+    path   = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
+    ledger = Ledger(path=path, starting_bankroll=1000.0)
+    updated = ledger.update_bet(bet_id, **fields)
+    if updated is None:
+        return jsonify({"error": "Bet not found"}), 404
+    return jsonify({"success": True, "bet": _py(updated)})
+
+
+@app.route("/api/mybets/add", methods=["POST"])
+def mybets_add():
+    """Manually add a bet (game or prop) with result=pending."""
+    import uuid as _uuid
+    from src.kelly import american_to_decimal, tracked_bet_kelly
+
+    data     = request.get_json() or {}
+    kind     = (data.get("kind") or "game").lower()
+    bankroll = float(data.get("bankroll") or 0)
+
+    if kind == "prop":
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        try:
+            line = float(data["line"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "line must be a number"}), 400
+        player = (data.get("player") or "").strip()
+        market = (data.get("market") or "").strip()
+        if not player or not market:
+            return jsonify({"error": "player and market are required"}), 400
+        pid = _ppt.add_manual_pick(
+            player=player, market=market, line=line,
+            side=(data.get("side") or "Over").strip().title(),
+            odds=data.get("odds"),
+            confidence=float(data.get("confidence") or 0),
+            predicted_value=data.get("predicted_value"),
+            team=data.get("team") or "",
+            event_id=data.get("event_id"),
+            commence_time=data.get("commence_time"),
+            notes=data.get("notes"),
+        )
+        if pid is None:
+            return jsonify({"error": "This pick is already tracked"}), 409
+        return jsonify({"success": True, "id": pid})
+
+    # ── Game bet ────────────────────────────────────────────────────────────
+    sport     = (data.get("sport") or "mlb").lower()
+    sport_cfg = SPORTS.get(sport) or SPORTS["mlb"]
+    bet_type  = (data.get("bet_type") or "ml").lower()   # ml | run_line | total
+    team      = (data.get("team") or "").strip()
+    home_team = (data.get("home_team") or "").strip()
+    away_team = (data.get("away_team") or "").strip()
+    try:
+        odds = int(data.get("odds"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "odds must be an integer"}), 400
+    prob = float(data.get("confidence") or 0)
+    if not (0.0 < prob < 1.0):
+        return jsonify({"error": "confidence must be between 0 and 1"}), 400
+
+    edge = prob - (1.0 / american_to_decimal(odds))
+    stake, _flag = tracked_bet_kelly(prob, odds, bankroll)
+
+    path   = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
+    ledger = Ledger(path=path, starting_bankroll=1000.0)
+    game = {
+        "id":            data.get("game_id") or str(_uuid.uuid4()),
+        "home_team":     home_team,
+        "away_team":     away_team,
+        "commence_time": data.get("commence_time") or "",
+    }
+
+    label, side, prop_line, bet_team = "single", "", None, team
+    if bet_type == "run_line":
+        label = "spread" if sport == "wnba" else "run_line"
+        side  = "home" if team == home_team else "away"
+        try:
+            prop_line = -float(data.get("line"))
+        except (TypeError, ValueError):
+            prop_line = None
+    elif bet_type == "total":
+        label = "totals"
+        side  = (data.get("side") or "over").lower()
+        try:
+            tl = float(data.get("line"))
+            prop_line = tl
+            bet_team  = f"{side.title()} {tl:g}"
+        except (TypeError, ValueError):
+            prop_line = None
+    else:  # moneyline
+        side = "home" if team == home_team else "away"
+
+    new_id = ledger.add_bet(
+        game=game, sport=sport, sport_key=sport_cfg.odds_key,
+        side=side, team=bet_team, odds=odds, model_prob=prob, edge=edge,
+        model_amount=0.0, confirmed=True, confirmed_amount=stake,
+        bet_type=label, prop_line=prop_line, confidence_tier="manual",
+    )
+    if data.get("notes"):
+        b = next((x for x in ledger.data["open_bets"] if x.get("id") == new_id), None)
+        if b is not None:
+            b["notes"] = str(data["notes"])
+    ledger.save()
+    return jsonify({"success": True, "id": new_id, "stake": stake})
+
+
 def _build_explain_prompt(d: dict) -> str:
     bet_type = d.get("bet_type", "ml")
     home     = d.get("home_team", "Home")
