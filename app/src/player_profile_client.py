@@ -637,7 +637,13 @@ def _scored_cache_to_entry(pick: dict) -> dict:
     """Project a scored_cache row into the dict shape the player page
     consumes.  Same fields the props page reads, plus the
     ``source="scored_cache"`` marker so log lines can attribute where
-    the pick came from."""
+    the pick came from.
+
+    Carries through the matchup/time fields (home_team, away_team,
+    team, event_id, commence_time) so the player-page info row can
+    show OPP + GAME TIME without a fresh schedule fetch -- they were
+    being dropped here, which is why those fields rendered as dashes.
+    """
     return {
         "market":          pick.get("market"),
         "line":            pick.get("line"),
@@ -652,6 +658,12 @@ def _scored_cache_to_entry(pick: dict) -> dict:
         "ev_pct":          pick.get("ev_pct"),
         "line_type":       pick.get("line_type", "main"),
         "is_primary":      bool(pick.get("is_primary", True)),
+        # Matchup + schedule context (used by the player-page info row).
+        "home_team":       pick.get("home_team"),
+        "away_team":       pick.get("away_team"),
+        "team":            pick.get("team"),
+        "event_id":        pick.get("event_id"),
+        "commence_time":   pick.get("commence_time"),
         "source":          "scored_cache",
     }
 

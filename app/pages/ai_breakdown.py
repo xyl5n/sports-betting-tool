@@ -370,10 +370,13 @@ def _bubble(role: str, content: str, *, placeholder: bool = False) -> None:
     border  = "none" if is_user else f"1px solid {t.BORDER}"
 
     with ui.row().classes("w-full").style(f"justify-content: {align};"):
-        # Use ui.html with newline -> <br> so the assistant's line-break
-        # separation survives.  Escape angle brackets so injected text
-        # can't render as HTML.
-        text = _escape_html(content).replace("\n", "<br>")
+        # Strip any HTML/markdown the model may have emitted (the system
+        # prompt bans formatting, but we belt-and-braces it here so a
+        # stray <b> or **bold** never shows as literal text), then
+        # escape angle brackets so injected text can't render as HTML,
+        # and convert newlines to <br> so line breaks survive.
+        from src.utils import strip_formatting
+        text = _escape_html(strip_formatting(content)).replace("\n", "<br>")
         if placeholder:
             text = '<span style="opacity:.6;">…</span>'
         ui.html(
