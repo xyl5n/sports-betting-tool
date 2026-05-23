@@ -554,8 +554,8 @@ def _purge_stale_caches_on_boot() -> None:
     # _cache layer also holds stale odds payloads from that run.
     # Wipe the odds-cache keys so the next analyze hits The Odds API
     # for fresh lines instead of recycling yesterday's.  Same matchup
-    # patterns _run_midnight_reset uses, so the behavior matches a
-    # real midnight cron firing.
+    # patterns the nightly full-clear job (_run_job2_full_clear) uses,
+    # so the behavior matches a real nightly cron firing.
     if snapshot_was_stale:
         try:
             # Glob the .cache/ dir for every "odds_*.json" file -- the
@@ -3302,9 +3302,10 @@ def schedule_for_date(sport: str):
 
 def _prefetch_schedules_next_n_days(n: int = 7) -> dict:
     """Warm the schedule cache for today + the next n-1 days across
-    both sports.  Wired into _run_midnight_reset so every ET day boots
-    with the next week pre-cached -- subsequent user navigations to
-    those dates hit the cache instead of a live API call.
+    both sports.  Used by the on-demand schedule endpoint for forward
+    date navigation so user moves through the date nav hit the cache
+    instead of a live API call.  (The nightly cycle's JOB 3 prefetches
+    TODAY only via _fetch_raw_schedule -- see _run_job3_games_prefetch.)
 
     Returns a summary dict for logging.  Best-effort: per-date / per-
     sport errors are caught and counted, never propagated."""
@@ -3374,9 +3375,12 @@ def _prefetch_no_odds_predictions(sport: str, date_str: str) -> dict:
     """Run _predict_no_odds_game on every game in the sport's schedule
     for date_str, then persist the {game_id: prediction} map.
 
-    Called from _run_midnight_reset so the new ET day boots with
-    predictions ready for every scheduled game -- the first page
-    load doesn't have to wait on the GameStore + model load before
+    Called on-demand by the schedule endpoint (and previously by the
+    midnight reset).  NOTE: the nightly cycle's JOB 3 deliberately does
+    NOT call this -- the 3 AM prefetch is schedule-only (no model
+    scoring); the real predictions come from the 8 AM analysis run.
+    When invoked, it leaves predictions ready for every scheduled game
+    so a page load doesn't wait on the GameStore + model load before
     seeing cards with Predicted Winner / Run Line / Projected Total.
 
     Per-game failures are skipped (logged with the matchup).  An
@@ -8927,61 +8931,104 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
         _schedule_auto_retry(label)
 
 
-def _run_midnight_reset() -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+#  Nightly three-job cycle (replaces the old single midnight_reset):
+#
+#    JOB 1  1:00 AM ET  final settlement   -- last-chance settle pass
+#    JOB 2  2:00 AM ET  full clear         -- wipe the day to a clean slate
+#    JOB 3  3:00 AM ET  games prefetch     -- schedule-only stub cards
+#
+#  The 8 AM auto-analysis job then runs as normal against the freshly
+#  prefetched schedule.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_job1_final_settlement() -> None:
+    """JOB 1 (1:00 AM ET) -- final settlement pass.
+
+    Runs the full settlement job in forced mode so it bypasses the
+    game-hours gate and catches anything the day's 30-minute
+    auto-settlement runs missed: open game picks, open prop picks,
+    postponed-game voids.  Each settle updates the model bankroll +
+    W/L records + Supabase via the existing Ledger / props_ledger
+    settle paths.
+
+    Logs a one-line summary: game picks settled, prop picks settled,
+    and total realized model P/L for the day.
     """
-    Midnight ET reset — clear all game data so the new day starts clean.
-    Deletes analysis caches, snapshot, timestamps, and odds API cache files.
-    In-memory state is also zeroed so the UI shows "Never run" until analysis
-    is triggered manually or by the 8 AM auto-analysis job.
-    """
-    _eprint("MIDNIGHT-RESET: clearing all game data for new day")
+    _eprint("NIGHTLY JOB 1 (final settlement): starting forced settlement pass")
     try:
-        # Delete disk analysis caches
+        result = _run_auto_settlement_job(force=True) or {}
+        _eprint(
+            "NIGHTLY JOB 1 (final settlement): COMPLETE -- "
+            f"game_picks_settled={result.get('settled', 0)} "
+            f"({result.get('wins', 0)}W/{result.get('losses', 0)}L, "
+            f"{result.get('voided', 0)} voided)  "
+            f"prop_picks_settled={result.get('props_settled', 0)}  "
+            f"total_model_pnl=${result.get('total_pnl', 0.0):+.2f} "
+            f"(game ${result.get('game_pnl', 0.0):+.2f} / "
+            f"props ${result.get('props_pnl', 0.0):+.2f})"
+        )
+    except Exception as _exc:                                             # noqa: BLE001
+        _eprint(f"NIGHTLY JOB 1 (final settlement): FAILED: "
+                f"{type(_exc).__name__}: {_exc}\n{traceback.format_exc()}")
+
+
+def _run_job2_full_clear() -> None:
+    """JOB 2 (2:00 AM ET) -- clear the website completely.
+
+    Resets every layer that holds today's picks / props / analysis so
+    the site looks like a brand-new day with nothing loaded:
+
+      * data/ensemble_picks_today.json, data/daily_picks.json (disk)
+      * analysis caches + daily snapshot + timestamps (disk)
+      * in-memory MLB + WNBA analysis state
+      * the props scored cache (local + Supabase)
+      * the raw props-lines cache (local + Supabase)
+      * Supabase app_cache rows for snapshot / analysis / daily_picks
+
+    Deliberately does NOT prefetch schedules or run any model scoring
+    -- that's JOB 3's responsibility, an hour later, so the clear is a
+    clean, fast, side-effect-free wipe.
+    """
+    _eprint("NIGHTLY JOB 2 (full clear): clearing all game + prop data")
+    try:
+        # ── Disk caches ──────────────────────────────────────────────────
         for _path in (_ANALYSIS_CACHE_FILE, _WNBA_ANALYSIS_CACHE_FILE):
             try:
                 _path.unlink(missing_ok=True)
-            except Exception:
+            except Exception:                                             # noqa: BLE001
                 pass
-        # Clear daily snapshot (both sports at once)
         with _snapshot_lock:
             try:
                 _DAILY_SNAPSHOT_FILE.unlink(missing_ok=True)
                 _DAILY_SNAPSHOT_TMP.unlink(missing_ok=True)
-            except Exception:
+            except Exception:                                             # noqa: BLE001
                 pass
-        # Clear analysis timestamps file
         try:
             _ANALYSIS_TIMESTAMPS_FILE.unlink(missing_ok=True)
-        except Exception:
+        except Exception:                                                 # noqa: BLE001
             pass
-        # Delete picks files so the UI shows empty instead of yesterday's picks
-        # during the window between midnight and the 8 AM auto-analysis run.
         for _picks_path in (_ENSEMBLE_PICKS_FILE, _DAILY_PICKS_FILE):
             try:
                 _picks_path.unlink(missing_ok=True)
-            except Exception:
+            except Exception:                                             # noqa: BLE001
                 pass
-        # Reload ensemble_store in-memory cache so get_picks() returns empty.
+
+        # ── In-memory state ──────────────────────────────────────────────
         try:
             ensemble_store.load()
-        except Exception:
+        except Exception:                                                 # noqa: BLE001
             pass
-        # Zero in-memory analysis states
-        _analysis_state["results"]          = []
-        _analysis_state["parlays"]          = {}
-        _analysis_state["last_analyzed_at"] = None
+        _analysis_state["results"]            = []
+        _analysis_state["parlays"]            = {}
+        _analysis_state["last_analyzed_at"]   = None
         _analysis_state["last_analysis_meta"] = {}
-        _wnba_analysis_state["results"]          = []
-        _wnba_analysis_state["parlays"]          = {}
-        _wnba_analysis_state["last_analyzed_at"] = None
+        _wnba_analysis_state["results"]            = []
+        _wnba_analysis_state["parlays"]            = {}
+        _wnba_analysis_state["last_analyzed_at"]   = None
         _wnba_analysis_state["last_analysis_meta"] = {}
-        # Evict odds API cache so fresh data is fetched on the next run.
-        # Actual cache keys include commence_from + commence_to UTC
-        # timestamps (see src.odds_client._odds_cache_key), so we glob
-        # the .cache/ directory for every file that starts with "odds_"
-        # and includes the sport key.  The previous short-key
-        # invalidate() calls never matched anything -- this is what
-        # was leaving yesterday's odds cached into the new ET day.
+
+        # ── Odds cache files ─────────────────────────────────────────────
         try:
             from pathlib import Path as _P
             _odds_wiped = 0
@@ -8991,62 +9038,97 @@ def _run_midnight_reset() -> None:
                     _odds_wiped += 1
                 except Exception:                                          # noqa: BLE001
                     pass
-            _eprint(f"MIDNIGHT-RESET: wiped {_odds_wiped} odds cache file(s)")
+            _eprint(f"NIGHTLY JOB 2 (full clear): wiped {_odds_wiped} odds cache file(s)")
         except Exception as _e:                                            # noqa: BLE001
-            _eprint(f"MIDNIGHT-RESET: odds cache wipe error: {_e}")
-        # Issue 4: also wipe the Supabase mirror so a redeploy after
-        # midnight doesn't restore yesterday's data from cache.
+            _eprint(f"NIGHTLY JOB 2 (full clear): odds cache wipe error: {_e}")
+
+        # ── Props caches (scored + raw lines) ────────────────────────────
+        try:
+            from src.props_scored_cache import clear_scored_props
+            _ps = clear_scored_props()
+            _eprint(f"NIGHTLY JOB 2 (full clear): props scored cache cleared {_ps}")
+        except Exception as _e:                                            # noqa: BLE001
+            _eprint(f"NIGHTLY JOB 2 (full clear): props scored clear error: {_e}")
+        try:
+            from pathlib import Path as _P
+            _props_raw_wiped = 0
+            for _f in _P(".cache").glob("props_mlb_*.json"):
+                try:
+                    _f.unlink()
+                    _props_raw_wiped += 1
+                except Exception:                                          # noqa: BLE001
+                    pass
+            # Supabase raw-props row for today
+            try:
+                from src import db as _db
+                if _db.is_supabase():
+                    _db.cache_delete(f"props_mlb_{_today_et()}")
+            except Exception:                                              # noqa: BLE001
+                pass
+            _eprint(f"NIGHTLY JOB 2 (full clear): wiped {_props_raw_wiped} raw-props cache file(s)")
+        except Exception as _e:                                            # noqa: BLE001
+            _eprint(f"NIGHTLY JOB 2 (full clear): raw-props clear error: {_e}")
+
+        # ── Supabase app_cache rows ──────────────────────────────────────
         for _ckey in (_CACHE_KEY_SNAPSHOT, _CACHE_KEY_ANALYSIS_MLB, _CACHE_KEY_ANALYSIS_WNBA):
             _supabase_cache_delete(_ckey)
-
-        # Pre-fetch the next 7 days of schedules for both sports so
-        # users browsing forward in the date nav hit the Supabase
-        # cache instead of triggering live MLB / ESPN calls.  Per-date
-        # entries use the "schedule" date sentinel so they survive
-        # the daily cleaner; past-date entries written by earlier
-        # views also persist indefinitely for the historical browse.
         try:
-            _eprint("MIDNIGHT-RESET: pre-fetching next 7 days of schedules...")
-            summary = _prefetch_schedules_next_n_days(n=7)
-            for sport, days in summary.items():
-                got = sum(1 for v in days.values() if isinstance(v, int))
+            from src import db as _db
+            if _db.is_supabase():
+                _db.cache_delete("daily_picks")
+        except Exception:                                                  # noqa: BLE001
+            pass
+
+        _eprint("NIGHTLY JOB 2 (full clear): COMPLETE -- site is a clean slate")
+    except Exception as _exc:                                             # noqa: BLE001
+        _eprint(f"NIGHTLY JOB 2 (full clear): FAILED: "
+                f"{type(_exc).__name__}: {_exc}\n{traceback.format_exc()}")
+
+
+def _run_job3_games_prefetch() -> None:
+    """JOB 3 (3:00 AM ET) -- prefetch today's game schedule only.
+
+    Fetches just the matchup + start time for today's games (both
+    sports) into the schedule cache so the home + sports pages can
+    render stub cards labelled "Analysis pending" when the user wakes
+    up.  Deliberately NO odds, NO model scoring, NO no-odds
+    predictions -- this is the cheap "something to look at" pass.
+
+    The 8 AM auto-analysis job runs the real, expensive analysis
+    afterwards.
+    """
+    _eprint("NIGHTLY JOB 3 (games prefetch): fetching today's schedule (no odds, no scoring)")
+    try:
+        today_str = _today_et()
+        for _sport in ("mlb", "wnba"):
+            try:
+                games = _fetch_raw_schedule(_sport, today_str)
                 _eprint(
-                    f"MIDNIGHT-RESET: prefetch {sport}: {got}/{len(days)} days "
-                    f"-- {days}"
+                    f"NIGHTLY JOB 3 (games prefetch): {_sport} -> "
+                    f"{len(games)} game(s) cached for {today_str}"
                 )
-        except Exception as _pre:                                         # noqa: BLE001
-            _eprint(f"MIDNIGHT-RESET: prefetch error: {_pre}")
+            except Exception as _e:                                       # noqa: BLE001
+                _eprint(
+                    f"NIGHTLY JOB 3 (games prefetch): {_sport} FAILED: "
+                    f"{type(_e).__name__}: {_e}"
+                )
+        _eprint("NIGHTLY JOB 3 (games prefetch): COMPLETE -- stub cards ready for the morning")
+    except Exception as _exc:                                             # noqa: BLE001
+        _eprint(f"NIGHTLY JOB 3 (games prefetch): FAILED: "
+                f"{type(_exc).__name__}: {_exc}\n{traceback.format_exc()}")
 
-        # Pre-compute model-only predictions for every game on today's
-        # schedule (both sports).  This runs AFTER the schedule
-        # prefetch above so the predictor walks the freshly-cached
-        # game list.  Stored in Supabase under the "no_odds" date
-        # sentinel so the daily cleaner leaves them alone and they
-        # persist across Railway restarts.  Net effect: when anyone
-        # opens /sports/* during the morning -- even before the 8 AM
-        # analyze runs -- every card on the slate already has
-        # Predicted Winner / Run Line / Projected Total numbers.
-        try:
-            _eprint("MIDNIGHT-RESET: pre-computing no-odds predictions for today's slate...")
-            _today_str = _today_et()
-            for _sport in ("mlb", "wnba"):
-                try:
-                    _preds = _prefetch_no_odds_predictions(_sport, _today_str)
-                    _eprint(
-                        f"MIDNIGHT-RESET: no-odds predictions {_sport}: "
-                        f"{len(_preds)} game(s) cached"
-                    )
-                except Exception as _e:                                   # noqa: BLE001
-                    _eprint(
-                        f"MIDNIGHT-RESET: no-odds predictions {_sport} FAILED: "
-                        f"{type(_e).__name__}: {_e}"
-                    )
-        except Exception as _pe:                                          # noqa: BLE001
-            _eprint(f"MIDNIGHT-RESET: no-odds predict block error: {_pe}")
 
-        _eprint("MIDNIGHT-RESET: complete -- new day ready")
-    except Exception as _mre:
-        _eprint(f"MIDNIGHT-RESET: unexpected error: {_mre}")
+def get_todays_schedule(sport: str) -> list[dict]:
+    """Public accessor for the home/sports pages: today's prefetched
+    schedule (matchup + start time) for *sport*.  Reads the schedule
+    cache populated by JOB 3 (or any earlier on-demand fetch).  Never
+    triggers analysis or odds calls beyond the cheap schedule fetch.
+    Returns [] on any failure."""
+    try:
+        return _fetch_raw_schedule(sport.lower(), _today_et()) or []
+    except Exception as _exc:                                             # noqa: BLE001
+        _eprint(f"get_todays_schedule({sport}) failed: {_exc}")
+        return []
 
 
 def _schedule_auto_retry(label: str) -> None:
@@ -9367,6 +9449,15 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     if not settled and not voided:
         _eprint("AUTO-SETTLE: no newly settled bets")
 
+    # ── Total model P/L across everything settled this pass ─────────────────
+    # game-pick P/L is on each settled bet's "model_pnl"; prop P/L is on
+    # each settled prop bet's "model_pnl" too (props_ledger mirrors the
+    # field name).  Summing both gives the day's realized model P/L for
+    # the JOB 1 summary line.
+    game_pnl  = sum(float(s.get("model_pnl") or 0.0) for s in settled)
+    props_pnl = sum(float(b.get("model_pnl") or 0.0) for b in props_settled)
+    total_pnl = game_pnl + props_pnl
+
     # ── Update state ──────────────────────────────────────────────────────────
     with _auto_settlement_lock:
         _auto_settlement_state.update({
@@ -9378,11 +9469,15 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         })
 
     return {
-        "settled": len(settled),
-        "wins":    wins,
-        "losses":  losses,
-        "voided":  len(voided),
-        "forced":  force,
+        "settled":       len(settled),
+        "wins":          wins,
+        "losses":        losses,
+        "voided":        len(voided),
+        "props_settled": len(props_settled),
+        "game_pnl":      round(game_pnl, 2),
+        "props_pnl":     round(props_pnl, 2),
+        "total_pnl":     round(total_pnl, 2),
+        "forced":        force,
     }
 
 
@@ -9501,32 +9596,61 @@ if not _in_debug_mode or _werkzeug_main:
                     max_instances=1,
                     kwargs={"label": "noon"},
                 )
-                # Settlement runs every 30 minutes BUT only during the
-                # game-hours window (11 AM ET through 2 AM ET the next
-                # morning).  Cron hour syntax "11-23,0-2" covers that
-                # exact range so we don't burn CPU + Odds API quota
-                # polling for completed scores at 4 AM ET when nothing
-                # is in play.
+                # Intraday settlement runs every 30 minutes during the
+                # game-hours window (11 AM ET through 12:30 AM ET the
+                # next morning).  The window ends at 12:30 because the
+                # 1 AM JOB 1 below is the definitive final settlement
+                # pass; running the 30-min job past 1 AM would just
+                # race the clean nightly cycle for no benefit.
                 _sched.add_job(
                     _run_auto_settlement_job,
-                    _CronTrigger(hour="11-23,0-2", minute="0,30",
+                    _CronTrigger(hour="11-23,0", minute="0,30",
                                  timezone=_ET),
                     id="auto_settlement",
                     replace_existing=True,
                     misfire_grace_time=1800,
                     max_instances=1,
                 )
+                # ── Nightly three-job cycle ──────────────────────────────
+                # JOB 1  1:00 AM ET  final settlement
+                # JOB 2  2:00 AM ET  full clear
+                # JOB 3  3:00 AM ET  games prefetch (schedule only)
                 _sched.add_job(
-                    _run_midnight_reset,
-                    _CronTrigger(hour=0, minute=0, timezone=_ET),
-                    id="midnight_reset",
+                    _run_job1_final_settlement,
+                    _CronTrigger(hour=1, minute=0, timezone=_ET),
+                    id="nightly_settlement",
                     replace_existing=True,
                     misfire_grace_time=3600,
                     max_instances=1,
                 )
+                _sched.add_job(
+                    _run_job2_full_clear,
+                    _CronTrigger(hour=2, minute=0, timezone=_ET),
+                    id="nightly_clear",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
+                )
+                _sched.add_job(
+                    _run_job3_games_prefetch,
+                    _CronTrigger(hour=3, minute=0, timezone=_ET),
+                    id="nightly_prefetch",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
+                )
+                # Belt-and-braces: if an older deploy registered the
+                # retired midnight_reset job (persisted in a jobstore),
+                # remove it so it can't fire alongside the new cycle.
+                try:
+                    _sched.remove_job("midnight_reset")
+                    print("STARTUP: removed retired midnight_reset job",
+                          flush=True, file=sys.stderr)
+                except Exception:                                          # noqa: BLE001
+                    pass
                 print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET", flush=True, file=sys.stderr)
-                print("STARTUP: auto-settlement job scheduled — every 30 min during 11 AM–2 AM ET window", flush=True, file=sys.stderr)
-                print("STARTUP: midnight reset job scheduled — 12:00 AM ET", flush=True, file=sys.stderr)
+                print("STARTUP: auto-settlement job scheduled — every 30 min during 11 AM–12:30 AM ET window", flush=True, file=sys.stderr)
+                print("STARTUP: nightly cycle scheduled — JOB1 settle 1 AM, JOB2 clear 2 AM, JOB3 prefetch 3 AM ET", flush=True, file=sys.stderr)
 
                 # Player-props Tier 1 refresh -- every 15 min during game
                 # hours (11 AM-11 PM ET).  Tier 1 covers the four high-
@@ -9775,7 +9899,9 @@ def _boot_health_report() -> None:
         ("auto_analysis_morning", "8 AM analysis"),
         ("auto_analysis_noon",    "12 PM refresh"),
         ("auto_settlement",       "30-min settlement"),
-        ("midnight_reset",        "midnight reset"),
+        ("nightly_settlement",    "JOB1 final settlement 1 AM"),
+        ("nightly_clear",         "JOB2 full clear 2 AM"),
+        ("nightly_prefetch",      "JOB3 games prefetch 3 AM"),
         ("nightly_retrain",       "2 AM model retrain"),
     )
     if sched is not None:

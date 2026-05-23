@@ -169,6 +169,8 @@ def _layout(backend) -> None:
         f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
     ):
         _guarded_section("chips", lambda: _section_chips(backend))
+        _guarded_section("todays_games_stub",
+                         lambda: _section_todays_games_stub(backend))
         _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
         _guarded_section("confidence_carousel",
                          lambda: _section_confidence_carousel(backend))
@@ -238,6 +240,101 @@ def _section_chips(backend) -> None:
             _chip_overall(overall)
         _chip_best_model(best_m)
         _chip_best_bet_type(best_t)
+
+
+def _section_todays_games_stub(backend) -> None:
+    """Schedule-only stub cards shown on a fresh day.
+
+    Between the 2 AM full-clear and the 8 AM analysis run, there are no
+    picks to surface -- but the 3 AM games-prefetch job has cached
+    today's schedule.  This section renders those games as lightweight
+    "Analysis pending" stub cards so the user has something to see when
+    they wake up.
+
+    Suppressed entirely once analysis has produced results (the EV /
+    confidence carousels below take over).  Renders nothing if the
+    schedule cache is also empty.
+    """
+    # If either sport already has analysis results, the carousels cover
+    # the slate -- don't show stubs.
+    try:
+        mlb_results  = backend._analysis_state.get("results") or []
+        wnba_results = backend._wnba_analysis_state.get("results") or []
+    except Exception:                                                     # noqa: BLE001
+        mlb_results = wnba_results = []
+    if mlb_results or wnba_results:
+        return
+
+    # Pull today's prefetched schedule (cheap, cache-backed -- no odds,
+    # no analysis).
+    try:
+        games = list(backend.get_todays_schedule("mlb"))
+    except Exception:                                                     # noqa: BLE001
+        games = []
+    try:
+        games += list(backend.get_todays_schedule("wnba"))
+    except Exception:                                                     # noqa: BLE001
+        pass
+    if not games:
+        return
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label("TODAY'S GAMES").style(
+                f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                f"color: {t.TEXT};"
+            )
+            ui.label("Analysis pending").style(
+                f"background: {t.CARD_HI}; color: {t.WARN}; "
+                f"font-size: 10.5px; font-weight: 700; letter-spacing: .3px; "
+                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+            )
+
+        with ui.element("div").classes("game-grid w-full"):
+            for g in games:
+                _stub_game_card(g)
+
+
+def _stub_game_card(game: dict) -> None:
+    """One schedule-only stub card: matchup + time + 'Analysis pending'."""
+    away = (game.get("away_team") or "").strip() or "TBD"
+    home = (game.get("home_team") or "").strip() or "TBD"
+    time_str = _fmt_game_time(game.get("commence_time"))
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 8px; "
+        f"min-width: 0;"
+    ):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label(f"{away}  @  {home}").style(
+                f"font-size: 14px; font-weight: 800; color: {t.TEXT}; "
+                f"flex: 1; min-width: 0; white-space: nowrap; "
+                f"overflow: hidden; text-overflow: ellipsis;"
+            )
+            ui.label(time_str).style(
+                f"font-size: 11.5px; font-weight: 700; color: {t.TEXT_DIM}; "
+                f"font-family: monospace; flex-shrink: 0;"
+            )
+        ui.label("Analysis pending").style(
+            f"font-size: 10px; font-weight: 700; letter-spacing: .4px; "
+            f"color: {t.WARN}; background: rgba(245, 158, 11, .08); "
+            f"padding: 3px 8px; border-radius: {t.RADIUS_PILL}; "
+            f"align-self: flex-start;"
+        )
+
+
+def _fmt_game_time(iso) -> str:
+    """ISO commence_time -> '7:05 PM ET'.  Returns 'TBD' on failure."""
+    if not iso:
+        return "TBD"
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p ET")
+    except Exception:                                                     # noqa: BLE001
+        return "TBD"
 
 
 def _chip_overall(overall: dict) -> None:
