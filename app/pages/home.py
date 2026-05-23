@@ -291,15 +291,59 @@ def _section_todays_games_stub(backend) -> None:
             )
 
         with ui.element("div").classes("game-grid w-full"):
-            for g in games:
+            for g in _dedup_stub_games(games):
                 _stub_game_card(g)
 
 
+def _dedup_stub_games(games: list[dict]) -> list[dict]:
+    """Belt-and-braces dedup for the stub list -- collapses any same
+    matchup + same ET date that slipped through (e.g. a schedule row
+    cached before the upstream dedup shipped, or a postponed twin).
+    Prefers a live/scored entry over a plain scheduled one."""
+    def key(g: dict) -> tuple:
+        ct = g.get("commence_time") or ""
+        return ((g.get("away_team") or "").strip().lower(),
+                (g.get("home_team") or "").strip().lower(), ct[:10])
+
+    def is_ppd(g: dict) -> bool:
+        ds = (g.get("detailed_status") or "").lower()
+        return "postpon" in ds or (g.get("coded_status") or "") in ("D", "DR", "PR")
+
+    def prio(g: dict) -> int:
+        if is_ppd(g):
+            return 0
+        if _stub_is_live(g):
+            return 3
+        return 1
+
+    best: dict[tuple, dict] = {}
+    for g in games:
+        k = key(g)
+        if k not in best or prio(g) > prio(best[k]):
+            best[k] = g
+    return list(best.values())
+
+
+def _stub_is_live(game: dict) -> bool:
+    """True when the schedule data marks this game in progress."""
+    return bool(
+        game.get("is_live")
+        or game.get("status") == "Live"
+        or (game.get("coded_status") or "") == "I"
+    )
+
+
 def _stub_game_card(game: dict) -> None:
-    """One schedule-only stub card: matchup + time + 'Analysis pending'."""
+    """One schedule-only stub card.
+
+    In-progress games (BUG 2) show a LIVE badge + the current score
+    pulled straight from the schedule response instead of the static
+    tip time; pre-game cards keep the scheduled time + "Analysis
+    pending" label.
+    """
     away = (game.get("away_team") or "").strip() or "TBD"
     home = (game.get("home_team") or "").strip() or "TBD"
-    time_str = _fmt_game_time(game.get("commence_time"))
+    is_live = _stub_is_live(game)
 
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
@@ -312,16 +356,36 @@ def _stub_game_card(game: dict) -> None:
                 f"flex: 1; min-width: 0; white-space: nowrap; "
                 f"overflow: hidden; text-overflow: ellipsis;"
             )
-            ui.label(time_str).style(
-                f"font-size: 11.5px; font-weight: 700; color: {t.TEXT_DIM}; "
-                f"font-family: monospace; flex-shrink: 0;"
+            if is_live:
+                ui.html(
+                    f'<span style="display:inline-flex; align-items:center; gap:5px; '
+                    f'color:{t.NEG}; font-size:11px; font-weight:800; '
+                    f'letter-spacing:.4px; flex-shrink:0;">'
+                    f'<span style="width:7px; height:7px; border-radius:50%; '
+                    f'background:{t.NEG}; box-shadow:0 0 6px {t.NEG};"></span>LIVE</span>'
+                )
+            else:
+                ui.label(_fmt_game_time(game.get("commence_time"))).style(
+                    f"font-size: 11.5px; font-weight: 700; color: {t.TEXT_DIM}; "
+                    f"font-family: monospace; flex-shrink: 0;"
+                )
+
+        if is_live:
+            a_sc = game.get("away_score")
+            h_sc = game.get("home_score")
+            a_sc = 0 if a_sc is None else a_sc
+            h_sc = 0 if h_sc is None else h_sc
+            ui.label(f"{away} {a_sc}   —   {home} {h_sc}").style(
+                f"font-size: 13px; font-weight: 800; color: {t.POS}; "
+                f"font-family: monospace; align-self: flex-start;"
             )
-        ui.label("Analysis pending").style(
-            f"font-size: 10px; font-weight: 700; letter-spacing: .4px; "
-            f"color: {t.WARN}; background: rgba(245, 158, 11, .08); "
-            f"padding: 3px 8px; border-radius: {t.RADIUS_PILL}; "
-            f"align-self: flex-start;"
-        )
+        else:
+            ui.label("Analysis pending").style(
+                f"font-size: 10px; font-weight: 700; letter-spacing: .4px; "
+                f"color: {t.WARN}; background: rgba(245, 158, 11, .08); "
+                f"padding: 3px 8px; border-radius: {t.RADIUS_PILL}; "
+                f"align-self: flex-start;"
+            )
 
 
 def _fmt_game_time(iso) -> str:
