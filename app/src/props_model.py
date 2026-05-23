@@ -121,6 +121,53 @@ _PARK_HR: dict[str, float] = {
     "STL": 0.90, "TB":  0.90, "TEX": 1.10, "TOR": 1.05, "WSH": 0.95,
 }
 
+# ── PR6 per-stat empirical park factors (pitcher-allowed perspective) ────────
+# Mirror of PARK_FACTORS_BB / _ER / _H_ALLOWED / _OUTS in train_props_models.py.
+# Values are empirical means across 2023-2025 cached game logs after park_team
+# imputation -- regenerate by running the one-off block in train_props_models'
+# PR6 commit notes or .cache/park_factors_pitcher_empirical.json.
+#
+# These are PITCHER-side factors (how much a park inflates each stat AGAINST
+# the pitcher).  _PARK_H above is the BATTER-side hits factor with different
+# semantics and FanGraphs-derived values; do not confuse them.
+
+_PARK_BB: dict[str, float] = {
+    "ARI": 1.050, "ATL": 1.062, "BAL": 0.951, "BOS": 0.932, "CHC": 0.924,
+    "CIN": 1.006, "CLE": 1.020, "COL": 0.987, "CWS": 0.982, "DET": 0.946,
+    "HOU": 1.102, "KC":  1.009, "LAA": 1.082, "LAD": 1.024, "MIA": 0.935,
+    "MIL": 1.009, "MIN": 0.961, "NYM": 1.209, "NYY": 1.143, "OAK": 1.045,
+    "PHI": 0.957, "PIT": 1.050, "SD":  1.035, "SEA": 0.949, "SF":  0.880,
+    "STL": 0.942, "TB":  0.955, "TEX": 1.003, "TOR": 1.067, "WSH": 0.981,
+}
+
+_PARK_ER: dict[str, float] = {
+    "ARI": 1.134, "ATL": 1.057, "BAL": 1.049, "BOS": 0.967, "CHC": 0.914,
+    "CIN": 1.046, "CLE": 0.986, "COL": 1.290, "CWS": 0.899, "DET": 0.914,
+    "HOU": 1.088, "KC":  1.037, "LAA": 1.102, "LAD": 1.020, "MIA": 0.977,
+    "MIL": 0.944, "MIN": 1.075, "NYM": 1.002, "NYY": 0.999, "OAK": 0.991,
+    "PHI": 1.081, "PIT": 0.923, "SD":  0.945, "SEA": 0.921, "SF":  0.830,
+    "STL": 1.015, "TB":  0.965, "TEX": 0.961, "TOR": 1.047, "WSH": 1.070,
+}
+
+# Pitcher-allowed hits.  Distinct from _PARK_H above (batter-side factor).
+_PARK_H_ALLOWED: dict[str, float] = {
+    "ARI": 1.064, "ATL": 1.077, "BAL": 1.040, "BOS": 0.982, "CHC": 0.915,
+    "CIN": 1.003, "CLE": 1.011, "COL": 1.221, "CWS": 0.967, "DET": 0.919,
+    "HOU": 1.071, "KC":  1.076, "LAA": 1.025, "LAD": 0.932, "MIA": 1.009,
+    "MIL": 0.910, "MIN": 1.050, "NYM": 0.973, "NYY": 0.927, "OAK": 1.036,
+    "PHI": 1.053, "PIT": 0.977, "SD":  0.986, "SEA": 0.941, "SF":  0.906,
+    "STL": 1.050, "TB":  0.966, "TEX": 0.976, "TOR": 1.066, "WSH": 1.088,
+}
+
+_PARK_OUTS: dict[str, float] = {
+    "ARI": 0.967, "ATL": 1.034, "BAL": 1.013, "BOS": 0.915, "CHC": 0.947,
+    "CIN": 1.000, "CLE": 1.023, "COL": 0.994, "CWS": 0.986, "DET": 0.941,
+    "HOU": 1.067, "KC":  1.068, "LAA": 1.028, "LAD": 0.957, "MIA": 1.002,
+    "MIL": 0.936, "MIN": 1.035, "NYM": 1.032, "NYY": 1.014, "OAK": 1.065,
+    "PHI": 1.040, "PIT": 0.998, "SD":  1.002, "SEA": 1.074, "SF":  0.928,
+    "STL": 0.981, "TB":  1.000, "TEX": 1.017, "TOR": 1.062, "WSH": 1.038,
+}
+
 # Full team name → 3-letter abbreviation used by _PARK_* tables above.
 # props_client.py populates `home_team` with The Odds API's full name
 # (e.g. "New York Yankees"), so a naive `.upper()[:3]` produced "NEW"
@@ -171,6 +218,14 @@ assert set(TEAM_NAME_TO_ABBREV.values()) <= _PARK_H.keys(), \
 assert set(TEAM_NAME_TO_ABBREV.values()) <= _PARK_HR.keys(), \
     f"TEAM_NAME_TO_ABBREV maps to abbrevs missing from _PARK_HR: " \
     f"{set(TEAM_NAME_TO_ABBREV.values()) - _PARK_HR.keys()}"
+# PR6 per-stat factors — same fail-loud guarantee as the K / H / HR tables.
+for _name, _tbl in (
+    ("_PARK_BB", _PARK_BB), ("_PARK_ER", _PARK_ER),
+    ("_PARK_H_ALLOWED", _PARK_H_ALLOWED), ("_PARK_OUTS", _PARK_OUTS),
+):
+    assert set(TEAM_NAME_TO_ABBREV.values()) <= _tbl.keys(), \
+        f"TEAM_NAME_TO_ABBREV maps to abbrevs missing from {_name}: " \
+        f"{set(TEAM_NAME_TO_ABBREV.values()) - _tbl.keys()}"
 
 
 def _team_to_abbrev(home_team: str) -> str:
@@ -202,7 +257,13 @@ _PITCHER_FEATURE_NAMES: list[str] = (
     [f"szn_{c}" for c in _P_ROLL]   # 7
     + [f"r7_{c}"  for c in _P_ROLL] # 7
     + [f"r14_{c}" for c in _P_ROLL] # 7
-    + ["is_home_i", "days_since_last_start", "ip_last_30d", "ballpark_factor_k"]  # 4
+    + [
+        "is_home_i", "days_since_last_start", "ip_last_30d",
+        "ballpark_factor_k",
+        # PR6 per-stat empirical park factors (pitcher-allowed perspective)
+        "ballpark_factor_bb", "ballpark_factor_er",
+        "ballpark_factor_h", "ballpark_factor_outs",
+    ]  # 8
     + ["era_vs_lhb", "k_rate_vs_lhb", "era_vs_rhb", "k_rate_vs_rhb"]             # 4
     + [
         "opp_team_k_rate", "opp_team_woba", "opp_team_lhb_pct",                  # PR #2 opponent context
@@ -217,7 +278,7 @@ _PITCHER_FEATURE_NAMES: list[str] = (
     # was silently ignored.  Reintroduce one-by-one only with a real
     # training-time signal (weather_* via Open-Meteo archive is the most
     # viable backfill candidate).
-)  # 7+7+7+4+4+7 = 36
+)  # 7+7+7+8+4+7 = 40   (PR6 added 4 ballpark_factor_{bb,er,h,outs})
 
 _BATTER_FEATURE_NAMES: list[str] = (
     [f"szn_{c}" for c in _B_ROLL]   # 14
@@ -257,6 +318,14 @@ _PITCHER_DEFAULTS: dict[str, float] = {
     "career_bb_per_9":         3.30,
     "career_fip":              4.00,
     "career_ip":              50.0,
+    # PR6 per-stat park factors -- neutrals are 1.00 (league average).
+    # The actual park-specific value lands in the vector when home_team
+    # resolves to an abbrev in TEAM_NAME_TO_ABBREV; this default catches
+    # the unknown-team case so the slot isn't left at 0.0.
+    "ballpark_factor_bb":      1.00,
+    "ballpark_factor_er":      1.00,
+    "ballpark_factor_h":       1.00,
+    "ballpark_factor_outs":    1.00,
     # PR4 dropped the 13 phantom feature defaults that paired with the
     # always-zero-at-training INFER_FEATS.  See _PITCHER_FEATURE_NAMES
     # above for the full list of names removed.
@@ -831,6 +900,15 @@ def _build_reg_vector(prop: dict, bucket: str) -> tuple[list[float], list[str]]:
         vec[fn_idx["ballpark_factor_hits"]] = _PARK_H.get(park_team, 1.0)
     if "ballpark_factor_hr" in fn_idx:
         vec[fn_idx["ballpark_factor_hr"]] = _PARK_HR.get(park_team, 1.0)
+    # PR6 per-stat empirical park factors (pitcher-allowed perspective)
+    if "ballpark_factor_bb" in fn_idx:
+        vec[fn_idx["ballpark_factor_bb"]] = _PARK_BB.get(park_team, 1.0)
+    if "ballpark_factor_er" in fn_idx:
+        vec[fn_idx["ballpark_factor_er"]] = _PARK_ER.get(park_team, 1.0)
+    if "ballpark_factor_h" in fn_idx:
+        vec[fn_idx["ballpark_factor_h"]] = _PARK_H_ALLOWED.get(park_team, 1.0)
+    if "ballpark_factor_outs" in fn_idx:
+        vec[fn_idx["ballpark_factor_outs"]] = _PARK_OUTS.get(park_team, 1.0)
 
     # ── PR3 opp-pitcher lookup (batter only) ──────────────────────────────
     # For a batter prop, the opposing pitcher is the probable starter for

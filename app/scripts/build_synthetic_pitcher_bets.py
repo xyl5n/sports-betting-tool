@@ -48,6 +48,36 @@ from pathlib import Path
 
 _CACHE_DIR = Path(".cache")
 
+# Mirror of TEAM_NAME_TO_ABBREV in train_props_models.py / props_model.py.
+# Cached opp_team values are full team names ("Cincinnati Reds"), so we
+# normalize to abbrev for the bet's home_team field.
+_TEAM_NAME_TO_ABBREV: dict[str, str] = {
+    "Arizona Diamondbacks":"ARI","Atlanta Braves":"ATL","Baltimore Orioles":"BAL",
+    "Boston Red Sox":"BOS","Chicago Cubs":"CHC","Cincinnati Reds":"CIN",
+    "Cleveland Guardians":"CLE","Colorado Rockies":"COL","Chicago White Sox":"CWS",
+    "Detroit Tigers":"DET","Houston Astros":"HOU","Kansas City Royals":"KC",
+    "Los Angeles Angels":"LAA","Los Angeles Dodgers":"LAD","Miami Marlins":"MIA",
+    "Milwaukee Brewers":"MIL","Minnesota Twins":"MIN","New York Mets":"NYM",
+    "New York Yankees":"NYY","Oakland Athletics":"OAK","Athletics":"OAK",
+    "Philadelphia Phillies":"PHI","Pittsburgh Pirates":"PIT","San Diego Padres":"SD",
+    "Seattle Mariners":"SEA","San Francisco Giants":"SF","St. Louis Cardinals":"STL",
+    "Tampa Bay Rays":"TB","Texas Rangers":"TEX","Toronto Blue Jays":"TOR",
+    "Washington Nationals":"WSH",
+}
+
+
+def _abbrev(team_str: str) -> str:
+    if not team_str:
+        return ""
+    s = str(team_str).strip()
+    if s in _TEAM_NAME_TO_ABBREV:
+        return _TEAM_NAME_TO_ABBREV[s]
+    upper = s.upper()
+    # 3-letter abbrev passes through if it's a real team
+    if upper in set(_TEAM_NAME_TO_ABBREV.values()):
+        return upper
+    return ""
+
 # Markets we emit per pitcher game.  Maps market name -> (stat_key_in_log,
 # default_line).  Lines roughly mirror modern-era median per-start values.
 _MARKETS: dict[str, tuple[str, float]] = {
@@ -85,11 +115,24 @@ def build_bets(season: int, *, starts_only: bool = True) -> list[dict]:
     pitchers = payload.get("pitchers") or []
     _log(f"loaded {len(pitchers)} pitcher-seasons from {cache_path}")
 
+    # PR6: roster map (built once via batter_teams.json) covers every active
+    # MLB player including pitchers.  Used to recover the pitcher's team when
+    # the cached training entry has team="" (most of 2025).
+    roster_path = _CACHE_DIR / "batter_teams.json"
+    roster: dict[str, str] = {}
+    if roster_path.exists():
+        try:
+            roster = json.loads(roster_path.read_text())
+        except Exception:
+            roster = {}
+
     bets: list[dict] = []
     for p in pitchers:
         pid   = p.get("id")
         name  = p.get("name") or ""
         team  = (p.get("team") or "").strip().upper()
+        if not team and pid is not None:
+            team = (roster.get(f"{season}:{pid}") or "").strip().upper()
         for g in (p.get("games") or []):
             if starts_only and not int(g.get("games_started") or 0):
                 continue
@@ -99,6 +142,22 @@ def build_bets(season: int, *, starts_only: bool = True) -> list[dict]:
             commence = _commence_iso(date)
             if not commence:
                 continue
+            # PR6 backtest fidelity: derive real per-game park context.
+            # is_home flag comes straight from the gameLog row; home_team
+            # is the pitcher's team when is_home else opp_team (the
+            # visiting team plays at the home team's stadium).  Both are
+            # carried to the bet so backtest_props_model's _bet_to_prop_dict
+            # can hand the right park-factor key to predict() rather than
+            # forcing every bet to look like a home start.
+            is_home   = bool(g.get("is_home"))
+            opp_full  = g.get("opp_team") or ""
+            opp_abbr  = _abbrev(opp_full)
+            if is_home:
+                home_team = team or ""
+                away_team = opp_abbr
+            else:
+                home_team = opp_abbr
+                away_team = team or ""
             stats = {
                 "K":    int(g.get("K")  or 0),
                 "ER":   int(g.get("ER") or 0),
@@ -123,6 +182,9 @@ def build_bets(season: int, *, starts_only: bool = True) -> list[dict]:
                     "market":         market,
                     "player":         name,
                     "team":           team,
+                    "home_team":      home_team,  # actual venue (PR6)
+                    "away_team":      away_team,  # opposing batting team (PR6)
+                    "is_home":        is_home,    # per-game flag (PR6)
                     "line":           line,
                     "side":           side,
                     "odds":           -110,

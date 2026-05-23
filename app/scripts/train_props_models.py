@@ -212,6 +212,60 @@ PARK_FACTORS_HR: dict[str, float] = {
     "WSH": 0.95,
 }
 
+# ── PR6 per-stat empirical park factors (pitcher-allowed perspective) ────────
+# Computed by aggregating BB/ER/H/outs allowed by pitchers per (year, park)
+# across cached 2023-2025 training game logs, then taking the ratio over each
+# season's league average per pitcher-appearance and averaging across years.
+# park_team is imputed from is_home + opp_team + the cached roster map so
+# rows with empty park_team (most of 2025 and ~50% of 2023/24) still
+# contribute -- recovers 10,635 of 11,228 previously-unattributed rows.
+#
+# These are PITCHER-side factors (how much a park inflates each stat against
+# the pitcher).  They live alongside PARK_FACTORS_K which has the same
+# semantics for strikeouts.  PARK_FACTORS_H above is the batter-side hits
+# factor and is intentionally kept separate -- different empirical method.
+#
+# To refresh: rerun the one-shot block in PR6's commit message or
+# .cache/park_factors_pitcher_empirical.json (regenerated each training run).
+
+PARK_FACTORS_BB: dict[str, float] = {
+    "ARI": 1.050, "ATL": 1.062, "BAL": 0.951, "BOS": 0.932, "CHC": 0.924,
+    "CIN": 1.006, "CLE": 1.020, "COL": 0.987, "CWS": 0.982, "DET": 0.946,
+    "HOU": 1.102, "KC":  1.009, "LAA": 1.082, "LAD": 1.024, "MIA": 0.935,
+    "MIL": 1.009, "MIN": 0.961, "NYM": 1.209, "NYY": 1.143, "OAK": 1.045,
+    "PHI": 0.957, "PIT": 1.050, "SD":  1.035, "SEA": 0.949, "SF":  0.880,
+    "STL": 0.942, "TB":  0.955, "TEX": 1.003, "TOR": 1.067, "WSH": 0.981,
+}
+
+PARK_FACTORS_ER: dict[str, float] = {
+    "ARI": 1.134, "ATL": 1.057, "BAL": 1.049, "BOS": 0.967, "CHC": 0.914,
+    "CIN": 1.046, "CLE": 0.986, "COL": 1.290, "CWS": 0.899, "DET": 0.914,
+    "HOU": 1.088, "KC":  1.037, "LAA": 1.102, "LAD": 1.020, "MIA": 0.977,
+    "MIL": 0.944, "MIN": 1.075, "NYM": 1.002, "NYY": 0.999, "OAK": 0.991,
+    "PHI": 1.081, "PIT": 0.923, "SD":  0.945, "SEA": 0.921, "SF":  0.830,
+    "STL": 1.015, "TB":  0.965, "TEX": 0.961, "TOR": 1.047, "WSH": 1.070,
+}
+
+# Pitcher-allowed hits.  Distinct from PARK_FACTORS_H above which uses the
+# batter-side FanGraphs values and is consumed by _build_batter_dataset.
+PARK_FACTORS_H_ALLOWED: dict[str, float] = {
+    "ARI": 1.064, "ATL": 1.077, "BAL": 1.040, "BOS": 0.982, "CHC": 0.915,
+    "CIN": 1.003, "CLE": 1.011, "COL": 1.221, "CWS": 0.967, "DET": 0.919,
+    "HOU": 1.071, "KC":  1.076, "LAA": 1.025, "LAD": 0.932, "MIA": 1.009,
+    "MIL": 0.910, "MIN": 1.050, "NYM": 0.973, "NYY": 0.927, "OAK": 1.036,
+    "PHI": 1.053, "PIT": 0.977, "SD":  0.986, "SEA": 0.941, "SF":  0.906,
+    "STL": 1.050, "TB":  0.966, "TEX": 0.976, "TOR": 1.066, "WSH": 1.088,
+}
+
+PARK_FACTORS_OUTS: dict[str, float] = {
+    "ARI": 0.967, "ATL": 1.034, "BAL": 1.013, "BOS": 0.915, "CHC": 0.947,
+    "CIN": 1.000, "CLE": 1.023, "COL": 0.994, "CWS": 0.986, "DET": 0.941,
+    "HOU": 1.067, "KC":  1.068, "LAA": 1.028, "LAD": 0.957, "MIA": 1.002,
+    "MIL": 0.936, "MIN": 1.035, "NYM": 1.032, "NYY": 1.014, "OAK": 1.065,
+    "PHI": 1.040, "PIT": 0.998, "SD":  1.002, "SEA": 1.074, "SF":  0.928,
+    "STL": 0.981, "TB":  1.000, "TEX": 1.017, "TOR": 1.062, "WSH": 1.038,
+}
+
 # Stadium geo-coordinates — used at inference time to fetch Open-Meteo weather.
 # Included here so the inference layer has a single source of truth.
 STADIUM_COORDS: dict[str, tuple[float, float]] = {
@@ -1238,6 +1292,7 @@ def _build_pitcher_dataset(
     splits_by_season: dict[int, dict[int, dict]],
     team_baselines: Optional[dict[str, dict[str, float]]] = None,
     career_baselines: Optional[dict[int, dict[str, float]]] = None,
+    batter_teams: Optional[dict[str, str]] = None,
 ):
     """Build (X, y, reg_targets, feature_names, snapshots) for pitcher_strikeouts >= 6 label.
 
@@ -1320,6 +1375,31 @@ def _build_pitcher_dataset(
                 lambda r: player_team if r.get("is_home") else (r.get("opp_team") or ""),
                 axis=1,
             )
+
+        # ── PR6 park_team imputation ──────────────────────────────────────
+        # The 2025 cache has park_team = "" for every row, and 2023/24 caches
+        # have it missing for ~50% of rows -- so every existing PARK_FACTORS_*
+        # lookup silently defaulted to 1.00 for ~half of training rows.
+        # Recover by deriving from is_home + opp_team + batter_teams roster
+        # map (which despite the name covers all players including pitchers):
+        #   away game (is_home=False): park = opp_team's home stadium
+        #   home game (is_home=True):  park = pitcher's own team from roster
+        # Recovers 10,635 of 11,228 previously-empty rows; remaining 593 fall
+        # through to "" and use the 1.00 default at lookup time.
+        pitcher_team_abbrev = ""
+        if batter_teams:
+            pitcher_team_abbrev = (batter_teams.get(f"{season}:{pid}") or "").strip().upper()
+        if pitcher_team_abbrev not in PARK_FACTORS_K:
+            pitcher_team_abbrev = ""
+
+        def _impute_park(row):
+            existing = _to_abbrev(row.get("park_team") or "")
+            if existing:
+                return existing
+            if row.get("is_home"):
+                return pitcher_team_abbrev  # may be "" if pid not in roster map
+            return _to_abbrev(row.get("opp_team") or "")
+        df["park_team"] = df.apply(_impute_park, axis=1)
 
         # ── Defensive: ensure games_started exists ─────────────────────────
         # Should always be present, but guard against unexpected cache shapes.
@@ -1413,9 +1493,24 @@ def _build_pitcher_dataset(
             # Fallback: simple 6-game rolling sum (~30 days at typical 5d cadence)
             df["ip_last_30d"] = df["IP"].shift(1).rolling(6, min_periods=0).sum().fillna(0)
 
-        # Ballpark strikeout factor — park_team is guaranteed to exist above
+        # ── PR6 per-stat empirical ballpark factors ────────────────────────
+        # park_team values are already abbrev-normalized (or "") by the
+        # imputation step above, so _to_abbrev's second pass is a no-op for
+        # the populated rows but defends against future format drift.
         df["ballpark_factor_k"] = df["park_team"].map(
             lambda t: PARK_FACTORS_K.get(_to_abbrev(t), 1.0)
+        )
+        df["ballpark_factor_bb"] = df["park_team"].map(
+            lambda t: PARK_FACTORS_BB.get(_to_abbrev(t), 1.0)
+        )
+        df["ballpark_factor_er"] = df["park_team"].map(
+            lambda t: PARK_FACTORS_ER.get(_to_abbrev(t), 1.0)
+        )
+        df["ballpark_factor_h"] = df["park_team"].map(
+            lambda t: PARK_FACTORS_H_ALLOWED.get(_to_abbrev(t), 1.0)
+        )
+        df["ballpark_factor_outs"] = df["park_team"].map(
+            lambda t: PARK_FACTORS_OUTS.get(_to_abbrev(t), 1.0)
         )
 
         # Drop rows that lack rolling averages (first 2 appearances)
@@ -1446,6 +1541,11 @@ def _build_pitcher_dataset(
                 "days_since_last_start",
                 "ip_last_30d",
                 "ballpark_factor_k",
+                # PR6 per-stat park factors (pitcher-allowed perspective)
+                "ballpark_factor_bb",
+                "ballpark_factor_er",
+                "ballpark_factor_h",
+                "ballpark_factor_outs",
             ]
         )
 
@@ -2685,6 +2785,7 @@ def main() -> int:
                 payload, pitcher_splits_by_season,
                 team_baselines=team_baselines,
                 career_baselines=career_baselines,
+                batter_teams=batter_teams,
             )
         )
         # PR3: pass groups=pitcher_ids so _train_and_save uses GroupKFold,

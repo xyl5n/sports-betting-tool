@@ -126,23 +126,39 @@ def _load_bets_from_file(path: Path) -> list[dict]:
 
 def _bet_to_prop_dict(bet: dict) -> dict:
     """Mirror the field names the live prop pipeline produces so predict()
-    sees the same shape it would in production.  Missing fields (is_home,
-    home_team) are filled with neutral defaults — the ledger doesn't
-    persist them, so we accept that snapshot/park-factor lookups will use
-    the away/unknown branch in those cases.
+    sees the same shape it would in production.
+
+    Park-context resolution (PR6 backtest fidelity):
+      * If the bet carries `home_team` and `is_home`, honor them — that's
+        the actual venue for this specific game.  Synthetic bet generators
+        (build_synthetic_pitcher_bets.py) populate these so per-stat park
+        factors evaluate against the real venue per row, not a single
+        pitcher-home constant.
+      * Otherwise fall back to bet["team"] as home_team + is_home=True
+        (the original live-ledger shape, where venue isn't persisted).
     """
-    home_team = (bet.get("team") or "").strip().upper()[:3]
+    explicit_home_team = (bet.get("home_team") or "").strip()
+    explicit_is_home   = bet.get("is_home")
+    if explicit_home_team and explicit_is_home is not None:
+        home_team = explicit_home_team
+        is_home   = bool(explicit_is_home)
+    else:
+        home_team = (bet.get("team") or "").strip().upper()[:3]
+        is_home   = True
     return {
         "market":       bet.get("market", ""),
         "player_name":  bet.get("player", ""),
         "home_team":    home_team,
-        "is_home":      True,            # ledger doesn't store this; assume home
+        "is_home":      is_home,
         "line":         float(bet.get("line") or 0),
         "best_odds":    int(bet.get("odds") or -110),
         "side":         (bet.get("side") or "Over").strip().title(),
         "all_books":    [{"odds": int(bet.get("odds") or -110)}],
         "event_id":     bet.get("event_id"),
         "commence_time": bet.get("commence_time"),
+        # PR6: away_team carried through so pitcher-side opp-baseline
+        # lookup picks the correct opposing batting team at predict time.
+        "away_team":    bet.get("away_team"),
     }
 
 
