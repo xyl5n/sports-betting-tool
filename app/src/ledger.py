@@ -458,15 +458,19 @@ class Ledger:
         *,
         odds=None,
         line=None,
+        amount=None,
         actual_payout=None,
         notes=None,
     ) -> dict | None:
         """Edit fields on a single bet (open or settled) and persist.  Only
         provided fields change.  *line* is the bettor-facing handicap/total;
         for run_line/spread it's stored negated (settlement threshold), for
-        totals it's stored as-is.  *actual_payout* only applies to settled
-        bets and adjusts the personal bankroll by the P&L delta so the
-        running balance stays consistent.  Returns the updated bet or None."""
+        totals it's stored as-is.  *amount* is the placed stake: on an open
+        bet the personal bankroll is adjusted by the stake delta (so a
+        smaller stake refunds the difference); on a settled bet it just
+        re-records the stake.  *actual_payout* only applies to settled bets
+        and adjusts the personal bankroll by the P&L delta so the running
+        balance stays consistent.  Returns the updated bet or None."""
         bet = next((b for b in (self.data.get("open_bets") or []) if b.get("id") == bet_id), None)
         settled = False
         if bet is None:
@@ -488,6 +492,18 @@ class Ledger:
                     bet["prop_line"] = -lv
                 elif bt == "totals":
                     bet["prop_line"] = lv
+            except (TypeError, ValueError):
+                pass
+        if amount is not None:
+            try:
+                new_amt = round(float(amount), 2)
+                old_amt = float(bet.get("confirmed_amount") or 0.0)
+                # Open bet: the stake was deducted at placement, so adjust
+                # the available balance by the delta (lower stake refunds).
+                if not settled and not bet.get("limit_reached") and bet.get("confirmed"):
+                    self.data["personal_bankroll"] = round(
+                        self.data["personal_bankroll"] + (old_amt - new_amt), 2)
+                bet["confirmed_amount"] = new_amt
             except (TypeError, ValueError):
                 pass
         if notes is not None:
