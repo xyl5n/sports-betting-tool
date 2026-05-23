@@ -150,7 +150,43 @@ def load_scored_props() -> dict:
     return payload
 
 
+# ── Public: cache clear (nightly full-clear job) ────────────────────────────
+
+def clear_scored_props(date_str: Optional[str] = None) -> dict:
+    """Wipe the scored-props cache for *date_str* (defaults to today
+    ET) from BOTH the local file and the Supabase ``app_cache`` row.
+
+    Used by the 2 AM full-clear job so the props page shows its empty
+    state again until the next day's scoring run repopulates it.
+    Returns a small status dict {local_deleted, supabase_deleted}.
+    """
+    date_str = date_str or _today_et()
+    out = {"local_deleted": False, "supabase_deleted": False}
+
+    # Local file
+    try:
+        path = _cache_path(date_str)
+        if path.exists():
+            path.unlink()
+            out["local_deleted"] = True
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"clear local failed for {date_str}: {exc}")
+
+    # Supabase row
+    try:
+        from . import db
+        if db.is_supabase():
+            db.cache_delete(_supabase_key(date_str))
+            out["supabase_deleted"] = True
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"clear supabase failed for {date_str}: {exc}")
+
+    _log(f"clear_scored_props({date_str}) -> {out}")
+    return out
+
+
 # ── Public: scheduler-side scorer ───────────────────────────────────────────
+
 
 _CONF_THRESHOLD = 0.55
 
