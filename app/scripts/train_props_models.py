@@ -1260,15 +1260,17 @@ def _build_pitcher_dataset(
 
     Pitcher career baseline features (per-pitcher, identical for every row
     of the same pid — looked up from career_baselines):
-        career_k_per_9, career_bb_per_9, career_ip
+        career_k_per_9, career_bb_per_9, career_fip, career_ip
 
-    Inference-time placeholder features (zero during training; populated
-    at prediction time by the inference layer):
-        lineup_avg_k_rate, lineup_lhb_count, lineup_rhb_count,
-        weather_temp, weather_wind_speed, weather_wind_dir_num,
-        time_of_day, umpire_k_rate, implied_total,
-        first_inning_k_pct, pitch_mix_fastball_pct,
-        pitch_mix_breaking_pct, pitch_mix_offspeed_pct
+    PR4 dropped the 13 phantom "inference-time placeholder" features that
+    were always zero during training (lineup_avg_k_rate, lineup_lhb_count,
+    lineup_rhb_count, weather_temp, weather_wind_speed, weather_wind_dir_num,
+    time_of_day, umpire_k_rate, implied_total, first_inning_k_pct,
+    pitch_mix_fastball_pct, pitch_mix_breaking_pct, pitch_mix_offspeed_pct).
+    XGBoost can't split on constant columns so those features were dead
+    weight: any nonzero value supplied at inference was silently ignored.
+    They'll be reintroduced one-at-a-time as we backfill real values
+    (weather_* via Open-Meteo archive in a future PR is the most viable).
     """
     try:
         import pandas as pd
@@ -1276,23 +1278,6 @@ def _build_pitcher_dataset(
     except ImportError:
         _log("pandas/numpy missing -- aborting pitcher build")
         return None, None, None, None, None, None
-
-    # Inference-time features that are always zero during training
-    INFER_FEATS = [
-        "lineup_avg_k_rate",
-        "lineup_lhb_count",
-        "lineup_rhb_count",
-        "weather_temp",
-        "weather_wind_speed",
-        "weather_wind_dir_num",
-        "time_of_day",
-        "umpire_k_rate",
-        "implied_total",
-        "first_inning_k_pct",
-        "pitch_mix_fastball_pct",
-        "pitch_mix_breaking_pct",
-        "pitch_mix_offspeed_pct",
-    ]
 
     rows: list[dict] = []
     reg_rows: list[dict] = []
@@ -1357,11 +1342,38 @@ def _build_pitcher_dataset(
         if df.empty:
             continue
 
-        # Per-row rate stats (needed for rolling averages)
+        # Per-row rate stats (kept as columns for the snapshot's "most recent
+        # appearance" entry; the rolling per-9 features use sum-weighted
+        # aggregation below rather than mean-of-per-game-rates).
         df["k_per_9"]  = (df["K"]  * 9.0 / df["IP"].clip(lower=0.01)).fillna(0.0)
         df["bb_per_9"] = (df["BB"] * 9.0 / df["IP"].clip(lower=0.01)).fillna(0.0)
 
-        roll_stats = ["K", "BB", "H", "ER", "IP", "k_per_9", "bb_per_9"]
+        # Count stats roll as arithmetic mean per-game (correct for K, BB, H,
+        # ER, IP — each game is one event we're averaging).
+        roll_stats = ["K", "BB", "H", "ER", "IP"]
+
+        # PR4 IP-weighted per-9 rates: szn_k_per_9 = sum(K) * 9 / sum(IP)
+        # over the prior window, weighting each appearance by workload.
+        # Old behaviour was mean(K_per_9_per_game), which counted a
+        # 3-IP/2-K outing (K/9=6.0) equally with a 7-IP/8-K outing
+        # (K/9=10.3) -- short outings dragged the rolling rate around.
+        # Use cumulative sums (shift(1) so the current row is excluded)
+        # then divide.  rolling(window).sum() gives the window's total.
+        for prefix, window in (("szn", None), ("r7", 7), ("r14", 14)):
+            if window is None:
+                # Expanding (season-to-date) sums
+                sum_K  = df["K"].shift(1).expanding().sum()
+                sum_BB = df["BB"].shift(1).expanding().sum()
+                sum_IP = df["IP"].shift(1).expanding().sum()
+            else:
+                min_p = 2 if window == 7 else 3
+                sum_K  = df["K"].shift(1).rolling(window=window, min_periods=min_p).sum()
+                sum_BB = df["BB"].shift(1).rolling(window=window, min_periods=min_p).sum()
+                sum_IP = df["IP"].shift(1).rolling(window=window, min_periods=min_p).sum()
+            # Guard sum_IP=0 (all-NaN windows): clip to a small positive so
+            # divisions return 0.0 rather than NaN/inf.
+            df[f"{prefix}_k_per_9"]  = (sum_K  * 9.0 / sum_IP.clip(lower=0.01)).fillna(0.0)
+            df[f"{prefix}_bb_per_9"] = (sum_BB * 9.0 / sum_IP.clip(lower=0.01)).fillna(0.0)
 
         # Season-to-date (expanding mean, shift(1) = strictly before this row)
         for c in roll_stats:
@@ -1414,10 +1426,21 @@ def _build_pitcher_dataset(
         df["label"]      = (df["K"] >= 6).astype(int)
         df["is_home_i"]  = df["is_home"].astype(int)
 
+        # PR4: roll_stats above is the count-stat set (K/BB/H/ER/IP) which
+        # rolls as arithmetic mean.  The per-9 rate columns (k_per_9, bb_per_9)
+        # were just produced via sum-weighted aggregation; list them
+        # explicitly so feat_cols includes them at the same szn_/r7_/r14_
+        # column positions the snapshot + inference expect.
+        per9_cols = [
+            f"{prefix}_{stat}"
+            for prefix in ("szn", "r7", "r14")
+            for stat in ("k_per_9", "bb_per_9")
+        ]
         feat_cols = (
             [f"szn_{c}"  for c in roll_stats]
             + [f"r7_{c}" for c in roll_stats]
             + [f"r14_{c}" for c in roll_stats]
+            + per9_cols
             + [
                 "is_home_i",
                 "days_since_last_start",
@@ -1459,9 +1482,9 @@ def _build_pitcher_dataset(
             # axis as career_bb_per_9 but on the 4.00-centered FIP scale.
             record["career_fip"]      = float(career.get("career_fip", 4.00))
             record["career_ip"]       = float(career["career_ip"])
-            # Inference-time features — zero during training
-            for f in INFER_FEATS:
-                record[f] = 0.0
+            # PR4: the old INFER_FEATS zero-stamp loop is gone -- those 13
+            # phantom features were dead weight because trees can't split
+            # on constant columns at training time.
             record["label"]      = int(row["label"])
             # PR3: stamp pid on every row so _train_and_save can pass
             # groups=pitcher_ids to GroupKFold and prevent player-identity
