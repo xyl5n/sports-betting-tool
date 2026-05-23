@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-23T20:57:50.262725Z",
+  "generated_at": "2026-05-23T21:14:55.604267Z",
   "pitcher_feature_names": [
     "szn_K",
     "szn_BB",
@@ -99,22 +99,6 @@
     "slg_vs_lhp",
     "ops_vs_rhp",
     "obp_vs_rhp",
-    "slg_vs_rhp",
-    "whiff_pct",
-    "chase_pct",
-    "hard_hit_rate",
-    "barrel_rate",
-    "sprint_speed",
-    "platoon_matchup_flag",
-    "weather_temp",
-    "weather_wind_speed",
-    "time_of_day",
-    "ba_vs_breaking",
-    "ba_vs_fastball",
-    "ba_vs_offspeed",
-    "h2h_career_ab",
-    "h2h_career_avg",
-    "h2h_career_k_rate",
-    "implied_total"
+    "slg_vs_rhp"
   ]
 }

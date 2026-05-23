@@ -178,7 +178,9 @@ PARK_FACTORS_H: dict[str, float] = {
     "WSH": 1.00,
 }
 
-# Home-run park factor (>1 = more HRs)
+# Home-run park factor — switch-hitter-blind table (>1 = more HRs).
+# Retained as the league-average baseline that PARK_HR_LHB / PARK_HR_RHB
+# weight toward when handedness is unknown.
 PARK_FACTORS_HR: dict[str, float] = {
     "ARI": 1.05,
     "ATL": 1.08,
@@ -211,6 +213,43 @@ PARK_FACTORS_HR: dict[str, float] = {
     "TOR": 1.05,
     "WSH": 0.95,
 }
+
+# Handedness-split HR park factors (PR4 audit #10).  Sources: FanGraphs
+# multi-year park-factor splits.  Numbers below are league-relative
+# (1.00 = league-average HR per fly ball at that bat-hand).  The
+# notable asymmetries — Yankee Stadium's short porch (LHB +60%, RHB
+# neutral), Fenway's Green Monster (LHB hurt, RHB helped), the small
+# parks in PHI/CIN (LHB short porches) — are the signal the
+# switch-hitter-blind PARK_FACTORS_HR table was washing out.
+PARK_HR_LHB: dict[str, float] = {
+    "ARI": 1.08, "ATL": 1.08, "BAL": 1.15, "BOS": 0.90, "CHC": 1.05,
+    "CIN": 1.45, "CLE": 0.95, "COL": 1.30, "CWS": 1.20, "DET": 0.82,
+    "HOU": 0.95, "KC":  0.85, "LAA": 1.05, "LAD": 0.90, "MIA": 0.85,
+    "MIL": 1.05, "MIN": 1.10, "NYM": 0.95, "NYY": 1.60, "OAK": 0.78,
+    "PHI": 1.40, "PIT": 0.85, "SD":  0.78, "SEA": 0.85, "SF":  0.55,
+    "STL": 0.92, "TB":  0.92, "TEX": 1.12, "TOR": 1.08, "WSH": 0.98,
+}
+
+PARK_HR_RHB: dict[str, float] = {
+    "ARI": 1.02, "ATL": 1.08, "BAL": 1.05, "BOS": 1.30, "CHC": 1.10,
+    "CIN": 1.25, "CLE": 0.95, "COL": 1.22, "CWS": 1.10, "DET": 0.88,
+    "HOU": 0.95, "KC":  0.92, "LAA": 1.05, "LAD": 0.85, "MIA": 0.85,
+    "MIL": 1.05, "MIN": 1.10, "NYM": 0.92, "NYY": 1.20, "OAK": 0.82,
+    "PHI": 1.20, "PIT": 0.80, "SD":  0.68, "SEA": 0.80, "SF":  0.65,
+    "STL": 0.88, "TB":  0.88, "TEX": 1.08, "TOR": 1.02, "WSH": 0.92,
+}
+
+# Switch hitters are bucketed as LHB by collect_batter_handedness because
+# they bat from the left side vs the majority of starters (RHP).  Default
+# to the switch-hitter-blind table when bat-hand is unknown.
+def _park_hr_for_batter(park_abbrev: str, bat_hand: str) -> float:
+    if not park_abbrev:
+        return 1.0
+    if bat_hand in ("L", "S"):
+        return PARK_HR_LHB.get(park_abbrev, PARK_FACTORS_HR.get(park_abbrev, 1.0))
+    if bat_hand == "R":
+        return PARK_HR_RHB.get(park_abbrev, PARK_FACTORS_HR.get(park_abbrev, 1.0))
+    return PARK_FACTORS_HR.get(park_abbrev, 1.0)
 
 # Stadium geo-coordinates — used at inference time to fetch Open-Meteo weather.
 # Included here so the inference layer has a single source of truth.
@@ -1577,6 +1616,7 @@ def _build_batter_dataset(
     opp_pitcher_lookup:    Optional[dict[str, int]] = None,
     pitcher_season_stats:  Optional[dict[str, dict[str, float]]] = None,
     pitcher_handedness:    Optional[dict[int, str]] = None,
+    batter_handedness:     Optional[dict[int, str]] = None,
 ):
     """Build (X, y, feature_names, snapshots, groups) for batter_hits >= 1 label.
 
@@ -1598,42 +1638,30 @@ def _build_batter_dataset(
     PR3 opposing-pitcher context (when *opp_pitcher_lookup* etc. provided):
         opp_pitcher_szn_k_per_9, opp_pitcher_szn_era, opp_pitcher_throws_lhp
 
-    Inference-time placeholder features (zero during training):
-        whiff_pct, chase_pct, hard_hit_rate, barrel_rate, sprint_speed,
-        platoon_matchup_flag, weather_temp, weather_wind_speed,
-        time_of_day, ba_vs_breaking, ba_vs_fastball, ba_vs_offspeed,
-        h2h_career_ab, h2h_career_avg, h2h_career_k_rate, implied_total
+    PR4 (audit #10): ballpark_factor_hr is now bat-hand-aware — selects
+    PARK_HR_LHB or PARK_HR_RHB per row using *batter_handedness*.
+
+    PR4 (audit #3): the 16 INFER_FEATS placeholders (whiff_pct, chase_pct,
+    hard_hit_rate, barrel_rate, sprint_speed, platoon_matchup_flag,
+    weather_temp, weather_wind_speed, time_of_day, ba_vs_breaking,
+    ba_vs_fastball, ba_vs_offspeed, h2h_career_*, implied_total) are
+    DROPPED entirely.  They were trained as zero -> SHAP-zero importance
+    -> inference filled them with non-zero league-average defaults,
+    which was noise injection on every prediction.  Dropping them
+    shrinks the feature vector from 77 -> 61 and removes that noise.
     """
     # Default to empty dicts so the per-row lookups gracefully return the
     # league-average neutral when no opp pitcher context is wired in.
     opp_pitcher_lookup   = opp_pitcher_lookup   or {}
     pitcher_season_stats = pitcher_season_stats or {}
     pitcher_handedness   = pitcher_handedness   or {}
+    batter_handedness    = batter_handedness    or {}
     try:
         import pandas as pd
         import numpy as np
     except ImportError:
         _log("pandas/numpy missing -- aborting batter build")
         return None, None, None, None, None, None
-
-    INFER_FEATS = [
-        "whiff_pct",
-        "chase_pct",
-        "hard_hit_rate",
-        "barrel_rate",
-        "sprint_speed",
-        "platoon_matchup_flag",
-        "weather_temp",
-        "weather_wind_speed",
-        "time_of_day",
-        "ba_vs_breaking",
-        "ba_vs_fastball",
-        "ba_vs_offspeed",
-        "h2h_career_ab",
-        "h2h_career_avg",
-        "h2h_career_k_rate",
-        "implied_total",
-    ]
 
     rows: list[dict] = []
     reg_rows: list[dict] = []
@@ -1718,12 +1746,17 @@ def _build_batter_dataset(
         df["k_pct_7d"]  = df["k_pct"].shift(1).rolling(window=7,  min_periods=2).mean()
         df["k_pct_14d"] = df["k_pct"].shift(1).rolling(window=14, min_periods=3).mean()
 
-        # Ballpark factors — park_team is guaranteed to exist above
+        # Ballpark factors — park_team is guaranteed to exist above.
         df["ballpark_factor_hits"] = df["park_team"].map(
             lambda t: PARK_FACTORS_H.get(_to_abbrev(t), 1.0)
         )
+        # PR4 (audit #10): HR park factor is bat-hand-specific.  Yankee
+        # Stadium short porch is +60% HR for LHB / +20% for RHB; Fenway's
+        # Green Monster flips the asymmetry the other way.  Single-table
+        # PARK_FACTORS_HR was washing this out.
+        bat_hand = (batter_handedness.get(pid) or "R").upper()
         df["ballpark_factor_hr"] = df["park_team"].map(
-            lambda t: PARK_FACTORS_HR.get(_to_abbrev(t), 1.0)
+            lambda t: _park_hr_for_batter(_to_abbrev(t), bat_hand)
         )
 
         # ── PR3: per-row opposing-pitcher context ──────────────────────────
@@ -1806,9 +1839,10 @@ def _build_batter_dataset(
             record["ops_vs_rhp"] = float(splits.get("ops_vs_rhp", 0.720))
             record["obp_vs_rhp"] = float(splits.get("obp_vs_rhp", 0.315))
             record["slg_vs_rhp"] = float(splits.get("slg_vs_rhp", 0.405))
-            # Inference-time features — zero during training
-            for f in INFER_FEATS:
-                record[f] = 0.0
+            # PR4 (audit #3): the 16 INFER_FEATS placeholders are dropped.
+            # They trained as zero -> SHAP-zero importance -> noise at
+            # inference from non-zero league defaults.  Removing them
+            # shrinks the vector to the features the model actually uses.
             record["label"]      = int(row["label"])
             # PR3: stamp pid on every batter row so _train_and_save can pass
             # groups=batter_ids to GroupKFold.  Stripped from feat_cols below.
@@ -1836,10 +1870,15 @@ def _build_batter_dataset(
         snap_feats["obp_vs_rhp"] = float(splits.get("obp_vs_rhp", 0.315))
         snap_feats["slg_vs_rhp"] = float(splits.get("slg_vs_rhp", 0.405))
         snapshots[str(pid)] = {
+            "id":          int(pid),
             "name":        pname,
             "team":        pteam,
             "season":      int(season),
             "as_of_date":  str(last.get("date", "")),
+            # PR4 (audit #10): inlined bat_hand so inference can pick
+            # _PARK_HR_LHB / _PARK_HR_RHB without round-tripping through
+            # batter_handedness.json + a search_player_by_name fallback.
+            "bat_hand":    (batter_handedness.get(pid) or "R").upper(),
             "features":    snap_feats,
         }
 
@@ -2588,8 +2627,13 @@ def main() -> int:
     # opposing batting team's k_rate / woba / lhb_pct at predict time.
     team_baselines:   dict[str, dict[str, float]] = {}
     career_baselines: dict[int, dict[str, float]] = {}
+    # PR4 (audit #10): batter handedness now also drives the bat-hand park
+    # factor lookup in _build_batter_dataset.  Collect once up here, share
+    # with the pitcher block (which needed it for team_baselines/lhb_pct)
+    # AND the batter block.  The collector is cache-backed so the second
+    # caller is a no-op when both blocks run.
+    handedness: dict[int, str] = collect_batter_handedness(payload, refresh=args.refresh_data)
     if not args.skip_pitcher:
-        handedness    = collect_batter_handedness(payload, refresh=args.refresh_data)
         batter_teams  = collect_batter_teams(seasons, refresh=args.refresh_data)
         team_baselines   = compute_team_baselines(payload, handedness, batter_teams=batter_teams)
         career_baselines = compute_career_baselines(payload)
@@ -2684,6 +2728,9 @@ def main() -> int:
                 opp_pitcher_lookup=opp_pitcher_lookup,
                 pitcher_season_stats=pitcher_season_stats,
                 pitcher_handedness=pitcher_handedness,
+                # PR4 (audit #10): drives the bat-hand park-factor lookup
+                # so Yankee Stadium's short porch isn't averaged out.
+                batter_handedness=handedness,
             )
         )
         # PR3: same GroupKFold treatment for batters -- player_id is the
