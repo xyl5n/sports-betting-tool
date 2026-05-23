@@ -401,6 +401,87 @@ def get_all() -> list[dict]:
     return list(_picks)
 
 
+def remove_pick(pick_id: str) -> bool:
+    """Delete a single tracked prop pick by id from the in-memory list and
+    persist (Supabase + local).  Returns True if a pick was removed."""
+    global _picks
+    _ensure_loaded()
+    before = len(_picks)
+    _picks = [p for p in _picks if p.get("id") != pick_id]
+    if len(_picks) == before:
+        return False
+    _save()
+    return True
+
+
+def update_pick(
+    pick_id: str,
+    *,
+    odds=None,
+    line=None,
+    actual_payout=None,
+    notes=None,
+) -> Optional[dict]:
+    """Edit fields on a single tracked prop pick and persist.  Only the
+    provided fields are changed.  Props use a flat-stake tracker (no
+    personal bankroll), so editing never mutates a bankroll.  Returns the
+    updated pick, or None if not found."""
+    _ensure_loaded()
+    pick = next((p for p in _picks if p.get("id") == pick_id), None)
+    if pick is None:
+        return None
+    if odds is not None:
+        try:
+            pick["odds"] = int(odds)
+        except (TypeError, ValueError):
+            pass
+    if line is not None:
+        try:
+            pick["line"] = float(line)
+        except (TypeError, ValueError):
+            pass
+    if notes is not None:
+        pick["notes"] = str(notes)
+    if actual_payout is not None:
+        try:
+            pick["actual_payout"] = round(float(actual_payout), 2)
+        except (TypeError, ValueError):
+            pass
+    _save()
+    return pick
+
+
+def add_manual_pick(
+    *,
+    player: str,
+    market: str,
+    line: float,
+    side: str,
+    odds=None,
+    confidence: float = 0.0,
+    predicted_value=None,
+    team: str = "",
+    event_id=None,
+    commence_time=None,
+    notes=None,
+) -> Optional[str]:
+    """Thin wrapper over record_prop_pick for the manual Add-Bet flow that
+    also stamps an optional note.  Returns the new pick id (or None if the
+    pick is a duplicate)."""
+    pid = record_prop_pick(
+        player=player, market=market, line=line, side=side, odds=odds,
+        confidence=confidence, predicted_value=predicted_value,
+        team=team, event_id=event_id, commence_time=commence_time,
+    )
+    if pid is not None and notes:
+        _ensure_loaded()
+        pick = next((p for p in _picks if p.get("id") == pid), None)
+        if pick is not None:
+            pick["notes"] = str(notes)
+            _save()
+    return pid
+
+
 def get_record() -> dict:
     _ensure_loaded()
     won  = sum(1 for p in _picks if p.get("result") == "won")

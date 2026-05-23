@@ -413,6 +413,100 @@ class Ledger:
             entry["nn_prob"]  = round(nn_prob, 4)
 
         self.data["open_bets"].append(entry)
+        return entry["id"]
+
+    # ── single-bet remove / edit (My Bets card controls) ───────────────────────
+
+    def remove_bet(self, bet_id: str) -> dict | None:
+        """Delete one bet by id from open_bets OR history and undo its
+        bankroll effect, then persist.  Returns the removed bet, or None.
+
+        - Open bet  -> refund the staked amount (reverse the placement
+          deduction), same as the legacy /api/ledger/bet DELETE route.
+        - Settled bet -> reverse the net P&L (model_pnl / confirmed_pnl)
+          so the bankroll matches a world where the bet never happened."""
+        for i, b in enumerate(self.data.get("open_bets") or []):
+            if b.get("id") == bet_id:
+                if not b.get("limit_reached"):
+                    ma = float(b.get("model_amount") or 0.0)
+                    if ma > 0:
+                        self.data["model_bankroll"] = round(
+                            self.data["model_bankroll"] + ma, 2)
+                    if b.get("confirmed"):
+                        ca = float(b.get("confirmed_amount") or 0.0)
+                        if ca > 0:
+                            self.data["personal_bankroll"] = round(
+                                self.data["personal_bankroll"] + ca, 2)
+                removed = self.data["open_bets"].pop(i)
+                self.save()
+                return removed
+
+        for i, b in enumerate(self.data.get("history") or []):
+            if b.get("id") == bet_id:
+                self.data["model_bankroll"] = round(
+                    self.data["model_bankroll"] - float(b.get("model_pnl") or 0.0), 2)
+                self.data["personal_bankroll"] = round(
+                    self.data["personal_bankroll"] - float(b.get("confirmed_pnl") or 0.0), 2)
+                removed = self.data["history"].pop(i)
+                self.save()
+                return removed
+        return None
+
+    def update_bet(
+        self,
+        bet_id: str,
+        *,
+        odds=None,
+        line=None,
+        actual_payout=None,
+        notes=None,
+    ) -> dict | None:
+        """Edit fields on a single bet (open or settled) and persist.  Only
+        provided fields change.  *line* is the bettor-facing handicap/total;
+        for run_line/spread it's stored negated (settlement threshold), for
+        totals it's stored as-is.  *actual_payout* only applies to settled
+        bets and adjusts the personal bankroll by the P&L delta so the
+        running balance stays consistent.  Returns the updated bet or None."""
+        bet = next((b for b in (self.data.get("open_bets") or []) if b.get("id") == bet_id), None)
+        settled = False
+        if bet is None:
+            bet = next((b for b in (self.data.get("history") or []) if b.get("id") == bet_id), None)
+            settled = bet is not None
+        if bet is None:
+            return None
+
+        if odds is not None:
+            try:
+                bet["american_odds"] = int(odds)
+            except (TypeError, ValueError):
+                pass
+        if line is not None:
+            bt = (bet.get("bet_type") or "single").lower()
+            try:
+                lv = float(line)
+                if bt in ("run_line", "spread"):
+                    bet["prop_line"] = -lv
+                elif bt == "totals":
+                    bet["prop_line"] = lv
+            except (TypeError, ValueError):
+                pass
+        if notes is not None:
+            bet["notes"] = str(notes)
+        if actual_payout is not None and settled:
+            try:
+                payout  = float(actual_payout)
+                stake   = float(bet.get("confirmed_amount") or 0.0)
+                new_pnl = round(payout - stake, 2)
+                old_pnl = float(bet.get("confirmed_pnl") or 0.0)
+                self.data["personal_bankroll"] = round(
+                    self.data["personal_bankroll"] + (new_pnl - old_pnl), 2)
+                bet["confirmed_pnl"]  = new_pnl
+                bet["actual_payout"]  = round(payout, 2)
+            except (TypeError, ValueError):
+                pass
+
+        self.save()
+        return bet
 
     # ── settlement ────────────────────────────────────────────────────────────
 
