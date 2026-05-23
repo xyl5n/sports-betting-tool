@@ -108,7 +108,54 @@ class Ledger:
 
     # ── persistence ───────────────────────────────────────────────────────────
 
+    def _sport_key(self) -> str:
+        return "wnba" if "wnba" in self.path.name.lower() else "mlb"
+
+    def _snapshot_cache_key(self) -> str:
+        # "history" in the key so db.cache_delete_stale (which preserves
+        # any key containing "history") never purges the snapshot at the
+        # daily ET rollover -- tracked bets must survive indefinitely.
+        return f"{self._sport_key()}_ledger_history"
+
+    def _restore_snapshot_from_supabase(self) -> dict | None:
+        """Return the full ledger snapshot mirrored to Supabase, or None.
+        Used on boot when the local JSON is missing/empty so user-tracked
+        bets survive a Railway redeploy / fresh container."""
+        try:
+            from . import db
+            if not db.is_supabase():
+                return None
+            row = db.cache_get(self._snapshot_cache_key())
+            if not isinstance(row, dict):
+                return None
+            data = row.get("data") if isinstance(row.get("data"), dict) else row
+            if isinstance(data, dict) and ("open_bets" in data or "history" in data):
+                _logger.info(
+                    "Ledger restored from Supabase snapshot (%s): "
+                    "%d open, %d settled",
+                    self._snapshot_cache_key(),
+                    len(data.get("open_bets") or []),
+                    len(data.get("history") or []),
+                )
+                return data
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("Ledger Supabase restore failed: %s", exc)
+        return None
+
     def _load(self) -> dict:
+        # Local JSON missing or empty (fresh container / post-redeploy) ->
+        # restore the full snapshot from Supabase before falling back to a
+        # blank ledger, so tracked bets are never lost on redeploy.
+        if (not self.path.exists()) or self.path.stat().st_size == 0:
+            restored = self._restore_snapshot_from_supabase()
+            if restored is not None:
+                try:
+                    with open(self.path, "w", encoding="utf-8") as f:
+                        json.dump(restored, f, indent=2)
+                except Exception as exc:                                  # noqa: BLE001
+                    _logger.warning("Ledger restore local write failed: %s", exc)
+                return restored
+
         if self.path.exists():
             with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -216,6 +263,19 @@ class Ledger:
             rec["units_won"] += float(b.get("units_won") or 0.0)
         if records:
             db.upsert_records_bulk(list(records.values()))
+
+        # 4) Full snapshot mirror — faithful round-trip restore source on
+        #    boot.  The bets table is lossy (_serialize_bet promotes some
+        #    columns and dumps the rest to meta), so we also stash the entire
+        #    ledger JSON in app_cache.  The key contains "history" so the
+        #    daily cache_delete_stale() cleaner preserves it across date
+        #    rollovers and Railway redeploys.
+        try:
+            today = datetime.now(timezone.utc).date().isoformat()
+            db.cache_set(self._snapshot_cache_key(), sport, today, self.data)
+        except Exception as exc:                                              # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Ledger snapshot mirror failed: %s", exc)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

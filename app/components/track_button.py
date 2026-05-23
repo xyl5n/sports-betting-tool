@@ -133,8 +133,13 @@ def render(
                         on_tracked()
                     except Exception:                                     # noqa: BLE001
                         pass
+            elif status < 400 and (data.get("unavailable") or data.get("message")):
+                # Graceful "prediction not available" — not an error, just
+                # nothing to track for this bet type on this game.
+                ui.notify(data.get("message") or "Not available for this game.",
+                          type="warning", multi_line=True)
             else:
-                err = data.get("error") or "unknown error"
+                err = data.get("error") or data.get("message") or "unknown error"
                 ui.notify(f"Track {short} failed ({status}): {err}",
                           type="negative", multi_line=True)
         except Exception as exc:                                          # noqa: BLE001
