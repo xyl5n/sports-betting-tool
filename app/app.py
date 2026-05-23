@@ -2817,6 +2817,13 @@ def _normalize_mlb_schedule(raw: dict) -> list[dict]:
                 "is_live":         (abstract == "Live") or (coded == "I"),
                 "home_score":      home_runs,
                 "away_score":      away_runs,
+                # Live in-game detail (linescore hydrate) so a card can show
+                # the inning/count without a second API call.
+                "inning_ordinal":  ls.get("currentInningOrdinal") or "",
+                "is_top_inning":   bool(ls.get("isTopInning")),
+                "balls":           ls.get("balls"),
+                "strikes":         ls.get("strikes"),
+                "outs":            ls.get("outs"),
             })
     return _dedup_schedule_games(out)
 
@@ -3226,6 +3233,27 @@ def _predict_no_odds_game(sport: str, g: dict) -> dict | None:
     return out
 
 
+def _sched_live_fields(g: dict) -> dict:
+    """Subset of a normalized schedule game describing its live state +
+    score.  Stashed on each card row as ``_sched`` so the game card can
+    show a live indicator + score straight from the schedule data, even
+    when the separate live-score cache misses (e.g. team-name key
+    mismatch).  No extra API call -- these values are already in the
+    schedule response."""
+    return {
+        "is_live":        g.get("is_live"),
+        "status":         g.get("status"),
+        "coded_status":   g.get("coded_status"),
+        "home_score":     g.get("home_score"),
+        "away_score":     g.get("away_score"),
+        "inning_ordinal": g.get("inning_ordinal"),
+        "is_top_inning":  g.get("is_top_inning"),
+        "balls":          g.get("balls"),
+        "strikes":        g.get("strikes"),
+        "outs":           g.get("outs"),
+    }
+
+
 @app.route("/api/schedule/<sport>", methods=["GET"])
 def schedule_for_date(sport: str):
     """Full slate for one sport on one ET date.
@@ -3305,6 +3333,7 @@ def schedule_for_date(sport: str):
                 # live-score lookups still work for in-progress / finished
                 # games on the same date.
                 serialized["_status"] = g.get("status")
+                serialized["_sched"] = _sched_live_fields(g)
                 serialized["_has_odds"] = True
                 # _data_source lets game_card.render log which path each
                 # card took -- "analysis_id" (legacy id match) or
@@ -3339,6 +3368,7 @@ def schedule_for_date(sport: str):
             "away_team":     g.get("away_team"),
             "commence_time": g.get("commence_time"),
             "_status":       g.get("status"),
+            "_sched":        _sched_live_fields(g),
             "_no_odds":      True,
             "_data_source":  "schedule_stub",
         }
@@ -9178,6 +9208,26 @@ def _run_job2_full_clear() -> None:
                 _db.cache_delete("daily_picks")
         except Exception:                                                  # noqa: BLE001
             pass
+
+        # ── Daily bet budget (FIX 4) ─────────────────────────────────────
+        # Compute tomorrow's conservative budget off the current personal
+        # bankroll and persist it to Supabase so the My Bets page shows a
+        # fixed budget for the whole ET day (recomputed here every 2 AM).
+        try:
+            from src.ledger import Ledger as _BudgetLedger, compute_daily_budget
+            _bl = _BudgetLedger(path="data/ledger.json", starting_bankroll=1000.0)
+            _bankroll = float(
+                _bl.data.get("personal_bankroll")
+                or _bl.data.get("personal_starting_bankroll")
+                or 0.0
+            )
+            _budget = compute_daily_budget(_bankroll)
+            from src import db as _db
+            if _db.is_supabase():
+                _db.cache_set("daily_budget", None, _today_et(), _budget)
+            _eprint(f"NIGHTLY JOB 2 (full clear): daily budget {_budget}")
+        except Exception as _e:                                            # noqa: BLE001
+            _eprint(f"NIGHTLY JOB 2 (full clear): daily budget error: {_e}")
 
         _eprint("NIGHTLY JOB 2 (full clear): COMPLETE -- site is a clean slate")
     except Exception as _exc:                                             # noqa: BLE001

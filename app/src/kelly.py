@@ -26,6 +26,7 @@ Dollar precision:
   Model bets (is_user_bet=False) → rounded to the cent  ($7.50)
   User bets  (is_user_bet=True)  → rounded to nearest dollar ($8)
 """
+from typing import Optional
 
 
 # ── Named constants ───────────────────────────────────────────────────────────
@@ -106,6 +107,47 @@ def confidence_tier_from_prob(pick_prob: float | None) -> str:
     if p >= CONFIDENCE_MODERATE_MIN:
         return "moderate"
     return "low"
+
+
+def tracked_bet_kelly(prob, american_odds, bankroll) -> tuple[float, Optional[str]]:
+    """Recommended stake for a tracked bet using the textbook half-Kelly
+    formula, sized off the *current* bankroll.
+
+        b    = decimal_odds - 1
+        p    = model win probability,  q = 1 - p
+        full = (b*p - q) / b
+        half = full / 2
+        $    = half * bankroll
+
+    Returns ``(dollars, flag)``:
+      * positive edge -> (dollars, None), with a $1 floor when the raw
+        amount rounds below a dollar (so a real edge never displays $0).
+      * no edge (half-Kelly <= 0) -> (0.0, "no_edge").
+      * bad inputs -> (0.0, "invalid").
+
+    Unlike :func:`size_bet`, this applies NO confidence-tier / upset /
+    hard-cap reductions and NO minimum-edge gate -- every tracked bet is
+    sized by the same formula off the same bankroll, so two bets can no
+    longer disagree on method (the $2-vs-$0 bug)."""
+    try:
+        p  = float(prob)
+        bk = float(bankroll)
+        odds = int(american_odds)
+    except (TypeError, ValueError):
+        return 0.0, "invalid"
+    if not (0.0 < p < 1.0) or bk <= 0:
+        return 0.0, "invalid"
+    b = american_to_decimal(odds) - 1.0
+    if b <= 0:
+        return 0.0, "invalid"
+    q = 1.0 - p
+    half = ((b * p - q) / b) / 2.0
+    if half <= 0:
+        return 0.0, "no_edge"
+    dollars = half * bk
+    if dollars < 1.0:
+        return 1.0, None          # positive edge but rounds to $0 -> $1 floor
+    return float(round(dollars)), None
 
 
 def size_bet(

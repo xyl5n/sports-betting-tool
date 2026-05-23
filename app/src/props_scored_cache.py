@@ -399,6 +399,14 @@ def score_today_props() -> dict:
             r["opp_rank"] = get_opp_rank_for_prop(opp, r["market"])
         except Exception:                                                 # noqa: BLE001
             r["opp_rank"] = None
+        # Resolve the MLB player id once (cached -- the opp lookup above
+        # already resolved it) so prop cards can show a headshot without a
+        # per-render name->id lookup.
+        try:
+            from src.player_profile_client import search_player_by_name
+            r["player_id"] = search_player_by_name(r["player"])
+        except Exception:                                                 # noqa: BLE001
+            r["player_id"] = None
         # Drop the raw-prop reference so the persisted payload stays
         # small and JSON-clean (the raw dict can carry deeply nested
         # bookmaker arrays that bloat the cache row).

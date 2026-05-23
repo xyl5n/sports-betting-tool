@@ -156,6 +156,45 @@ def state_of(live: Optional[dict]) -> str:
     return "scheduled"
 
 
+def state_from_schedule(sched: Optional[dict]) -> str:
+    """Live/final/scheduled derived from the flat schedule fields stashed
+    on a card row's ``_sched`` (is_live / status / coded_status).  Used as
+    a fallback when the live-score cache misses."""
+    if not sched:
+        return "scheduled"
+    coded = (sched.get("coded_status") or "").upper()
+    status = (sched.get("status") or "").lower()
+    if sched.get("is_live") or status == "live" or coded == "I":
+        return "live"
+    if status == "final" or coded == "F":
+        return "final"
+    return "scheduled"
+
+
+def synth_from_schedule(sched: Optional[dict]) -> Optional[dict]:
+    """Build a minimal stats-API-shaped game dict from the flat ``_sched``
+    fields so render_score_block / state_of work without the live cache.
+    Returns None for pre-game (or missing) data."""
+    st = state_from_schedule(sched)
+    if st == "scheduled":
+        return None
+    sched = sched or {}
+    return {
+        "status": {"abstractGameState": "Live" if st == "live" else "Final"},
+        "linescore": {
+            "currentInningOrdinal": sched.get("inning_ordinal") or "",
+            "isTopInning":          bool(sched.get("is_top_inning")),
+            "balls":                sched.get("balls"),
+            "strikes":              sched.get("strikes"),
+            "outs":                 sched.get("outs"),
+            "teams": {
+                "home": {"runs": sched.get("home_score")},
+                "away": {"runs": sched.get("away_score")},
+            },
+        },
+    }
+
+
 def render_score_block(live: dict, sport: str) -> None:
     """Render the big-score area for an in-progress or completed game.
 

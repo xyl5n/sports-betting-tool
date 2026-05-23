@@ -1367,7 +1367,8 @@ def _section_similar_players(
         async def _load() -> None:                                        # noqa: WPS430
             try:
                 enriched = await asyncio.to_thread(
-                    _enrich_similar, sims, market, prop.get("line"), side, is_pitcher,
+                    _enrich_similar, sims, market, prop.get("line"), side,
+                    is_pitcher, player_name, prop,
                 )
             except Exception as exc:                                      # noqa: BLE001
                 _log(f"similar enrich failed: {exc}")
@@ -1388,13 +1389,29 @@ def _section_similar_players(
 
 def _enrich_similar(
     sims: list[dict], market: str, line, side: str, is_pitcher: bool,
+    player_name: str = "", prop: Optional[dict] = None,
 ) -> list[dict]:
-    """Background-thread enrichment: attach season avg + L10 hit rate +
-    last-5 games for each similar player.  Cached gamelog reads only."""
+    """Background-thread enrichment.  For each similar player, find their
+    most recent game vs THIS player's opponent today and attach what they
+    recorded there (plus the date and how many H2H games exist).  Falls
+    back to the season average when they've never faced today's opponent.
+    Cached gamelog reads only."""
     from src.player_profile_client import (
-        get_player_gamelog, get_player_prop_summary, _CURRENT_SEASON,
+        get_player_gamelog, get_player_prop_summary, gamelog_stat_value,
+        get_player_today_opponent, _CURRENT_SEASON,
     )
     stat_key = _MARKET_TO_STAT.get(market) or ("K" if is_pitcher else "H")
+
+    # Today's opponent for the profile player (the team the similar
+    # players' H2H is measured against).  One cached resolution.
+    opp = None
+    try:
+        if player_name and prop is not None:
+            opp = get_player_today_opponent(player_name, prop)
+    except Exception:                                                     # noqa: BLE001
+        opp = None
+    opp_u = (opp or "").strip().upper()
+
     out: list[dict] = []
     for s in sims:
         pid = s.get("id")
@@ -1414,27 +1431,40 @@ def _enrich_similar(
             ) or {}
         except Exception:                                                 # noqa: BLE001
             summ = {}
+
+        # Most recent game vs today's opponent (games are date-ascending).
+        h2h_games = (
+            [g for g in games if (g.get("opp") or "").upper() == opp_u]
+            if opp_u else []
+        )
+        last_h2h = h2h_games[-1] if h2h_games else None
         out.append({
-            "name":       s.get("name") or "—",
-            "team":       s.get("team") or "",
-            "score":      s.get("score"),
-            "season_avg": summ.get("season_avg"),
-            "l10_hits":   summ.get("last_10_hits") or 0,
-            "l10_games":  summ.get("last_10_games") or 0,
-            "last5":      games[-5:],
-            "stat_key":   stat_key,
+            "name":         s.get("name") or "—",
+            "team":         s.get("team") or "",
+            "score":        s.get("score"),
+            "season_avg":   summ.get("season_avg"),
+            "last5":        games[-5:],
+            "stat_key":     stat_key,
+            "opp":          opp,
+            "h2h_count":    len(h2h_games),
+            "h2h_recorded": (gamelog_stat_value(last_h2h, stat_key)
+                             if last_h2h else None),
+            "h2h_date":     (last_h2h.get("date") if last_h2h else None),
         })
     return out
 
 
 def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
-    """One similar-player card: name + team + similarity score, season
-    avg, L10 hit rate vs the line, and a last-5 mini bar chart."""
+    """One similar-player card: name + team + similarity score, then their
+    result the last time they faced today's opponent (line being analyzed
+    vs what they actually recorded), or a season-average fallback with a
+    'No H2H vs [team]' note when they've never faced that opponent."""
     from src.utils import strip_formatting
     name = strip_formatting(s.get("name") or "—")
     team = strip_formatting(s.get("team") or "")
     slug = (s.get("name") or "").lower().replace(" ", "-")
     stat_key = s.get("stat_key") or "H"
+    opp = (s.get("opp") or "").strip().upper()
 
     score = s.get("score")
     try:
@@ -1443,16 +1473,19 @@ def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
         score_pct = "—"
 
     season_avg = s.get("season_avg")
-    avg_str = f"{season_avg:.2f}" if isinstance(season_avg, (int, float)) else "—"
+    avg_str = f"{season_avg:.1f}" if isinstance(season_avg, (int, float)) else "—"
+    line_str = f"{line_f:g}" if isinstance(line_f, (int, float)) else "—"
 
-    l10_hits  = int(s.get("l10_hits") or 0)
-    l10_games = int(s.get("l10_games") or 0)
-    if l10_games:
-        rate = l10_hits / l10_games
-        l10_str   = f"{l10_hits}/{l10_games} ({int(round(rate * 100))}%)"
-        l10_color = t.POS if rate >= 0.5 else t.NEG
+    recorded = s.get("h2h_recorded")
+    has_h2h  = recorded is not None
+    h2h_count = int(s.get("h2h_count") or 0)
+    rec_date  = _fmt_short_date(s.get("h2h_date"))
+
+    # Color the recorded value vs the analyzed line (over = green).
+    if has_h2h and isinstance(line_f, (int, float)):
+        rec_color = t.POS if float(recorded) > float(line_f) else t.NEG
     else:
-        l10_str, l10_color = "—", t.TEXT_DIM2
+        rec_color = t.TEXT
 
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
@@ -1478,35 +1511,52 @@ def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
                 f"font-family: monospace;"
             )
 
-        # Stats + mini chart
-        with ui.row().classes("items-center w-full").style(
-            "gap: 12px; flex-wrap: nowrap;"
-        ):
-            with ui.column().style("gap: 2px; flex-shrink: 0;"):
-                ui.label("AVG").style(
+        if has_h2h:
+            # Last time this similar player faced today's opponent.
+            label = f"LAST VS {opp}" + (f" · {rec_date}" if rec_date else "")
+            with ui.row().classes("items-center w-full").style(
+                "gap: 16px; flex-wrap: nowrap;"
+            ):
+                with ui.column().style("gap: 2px; flex-shrink: 0;"):
+                    ui.label(label).style(
+                        f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
+                        f"color: {t.TEXT_DIM2};"
+                    )
+                    ui.label(
+                        f"Line {line_str} {stat_key} · Got {float(recorded):g}"
+                    ).style(
+                        f"font-size: 12px; font-weight: 800; color: {rec_color}; "
+                        f"font-family: monospace;"
+                    )
+                if h2h_count > 1:
+                    ui.label(f"{h2h_count} H2H games").style(
+                        f"font-size: 10px; color: {t.TEXT_DIM2}; "
+                        f"font-family: monospace;"
+                    )
+        else:
+            # Never faced today's opponent -> season average fallback.
+            with ui.column().style("gap: 2px;"):
+                ui.label(
+                    f"No H2H vs {opp}" if opp else "No opponent set today"
+                ).style(
                     f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
                     f"color: {t.TEXT_DIM2};"
                 )
-                ui.label(f"{avg_str} {stat_key}").style(
+                ui.label(f"Season avg {avg_str} {stat_key}").style(
                     f"font-size: 12px; font-weight: 800; color: {t.TEXT}; "
                     f"font-family: monospace;"
                 )
-            with ui.column().style("gap: 2px; flex-shrink: 0;"):
-                ui.label("L10 HIT").style(
-                    f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
-                    f"color: {t.TEXT_DIM2};"
-                )
-                ui.label(l10_str).style(
-                    f"font-size: 12px; font-weight: 800; color: {l10_color}; "
-                    f"font-family: monospace;"
-                )
-            last5 = s.get("last5") or []
-            if last5:
-                ui.echart(_mini_bar_chart_options(
-                    last5, stat_key, line_f,
-                )).style("flex: 1; min-width: 0; height: 56px;")
-            else:
-                ui.element("div").style("flex: 1;")
+
+
+def _fmt_short_date(iso: Optional[str]) -> str:
+    """'2026-04-12' -> 'Apr 12'.  Empty string on any parse failure."""
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime
+        return datetime.strptime(iso[:10], "%Y-%m-%d").strftime("%b %-d")
+    except Exception:                                                     # noqa: BLE001
+        return ""
 
 
 # ── Donut gauge ────────────────────────────────────────────────────────────
