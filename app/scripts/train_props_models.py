@@ -1784,9 +1784,7 @@ def _train_and_save(
              "-- skipping train")
         return None, None
     try:
-        from sklearn.model_selection import (
-            StratifiedKFold, GroupKFold, GroupShuffleSplit, train_test_split,
-        )
+        from sklearn.model_selection import StratifiedKFold, GroupKFold
         from sklearn.metrics         import accuracy_score, log_loss
         import xgboost as xgb
         import joblib
@@ -1844,69 +1842,57 @@ def _train_and_save(
     oof_ll  = log_loss(y, oof, labels=[0, 1])
     _log(f"{label} OOF: acc={oof_acc:.3f}  log_loss={oof_ll:.3f}")
 
-    # ── 80/20 split: base trains on 80%, isotonic fits on 20%.
-    # When groups is provided, GroupShuffleSplit keeps players whole so
-    # the calibration cohort is fully unseen by the base classifier.
-    if groups_arr is not None:
-        gss = GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
-        tr_idx, cal_idx = next(gss.split(X, y, groups=groups_arr))
-        X_train, X_cal = X[tr_idx], X[cal_idx]
-        y_train, y_cal = y[tr_idx], y[cal_idx]
-        _log(
-            f"{label} split: base={len(X_train)} rows ({len(set(groups_arr[tr_idx].tolist()))} players), "
-            f"calibration={len(X_cal)} rows ({len(set(groups_arr[cal_idx].tolist()))} players)  "
-            f"-- GroupShuffleSplit (no player overlap)"
-        )
-    else:
-        X_train, X_cal, y_train, y_cal = train_test_split(
-            X, y, test_size=0.20, random_state=42, stratify=y,
-        )
-        _log(
-            f"{label} split: base={len(X_train)} rows, calibration={len(X_cal)} rows "
-            f"(positive_rate train={y_train.mean():.3f}  cal={y_cal.mean():.3f})"
-        )
-
+    # ── Final base model (full data) — returned for SHAP only ─────────────
+    # TreeExplainer can't traverse a CalibratedClassifierCV wrapper, so we
+    # fit a plain XGB on all data purely for SHAP attribution.  This is NOT
+    # what we persist.
     base = xgb.XGBClassifier(**_xgb_kwargs)
-    base.fit(X_train, y_train)
+    base.fit(X, y)
 
-    # ── Isotonic calibration on the held-out 20% ──────────────────────────
-    # We wrap `base` in FrozenEstimator so CalibratedClassifierCV.fit() only
-    # fits the isotonic map — the base classifier's weights aren't touched.
-    # sklearn 1.6+ removed the legacy `cv='prefit'` argument in favour of
-    # this pattern (the cv= arg is now strictly for k-fold ints / splitters).
-    # Base and calibrator see disjoint data, so the Brier delta below reads
-    # honestly as a test-set number.
-    try:
-        from sklearn.calibration import CalibratedClassifierCV
-        from sklearn.frozen      import FrozenEstimator
-        from sklearn.metrics     import brier_score_loss
+    # ── Isotonic calibration via 5-fold CV — THIS is the saved artifact ───
+    # The persisted model MUST be the CalibratedClassifierCV wrapper, never
+    # the raw XGBClassifier: raw XGB outputs wildly over-confident probs
+    # (clustered near 0/1, ~100% picks).  CalibratedClassifierCV(cv=5)
+    # clones the estimator, fits it on 4 folds and the isotonic map on the
+    # held-out fold (x5), so calibration data is always unseen by the base
+    # it calibrates -- no prefit/FrozenEstimator fragility.
+    #
+    # No try/except fallback to dumping `base`: silently saving the raw
+    # classifier on any hiccup is exactly the bug that produced
+    # `cls=XGBClassifier` in the boot log.  If calibration can't run we
+    # want a loud failure, not a miscalibrated model on disk.
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.metrics     import brier_score_loss
 
-        brier_pre_holdout = brier_score_loss(
-            y_cal, base.predict_proba(X_cal)[:, 1],
-        )
-        _log(f"{label} pre-calibration Brier (20% holdout): {brier_pre_holdout:.4f}")
+    calibrated = CalibratedClassifierCV(
+        estimator=xgb.XGBClassifier(**_xgb_kwargs),
+        method="isotonic",
+        cv=5,
+    )
+    calibrated.fit(X, y)
 
-        calibrated = CalibratedClassifierCV(
-            FrozenEstimator(base), method="isotonic",
-        )
-        calibrated.fit(X_cal, y_cal)
+    # Brier: OOF (honest, uncalibrated) vs calibrated in-sample.  The
+    # calibrated number is in-sample (optimistic) but the OOF->calibrated
+    # comparison still flags gross miscalibration if it regresses.
+    brier_oof = brier_score_loss(y, oof)
+    brier_cal = brier_score_loss(y, calibrated.predict_proba(X)[:, 1])
+    _log(f"{label} Brier: oof(uncalibrated)={brier_oof:.4f}  "
+         f"calibrated(in-sample)={brier_cal:.4f}")
 
-        brier_post_holdout = brier_score_loss(
-            y_cal, calibrated.predict_proba(X_cal)[:, 1],
-        )
-        _log(f"{label} post-calibration Brier (20% holdout): {brier_post_holdout:.4f}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(calibrated, out_path)
+    _log(f"{label} calibrated model saved: {out_path} "
+         f"(cls={type(calibrated).__name__})")
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(calibrated, out_path)
-        _log(f"{label} calibrated model saved: {out_path}")
-        # Return base for SHAP; calibrated is what landed on disk.
-        return float(oof_acc), base
-    except Exception as cal_exc:                                            # noqa: BLE001
-        _log(f"{label} calibration failed ({cal_exc}) -- saving uncalibrated base")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(base, out_path)
-        _log(f"{label} model saved (uncalibrated): {out_path}")
-        return float(oof_acc), base
+    # Reload sanity check -- prove the persisted artifact is the wrapper,
+    # mirroring the boot-time `cls=` log so the retrain self-verifies.
+    _reloaded = joblib.load(out_path)
+    _inner = getattr(_reloaded, "estimator", None)
+    _log(f"{label} reload check: cls={type(_reloaded).__name__}"
+         + (f" (inner={type(_inner).__name__})" if _inner is not None else ""))
+
+    # Return base for SHAP; the calibrated wrapper is what landed on disk.
+    return float(oof_acc), base
 
 
 def _train_regressor(

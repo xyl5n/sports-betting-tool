@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .kelly import american_to_decimal, size_bet
+from .kelly import american_to_decimal, size_bet, tracked_bet_kelly
 
 _logger = logging.getLogger(__name__)
 
@@ -307,15 +307,23 @@ class Ledger:
         )
 
     def kelly_amounts(self, model_prob: float, american_odds: int) -> tuple[float, float]:
-        """Return (model_amount, personal_amount) sized off current ledger bankrolls."""
-        model_starting    = self.data.get("model_starting_bankroll",    1000.0)
-        personal_starting = self.data.get("personal_starting_bankroll", self._starting)
+        """Return (model_amount, personal_amount) sized off current ledger bankrolls.
+
+        The personal/confirmed stake uses the plain half-Kelly formula
+        (tracked_bet_kelly): no minimum-edge gate and no 2%-of-bankroll
+        hard cap.  Those two reductions were what produced the inconsistent
+        $0 (edge < 3% gated to zero) and $2 (2% cap on a small bankroll)
+        stakes -- every tracked bet now sizes by the same formula off the
+        current personal bankroll, with a $1 floor on any positive edge and
+        $0 only on a genuine negative edge.  The model side keeps size_bet's
+        conservative caps since those auto-logged bets are a separate ledger.
+        """
+        model_starting = self.data.get("model_starting_bankroll", 1000.0)
         _, m, _, _ = size_bet(model_prob, american_odds,
                                self.data["model_bankroll"], model_starting,
                                is_user_bet=False)
-        _, c, _, _ = size_bet(model_prob, american_odds,
-                               self.data["personal_bankroll"], personal_starting,
-                               is_user_bet=True)
+        c, _flag = tracked_bet_kelly(model_prob, american_odds,
+                                     self.data["personal_bankroll"])
         return round(m, 2), round(c, 2)
 
     def _daily_exposure(self, today_str: str, confirmed_only: bool = False) -> float:

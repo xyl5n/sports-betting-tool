@@ -25,8 +25,10 @@ All log lines are prefixed PLAYER-CLIENT so they are easy to grep in Railway log
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,7 +46,7 @@ _CURRENT_SEASON = 2025
 
 # Module-level in-process caches (reset each Railway deploy — that's fine)
 _player_info_cache: dict[int, dict] = {}   # player_id -> info dict
-_name_to_id_cache:  dict[str, int]  = {}   # lowercased name -> player_id
+_name_to_id_cache:  dict[str, Optional[int]] = {}   # lowercased name -> player_id (None = negative cache)
 
 
 # ---------------------------------------------------------------------------
@@ -174,37 +176,102 @@ def get_player_info(player_id: int) -> dict:
 # Name search / slug resolution
 # ---------------------------------------------------------------------------
 
+def _strip_accents(s: str) -> str:
+    """'Ureña' -> 'Urena'.  NFKD decompose, drop combining marks."""
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+
+
+def _norm_name(s: str) -> str:
+    """Accent/punctuation-insensitive form for comparison: lowercase,
+    strip accents, drop everything but letters/digits/space, collapse
+    spaces.  'J.T. Ginn' -> 'jt ginn', 'Walbert Ureña' -> 'walbert urena'."""
+    s = _strip_accents(s or "").lower()
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _name_query_variants(name: str) -> list[str]:
+    """Distinct query strings to try against the MLB search API before
+    giving up: the original, an accent-stripped form ('Ureña'->'Urena'),
+    a period-stripped form ('J.T.'->'JT'), and a dotted-initials form
+    ('JT Ginn'->'J.T. Ginn')."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(v: str) -> None:
+        v = (v or "").strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+
+    add(name)
+    add(_strip_accents(name))                      # accent fallback
+    add(name.replace(".", ""))                     # "J.T. Ginn" -> "JT Ginn"
+    add(_strip_accents(name).replace(".", ""))
+
+    # Dotted-initials fallback: a 2-3 letter all-caps first token like
+    # "JT" -> "J.T." so "JT Ginn" also matches the API's "J.T. Ginn".
+    parts = name.split()
+    if parts and parts[0].isalpha() and parts[0].isupper() and 2 <= len(parts[0]) <= 3:
+        dotted = ".".join(parts[0]) + "."
+        add(" ".join([dotted, *parts[1:]]))
+        add(_strip_accents(" ".join([dotted, *parts[1:]])))
+    return out
+
+
 def search_player_by_name(name: str) -> Optional[int]:
-    """Search the MLB Stats API for *name* and return the player ID or None."""
+    """Search the MLB Stats API for *name* and return the player ID or None.
+
+    Caches both hits AND misses in ``_name_to_id_cache`` (negative cache):
+    a name that fails once is never retried for the rest of the process /
+    scoring run, so an unresolvable name no longer fires dozens of repeated
+    API calls (one per prop).  Failures log exactly once per name.
+
+    Before giving up it tries several normalized query variants (accent-
+    and period-insensitive) so e.g. "JT Ginn" matches the API's
+    "J.T. Ginn" and "Walbert Urena" matches "Walbert Ureña"."""
     key = name.lower()
     if key in _name_to_id_cache:
-        return _name_to_id_cache[key]
+        return _name_to_id_cache[key]            # hit OR negative-cache hit
 
-    encoded = urllib.parse.quote(name)
-    url     = (
-        f"{_STATS_BASE}/people/search"
-        f"?names={encoded}&season={_CURRENT_SEASON}&sportId=1"
-    )
-    data = _fetch_json(url, label=f"search_player_by_name({name!r})")
-    if not data:
-        return None
-
-    try:
-        people = data.get("people") or []
+    target_norm = _norm_name(name)
+    fallback_pid: Optional[int] = None           # first result seen, last resort
+    for variant in _name_query_variants(name):
+        encoded = urllib.parse.quote(variant)
+        url = (
+            f"{_STATS_BASE}/people/search"
+            f"?names={encoded}&season={_CURRENT_SEASON}&sportId=1"
+        )
+        data = _fetch_json(url, label=f"search_player_by_name({variant!r})")
+        if not data:
+            continue
+        try:
+            people = data.get("people") or []
+        except Exception:                                                 # noqa: BLE001
+            people = []
+        # Accent/punctuation-insensitive substring match first.
         for person in people:
-            full = (person.get("fullName") or "").lower()
-            if key in full or full in key:
+            full_norm = _norm_name(person.get("fullName") or "")
+            if full_norm and (target_norm in full_norm or full_norm in target_norm):
                 pid = int(person["id"])
                 _name_to_id_cache[key] = pid
                 return pid
-        if people:
-            pid = int(people[0]["id"])
-            _name_to_id_cache[key] = pid
-            return pid
-        return None
-    except Exception as exc:
-        _log(f"search_player_by_name({name!r}) parse error: {exc}")
-        return None
+        if fallback_pid is None and people:
+            try:
+                fallback_pid = int(people[0]["id"])
+            except (KeyError, ValueError, TypeError):
+                fallback_pid = None
+
+    # No normalized match across any variant.  Fall back to the first
+    # result the API returned (legacy behaviour) if there was one; else
+    # negative-cache so this name isn't retried this run.  Either way the
+    # outcome is cached and we log at most once per name.
+    if fallback_pid is not None:
+        _name_to_id_cache[key] = fallback_pid
+        return fallback_pid
+    _name_to_id_cache[key] = None
+    _log(f"search_player_by_name({name!r}) -- no MLB match (negative-cached)")
+    return None
 
 
 def resolve_player_id(player_id_or_slug: str) -> Optional[int]:
