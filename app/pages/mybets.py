@@ -240,12 +240,12 @@ _MARKET_LABEL: dict[str, str] = {
 
 
 def _load_props_bets() -> tuple[list[dict], list[dict]]:
-    """Return (open_bets, history) from PropsLedger."""
+    """Return (open_picks, history) from the props picks tracker
+    (props_picks_history.json -- same pattern as the game trackers)."""
     try:
-        from src.props_ledger import get_props_ledger
-        pl = get_props_ledger()
-        pl.reload()
-        return pl.get_open_bets(), pl.get_history()
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        return _ppt.get_open(), _ppt.get_history()
     except Exception:                                                      # noqa: BLE001
         return [], []
 
@@ -253,8 +253,9 @@ def _load_props_bets() -> tuple[list[dict], list[dict]]:
 def _props_record() -> None:
     """Small record summary card for prop picks."""
     try:
-        from src.props_ledger import get_props_ledger
-        rec = get_props_ledger().get_record()
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        rec = _ppt.get_record()
     except Exception:                                                      # noqa: BLE001
         rec = {"wins": 0, "losses": 0, "voids": 0, "open": 0, "total": 0, "pct": None}
 
@@ -335,8 +336,12 @@ def _props_history() -> None:
 def _prop_bet_row(b: dict, settled: bool) -> None:
     """Single row card for a prop pick (open or settled)."""
     result       = (b.get("result") or "").lower()
+    # New tracker uses won/lost/void/pending; map both the new and the
+    # legacy win/loss spellings to colors so old rows still render.
     result_color = {
-        "win": t.POS, "loss": t.NEG, "void": t.WARN,
+        "won": t.POS, "win": t.POS,
+        "lost": t.NEG, "loss": t.NEG,
+        "void": t.WARN,
     }.get(result, t.TEXT_DIM)
 
     side    = (b.get("side") or "Over").strip().title()
@@ -358,7 +363,8 @@ def _prop_bet_row(b: dict, settled: bool) -> None:
     team    = b.get("team") or ""
 
     border = (
-        f"1px solid {result_color}" if settled and result in ("win", "loss", "void")
+        f"1px solid {result_color}"
+        if settled and result in ("won", "win", "lost", "loss", "void")
         else f"1px solid {t.BORDER}"
     )
 
@@ -408,8 +414,11 @@ def _prop_bet_row(b: dict, settled: bool) -> None:
             if pv_s:
                 _mini_stat("MODEL", pv_s)
             if settled and actual_s is not None:
-                _mini_stat("ACTUAL", actual_s,
-                           t.POS if result == "win" else (t.NEG if result == "loss" else t.WARN))
+                _actual_color = (
+                    t.POS if result in ("won", "win")
+                    else (t.NEG if result in ("lost", "loss") else t.WARN)
+                )
+                _mini_stat("ACTUAL", actual_s, _actual_color)
             ui.element("div").style("flex: 1;")
             _mini_stat("ODDS", odds_s)
 

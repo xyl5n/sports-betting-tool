@@ -415,13 +415,24 @@ def cache_delete(key: str) -> bool:
 
 
 def cache_delete_stale(today: str) -> int:
-    """Delete every cache row whose `date` field doesn't equal *today*.
+    """Delete every cache row whose `date` field doesn't equal *today*,
+    EXCEPT durable history rows whose key contains "history" (e.g.
+    ``props_picks_history``).  Those are append-only records that must
+    survive the daily ET rollover -- without the carve-out the daily
+    purge wiped the entire props pick history overnight.
+
     Returns the number of rows the call reports deleting (0 if Supabase
     off or on error).  Caller passes today's ET date string."""
     if _mode != "supabase" or _client is None:
         return 0
     try:
-        resp = _client.table("app_cache").delete().neq("date", today).execute()
+        resp = (
+            _client.table("app_cache")
+            .delete()
+            .neq("date", today)
+            .not_.ilike("key", "%history%")
+            .execute()
+        )
         return len(resp.data or [])
     except Exception as exc:                                              # noqa: BLE001
         _logger.warning("cache_delete_stale(today=%s) failed: %s", today, exc)
