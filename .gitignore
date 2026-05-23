@@ -32,3 +32,14 @@ env/
 # Supabase is the cross-environment persistence layer for cross-PR diffs.
 **/.cache/backtest_results_*.json
 **/.cache/backtest_baseline.json
+
+# Props regression metadata — pitcher_feature_names + batter_feature_names
+# are written wholesale by every training run.  When parallel branches
+# train opposite sides (one --skip-pitcher, the other --skip-batter), they
+# can't auto-merge cleanly even with _save_reg_metadata's read-modify-write
+# logic, because the timestamp + the side-this-branch-actually-trained both
+# diff.  The hardcoded _PITCHER_FEATURE_NAMES / _BATTER_FEATURE_NAMES
+# constants in props_model.py are the source of truth at inference; the
+# file is restored from Supabase on cold boot when present.  Stop tracking
+# it in git so PR-merge conflicts on this one file never happen again.
+**/.cache/props_reg_metadata.json

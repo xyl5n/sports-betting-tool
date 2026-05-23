@@ -2076,27 +2076,32 @@ def _train_and_save(
     label: str,
     groups=None,
 ) -> tuple[Optional[float], Optional[object]]:
-    """5-fold CV XGBoost training + isotonic calibration on a 20% holdout.
+    """5-fold CV XGBoost training + isotonic calibration via CalibratedClassifierCV(cv=5).
 
     Returns (oof_accuracy, base_classifier).  The *saved* artifact is the
-    CalibratedClassifierCV wrapper; the returned model is the underlying
+    CalibratedClassifierCV wrapper; the returned model is an underlying
     base XGB tree so SHAP TreeExplainer can introspect it (TreeExplainer
     can't traverse the wrapper).
 
-    PR2 change: previously calibrated with cv='prefit' on the SAME X, y
-    used to fit the base classifier (acknowledged in the source as
-    "optimistic but directional").  Now uses an explicit 20% stratified
-    holdout — base fits on 80%, isotonic regression fits on the unseen
-    20% — so the post-calibration Brier score is an honest test-set
-    number, not a self-graded one.
+    PR5 change: previously CalibratedClassifierCV(FrozenEstimator(base),
+    method='isotonic') with a single 80/20 holdout — only 20% of rows
+    fed the calibrator.  Now uses the standard cv=5 pattern: sklearn
+    refits the base XGB 5 times internally, each on 4 folds, and fits
+    the isotonic map on each held-out fold.  Final predict_proba is the
+    average of all 5 calibrated outputs, which softens the isotonic-zero
+    extremes a single calibrator can produce.  Every row contributes to
+    calibration, not just 20%.
 
-    PR3 change: when *groups* is provided, switch from StratifiedKFold
-    (shuffle=True) to GroupKFold so the same player_id never lands in
-    both train and test folds.  Previous shuffle-only splits leaked
-    player identity across folds — a pitcher's first 8 starts could
-    train the fold that scored their 9th, inflating OOF accuracy.
-    The 80/20 calibration split also switches to GroupShuffleSplit so
-    base + calibration cohorts stay disjoint at the player level.
+    When *groups* is provided we pre-compute the 5 (train, test) splits
+    with GroupKFold(n_splits=5) and pass that explicit iterable to
+    CalibratedClassifierCV's cv= argument.  Same identity-leak prevention
+    as the OOF loop above: a pitcher's June starts and July starts never
+    land in different sides of the same calibration fold.
+
+    Pre/post-calibration Brier (PR2 change kept): we still compute Brier
+    on an independent 20% group-aware holdout to log an honest pre→post
+    delta.  That holdout is excluded from the final cv=5 fit so its
+    Brier read isn't self-graded.
     """
     if X is None or y is None or len(X) < 20:
         _log(f"{label}: not enough data ({0 if X is None else len(X)} rows) "
@@ -2163,69 +2168,124 @@ def _train_and_save(
     oof_ll  = log_loss(y, oof, labels=[0, 1])
     _log(f"{label} OOF: acc={oof_acc:.3f}  log_loss={oof_ll:.3f}")
 
-    # ── 80/20 split: base trains on 80%, isotonic fits on 20%.
-    # When groups is provided, GroupShuffleSplit keeps players whole so
-    # the calibration cohort is fully unseen by the base classifier.
+    # ── 80/20 holdout for Brier reporting only.
+    # The final cv=5 calibrator is fit on the 80% train portion; the 20%
+    # holdout is used exclusively for pre/post Brier comparison so the
+    # numbers we log are honest (the calibrator never sees the holdout).
+    # GroupShuffleSplit when groups is provided so players stay whole.
     if groups_arr is not None:
         gss = GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
         tr_idx, cal_idx = next(gss.split(X, y, groups=groups_arr))
         X_train, X_cal = X[tr_idx], X[cal_idx]
         y_train, y_cal = y[tr_idx], y[cal_idx]
+        groups_train = groups_arr[tr_idx]
         _log(
-            f"{label} split: base={len(X_train)} rows ({len(set(groups_arr[tr_idx].tolist()))} players), "
-            f"calibration={len(X_cal)} rows ({len(set(groups_arr[cal_idx].tolist()))} players)  "
+            f"{label} holdout split: train={len(X_train)} rows "
+            f"({len(set(groups_train.tolist()))} players), "
+            f"brier_holdout={len(X_cal)} rows "
+            f"({len(set(groups_arr[cal_idx].tolist()))} players)  "
             f"-- GroupShuffleSplit (no player overlap)"
         )
     else:
-        X_train, X_cal, y_train, y_cal = train_test_split(
-            X, y, test_size=0.20, random_state=42, stratify=y,
+        tr_idx, cal_idx = train_test_split(
+            np.arange(len(y)), test_size=0.20, random_state=42, stratify=y,
         )
+        X_train, X_cal = X[tr_idx], X[cal_idx]
+        y_train, y_cal = y[tr_idx], y[cal_idx]
+        groups_train = None
         _log(
-            f"{label} split: base={len(X_train)} rows, calibration={len(X_cal)} rows "
+            f"{label} holdout split: train={len(X_train)} rows, "
+            f"brier_holdout={len(X_cal)} rows "
             f"(positive_rate train={y_train.mean():.3f}  cal={y_cal.mean():.3f})"
         )
 
-    base = xgb.XGBClassifier(**_xgb_kwargs)
-    base.fit(X_train, y_train)
+    # Pre-calibration Brier reference: fit a single base XGB on the train
+    # portion and score on the holdout.  This is the "raw XGB" number we
+    # want the cv=5 calibrator to beat.
+    base_for_brier = xgb.XGBClassifier(**_xgb_kwargs)
+    base_for_brier.fit(X_train, y_train)
 
-    # ── Isotonic calibration on the held-out 20% ──────────────────────────
-    # We wrap `base` in FrozenEstimator so CalibratedClassifierCV.fit() only
-    # fits the isotonic map — the base classifier's weights aren't touched.
-    # sklearn 1.6+ removed the legacy `cv='prefit'` argument in favour of
-    # this pattern (the cv= arg is now strictly for k-fold ints / splitters).
-    # Base and calibrator see disjoint data, so the Brier delta below reads
-    # honestly as a test-set number.
     try:
         from sklearn.calibration import CalibratedClassifierCV
-        from sklearn.frozen      import FrozenEstimator
         from sklearn.metrics     import brier_score_loss
 
         brier_pre_holdout = brier_score_loss(
-            y_cal, base.predict_proba(X_cal)[:, 1],
+            y_cal, base_for_brier.predict_proba(X_cal)[:, 1],
         )
         _log(f"{label} pre-calibration Brier (20% holdout): {brier_pre_holdout:.4f}")
 
+        # ── PR5: CalibratedClassifierCV with cv=5 ─────────────────────────
+        # sklearn refits the base XGBClassifier 5 times internally (each
+        # on 4 folds), fits an isotonic map on each held-out fold, then
+        # averages the 5 calibrated predictions.  Every row contributes
+        # to calibration -- big upgrade from the old "calibrate on 20%
+        # only" pattern, and the 5-way averaging softens the isotonic
+        # extremes (single calibrators clamp some predictions to exactly
+        # 0.0 / 1.0; averaging 5 of them rarely does).
+        if groups_train is not None:
+            gkf = GroupKFold(n_splits=5)
+            cv_splits = list(gkf.split(X_train, y_train, groups=groups_train))
+            _log(
+                f"{label} CalibratedClassifierCV(cv=GroupKFold(5))  "
+                f"-- each fold's calibrator sees a unique disjoint player cohort"
+            )
+        else:
+            cv_splits = StratifiedKFold(
+                n_splits=5, shuffle=True, random_state=42,
+            )
+            _log(f"{label} CalibratedClassifierCV(cv=StratifiedKFold(5))")
+
+        base_template = xgb.XGBClassifier(**_xgb_kwargs)
         calibrated = CalibratedClassifierCV(
-            FrozenEstimator(base), method="isotonic",
+            base_template, method="isotonic", cv=cv_splits,
         )
-        calibrated.fit(X_cal, y_cal)
+        calibrated.fit(X_train, y_train)
 
         brier_post_holdout = brier_score_loss(
             y_cal, calibrated.predict_proba(X_cal)[:, 1],
         )
         _log(f"{label} post-calibration Brier (20% holdout): {brier_post_holdout:.4f}")
+        _log(
+            f"{label} calibrator: inner_classifiers={len(calibrated.calibrated_classifiers_)}  "
+            f"method={calibrated.method}"
+        )
+
+        # PR5: 50-sample predict_proba distribution check.  Verifies the
+        # calibrated model produces a natural spread rather than clustering
+        # near 0 or 1.  Pulls a random 50-row sample from the holdout
+        # (which the calibrator did not see during fit).
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(len(X_cal), size=min(50, len(X_cal)), replace=False)
+        sample_probas = calibrated.predict_proba(X_cal[sample_idx])[:, 1]
+        bucket_lines = []
+        for lo, hi in ((0.0, 0.2), (0.2, 0.4), (0.4, 0.55),
+                       (0.55, 0.70), (0.70, 0.85), (0.85, 1.00)):
+            n_in = int(((sample_probas >= lo) & (sample_probas < hi)).sum())
+            bucket_lines.append(f"[{lo:.2f},{hi:.2f})={n_in}")
+        _log(
+            f"{label} predict_proba sample (n={len(sample_probas)}): "
+            f"min={sample_probas.min():.4f}  max={sample_probas.max():.4f}  "
+            f"mean={sample_probas.mean():.4f}  median={float(np.median(sample_probas)):.4f}  "
+            f"std={sample_probas.std():.4f}"
+        )
+        _log(f"{label} predict_proba buckets: {' '.join(bucket_lines)}")
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(calibrated, out_path)
-        _log(f"{label} calibrated model saved: {out_path}")
-        # Return base for SHAP; calibrated is what landed on disk.
-        return float(oof_acc), base
+        _log(
+            f"{label} calibrated model saved: {out_path}  "
+            f"cls={type(calibrated).__name__}"
+        )
+        # Return base_for_brier (an XGBClassifier instance trained on the
+        # 80% train portion) for SHAP; the calibrated wrapper is what
+        # landed on disk.
+        return float(oof_acc), base_for_brier
     except Exception as cal_exc:                                            # noqa: BLE001
         _log(f"{label} calibration failed ({cal_exc}) -- saving uncalibrated base")
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(base, out_path)
+        joblib.dump(base_for_brier, out_path)
         _log(f"{label} model saved (uncalibrated): {out_path}")
-        return float(oof_acc), base
+        return float(oof_acc), base_for_brier
 
 
 def _train_regressor(
