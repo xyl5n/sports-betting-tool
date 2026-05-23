@@ -1633,7 +1633,10 @@ def _build_batter_dataset(
         is_home, ballpark_factor_hits, ballpark_factor_hr,
         ops_vs_lhp, obp_vs_lhp, slg_vs_lhp,
         ops_vs_rhp, obp_vs_rhp, slg_vs_rhp,
-        r30_HR, r30_BB (30-game windows for sparse counts)
+        r30_H, r30_HR, r30_TB, r30_RBI, r30_R, r30_BB (30-game windows;
+        sparse counts get most benefit, but PR5 extends the same smoothing
+        to the high-volume H/TB markets so the model can blend short-term
+        form with a longer trend)
 
     PR3 opposing-pitcher context (when *opp_pitcher_lookup* etc. provided):
         opp_pitcher_szn_k_per_9, opp_pitcher_szn_era, opp_pitcher_throws_lhp
@@ -1735,7 +1738,12 @@ def _build_batter_dataset(
         # smooths the signal toward the player's true level over a 5-6
         # week horizon — adds two features instead of replacing the
         # shorter windows so the model can blend them.
-        for c in ("HR", "BB"):
+        # PR5: extend r30 smoothing to all six batter prop targets.
+        # PR3 only smoothed HR and BB (the two sparsest stats).  H and TB
+        # are the highest-volume markets so a long-trend signal is the
+        # most useful there; R and RBI are mid-volume and benefit from
+        # the same dampening at ~30 games (~5-6 weeks of play).
+        for c in ("H", "HR", "TB", "RBI", "R", "BB"):
             df[f"r30_{c}"] = df[c].shift(1).rolling(window=30, min_periods=5).mean()
 
         # BABIP rolling averages (7d and 14d)
@@ -1814,8 +1822,10 @@ def _build_batter_dataset(
             [f"szn_{c}"  for c in roll_stats]
             + [f"r7_{c}" for c in roll_stats]
             + [f"r14_{c}" for c in roll_stats]
-            # PR3: 30-game smoothing for the two sparse count stats.
-            + ["r30_HR", "r30_BB"]
+            # PR5: 30-game smoothing extended to all six batter stat targets.
+            # Order matches the inference-side _BATTER_FEATURE_NAMES so the
+            # vector layout is stable across train/predict.
+            + ["r30_H", "r30_HR", "r30_TB", "r30_RBI", "r30_R", "r30_BB"]
             + [
                 "k_pct_7d", "k_pct_14d",
                 "babip_7d", "babip_14d",

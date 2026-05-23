@@ -268,7 +268,11 @@ _BATTER_FEATURE_NAMES: list[str] = (
     [f"szn_{c}" for c in _B_ROLL]   # 14
     + [f"r7_{c}"  for c in _B_ROLL] # 14
     + [f"r14_{c}" for c in _B_ROLL] # 14
-    + ["r30_HR", "r30_BB"]          # 2  (PR3 sparse-count smoothing)
+    # PR5: r30 smoothing extended to all six batter stat targets (was
+    # HR + BB only in PR3).  H and TB are the highest-volume markets;
+    # R and RBI are mid-volume.  Order matches the training script's
+    # feat_cols list — keep these two in sync.
+    + ["r30_H", "r30_HR", "r30_TB", "r30_RBI", "r30_R", "r30_BB"]  # 6
     + [
         "k_pct_7d", "k_pct_14d", "babip_7d", "babip_14d",
         "batting_order", "is_home_i", "ballpark_factor_hits", "ballpark_factor_hr",
@@ -284,7 +288,7 @@ _BATTER_FEATURE_NAMES: list[str] = (
     #   platoon_matchup_flag, weather_temp, weather_wind_speed, time_of_day,
     #   ba_vs_breaking, ba_vs_fastball, ba_vs_offspeed,
     #   h2h_career_ab, h2h_career_avg, h2h_career_k_rate, implied_total
-)  # 14+14+14+2+11+6 = 61
+)  # 14+14+14+6+11+6 = 65
 
 # Neutral inference-time defaults for features that require live data
 # (lineup, weather, umpire stats, etc.).  These match league-average
@@ -316,7 +320,14 @@ _BATTER_DEFAULTS: dict[str, float] = {
     "babip_14d":           0.295,
     "batting_order":       5.0,
     # PR3: 30-game windows for sparse counts.  League per-game means.
+    # PR5: r30 league-average per-game means.  Used when a batter has no
+    # snapshot row (rookies / mid-season debuts).  Numbers approximate
+    # 2023-2025 MLB per-PA averages * ~3.7 PA/game starter baseline.
+    "r30_H":               0.85,
     "r30_HR":              0.13,
+    "r30_TB":              1.45,
+    "r30_RBI":             0.45,
+    "r30_R":               0.50,
     "r30_BB":              0.36,
     "ops_vs_lhp":          0.720,
     "obp_vs_lhp":          0.315,
