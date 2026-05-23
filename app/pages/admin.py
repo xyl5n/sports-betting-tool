@@ -608,6 +608,18 @@ def _section_props(backend, refresh) -> None:
             ),
             refresh_status=refresh,
         )
+        _async_button(
+            backend, "Run Confidence Audit",
+            "POST", "/api/admin/audit/confidence",
+            spinner_msg="Running diagnostic audit -- "
+                        "tail Railway logs (grep CONF-AUDIT) for the report.",
+            done_msg=lambda d: (
+                f"Done — audit emitted to stderr in {d.get('elapsed_ms', 0)} ms. "
+                f"Grep '{d.get('log_grep', 'CONF-AUDIT')}' in Railway logs."
+            ),
+            refresh_status=refresh,
+            style="warn",
+        )
 
 
 def _section_models(backend, refresh) -> None:

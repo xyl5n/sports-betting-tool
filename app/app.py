@@ -9464,6 +9464,43 @@ def admin_props_refresh_now():
                         "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+@app.route("/api/admin/audit/confidence", methods=["POST"])
+def admin_audit_confidence():
+    """Run the read-only confidence audit script and stream its output
+    to Railway logs via stderr.  Powers the "Run Confidence Audit"
+    admin button.  Makes no changes to scoring/model code -- it just
+    inspects the saved joblibs, samples predict_proba on real props,
+    greps for legacy squash/cap code, and reports feature-vector
+    stats.  Returns {success, lines_emitted} so the button can show
+    completion without parsing the whole report.
+    """
+    import time as _time
+    started = _time.monotonic()
+    print("[ADMIN-ROUTE] /api/admin/audit/confidence invoked",
+          flush=True, file=sys.stderr)
+    try:
+        from scripts.audit_confidence import run_audit
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"AUDIT import failed: {type(exc).__name__}: {exc}")
+        return jsonify({
+            "success": False,
+            "error":   f"import failed: {exc}",
+        }), 500
+    try:
+        run_audit()
+        elapsed_ms = int((_time.monotonic() - started) * 1000)
+        return jsonify({
+            "success":     True,
+            "elapsed_ms":  elapsed_ms,
+            "log_grep":    "CONF-AUDIT",
+        })
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"AUDIT FAILED: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}")
+        return jsonify({"success": False,
+                        "error":   f"{type(exc).__name__}: {exc}"}), 500
+
+
 # ── Nightly retrain scheduler ─────────────────────────────────────────────────
 print("STARTUP: all routes registered — starting scheduler...", flush=True, file=sys.stderr)
 
