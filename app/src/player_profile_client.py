@@ -1319,6 +1319,28 @@ def get_batter_vs_pitcher(prop: dict, player_name: str) -> dict:
     return out
 
 
+def get_today_opposing_pitcher(prop: dict, player_name: str) -> Optional[dict]:
+    """Resolve today's opposing *starting* pitcher for *player_name*.
+
+    Returns ``{"id", "name", "hand"}`` (the probable starter on the
+    other side of the matchup) or ``None`` when the game / probable
+    pitcher isn't on today's schedule yet.  Wraps the private
+    ``_find_todays_game`` so other modules don't reach into privates.
+    """
+    try:
+        game = _find_todays_game(prop, player_name)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"get_today_opposing_pitcher error: {exc}")
+        return None
+    if not game:
+        return None
+    pitcher = (game.get("pitchers") or {}).get(game.get("opp_side") or "")
+    if not pitcher or not pitcher.get("id"):
+        return None
+    return {"id": pitcher.get("id"), "name": pitcher.get("name", ""),
+            "hand": pitcher.get("hand", "")}
+
+
 # ---------------------------------------------------------------------------
 # Opposing-team rank vs each prop market
 # ---------------------------------------------------------------------------
