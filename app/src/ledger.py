@@ -545,26 +545,32 @@ class Ledger:
 
     # ── settlement ────────────────────────────────────────────────────────────
 
-    def settle(self, odds_client, sport_key: str) -> list[dict]:
+    def settle(self, odds_client, sport_key: str, scores=None) -> list[dict]:
         """
         Query Odds API scores for open bets matching sport_key and auto-settle them.
         Stake was already deducted at placement:
           Win  → return stake × decimal (stake + profit)
           Push → return stake only       (no profit, no loss)
           Loss → nothing returned
+
+        *scores* may be a pre-fetched list of Odds API score rows; when
+        provided it's reused instead of issuing another get_scores call so
+        the caller can share one fetch across multiple settlement consumers
+        in the same refresh cycle.
         """
         open_for_sport = [b for b in self.data["open_bets"] if b["sport_key"] == sport_key]
         if not open_for_sport:
             return []
 
-        try:
-            scores = odds_client.get_scores(sport_key=sport_key, days_from=3)
-        except Exception as exc:                                              # noqa: BLE001
-            _logger.warning(
-                "settle: get_scores(%s) raised %s — %d open bets stay unsettled",
-                sport_key, exc, len(open_for_sport),
-            )
-            return []
+        if scores is None:
+            try:
+                scores = odds_client.get_scores(sport_key=sport_key, days_from=3)
+            except Exception as exc:                                          # noqa: BLE001
+                _logger.warning(
+                    "settle: get_scores(%s) raised %s — %d open bets stay unsettled",
+                    sport_key, exc, len(open_for_sport),
+                )
+                return []
 
         if not scores:
             _logger.info(
