@@ -292,7 +292,11 @@ def _generate_games(game_results: list[tuple]) -> dict:
         key = f"{sport}:{gid}"
         fp  = _game_fp(g)
         old = store.get(key)
-        if isinstance(old, dict) and old.get("summary") and old.get("fp") == fp:
+        # Regenerate only when missing.  Significant-change invalidation is
+        # driven explicitly by the 15-min cycle (invalidate_game), so a
+        # cached summary is kept until something material actually changed --
+        # minor drift never triggers a regeneration.
+        if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
         text = generate_summary(_game_prompt(sport, g), max_tokens=160)
@@ -328,7 +332,10 @@ def _generate_props() -> dict:
         key = _prop_key(r)
         fp  = _prop_fp(r)
         old = store.get(key)
-        if isinstance(old, dict) and old.get("summary") and _prop_fp_matches(old.get("fp"), fp):
+        # Regenerate only when missing.  The 15-min cycle calls
+        # invalidate_prop() for SIGNIFICANT changes (line > 1.0, side flip,
+        # projection-gap > 0.5); minor drift keeps the cached summary.
+        if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
         text = generate_summary(_prop_prompt(r), max_tokens=120)
@@ -404,3 +411,38 @@ def get_prop_summary(pick: dict) -> str | None:
     except Exception:                                                     # noqa: BLE001
         pass
     return None
+
+
+# ── Explicit invalidation (driven by the 15-min change-detection cycle) ──────
+# Deleting an entry makes the NEXT summary batch regenerate it (the generators
+# now regenerate only when an entry is missing).  Used after a model re-run so
+# only picks that actually changed get a fresh Groq summary.
+
+def invalidate_game(sport: str, game_id) -> bool:
+    """Drop the cached game summary for {sport}:{game_id} so it regenerates
+    next batch.  Returns True if an entry was removed."""
+    try:
+        key = f"{(sport or 'mlb').lower()}:{game_id}"
+        store = _load("game")
+        if key in store:
+            del store[key]
+            _flush("game")
+            return True
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"invalidate_game({sport}:{game_id}) failed: {exc}")
+    return False
+
+
+def invalidate_prop(player: str, market: str) -> bool:
+    """Drop the cached prop summary for player|market so it regenerates next
+    batch.  Returns True if an entry was removed."""
+    try:
+        key = f"{player}|{market}"
+        store = _load("prop")
+        if key in store:
+            del store[key]
+            _flush("prop")
+            return True
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"invalidate_prop({player}|{market}) failed: {exc}")
+    return False

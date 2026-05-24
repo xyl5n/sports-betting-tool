@@ -1273,6 +1273,14 @@ _refresh_cycle_state: dict = {
 _last_seen_lines: dict[str, dict] = {}
 _last_probables:  dict[str, str]  = {}
 
+# Per-cycle change-detection state (process-local).  Compared each 15-min tick.
+#   _last_game_state: gid -> {sport, ml_home, ml_away, total, rl_point,
+#                             pitchers, lineup, wind, temp}
+#   _last_prop_state: "player|market" -> {line, side, recommendation,
+#                             predicted_value, confidence}
+_last_game_state: dict[str, dict] = {}
+_last_prop_state: dict[str, dict] = {}
+
 # Module-level scheduler reference (set at startup)
 _sched = None
 
@@ -10380,10 +10388,10 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
 
 def _refresh_schedule_and_scores() -> dict:
     """Step 1: refresh today's schedule (scores/status, written to Supabase by
-    _fetch_raw_schedule), repopulate the live-score cache, and detect probable-
-    pitcher changes.  Best-effort -- never raises."""
+    _fetch_raw_schedule) and repopulate the live-score cache.  Pitching-change
+    detection now lives in _detect_game_changes (step 2).  Best-effort."""
     import sys as _sys
-    out = {"sports": 0, "pitching_changes": 0}
+    out = {"sports": 0}
     for sport in ("mlb", "wnba"):
         try:
             _fetch_raw_schedule(sport, _today_et())
@@ -10395,10 +10403,6 @@ def _refresh_schedule_and_scores() -> dict:
             _ls.fetch_live(_sys.modules.get(__name__), sport)
         except Exception:                                                 # noqa: BLE001
             pass
-    try:
-        out["pitching_changes"] = _detect_pitching_changes()
-    except Exception as exc:                                              # noqa: BLE001
-        _eprint(f"CYCLE step1 pitching-change error: {exc}")
     return out
 
 
@@ -10490,49 +10494,408 @@ def _refresh_game_odds_detect_moves() -> dict:
     return res
 
 
+def _norm_team(name) -> str:
+    return "".join(c for c in (name or "").lower() if c.isalnum())
+
+
+def _team_pair(away, home) -> str:
+    return f"{_norm_team(away)}|{_norm_team(home)}"
+
+
+def _to_float(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _probables_by_pair() -> dict:
+    """{team_pair -> 'away_pitcher|home_pitcher'} for today's MLB games."""
+    url = (f"{_MLB_STATS_BASE}/schedule?sportId=1&date={_today_et()}"
+           f"&hydrate=probablePitcher")
+    out: dict = {}
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "SportsBettingApp/1.0"})
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"CYCLE probables fetch failed: {exc}")
+        return out
+    for date_block in (data.get("dates") or []):
+        for g in (date_block.get("games") or []):
+            teams = g.get("teams") or {}
+            an = (((teams.get("away") or {}).get("team") or {}).get("name") or "")
+            hn = (((teams.get("home") or {}).get("team") or {}).get("name") or "")
+            ap = (((teams.get("away") or {}).get("probablePitcher") or {}).get("fullName") or "TBD")
+            hp = (((teams.get("home") or {}).get("probablePitcher") or {}).get("fullName") or "TBD")
+            if an and hn:
+                out[_team_pair(an, hn)] = f"{ap}|{hp}"
+    return out
+
+
+def _detect_game_changes() -> dict:
+    """Compare this cycle's odds + probables + lineup-confirmed + weather to
+    last cycle's per game; flag significant changes (ML > 10c, total > 0.5,
+    run line > 0.5, pitcher change, lineup-confirmed flip, wind > 5 mph or
+    temp > 10 F).  Lineup-roster swaps and precipitation aren't in the data
+    feeds (only a confirmed flag + wind/temp), so those sub-signals are
+    detected to the extent the existing data allows.  Returns the changeset +
+    the fresh per-game odds dicts (for re-runs)."""
+    out = {
+        "games_with_changes": 0, "reasons": {}, "odds_by_id": {},
+        "sport_by_id": {}, "pitcher_changed_pairs": set(),
+        "counts": {"ml": 0, "total": 0, "rl": 0, "pitcher": 0,
+                   "lineup": 0, "weather": 0},
+    }
+    odds_key = os.getenv("ODDS_API_KEY", "")
+    if not odds_key or odds_key == "your_odds_api_key_here":
+        return out
+    try:
+        oc = OddsClient(odds_key, _cache)
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"CYCLE detect-changes OddsClient init failed: {exc}")
+        return out
+
+    pair_pitchers = {}
+    try:
+        pair_pitchers = _probables_by_pair()
+    except Exception:                                                     # noqa: BLE001
+        pair_pitchers = {}
+
+    _lineup_fn = _weather_fn = None
+    try:
+        from src.lineup_client import get_lineup_client
+        _lineup_fn = get_lineup_client().is_lineup_confirmed
+    except Exception:                                                     # noqa: BLE001
+        _lineup_fn = None
+    try:
+        from src.weather_client import get_game_weather as _weather_fn
+    except Exception:                                                     # noqa: BLE001
+        _weather_fn = None
+
+    for sport_key, sport in (("baseball_mlb", "mlb"), ("basketball_wnba", "wnba")):
+        try:
+            games = oc.get_odds(sport_key, force_refresh=True) or []
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"CYCLE detect-changes {sport_key} odds error: {exc}")
+            continue
+        for g in games:
+            gid = str(g.get("id") or "")
+            if not gid:
+                continue
+            home, away = g.get("home_team"), g.get("away_team")
+            pair = _team_pair(away, home)
+            cur = {
+                "sport":   sport,
+                "ml_home": g.get("h2h_home_odds"),
+                "ml_away": g.get("h2h_away_odds"),
+                "total":   g.get("total_line"),
+                "rl_point": g.get("run_line_point"),
+            }
+            if sport == "mlb":
+                cur["pitchers"] = pair_pitchers.get(pair)
+                if _lineup_fn:
+                    try:
+                        cur["lineup"] = _lineup_fn(home, away, _today_et())
+                    except Exception:                                     # noqa: BLE001
+                        cur["lineup"] = None
+                if _weather_fn:
+                    try:
+                        wx = _weather_fn(home, g.get("commence_time") or "") or {}
+                        cur["wind"] = wx.get("wind_speed")
+                        cur["temp"] = wx.get("temperature")
+                    except Exception:                                     # noqa: BLE001
+                        cur["wind"] = cur["temp"] = None
+
+            prev = _last_game_state.get(gid)
+            reasons: list[str] = []
+            if prev:
+                for s, lbl in (("ml_home", "ML home"), ("ml_away", "ML away")):
+                    a, b = prev.get(s), cur.get(s)
+                    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(b - a) > 10:
+                        reasons.append(f"{lbl} {a}->{b}")
+                        out["counts"]["ml"] += 1
+                        break
+                a, b = prev.get("total"), cur.get("total")
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(b - a) > 0.5:
+                    reasons.append(f"total {a}->{b}")
+                    out["counts"]["total"] += 1
+                a, b = prev.get("rl_point"), cur.get("rl_point")
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(b - a) > 0.5:
+                    reasons.append(f"run line {a}->{b}")
+                    out["counts"]["rl"] += 1
+                pa, pb = prev.get("pitchers"), cur.get("pitchers")
+                if pa and pb and pa != pb and "TBD" not in (pb or ""):
+                    reasons.append(f"pitcher change {pa} -> {pb}")
+                    out["counts"]["pitcher"] += 1
+                    out["pitcher_changed_pairs"].add(pair)
+                la, lb = prev.get("lineup"), cur.get("lineup")
+                if isinstance(la, (int, float)) and isinstance(lb, (int, float)) and la != lb:
+                    reasons.append(f"lineup confirmed {la}->{lb}")
+                    out["counts"]["lineup"] += 1
+                wa, wb = prev.get("wind"), cur.get("wind")
+                ta, tb = prev.get("temp"), cur.get("temp")
+                if (isinstance(wa, (int, float)) and isinstance(wb, (int, float)) and abs(wb - wa) > 5) \
+                        or (isinstance(ta, (int, float)) and isinstance(tb, (int, float)) and abs(tb - ta) > 10):
+                    reasons.append("weather change")
+                    out["counts"]["weather"] += 1
+            _last_game_state[gid] = cur
+            if reasons:
+                out["games_with_changes"] += 1
+                out["reasons"][gid] = reasons
+                out["odds_by_id"][gid] = g
+                out["sport_by_id"][gid] = sport
+                _eprint(f"CYCLE game change [{sport}] {away} @ {home}: {', '.join(reasons)}")
+    return out
+
+
+def _update_result_in_state(sport: str, gid: str, serialized: dict) -> None:
+    state = _analysis_state if sport == "mlb" else _wnba_analysis_state
+    results = state.get("results") or []
+    for i, r in enumerate(results):
+        if _match_result_id(r, gid):
+            results[i] = serialized
+            state["results"] = results
+            return
+    results.append(serialized)
+    state["results"] = results
+
+
+def _update_snapshot_game(sport: str, gid: str, serialized: dict) -> None:
+    snap = _read_daily_snapshot()
+    if not _snapshot_is_today(snap):
+        return
+    sp = dict(snap.get(sport) or {})
+    res = list(sp.get("results") or [])
+    found = False
+    for i, r in enumerate(res):
+        if _match_result_id(r, gid):
+            res[i] = serialized
+            found = True
+            break
+    if not found:
+        res.append(serialized)
+    sp["results"] = res
+    payload = {k: v for k, v in sp.items() if k != "analyzed_at"}
+    _write_daily_snapshot(sport, payload, datetime.now(timezone.utc))
+
+
+def _rerun_single_game(sport: str, game: dict, reasons: list) -> bool:
+    """Re-run the full model for ONE game (reuses the cached no-odds
+    predictor's models + feature builder), re-serialize with the game's fresh
+    odds for EV, and update the in-memory state + snapshot for that game only.
+    Invalidates the game's Groq summary.  Best-effort -- returns False (leaving
+    the existing pick untouched) on any failure."""
+    gid = str(game.get("id") or "")
+    if not gid:
+        return False
+    try:
+        ctx = _ensure_no_odds_predictor(sport)
+        if not ctx:
+            return False
+        fb, ml_model, rl_model, totals_model = ctx
+        if not ml_model or not getattr(ml_model, "is_trained", False):
+            return False
+        built = fb.build_for_game(game)
+        if built is None:
+            return False
+        feature_vec, meta = built
+        try:
+            mw = Ledger(path="data/ledger.json", starting_bankroll=1000.0).get_model_weights()
+        except Exception:                                                 # noqa: BLE001
+            mw = None
+        prediction = ml_model.predict(feature_vec, weights=mw, game_meta=game)
+        rl_pred = None
+        if sport == "mlb" and rl_model and getattr(rl_model, "is_trained", False):
+            try:
+                rl_pred = rl_model.predict(
+                    feature_vec, game, weights=mw,
+                    ml_prob_home    = prediction.get("xgb_prob"),
+                    ml_lr_prob_home = prediction.get("lr_prob"),
+                    ml_nn_prob_home = prediction.get("nn_prob"),
+                )
+            except Exception:                                             # noqa: BLE001
+                rl_pred = None
+        totals_pred = None
+        if (sport == "mlb" and totals_model and getattr(totals_model, "is_trained", False)
+                and game.get("total_line") is not None):
+            try:
+                tv = fb.build_totals_from_meta(meta) if hasattr(fb, "build_totals_from_meta") else None
+                if tv is not None:
+                    totals_pred = totals_model.predict(tv, game, weights=mw)
+            except Exception:                                             # noqa: BLE001
+                totals_pred = None
+
+        raw = {"game": game, "prediction": prediction, "shap": None,
+               "meta": meta, "rl_pred": rl_pred, "totals_pred": totals_pred}
+        bankroll = float(_analysis_state.get("bankroll") or 250)
+        try:
+            pstart = Ledger(path="data/ledger.json", starting_bankroll=1000.0) \
+                .data.get("personal_starting_bankroll", bankroll)
+        except Exception:                                                 # noqa: BLE001
+            pstart = bankroll
+        serialized = _serialize(raw, bankroll, sport, pstart)
+        if not serialized.get("game_id"):
+            serialized["game_id"] = gid
+
+        _update_result_in_state(sport, gid, serialized)
+        _update_snapshot_game(sport, gid, serialized)
+        try:
+            from src import ai_summaries
+            ai_summaries.invalidate_game(sport, gid)
+        except Exception:                                                 # noqa: BLE001
+            pass
+        _eprint(
+            f"CYCLE game re-run [{sport}] {game.get('away_team')} @ "
+            f"{game.get('home_team')}: {', '.join(reasons)}"
+        )
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"CYCLE game re-run failed gid={gid}: {type(exc).__name__}: {exc}")
+        return False
+
+
+def _detect_prop_changes(pitcher_changed_pairs: set) -> dict:
+    """Compare this cycle's scored props (already re-scored in bulk by step
+    3-4) to last cycle's; flag SIGNIFICANT changes (line > 1.0, side flip,
+    projection-gap change > 0.5, or a pitcher change in that prop's game).
+    Minor drift (line <= 0.5 and confidence shift < 3%) is ignored.  Returns
+    the significant set so the cycle can invalidate just those Groq summaries."""
+    out = {"props_with_changes": 0, "significant": [],
+           "counts": {"line": 0, "side": 0, "gap": 0, "pitcher": 0}}
+    try:
+        from src.props_scored_cache import load_scored_props
+        picks = (load_scored_props() or {}).get("picks") or []
+    except Exception:                                                     # noqa: BLE001
+        return out
+    for r in picks:
+        player, market = r.get("player"), r.get("market")
+        if not player or not market:
+            continue
+        key = f"{player}|{market}"
+        cur = {
+            "line":            _to_float(r.get("line")),
+            "side":            (r.get("side") or "").title(),
+            "recommendation":  r.get("recommendation"),
+            "predicted_value": _to_float(r.get("predicted_value")),
+            "confidence":      _to_float(r.get("confidence")),
+        }
+        prev = _last_prop_state.get(key)
+        reasons: list[str] = []
+        if prev:
+            la, lb = prev.get("line"), cur.get("line")
+            if isinstance(la, (int, float)) and isinstance(lb, (int, float)) and abs(lb - la) > 1.0:
+                reasons.append(f"line {la}->{lb}")
+                out["counts"]["line"] += 1
+            if prev.get("side") and cur.get("side") and prev["side"] != cur["side"]:
+                reasons.append(f"side {prev['side']}->{cur['side']}")
+                out["counts"]["side"] += 1
+            pv0, ln0, pv1, ln1 = (prev.get("predicted_value"), prev.get("line"),
+                                  cur.get("predicted_value"), cur.get("line"))
+            if all(isinstance(x, (int, float)) for x in (pv0, ln0, pv1, ln1)):
+                if abs(abs(pv1 - ln1) - abs(pv0 - ln0)) > 0.5:
+                    reasons.append("proj-gap")
+                    out["counts"]["gap"] += 1
+            if _team_pair(r.get("away_team"), r.get("home_team")) in pitcher_changed_pairs:
+                reasons.append("pitcher change")
+                out["counts"]["pitcher"] += 1
+        _last_prop_state[key] = cur
+        if reasons:
+            out["props_with_changes"] += 1
+            out["significant"].append((player, market, reasons))
+            _eprint(f"CYCLE prop change {player} [{market}]: {', '.join(reasons)}")
+    return out
+
+
 def _run_consolidated_refresh_cycle() -> dict:
-    """The auto_props_refresh callback: one coordinated 15-minute pass.
-    Guarded so overlapping ticks are skipped; every step is best-effort so a
-    failure in one never aborts the rest of the cycle."""
+    """The auto_props_refresh callback: one coordinated 15-minute pass with
+    change detection + conditional per-game (5 AM-12 PM ET) and per-prop model
+    re-runs.  Guarded so overlapping ticks are skipped; every step is
+    best-effort so a failure in one never aborts the rest of the cycle."""
     if not _refresh_cycle_lock.acquire(blocking=False):
         _eprint("CYCLE: previous refresh cycle still running — skipping this tick")
         return {}
     started = time.time()
     summary = {
-        "schedule_sports": 0, "pitching_changes": 0,
-        "odds_games": 0, "ml_moves": 0, "total_moves": 0,
+        "schedule_sports": 0,
+        "games_changed": 0, "game_reruns": 0,
+        "props_changed": 0, "prop_reruns": 0,
+        "groq_queued": 0,
         "props_refreshed": False, "settled": 0, "props_settled": 0, "voided": 0,
     }
     try:
-        # 1) schedule + live scores + pitching changes
+        # ET hour gate for the game-model re-run window (5 AM - 12 PM ET).
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            et_hour = datetime.now(_ZI("America/New_York")).hour
+        except Exception:                                                 # noqa: BLE001
+            et_hour = datetime.now(timezone(timedelta(hours=-4))).hour
+        in_game_rerun_window = 5 <= et_hour < 12
+
+        # 1) Schedule + live scores (+ Supabase).
         s1 = _refresh_schedule_and_scores()
-        summary["schedule_sports"]  = s1.get("sports", 0)
-        summary["pitching_changes"] = s1.get("pitching_changes", 0)
+        summary["schedule_sports"] = s1.get("sports", 0)
 
-        # 2) game odds + line-move flagging
-        s2 = _refresh_game_odds_detect_moves()
-        summary["odds_games"]  = s2.get("games", 0)
-        summary["ml_moves"]    = s2.get("ml_moves", 0)
-        summary["total_moves"] = s2.get("total_moves", 0)
+        # 2) Change detection: odds / pitcher / lineup / weather per game.
+        gc = _detect_game_changes()
+        summary["games_changed"] = gc["games_with_changes"]
 
-        # 3 + 4 + 6(props): prop lines re-fetch, re-score, and the props Groq
-        # summary queue (which regenerates summaries for any pick whose line
-        # moved, via the ai_summaries line/side/pv fingerprint).
+        # 2b) Conditional per-GAME model re-run -- only in the 5 AM-12 PM
+        #     window, only for games that changed, one game at a time.
+        rerun_serialized: list = []
+        if in_game_rerun_window:
+            for gid, reasons in gc["reasons"].items():
+                sport = gc["sport_by_id"].get(gid, "mlb")
+                if _rerun_single_game(sport, gc["odds_by_id"][gid], reasons):
+                    summary["game_reruns"] += 1
+                    state = _analysis_state if sport == "mlb" else _wnba_analysis_state
+                    row = next((r for r in (state.get("results") or [])
+                                if _match_result_id(r, gid)), None)
+                    if row is not None:
+                        rerun_serialized.append((sport, row))
+        elif gc["games_with_changes"]:
+            _eprint(f"CYCLE: {gc['games_with_changes']} game change(s) detected but "
+                    f"outside the 5 AM-12 PM re-run window — not re-running game models")
+
+        # 3 + 4) Player prop lines re-fetch + bulk re-score (props model re-run)
+        #         + the props Groq batch.
         try:
             from src.props_client import run_tier_1_refresh
             run_tier_1_refresh()
             summary["props_refreshed"] = True
         except Exception as exc:                                          # noqa: BLE001
-            _eprint(f"CYCLE step3-4 props error: {type(exc).__name__}: {exc}")
+            _eprint(f"CYCLE props refresh/re-score error: {type(exc).__name__}: {exc}")
 
-        # 5) settlement (replaces the standalone 30-min auto_settlement job)
+        # 4b) Prop change detection against the freshly re-scored cache.
+        pc = _detect_prop_changes(gc.get("pitcher_changed_pairs") or set())
+        summary["props_changed"] = pc["props_with_changes"]
+        summary["prop_reruns"]   = len(pc["significant"])
+
+        # 6) Groq summary updates -- invalidate ONLY the picks that had a
+        #    significant change (game re-run already invalidated its summary);
+        #    minor changes keep their cached summary.  Then queue regeneration.
+        groq_queued = summary["game_reruns"]
+        try:
+            from src import ai_summaries
+            for player, market, _reasons in pc["significant"]:
+                if ai_summaries.invalidate_prop(player, market):
+                    groq_queued += 1
+            ai_summaries.launch_summary_queue(
+                game_results=rerun_serialized,
+                do_games=bool(rerun_serialized), do_props=True,
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"CYCLE groq invalidate/queue error: {type(exc).__name__}: {exc}")
+        summary["groq_queued"] = groq_queued
+
+        # 5) Settlement (replaces the standalone 30-min auto_settlement job).
         try:
             st = _run_auto_settlement_job(force=True) or {}
             summary["settled"]       = int(st.get("settled") or 0)
             summary["props_settled"] = int(st.get("props_settled") or 0)
             summary["voided"]        = int(st.get("voided") or 0)
         except Exception as exc:                                          # noqa: BLE001
-            _eprint(f"CYCLE step5 settlement error: {type(exc).__name__}: {exc}")
+            _eprint(f"CYCLE settlement error: {type(exc).__name__}: {exc}")
     finally:
         duration = round(time.time() - started, 1)
         _refresh_cycle_state.update({
@@ -10541,12 +10904,12 @@ def _run_consolidated_refresh_cycle() -> dict:
             "last_summary":  dict(summary),
         })
         _eprint(
-            "CYCLE COMPLETE in %ss | schedule=%d sports, pitching_changes=%d | "
-            "odds: %d games, %d ML moves, %d total moves | props_refreshed=%s | "
-            "settled: %d game + %d props (%d voided)" % (
-                duration, summary["schedule_sports"], summary["pitching_changes"],
-                summary["odds_games"], summary["ml_moves"], summary["total_moves"],
-                summary["props_refreshed"], summary["settled"],
+            "CYCLE COMPLETE in %ss | games_changed=%d game_reruns=%d | "
+            "props_changed=%d prop_reruns=%d | groq_queued=%d | "
+            "settled %d game + %d props (%d voided)" % (
+                duration, summary["games_changed"], summary["game_reruns"],
+                summary["props_changed"], summary["prop_reruns"],
+                summary["groq_queued"], summary["settled"],
                 summary["props_settled"], summary["voided"],
             )
         )
