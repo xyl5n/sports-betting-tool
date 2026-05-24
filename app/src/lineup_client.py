@@ -76,7 +76,54 @@ class LineupClient:
             _save_cache(self._cache)
             self._dirty = False
 
+    def get_lineups(
+        self,
+        home_team: str,
+        away_team: str,
+        game_date: Optional[str] = None,
+    ) -> dict:
+        """Return the actual batting orders for this matchup:
+
+            {"confirmed": bool,
+             "home": [{"id", "name", "order", "position", "bats"}],
+             "away": [...]}
+
+        ``confirmed`` mirrors is_lineup_confirmed (both sides posted).  The
+        player lists carry whatever the schedule's hydrate=lineups feed
+        provides (in batting order); empty lists when the lineup isn't out
+        yet.  Callers fall back to a probable lineup when these are empty."""
+        date_str = game_date or date.today().isoformat()
+        games = self._get_lineup_schedule(date_str)
+        for entry in games:
+            h_overlap = len(_team_tokens(entry["home_name"]) & _team_tokens(home_team))
+            a_overlap = len(_team_tokens(entry["away_name"]) & _team_tokens(away_team))
+            if h_overlap >= 1 and a_overlap >= 1:
+                return {
+                    "confirmed": bool(entry["home_confirmed"] and entry["away_confirmed"]),
+                    "home": entry.get("home_lineup") or [],
+                    "away": entry.get("away_lineup") or [],
+                }
+        return {"confirmed": False, "home": [], "away": []}
+
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_lineup(players: list) -> list[dict]:
+        """hydrate=lineups player objects -> ordered batting-order rows."""
+        out: list[dict] = []
+        for i, p in enumerate(players or []):
+            if not isinstance(p, dict):
+                continue
+            pos = (p.get("primaryPosition") or {}).get("abbreviation", "")
+            bats = (p.get("batSide") or {}).get("code", "")
+            out.append({
+                "id":       p.get("id"),
+                "name":     p.get("fullName", ""),
+                "order":    i + 1,
+                "position": pos,
+                "bats":     bats,
+            })
+        return out
 
     def _get_lineup_schedule(self, date_str: str) -> list[dict]:
         cache_key = f"lineups_{date_str}"
@@ -101,6 +148,8 @@ class LineupClient:
                     "away_name":      teams.get("away", {}).get("team", {}).get("name", ""),
                     "home_confirmed": len(home_bat) >= 8,
                     "away_confirmed": len(away_bat) >= 8,
+                    "home_lineup":    self._parse_lineup(home_bat),
+                    "away_lineup":    self._parse_lineup(away_bat),
                 })
 
         self._cache[cache_key] = entries

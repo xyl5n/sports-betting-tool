@@ -290,12 +290,14 @@ def resolve_player_id(player_id_or_slug: str) -> Optional[int]:
 # Season stats
 # ---------------------------------------------------------------------------
 
-def get_season_stats(player_id: int, *, is_pitcher: bool) -> dict:
-    """Return current-season aggregate stats for *player_id*."""
+def get_season_stats(player_id: int, *, is_pitcher: bool,
+                     season: Optional[int] = None) -> dict:
+    """Return season aggregate stats for *player_id* (defaults to the
+    module's current season)."""
     group = "pitching" if is_pitcher else "hitting"
     url   = (
         f"{_STATS_BASE}/people/{player_id}/stats"
-        f"?stats=season&season={_CURRENT_SEASON}&group={group}"
+        f"?stats=season&season={season or _CURRENT_SEASON}&group={group}"
     )
     data = _fetch_json(url, label=f"get_season_stats({player_id}, {group})")
 
@@ -1414,7 +1416,8 @@ def get_today_opposing_pitcher(prop: dict, player_name: str) -> Optional[dict]:
             "hand": pitcher.get("hand", "")}
 
 
-def _batter_split_vs_hand(batter_id: int, sit_code: str) -> Optional[dict]:
+def _batter_split_vs_hand(batter_id: int, sit_code: str,
+                          season: Optional[int] = None) -> Optional[dict]:
     """Hitting split vs a pitcher handedness for *batter_id*.
 
     *sit_code* is ``"vr"`` (vs RHP) or ``"vl"`` (vs LHP).  Returns
@@ -1423,9 +1426,10 @@ def _batter_split_vs_hand(batter_id: int, sit_code: str) -> Optional[dict]:
     stats with standard linear weights; ISO = SLG - AVG."""
     if not batter_id:
         return None
+    season = season or _CURRENT_SEASON
     url = (
         f"{_STATS_BASE}/people/{batter_id}/stats"
-        f"?stats=statSplits&group=hitting&sitCodes={sit_code}&season={_CURRENT_SEASON}"
+        f"?stats=statSplits&group=hitting&sitCodes={sit_code}&season={season}"
     )
     data = _fetch_json(url, label=f"_batter_split_vs_hand({batter_id},{sit_code})")
     if not data:

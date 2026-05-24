@@ -97,8 +97,8 @@ def register(backend) -> None:
                 # park-factor equivalent).
                 if sport == "mlb":
                     _section_venue(serialized)
-                _section_lineups_placeholder(sport)
-                _section_team_context_placeholder()
+                _section_lineups(serialized, sport)
+                _section_team_context(serialized, sport)
                 _section_game_context(serialized)
                 _section_upset_factor(serialized)
             else:
@@ -1168,38 +1168,240 @@ def _starting_five_placeholder() -> None:
 #  Section 5 -- Lineups (placeholder)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _section_lineups_placeholder(sport: str) -> None:
+def _team_abbr(team_name: str) -> str:
+    try:
+        from src.player_profile_client import team_name_to_abbrev
+        return (team_name_to_abbrev(team_name) or team_name or "—").upper()
+    except Exception:                                                     # noqa: BLE001
+        return (team_name or "—").upper()
+
+
+def _split_arrow_html(metric: str, value) -> str:
+    """Inline ▲/▼ vs league average for a lineup split metric."""
+    try:
+        from src.matchup_context import split_arrow_dir
+        better = split_arrow_dir(metric, value)
+    except Exception:                                                     # noqa: BLE001
+        better = None
+    if better is None:
+        return ""
+    sym = "▲" if better else "▼"
+    color = t.POS if better else t.NEG
+    return f"<span style='color:{color}; font-size:9px; margin-left:1px;'>{sym}</span>"
+
+
+def _r3(v) -> str:
+    return f"{v:.3f}".lstrip("0") if isinstance(v, (int, float)) else "—"
+
+
+def _section_lineups(ser: dict, sport: str) -> None:
     if sport == "wnba":
         return  # Section 4 already covers WNBA player stats
+
+    home_team = (ser.get("home_team") or "").strip()
+    away_team = (ser.get("away_team") or "").strip()
+    game_date = (_commence_et_date(ser.get("commence_time"))
+                 or datetime.now(_ET).date().isoformat())
+    # Each team's batters are split against the OPPOSING starter's hand.
+    away_sp, home_sp = _fetch_pitchers_direct(sport, ser)
+    home_sp_hand = home_sp.get("hand")
+    away_sp_hand = away_sp.get("hand")
+
     _section_card(
         "CONFIRMED LINEUPS",
-        rows_renderer=lambda: ui.label(
-            "Full batting orders with AVG / OBP / SLG and vs-LHP/RHP splits "
-            "coming soon — wiring the existing BatterSplitsClient + "
-            "LineupClient into the page response."
-        ).style(
-            f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic; "
-            f"line-height: 1.5;"
+        rows_renderer=lambda: _lineups_body(
+            home_team, away_team, game_date, home_sp_hand, away_sp_hand,
         ),
     )
 
 
+def _lineups_body(home_team, away_team, game_date, home_sp_hand, away_sp_hand) -> None:
+    container = ui.column().classes("w-full").style("gap: 12px;")
+    with container:
+        ui.label("Loading lineups…").style(
+            f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic;"
+        )
+
+    async def _load() -> None:                                            # noqa: WPS430
+        try:
+            from src.matchup_context import get_matchup_lineups
+            data = await asyncio.to_thread(
+                get_matchup_lineups, home_team, away_team, game_date,
+                home_sp_hand, away_sp_hand,
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            _log(f"lineups load failed: {type(exc).__name__}: {exc}")
+            data = {}
+        container.clear()
+        with container:
+            if not data or not data.get("available"):
+                ui.label("Lineup not yet posted.").style(
+                    f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic;"
+                )
+                return
+            with ui.element("div").classes("game-grid w-full"):
+                _render_team_lineup("AWAY", away_team, data.get("away") or {})
+                _render_team_lineup("HOME", home_team, data.get("home") or {})
+
+    ui.timer(0.05, _load, once=True)
+
+
+def _render_team_lineup(side_label: str, team_name: str, block: dict) -> None:
+    batters = block.get("batters") or []
+    abbr = _team_abbr(team_name)
+    confirmed = bool(block.get("confirmed"))
+    split_label = block.get("split_label") or "vs RHP"
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 12px 14px; gap: 6px; min-width: 0;"
+    ):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label(f"{side_label} · {abbr}").style(
+                f"font-size: 11px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.TEXT}; flex: 1; min-width: 0;"
+            )
+            ui.label("CONFIRMED" if confirmed else "PROBABLE").style(
+                f"background: {t.CARD}; "
+                f"color: {t.POS if confirmed else t.TEXT_DIM2}; "
+                f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
+                f"padding: 2px 7px; border-radius: {t.RADIUS_PILL}; "
+                f"border: 1px solid {t.BORDER};"
+            )
+        if not batters:
+            ui.label("Lineup not yet posted.").style(
+                f"font-size: 11.5px; color: {t.TEXT_DIM2}; font-style: italic;"
+            )
+            return
+        for b in batters:
+            _lineup_batter_row(b, split_label)
+
+
+def _lineup_batter_row(b: dict, split_label: str) -> None:
+    hand = f" ({b.get('hand')})" if b.get("hand") in ("L", "R", "S") else ""
+    pos = b.get("position") or ""
+    order = b.get("order")
+    with ui.column().classes("w-full").style(
+        f"gap: 2px; padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT}; "
+        f"min-width: 0;"
+    ):
+        with ui.row().classes("items-center w-full").style("gap: 6px;"):
+            ui.label(str(order) if order else "").style(
+                f"font-size: 10px; font-weight: 800; color: {t.TEXT_DIM2}; "
+                f"font-family: monospace; min-width: 14px;")
+            ui.label(f"{b.get('name', '')}{hand}").style(
+                f"font-size: 12.5px; font-weight: 700; color: {t.TEXT}; "
+                f"flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; "
+                f"text-overflow: ellipsis;")
+            if pos:
+                ui.label(str(pos)).style(
+                    f"font-size: 9.5px; color: {t.TEXT_DIM2}; "
+                    f"font-family: monospace;")
+            ui.label(
+                f"{_r3(b.get('avg'))}/{_r3(b.get('obp'))}/{_r3(b.get('slg'))}"
+            ).style(
+                f"font-size: 10.5px; font-weight: 700; color: {t.TEXT_DIM}; "
+                f"font-family: monospace; flex-shrink: 0;")
+        pa = b.get("split_pa")
+        if isinstance(pa, (int, float)) and pa > 0:
+            parts = [
+                f"<span style='color:{t.TEXT_DIM2};'>{split_label}</span>",
+                f"PA {int(pa)}",
+                f"AVG {_r3(b.get('split_avg'))}{_split_arrow_html('avg', b.get('split_avg'))}",
+                f"wOBA {_r3(b.get('split_woba'))}{_split_arrow_html('woba', b.get('split_woba'))}",
+                f"ISO {_r3(b.get('split_iso'))}{_split_arrow_html('iso', b.get('split_iso'))}",
+                (f"K% {b.get('split_k_pct'):.0f}%{_split_arrow_html('k_pct', b.get('split_k_pct'))}"
+                 if isinstance(b.get('split_k_pct'), (int, float)) else "K% —"),
+            ]
+            ui.html(
+                "<div style='display:flex; flex-wrap:wrap; gap:8px; "
+                "font-size:10.5px; font-family:monospace; padding-left:20px; "
+                f"color:{t.TEXT};'>"
+                + "".join(f"<span>{p}</span>" for p in parts)
+                + "</div>"
+            )
+        else:
+            ui.label(f"{split_label}: no split data").style(
+                f"font-size: 10px; font-style: italic; color: {t.TEXT_DIM2}; "
+                f"padding-left: 20px;")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  Section 6 -- Team Context (placeholder + the data that's already serialized)
+#  Section 6 -- Team Context (L10 / streak / home / away / H2H)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _section_team_context_placeholder() -> None:
+def _section_team_context(ser: dict, sport: str) -> None:
+    home_team = (ser.get("home_team") or "").strip()
+    away_team = (ser.get("away_team") or "").strip()
+    game_date = (_commence_et_date(ser.get("commence_time"))
+                 or datetime.now(_ET).date().isoformat())
     _section_card(
         "TEAM CONTEXT",
-        rows_renderer=lambda: ui.label(
-            "Last-10 record, home/away splits, head-to-head, and current "
-            "streak coming soon — pulling from the existing GameStore + "
-            "UpsetCalculator helpers."
-        ).style(
-            f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic; "
-            f"line-height: 1.5;"
-        ),
+        rows_renderer=lambda: _team_context_body(home_team, away_team, game_date),
     )
+
+
+def _team_context_body(home_team, away_team, game_date) -> None:
+    container = ui.column().classes("w-full").style("gap: 6px;")
+    with container:
+        ui.label("Loading team context…").style(
+            f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic;"
+        )
+
+    async def _load() -> None:                                            # noqa: WPS430
+        try:
+            from src.matchup_context import get_team_context
+            data = await asyncio.to_thread(
+                get_team_context, home_team, away_team, game_date,
+            )
+        except Exception as exc:                                          # noqa: BLE001
+            _log(f"team context load failed: {type(exc).__name__}: {exc}")
+            data = {}
+        container.clear()
+        with container:
+            _render_team_context(home_team, away_team, data or {})
+
+    ui.timer(0.05, _load, once=True)
+
+
+def _render_team_context(home_team, away_team, data: dict) -> None:
+    home = data.get("home") or {}
+    away = data.get("away") or {}
+    away_abbr = _team_abbr(away_team)
+    home_abbr = _team_abbr(home_team)
+
+    # Header: blank label cell + the two team abbrevs.
+    def _row(label: str, away_val: str, home_val: str, *, header: bool = False) -> None:
+        with ui.row().classes("items-center w-full").style(
+            f"padding: 5px 0; gap: 8px; border-bottom: 1px solid {t.BORDER_SOFT};"
+        ):
+            ui.label(label).style(
+                f"flex: 0 0 38%; font-size: 11px; "
+                f"color: {t.TEXT if header else t.TEXT_DIM}; "
+                f"font-weight: {'800' if header else '600'};")
+            for val in (away_val, home_val):
+                color = t.TEXT_DIM2 if val in ("—", "") else t.TEXT
+                ui.label(val or "—").style(
+                    f"flex: 1; text-align: center; font-size: 12px; "
+                    f"font-weight: {'800' if header else '700'}; "
+                    f"color: {color if not header else t.TEXT}; "
+                    f"font-family: monospace;")
+
+    _row("", away_abbr, home_abbr, header=True)
+    _row("Last 10",   away.get("l10", "—"),    home.get("l10", "—"))
+    _row("Streak",    away.get("streak", "—"), home.get("streak", "—"))
+    _row("Home",      away.get("home", "—"),   home.get("home", "—"))
+    _row("Away",      away.get("away", "—"),   home.get("away", "—"))
+
+    # Head-to-head (this season) — shown as away-wins–home-wins under the abbrevs.
+    h2h = data.get("h2h", "—")
+    with ui.row().classes("items-center w-full").style("padding: 8px 0 2px 0; gap: 8px;"):
+        ui.label(f"Head-to-head ({home_abbr}-{away_abbr})").style(
+            f"flex: 0 0 60%; font-size: 11px; color: {t.TEXT_DIM};")
+        color = t.TEXT_DIM2 if h2h in ("—", "") else t.TEXT
+        ui.label(h2h or "—").style(
+            f"flex: 1; text-align: center; font-size: 12.5px; font-weight: 800; "
+            f"color: {color}; font-family: monospace;")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
