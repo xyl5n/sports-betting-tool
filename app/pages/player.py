@@ -289,6 +289,66 @@ def _layout(backend, player_id_slug: str) -> None:
 
 # ── Per-market view (everything below the tabs) ─────────────────────────────
 
+def _section_ai_breakdown(
+    info: dict,
+    games: list[dict],
+    is_pitcher: bool,
+    prop: dict,
+    market: str,
+    line_f: Optional[float],
+    summary: dict,
+    opp_abbrev: Optional[str],
+) -> None:
+    """AI matchup breakdown -- four labeled dark cards (Matchup, Trends,
+    Arsenal/Approach or Plate Discipline, Game Script).  Cached once per
+    player/market/day in Supabase.  Shows a subtle spinner while generating
+    and renders nothing on any failure so the rest of the page is unaffected."""
+    holder = ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};")
+    with holder:
+        with ui.row().classes("items-center").style("gap: 8px; padding: 4px 2px;"):
+            ui.spinner(size="sm").style(f"color: {t.PRIMARY};")
+            ui.label("Generating AI breakdown…").style(
+                f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic;")
+
+    async def _load() -> None:                                            # noqa: WPS430
+        try:
+            from src import player_ai_breakdown as _pab
+            bd = await asyncio.to_thread(
+                _pab.get_breakdown, info, games, is_pitcher, prop, market,
+                line_f, summary, opp_abbrev,
+            )
+        except Exception:                                                 # noqa: BLE001
+            bd = None
+        holder.clear()
+        if not bd:
+            return  # API failed / no data -> show nothing (page still loads)
+
+        from src.player_ai_breakdown import approach_label
+        sections = [
+            ("matchup",     "MATCHUP"),
+            ("trends",      "TRENDS"),
+            ("approach",    approach_label(is_pitcher)),
+            ("game_script", "GAME SCRIPT"),
+        ]
+        with holder:
+            for key, label in sections:
+                text = (bd.get(key) or "").strip()
+                if not text:
+                    continue
+                with ui.column().classes("w-full").style(
+                    f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 6px;"
+                ):
+                    ui.label(label).style(
+                        f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+                        f"color: {t.PRIMARY_HI};")
+                    ui.label(text).style(
+                        f"font-size: 12.5px; color: {t.TEXT_DIM}; line-height: 1.5; "
+                        f"white-space: normal;")
+
+    ui.timer(0.05, _load, once=True)
+
+
 def _render_market_view(
     info: dict,
     games: list[dict],
@@ -297,7 +357,7 @@ def _render_market_view(
     opp_abbrev: Optional[str],
 ) -> None:
     """Renders one complete per-market view: player header, info row,
-    avg badge, chart block, matchup insights, recent trends."""
+    AI breakdown, chart block, similar players."""
     market = prop.get("market", "")
     try:
         line_f: Optional[float] = float(prop.get("line"))
@@ -317,16 +377,14 @@ def _render_market_view(
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_MD};"):
         _section_player_header(info, prop, opp_abbrev, prop=prop, grade=grade)
         _section_info_row(opp_abbrev, prop)
+        # AI-powered breakdown (replaces the old matchup-insights / matchup-tabs
+        # / recent-trends sections).  Sits between the stat data and the chart.
+        _section_ai_breakdown(
+            info, games, is_pitcher, prop, market, line_f, summary, opp_abbrev,
+        )
         _section_chart_block(
             games, is_pitcher, prop, market, line_f, summary, opp_abbrev,
         )
-        _section_matchup_insights(
-            info, prop, market, line_f, summary, opp_abbrev, is_pitcher, games,
-        )
-        _section_matchup_tabs(
-            info, prop, market, line_f, summary, opp_abbrev, is_pitcher,
-        )
-        _section_recent_trends(games, is_pitcher, market, line_f, summary)
         _section_similar_players(info, prop, market, line_f, is_pitcher)
 
 
