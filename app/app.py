@@ -9571,6 +9571,8 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
     season = int(os.getenv("SEASON", 2025))
 
     results: dict = {}
+    mlb_results: list = []
+    wnba_results: list = []
 
     # ── MLB ───────────────────────────────────────────────────────────────────
     mlb_games = mlb_picks = 0
@@ -9584,8 +9586,9 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
             )
         if resp.status_code == 200:
             data = resp.get_json() or {}
-            mlb_games = len(data.get("results", []))
-            mlb_picks = sum(1 for r in data.get("results", []) if r.get("value_pick"))
+            mlb_results = data.get("results", []) or []
+            mlb_games = len(mlb_results)
+            mlb_picks = sum(1 for r in mlb_results if r.get("value_pick"))
         else:
             mlb_error = f"HTTP {resp.status_code}"
     except Exception as _exc:
@@ -9606,8 +9609,9 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
             )
         if resp.status_code == 200:
             data = resp.get_json() or {}
-            wnba_games = len(data.get("results", []))
-            wnba_picks = sum(1 for r in data.get("results", []) if r.get("value_pick"))
+            wnba_results = data.get("results", []) or []
+            wnba_games = len(wnba_results)
+            wnba_picks = sum(1 for r in wnba_results if r.get("value_pick"))
         else:
             wnba_error = f"HTTP {resp.status_code}"
     except Exception as _exc:
@@ -9655,6 +9659,21 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
         "status":      status,
         "results":     results,
     })
+
+    # ── AI summaries: game summaries first (this call), props after ──────────
+    # Fire-and-forget background queue so it never blocks the scheduler.  Game
+    # summaries complete before prop summaries begin (run_summary_queue order).
+    if mlb_ok or wnba_ok:
+        try:
+            from src import ai_summaries
+            game_results = (
+                [("mlb", r) for r in mlb_results]
+                + [("wnba", r) for r in wnba_results]
+            )
+            ai_summaries.launch_summary_queue(
+                game_results=game_results, do_games=True, do_props=True)
+        except Exception as _se:                                          # noqa: BLE001
+            _eprint(f"AUTO-ANALYSIS [{label}]: summary launch failed: {_se}")
 
     if not overall_ok and not is_retry:
         _schedule_auto_retry(label)

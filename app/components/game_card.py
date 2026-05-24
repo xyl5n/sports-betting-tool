@@ -110,8 +110,36 @@ def render(g: dict, sport: str = "mlb", backend=None) -> None:
             # for FINAL games.  Pre-game and live (in-progress) cards
             # get None back from _final_scores -> neutral boxes.
             _bet_boxes(g, is_mlb, live=live if state == "final" else None)
+        if not g.get("_no_odds") and not g.get("_no_model"):
+            _ai_summary_block(g, sport)
         if backend is not None and not g.get("_no_odds"):
             _track_row(backend, g, sport)
+
+
+def _ai_summary_block(g: dict, sport: str) -> None:
+    """Short cached AI blurb on why the model favors this game's pick.
+    Renders nothing when no summary is cached (never generates at render)."""
+    try:
+        from src import ai_summaries
+        text = ai_summaries.get_game_summary(sport, g)
+    except Exception:                                                     # noqa: BLE001
+        text = None
+    if not text:
+        return
+    with ui.row().classes("items-start w-full").style(
+        f"gap: 6px; margin-top: {t.SPACE_SM}; padding: 8px 10px; "
+        f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_SM};"
+    ):
+        ui.label("AI").style(
+            f"font-size: 8.5px; font-weight: 800; letter-spacing: .5px; "
+            f"color: {t.PRIMARY}; background: {t.CARD}; "
+            f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
+        )
+        ui.label(text).style(
+            f"font-size: 11.5px; color: {t.TEXT_DIM}; line-height: 1.4; "
+            f"font-style: italic; white-space: normal;"
+        )
 
 
 def _track_row(backend, g: dict, sport: str) -> None:
