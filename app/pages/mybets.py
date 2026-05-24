@@ -894,13 +894,13 @@ def _matchup_str(b: dict) -> str:
 def _kelly_rec_label(prob, american_odds, bankroll: float) -> None:
     """Small 'Rec ½K $X' line under a tracked bet (FIX 3).  Shows the
     half-Kelly stake off the current bankroll, '$1 min' when a real edge
-    rounds to zero, or 'Edge too small to bet' when there's no edge."""
+    rounds to zero, or 'No edge — skip this bet' on a negative edge."""
     from src.kelly import tracked_bet_kelly
     dollars, flag = tracked_bet_kelly(prob, american_odds, bankroll)
     if flag == "invalid":
         return
     if flag == "no_edge":
-        ui.label("Rec ½-Kelly: Edge too small to bet").style(
+        ui.label("No edge — skip this bet").style(
             f"font-size: 10.5px; font-weight: 700; color: {t.TEXT_DIM2}; "
             f"font-family: monospace;"
         )
@@ -1115,7 +1115,7 @@ def _prop_bet_row(backend, b: dict, settled: bool, bankroll: float = 0.0) -> Non
                 from src.kelly import tracked_bet_kelly
                 _k_dollars, _k_flag = tracked_bet_kelly(conf, odds, bankroll)
                 if _k_flag == "no_edge":
-                    _mini_stat("REC ½K", "too small", t.TEXT_DIM2)
+                    _mini_stat("REC ½K", "no edge — skip", t.TEXT_DIM2)
                 elif _k_flag is None:
                     _mini_stat("REC ½K", f"${_k_dollars:,.0f}", t.PRIMARY_HI)
                 ui.element("div").style("flex: 1;")
