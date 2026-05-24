@@ -205,18 +205,53 @@ def _game_prompt(sport: str, g: dict) -> str:
     if (sport or "").lower() == "mlb":
         asp = g.get("away_sp") or {}
         hsp = g.get("home_sp") or {}
-        if asp.get("full_name") or hsp.get("full_name"):
+        for sp, label in ((asp, away), (hsp, home)):
+            if not sp.get("full_name"):
+                continue
             facts.append(
-                f"Pitchers: {asp.get('full_name') or 'TBD'} "
-                f"({_num(asp.get('era'))} ERA, {_num(asp.get('k_per_9'))} K/9) vs "
-                f"{hsp.get('full_name') or 'TBD'} "
-                f"({_num(hsp.get('era'))} ERA, {_num(hsp.get('k_per_9'))} K/9)."
+                f"{label} SP {sp.get('full_name')}: {_num(sp.get('era'))} ERA, "
+                f"{_num(sp.get('whip'))} WHIP, {_num(sp.get('k_per_9'))} K/9, "
+                f"last-3 starts {_num(sp.get('last3_era'))} ERA, "
+                f"record {sp.get('wins', 0)}-{sp.get('losses', 0)}."
             )
+            mix_txt = _pitcher_mix_text(sp.get("full_name"))
+            if mix_txt:
+                facts.append(f"{label} SP {mix_txt}")
+        # Park factor (home park).
+        try:
+            from .park_factors import get_park_factors
+            run_f, hr_f = get_park_factors(home)
+            facts.append(f"Park factors: run {run_f:.2f}, HR {hr_f:.2f} (1.00=neutral).")
+        except Exception:                                                 # noqa: BLE001
+            pass
+    # Pass through any extra signals the analysis row already carries.
+    for key, label in (("h2h", "Season head-to-head"), ("bullpen", "Bullpen"),
+                       ("team_ranks", "Team offensive ranks"),
+                       ("home_away", "Home/away splits")):
+        v = g.get(key)
+        if isinstance(v, str) and v.strip():
+            facts.append(f"{label}: {v.strip()}.")
+
     return (
-        "You are a concise sports-betting analyst. In 2-3 sentences explain why "
-        "the model favors its pick for this game. Use ONLY the facts provided; do "
-        "not invent any numbers. Keep it under 60 words.\n" + " ".join(facts)
+        "You are an experienced sports-betting analyst, not a data reader. Using "
+        "ONLY the facts provided (never invent numbers), reason across the signals "
+        "to explain this pick in 3-5 plain-text sentences. Identify the single key "
+        "edge driving the pick, flag any significant risk factor that could sink it, "
+        "and close with a clear directional verdict — whether the pick looks strong "
+        "or merely situational. No markdown, no bold, no bullet points.\n"
+        + " ".join(facts)
     )
+
+
+def _pitcher_mix_text(name: str) -> str:
+    """'throws Slider 38% 87mph, ...' for a starter, or '' if unavailable."""
+    try:
+        from . import ai_context as _aic
+        mix = _aic.pitch_mix(_aic.resolve_player_id(name or ""))
+        txt = _aic.pitch_mix_text(mix)
+        return txt.replace("Arsenal: ", "throws ") if txt else ""
+    except Exception:                                                     # noqa: BLE001
+        return ""
 
 
 # ── Prop summaries ──────────────────────────────────────────────────────────
@@ -253,16 +288,34 @@ def _prop_fp_matches(old: dict, new: dict) -> bool:
         return False
 
 
+def _opposing_pitcher_id(r: dict):
+    """Best-effort MLB id of the pitcher a batter prop faces today."""
+    try:
+        from .player_profile_client import get_today_opposing_pitcher
+        prop = {
+            "home_team": r.get("home_team"), "away_team": r.get("away_team"),
+            "team": r.get("team"), "commence_time": r.get("commence_time"),
+            "event_id": r.get("event_id"),
+        }
+        opp = get_today_opposing_pitcher(prop, r.get("player") or "") or {}
+        return opp.get("id")
+    except Exception:                                                     # noqa: BLE001
+        return None
+
+
 def _prop_prompt(r: dict) -> str:
     s = r.get("summary") or {}
+    market = r.get("market") or ""
+    player = r.get("player") or ""
+    is_pitcher_market = market.startswith("pitcher_")
 
     def hr(n: int) -> str:
         h = s.get(f"last_{n}_hits"); g = s.get(f"last_{n}_games")
         return f"L{n} {h}/{g}" if g else f"L{n} n/a"
 
     facts = [
-        f"{r.get('player')} {(r.get('side') or '').title()} {r.get('line')} "
-        f"{_market_label(r.get('market'))}.",
+        f"{player} {(r.get('side') or '').title()} {r.get('line')} "
+        f"{_market_label(market)}.",
         f"Model confidence {_pct(r.get('confidence'))}, projected {_num(r.get('predicted_value'))}.",
         f"Hit rates {hr(5)}, {hr(10)}, {hr(20)}; season avg {_num(s.get('season_avg'))}.",
     ]
@@ -270,10 +323,45 @@ def _prop_prompt(r: dict) -> str:
         rank = r.get("opp_rank")
         rank_s = f"#{rank}" if rank is not None else "n/a"
         facts.append(f"Opponent {r.get('opp_abbrev')} ranks {rank_s} vs this stat (1=toughest).")
+
+    # Deeper signals (best-effort, cached): similar-player cluster + the
+    # pitch-mix matchup (pitcher's own arsenal, or for a batter prop the
+    # opposing arsenal + how this batter hits those pitch types).
+    try:
+        from . import ai_context as _aic
+        st = _aic.similar_text(_aic.similar_players(market, player, limit=4),
+                               _market_label(market))
+        if st:
+            facts.append(st)
+        if is_pitcher_market:
+            mt = _aic.pitch_mix_text(_aic.pitch_mix(_aic.resolve_player_id(player)))
+            if mt:
+                facts.append(mt)
+        else:
+            opp_pid = _opposing_pitcher_id(r)
+            if opp_pid:
+                mt = _aic.pitch_mix_text(_aic.pitch_mix(opp_pid))
+                if mt:
+                    facts.append("Opposing pitcher " + mt[0].lower() + mt[1:])
+                bt = _aic.batter_vs_pitch_text(
+                    _aic.batter_vs_pitch(_aic.resolve_player_id(player), opp_pid))
+                if bt:
+                    facts.append(bt)
+    except Exception:                                                     # noqa: BLE001
+        pass
+
     return (
-        "You are a concise sports-betting analyst. In 1-2 sentences explain why "
-        "the model likes this player prop. Use ONLY the facts provided; do not "
-        "invent any numbers. Keep it under 40 words.\n" + " ".join(facts)
+        "You are an experienced sports-betting analyst, not a data reader. Using "
+        "ONLY the facts provided (never invent numbers), reason across the signals "
+        "in 3-5 plain-text sentences. Name the two or three strongest factors for "
+        "or against this prop; cross-reference the similar-player comparison when "
+        "present; flag any conflicting signal that suggests caution (e.g. high "
+        "confidence but poor recent form, or a favorable park but a tough pitch-mix "
+        "matchup); when a pitcher's arsenal is given, weigh whether the pitch-type "
+        "matchup favors the batter or the pitcher (e.g. a heavy slider usage against "
+        "a batter who struggles on breaking balls); and close with a clear "
+        "directional opinion on whether the factors lean for or against the pick. "
+        "No markdown, no bold tags.\n" + " ".join(facts)
     )
 
 
@@ -299,7 +387,7 @@ def _generate_games(game_results: list[tuple]) -> dict:
         if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
-        text = generate_summary(_game_prompt(sport, g), max_tokens=160)
+        text = generate_summary(_game_prompt(sport, g), max_tokens=230)
         time.sleep(_DELAY_S)
         if text:
             store[key] = {"summary": text, "fp": fp, "updated_at": _now_iso()}
@@ -338,7 +426,7 @@ def _generate_props() -> dict:
         if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
-        text = generate_summary(_prop_prompt(r), max_tokens=120)
+        text = generate_summary(_prop_prompt(r), max_tokens=230)
         time.sleep(_DELAY_S)
         if text:
             store[key] = {"summary": text, "fp": fp, "updated_at": _now_iso()}
@@ -435,7 +523,7 @@ def ensure_game_summary(sport: str, g: dict) -> str:
     if isinstance(old, dict) and old.get("summary"):
         return "cached"
     from .groq_client import generate_summary
-    text = generate_summary(_game_prompt(sport, g), max_tokens=160)
+    text = generate_summary(_game_prompt(sport, g), max_tokens=230)
     if not text:
         return "failed"
     store[key] = {"summary": text, "fp": _game_fp(g), "updated_at": _now_iso()}
@@ -457,7 +545,7 @@ def ensure_prop_summary(r: dict) -> str:
     if isinstance(old, dict) and old.get("summary"):
         return "cached"
     from .groq_client import generate_summary
-    text = generate_summary(_prop_prompt(r), max_tokens=120)
+    text = generate_summary(_prop_prompt(r), max_tokens=230)
     if not text:
         return "failed"
     store[key] = {"summary": text, "fp": _prop_fp(r), "updated_at": _now_iso()}

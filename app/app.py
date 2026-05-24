@@ -985,21 +985,26 @@ def _clear_snapshot_sport(sport: str) -> None:
 # chat surface renders text plainly; asterisks and pound signs would
 # show through as raw characters.
 _CHAT_SYSTEM_PROMPT = (
-    "You are a professional sports analyst assistant. You have access to "
-    "today's MLB and WNBA model predictions, pick data, confidence scores, "
-    "edge percentages, SHAP feature importance values, pitcher stats, team "
-    "stats, and betting lines. You answer questions about sports picks, "
-    "player performance, team matchups, betting strategy, and sports data "
-    "only. If the user asks anything unrelated to sports you respond with "
-    "I can only answer sports related questions about picks, players, "
-    "teams, and betting data. You never use any formatting whatsoever: "
-    "no markdown (no asterisks for bold, no underscores for italic, no "
-    "pound signs for headers, no backticks), and no HTML tags such as "
-    "<b> or <i>, because they display as raw symbols on this interface. "
-    "Use plain text only with line breaks for separation. When referencing picks "
-    "always include the confidence level, edge percentage, and the key "
-    "factors the model used to make the pick based on the SHAP values "
-    "available."
+    "You are an experienced sports betting analyst who has done the homework — "
+    "not a data reader. You have access to today's MLB and WNBA model predictions, "
+    "confidence scores, edge percentages, SHAP factors, starting-pitcher stats and "
+    "pitch mix (usage % and velocity by pitch type), team stats, and betting lines. "
+    "Reason ACROSS all of these signals to form your own opinion rather than "
+    "describing them one at a time. For any pick the user asks about, proactively "
+    "identify what would make it FAIL and whether those risks are present today. "
+    "Use the pitch-mix data to judge whether a matchup is mechanically favorable or "
+    "unfavorable — for example, a pitcher who leans heavily on a pitch type the "
+    "opposing hitters struggle against. When similar-player comparisons are present "
+    "in the data, reference them. Be direct and willing to say plainly when a pick "
+    "looks weak DESPITE high model confidence, and when you disagree with the model, "
+    "state your own pick and why. Always include the confidence level and edge when "
+    "referencing a pick, and end with a clear stance: 'Agree with model', "
+    "'Disagree — my pick is X', or 'Lean with caution'. "
+    "Answer only sports/betting questions; for anything unrelated reply exactly: "
+    "I can only answer sports related questions about picks, players, teams, and "
+    "betting data. Never use any formatting whatsoever: no markdown (no asterisks, "
+    "underscores, pound signs, or backticks) and no HTML tags — plain text only "
+    "with line breaks for separation, because formatting displays as raw symbols here."
 )
 
 
@@ -1062,6 +1067,17 @@ def _call_analyst_chat(extra_context: str, messages: list, max_tokens: int = 800
     return msg.content[0].text.strip()
 
 
+def _sp_pitch_mix_text(name: str) -> str:
+    """Compact pitch-mix string for a starter (cached); '' if unavailable."""
+    try:
+        from src import ai_context as _aic
+        mix = _aic.pitch_mix(_aic.resolve_player_id(name or ""))
+        txt = _aic.pitch_mix_text(mix)
+        return txt.replace("Arsenal: ", "").rstrip(".") if txt else ""
+    except Exception:                                                      # noqa: BLE001
+        return ""
+
+
 def _build_chat_context(results: list, bankroll: float, sport: str) -> str:
     """Build a compact text summary of today's games for the chat system prompt."""
     if not results:
@@ -1120,10 +1136,15 @@ def _build_chat_context(results: list, bankroll: float, sport: str) -> str:
         if total_dir and total_line:
             parts.append(f"  Total: {total_dir} {total_line}")
         sp_parts = []
-        if a_sp_name:
-            sp_parts.append(f"{a_sp_name} ERA:{a_sp.get('era', '?')} WHIP:{a_sp.get('whip', '?')}")
-        if h_sp_name:
-            sp_parts.append(f"{h_sp_name} ERA:{h_sp.get('era', '?')} WHIP:{h_sp.get('whip', '?')}")
+        for _nm, _sp in ((a_sp_name, a_sp), (h_sp_name, h_sp)):
+            if not _nm:
+                continue
+            _line = (f"{_nm} ERA:{_sp.get('era', '?')} WHIP:{_sp.get('whip', '?')} "
+                     f"K9:{_sp.get('k_per_9', '?')}")
+            _mix = _sp_pitch_mix_text(_nm)
+            if _mix:
+                _line += f" [{_mix}]"
+            sp_parts.append(_line)
         if sp_parts:
             parts.append(f"  SPs: {' vs '.join(sp_parts)}")
         if shap_vals:

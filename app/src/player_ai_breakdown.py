@@ -164,6 +164,47 @@ def _collect_context(info, games, is_pitcher, prop, market, line_f,
         hand = _pitcher_hand_for_batter(prop, info.get("name") or "")
         if hand:
             ctx["opposing_pitcher_hand"] = hand
+
+    # ── Deeper analytical signals: pitch mix / batter-vs-pitch / Statcast
+    #    percentiles / similar-player cluster.  All best-effort + cached.
+    try:
+        from . import ai_context as _aic
+        pid = info.get("id")
+        sims = _aic.similar_players(market, info.get("name") or "", limit=4)
+        if sims:
+            ctx["similar_players"] = [
+                {"name": s.get("name"), "team": s.get("team"),
+                 "similarity": _round(s.get("score"), 3)} for s in sims]
+        pcts = _aic.percentile_facts(pid, is_pitcher)
+        if pcts:
+            ctx["statcast_percentiles"] = pcts
+        if is_pitcher:
+            mix = _aic.pitch_mix(pid)
+            if mix:
+                ctx["pitch_arsenal"] = _aic.pitch_mix_payload(mix)
+        else:
+            opp_pid = None
+            try:
+                from .player_profile_client import get_today_opposing_pitcher
+                opp = get_today_opposing_pitcher(prop, info.get("name") or "") or {}
+                opp_pid = opp.get("id")
+                if opp.get("name"):
+                    ctx["opposing_pitcher"] = {
+                        "name": opp.get("name"), "hand": opp.get("hand")}
+            except Exception:                                             # noqa: BLE001
+                opp_pid = None
+            mix = _aic.pitch_mix(opp_pid)
+            if mix:
+                ctx["opposing_pitcher_arsenal"] = _aic.pitch_mix_payload(mix)
+            bvp = _aic.batter_vs_pitch(pid, opp_pid)
+            if bvp and bvp.get("rows"):
+                ctx["batter_vs_pitch_type"] = [
+                    {"pitch": r.get("pitch"), "avg": r.get("avg"),
+                     "slg": r.get("slg"), "k_pct": r.get("k_pct"),
+                     "faced": r.get("faced")}
+                    for r in bvp["rows"] if r.get("faced")]
+    except Exception as exc:                                             # noqa: BLE001
+        _log(f"breakdown enrichment failed: {type(exc).__name__}: {exc}")
     return ctx
 
 
@@ -173,24 +214,37 @@ def _system_prompt(is_pitcher: bool) -> str:
     approach_label = ("Arsenal/Approach (K/9, BB/9, FIP, pitch effectiveness)"
                       if is_pitcher else
                       "Plate Discipline (contact rate, power profile, walk rate, approach)")
+    mech = ("how the pitcher's own arsenal (pitch mix %, velocity) and Statcast "
+            "percentiles shape this strikeout/outs/ER projection"
+            if is_pitcher else
+            "whether the mechanical matchup favors the batter or the pitcher — use "
+            "the opposing pitcher's pitch mix together with the batter-vs-pitch-type "
+            "splits (e.g. a pitcher who throws 45% sliders against a batter hitting "
+            ".180 on breaking balls is a bad matchup) and the batter's Statcast "
+            "percentiles")
     return (
-        "You are a sharp, concise MLB betting analyst. Using ONLY the JSON data "
-        "provided, write a four-section breakdown for this specific player prop. "
-        "Do not invent any numbers — use only what is given, and omit a point if "
-        "the data is missing. Write in plain, conversational sentences. "
-        "ABSOLUTELY NO markdown, no bold or asterisks, no headers, no bullet "
-        "points or dashes — just clean readable prose, 2-4 sentences per section.\n\n"
+        "You are an experienced MLB betting analyst, not a data reader. Using ONLY "
+        "the JSON data provided, reason ACROSS the signals to judge this specific "
+        "player prop — do not just restate numbers. Identify the strongest factors "
+        "for and against, and proactively flag conflicting signals that warrant "
+        "caution (e.g. high model confidence but poor recent form, or a favorable "
+        "park but a tough pitch-mix matchup). When the data supports it, cross-"
+        "reference the similar-player cluster. Do not invent numbers — use only what "
+        "is given, and omit a point when its data is missing. Plain conversational "
+        "sentences only: ABSOLUTELY NO markdown, asterisks, headers, bullets or "
+        "dashes — 2-4 sentences per section.\n\n"
         "Return ONLY a JSON object (no prose around it) with exactly these string "
         "keys:\n"
-        '  "matchup": how the player performs against today\'s specific opponent — '
-        "reference H2H history if present, the opponent's rank versus this prop "
-        "type, and home/away (and vs LHP/RHP for batters) splits.\n"
-        '  "trends": whether the player is trending up or down — compare the r7, '
-        "r14, r30 and season values for the active stat and flag any meaningful "
-        "recent change.\n"
-        f'  "approach": {approach_label}.\n'
-        '  "game_script": situational factors for this prop — park factor, '
-        "lineup/role context, and any other relevant situational notes."
+        '  "matchup": how the player fares against today\'s specific opponent — H2H '
+        "history if present, the opponent's rank versus this prop type, home/away "
+        "(and vs LHP/RHP) splits, and the opposing pitcher's arsenal where relevant.\n"
+        '  "trends": whether the player is trending up or down — compare r7 / r14 / '
+        "r30 / season for the active stat and flag any meaningful recent change.\n"
+        f'  "approach": {approach_label}. Also assess {mech}.\n'
+        '  "game_script": situational factors (park, lineup/role) AND a clear '
+        "directional close — state whether, weighing everything, the factors lean "
+        "FOR or AGAINST this pick, and say so plainly even if that disagrees with "
+        "the model's confidence."
     )
 
 
