@@ -2,8 +2,8 @@
 AI-powered player matchup breakdown for the player profile page.
 
 Generates a four-section breakdown (Matchup, Trends, Arsenal/Approach or
-Plate Discipline, Game Script) with the Anthropic API
-(claude-sonnet-4-20250514), fed only data already computed in the app:
+Plate Discipline, Game Script) with Groq (llama-3.1-8b-instant) via the
+shared src/groq_client.py, fed only data already computed in the app:
 rolling snapshot windows (r7/r14/r30/season), today's line + model
 prediction, opponent rank vs the prop type, H2H game log, L5/L10/L20/season
 hit rates, park factor, home/away splits, and pitcher handedness (batters).
@@ -17,12 +17,10 @@ nothing instead of an error.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-_MODEL = "claude-sonnet-4-20250514"
 _ET = ZoneInfo("America/New_York")
 
 # Active-market -> rolling-snapshot stat key (matches props_model windows).
@@ -196,22 +194,16 @@ def _system_prompt(is_pitcher: bool) -> str:
     )
 
 
-def _call_anthropic(system: str, user: str, max_tokens: int = 900) -> str | None:
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return None
+def _call_groq(system: str, user: str, max_tokens: int = 900) -> str | None:
+    """Generate the breakdown via the shared Groq client (llama-3.1-8b-instant).
+    Groq's helper takes a single prompt, so we fold the system instructions
+    and the data payload into one message.  Returns None on any failure."""
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model=_MODEL,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        return (msg.content[0].text or "").strip()
+        from .groq_client import generate_summary
+        prompt = f"{system}\n\n{user}"
+        return generate_summary(prompt, max_tokens=max_tokens)
     except Exception as exc:                                                # noqa: BLE001
-        _log(f"anthropic call failed: {type(exc).__name__}: {exc}")
+        _log(f"groq call failed: {type(exc).__name__}: {exc}")
         return None
 
 
@@ -286,7 +278,7 @@ def get_breakdown(info, games, is_pitcher, prop, market, line_f,
                                summary, opp_abbrev)
         user = ("Generate the breakdown for this prop. Data JSON:\n"
                 + json.dumps(ctx, default=str))
-        text = _call_anthropic(_system_prompt(is_pitcher), user)
+        text = _call_groq(_system_prompt(is_pitcher), user)
         sections = _parse_sections(text)
         if sections is None:
             return None
