@@ -195,6 +195,7 @@ class PitcherClient:
         home_team: str,
         away_team: str,
         game_date: Optional[str] = None,
+        commence_time: Optional[str] = None,
     ) -> dict:
         """
         Return pitcher feature dict for one game:
@@ -205,6 +206,12 @@ class PitcherClient:
             "away": {...},
         }
         Returns neutral values for any unavailable fields.
+
+        Doubleheader-safe (BUG 1): when two schedule entries match the same
+        team pair on the same date, they're sorted by start time ascending and
+        the one whose start time is closest to *commence_time* is chosen, so
+        game 1 (earlier slot) and game 2 (later slot) never get swapped.  With
+        no commence_time the earliest slot (game 1) is used.
         """
         date_str = game_date or date.today().isoformat()
         season   = _current_season(date_str)
@@ -213,24 +220,52 @@ class PitcherClient:
         home_stats = away_stats = None
 
         _log(f"get_starters_for_game home={home_team!r} away={away_team!r} "
-             f"date={date_str} season={season}  schedule_entries={len(schedule)}")
+             f"date={date_str} commence={commence_time!r} "
+             f"season={season}  schedule_entries={len(schedule)}")
 
-        for entry in schedule:
-            h_name = entry.get("home_name", "")
-            a_name = entry.get("away_name", "")
-            # Match by token overlap (handles minor name differences)
-            h_overlap = len(_team_tokens(h_name) & _team_tokens(home_team))
-            a_overlap = len(_team_tokens(a_name) & _team_tokens(away_team))
-            if h_overlap >= 1 and a_overlap >= 1:
-                _log(f"  matched schedule entry game_pk={entry.get('game_pk')}  "
-                     f"sched_home={h_name!r}  sched_away={a_name!r}")
-                home_stats = self._pitcher_stats(
-                    entry.get("home_pitcher"), entry.get("home_team_id"), season,
-                )
-                away_stats = self._pitcher_stats(
-                    entry.get("away_pitcher"), entry.get("away_team_id"), season,
-                )
-                break
+        # Collect ALL schedule entries for this team pair (a doubleheader
+        # yields two), sorted by their start time ascending.
+        matches = [
+            e for e in schedule
+            if len(_team_tokens(e.get("home_name", "")) & _team_tokens(home_team)) >= 1
+            and len(_team_tokens(e.get("away_name", "")) & _team_tokens(away_team)) >= 1
+        ]
+        matches.sort(key=lambda e: (e.get("game_date") or "", e.get("game_number") or 0))
+
+        entry = None
+        if len(matches) == 1:
+            entry = matches[0]
+        elif len(matches) > 1:
+            # Doubleheader: pick the slot whose start time is closest to the
+            # requested commence_time; fall back to the earliest (game 1).
+            entry = matches[0]
+            if commence_time:
+                def _ts(v):
+                    try:
+                        from datetime import datetime as _dt
+                        return _dt.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+                    except Exception:                                     # noqa: BLE001
+                        return None
+                target = _ts(commence_time)
+                if target is not None:
+                    scored = [(abs((_ts(e.get("game_date")) or target) - target), e)
+                              for e in matches]
+                    scored.sort(key=lambda x: x[0])
+                    entry = scored[0][1]
+            _log(f"  doubleheader: {len(matches)} entries for this pair -> "
+                 f"chose game_pk={entry.get('game_pk')} "
+                 f"start={entry.get('game_date')!r} (game {entry.get('game_number')})")
+
+        if entry is not None:
+            _log(f"  matched schedule entry game_pk={entry.get('game_pk')}  "
+                 f"sched_home={entry.get('home_name')!r}  "
+                 f"sched_away={entry.get('away_name')!r}")
+            home_stats = self._pitcher_stats(
+                entry.get("home_pitcher"), entry.get("home_team_id"), season,
+            )
+            away_stats = self._pitcher_stats(
+                entry.get("away_pitcher"), entry.get("away_team_id"), season,
+            )
 
         if home_stats is None and away_stats is None:
             _log(f"  no matching schedule entry found for "
@@ -336,6 +371,8 @@ class PitcherClient:
                     without_probable += 1
                 entries.append({
                     "game_pk":      game_pk,
+                    "game_date":    game.get("gameDate"),     # ISO start time
+                    "game_number":  game.get("gameNumber"),   # 1/2 on doubleheaders
                     "home_name":    home_name,
                     "away_name":    away_name,
                     "home_team_id": (home.get("team") or {}).get("id"),
