@@ -61,6 +61,7 @@ def register(backend) -> None:
 
                 _section_analysis(backend, _refresh)
                 _section_props(backend, _refresh)
+                _section_ai_analysis(backend)
                 _section_models(backend, _refresh)
                 _section_model_bets(backend, _refresh)
                 _section_my_bets(backend, _refresh)
@@ -610,6 +611,88 @@ def _section_props(backend, refresh) -> None:
             ),
             refresh_status=refresh,
         )
+
+
+def _section_ai_analysis(backend) -> None:
+    """On-demand Groq generation: game summaries, prop summaries, and player
+    breakdowns that aren't cached yet.  Live progress counter polls the
+    status endpoint every few seconds; the button is disabled + spins while a
+    run is in progress (can't double-click)."""
+    with _card(
+        "AI ANALYSIS",
+        "Generate Groq summaries for every game pick, prop pick, and player "
+        "breakdown that isn't cached yet (highest-confidence props first). "
+        "Sequential with a 150 ms gap between calls.",
+    ):
+        btn = ui.button("Run AI Analysis").props("no-caps unelevated").style(_btn_style("primary"))
+        prog = ui.column().classes("w-full").style("gap: 4px;")
+
+        def _render(data: dict) -> None:
+            prog.clear()
+            with prog:
+                if data.get("running"):
+                    with ui.row().classes("items-center").style("gap: 8px;"):
+                        ui.spinner(size="sm").style(f"color: {t.PRIMARY};")
+                        ui.label(
+                            f"Generating {data.get('phase') or 'summaries'}… "
+                            f"{int(data.get('done') or 0)}/{int(data.get('total') or 0)} complete"
+                        ).style(f"font-size: 12.5px; font-weight: 700; color: {t.TEXT};")
+                elif data.get("summary"):
+                    s = data["summary"]
+                    ui.label(
+                        f"Done in {s.get('elapsed')}s — "
+                        f"{s.get('games_generated', 0)} game summaries, "
+                        f"{s.get('props_generated', 0)} prop summaries, "
+                        f"{s.get('breakdowns_generated', 0)} player breakdowns generated; "
+                        f"{s.get('skipped', 0)} already cached/skipped"
+                        + (f"; {s.get('failed', 0)} failed" if s.get('failed') else "")
+                        + "."
+                    ).style(
+                        f"font-size: 12px; font-weight: 600; color: {t.POS}; "
+                        f"white-space: normal; line-height: 1.4;"
+                    )
+
+        async def _poll() -> None:
+            ok, data, _ = await asyncio.to_thread(
+                _call, backend, "GET", "/api/admin/ai_analysis/status")
+            if not ok:
+                return
+            _render(data)
+            if not data.get("running"):
+                _timer.active = False
+                btn.props(remove="loading")
+                btn.enable()
+
+        _timer = ui.timer(2.0, _poll, active=False)
+
+        async def _click() -> None:
+            btn.props("loading")
+            btn.disable()
+            ok, data, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/admin/ai_analysis/run")
+            if not ok:
+                _show_inline_status(prog, f"Failed to start: {data.get('error')}", "error")
+                btn.props(remove="loading")
+                btn.enable()
+                return
+            _timer.active = True
+            await _poll()
+        btn.on("click", _click)
+
+        # On (re)load, reflect an already-running run or the last result.
+        async def _init() -> None:
+            ok, data, _ = await asyncio.to_thread(
+                _call, backend, "GET", "/api/admin/ai_analysis/status")
+            if not ok:
+                return
+            if data.get("running"):
+                btn.props("loading")
+                btn.disable()
+                _render(data)
+                _timer.active = True
+            elif data.get("summary"):
+                _render(data)
+        ui.timer(0.3, _init, once=True)
 
 
 def _section_models(backend, refresh) -> None:

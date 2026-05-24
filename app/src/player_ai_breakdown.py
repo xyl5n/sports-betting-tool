@@ -291,3 +291,56 @@ def get_breakdown(info, games, is_pitcher, prop, market, line_f,
 
 def approach_label(is_pitcher: bool) -> str:
     return "ARSENAL & APPROACH" if is_pitcher else "PLATE DISCIPLINE"
+
+
+def has_breakdown(player_id, market: str) -> bool:
+    """True if a breakdown is already cached for this player+market today."""
+    return _cache_read(player_id, market) is not None
+
+
+def generate_for_pick(pick: dict) -> str:
+    """On-demand: ensure a player breakdown exists for a scored prop pick.
+    Assembles the same context the player page feeds get_breakdown() (player
+    info + gamelog + summary + opponent) and generates if not already cached.
+    Returns 'cached' / 'generated' / 'failed'.  Best-effort -- never raises."""
+    try:
+        player = pick.get("player")
+        market = pick.get("market")
+        if not player or not market:
+            return "failed"
+        from .player_profile_client import (
+            get_player_info, get_player_gamelog, get_player_prop_summary,
+            get_player_today_opponent, search_player_by_name, _CURRENT_SEASON,
+        )
+        player_id = pick.get("player_id") or search_player_by_name(player)
+        if not player_id:
+            return "failed"
+        if _cache_read(player_id, market) is not None:
+            return "cached"
+
+        info = get_player_info(int(player_id)) or {}
+        if not info.get("id"):
+            info = {**info, "id": int(player_id), "name": player}
+        is_pitcher = (pick.get("bucket") == "pitcher") or \
+            ((info.get("position_code") or "") == "1")
+        games = get_player_gamelog(int(player_id), _CURRENT_SEASON, is_pitcher=is_pitcher) or []
+        if is_pitcher:
+            games = [g for g in games if g.get("games_started", 0) > 0]
+
+        try:
+            line_f = float(pick.get("line"))
+        except (TypeError, ValueError):
+            line_f = None
+        opp = pick.get("opp_abbrev") or get_player_today_opponent(player, pick)
+        summary = pick.get("summary")
+        if not isinstance(summary, dict):
+            summary = get_player_prop_summary(
+                player, market, pick.get("line"), pick.get("side") or "Over",
+                opp_abbrev=opp, is_pitcher=is_pitcher, games=games,
+            )
+
+        bd = get_breakdown(info, games, is_pitcher, pick, market, line_f, summary, opp)
+        return "generated" if bd else "failed"
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"generate_for_pick failed: {type(exc).__name__}: {exc}")
+        return "failed"
