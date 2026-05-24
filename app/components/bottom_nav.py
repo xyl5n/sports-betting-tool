@@ -31,6 +31,7 @@ _TABS = (
     ("Home",     t.TAB_HOME,   "/",            "home"),
     ("Sports",   t.TAB_SPORTS, "/sports/mlb",  "sports_baseball"),
     ("Props",    t.TAB_PROPS,  "/props",       "person"),
+    ("Top",      t.TAB_TOP,    "/top-picks",   "leaderboard"),
     ("AI",       t.TAB_AI,     "/ai",          "auto_awesome"),
     ("Model",    t.TAB_MODEL,  "/model",       "insights"),
     ("My Bets",  t.TAB_MYBETS, "/mybets",      "receipt_long"),
