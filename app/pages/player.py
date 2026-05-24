@@ -2284,26 +2284,14 @@ def _enrich_similar(
     sims: list[dict], market: str, line, side: str, is_pitcher: bool,
     player_name: str = "", prop: Optional[dict] = None,
 ) -> list[dict]:
-    """Background-thread enrichment.  For each similar player, find their
-    most recent game vs THIS player's opponent today and attach what they
-    recorded there (plus the date and how many H2H games exist).  Falls
-    back to the season average when they've never faced today's opponent.
-    Cached gamelog reads only."""
+    """Background-thread enrichment.  For each similar player attach their
+    season average for the market stat, their L10 hit rate vs today's line,
+    and their last-5 games (for the mini bar chart).  Cached gamelog reads
+    only."""
     from src.player_profile_client import (
-        get_player_gamelog, get_player_prop_summary, gamelog_stat_value,
-        get_player_today_opponent, _CURRENT_SEASON,
+        get_player_gamelog, get_player_prop_summary, _CURRENT_SEASON,
     )
     stat_key = _MARKET_TO_STAT.get(market) or ("K" if is_pitcher else "H")
-
-    # Today's opponent for the profile player (the team the similar
-    # players' H2H is measured against).  One cached resolution.
-    opp = None
-    try:
-        if player_name and prop is not None:
-            opp = get_player_today_opponent(player_name, prop)
-    except Exception:                                                     # noqa: BLE001
-        opp = None
-    opp_u = (opp or "").strip().upper()
 
     out: list[dict] = []
     for s in sims:
@@ -2325,39 +2313,61 @@ def _enrich_similar(
         except Exception:                                                 # noqa: BLE001
             summ = {}
 
-        # Most recent game vs today's opponent (games are date-ascending).
-        h2h_games = (
-            [g for g in games if (g.get("opp") or "").upper() == opp_u]
-            if opp_u else []
-        )
-        last_h2h = h2h_games[-1] if h2h_games else None
         out.append({
-            "name":         s.get("name") or "—",
-            "team":         s.get("team") or "",
-            "score":        s.get("score"),
-            "season_avg":   summ.get("season_avg"),
-            "last5":        games[-5:],
-            "stat_key":     stat_key,
-            "opp":          opp,
-            "h2h_count":    len(h2h_games),
-            "h2h_recorded": (gamelog_stat_value(last_h2h, stat_key)
-                             if last_h2h else None),
-            "h2h_date":     (last_h2h.get("date") if last_h2h else None),
+            "name":       s.get("name") or "—",
+            "team":       s.get("team") or "",
+            "score":      s.get("score"),
+            "season_avg": summ.get("season_avg"),
+            "l10_hits":   summ.get("last_10_hits"),
+            "l10_games":  summ.get("last_10_games"),
+            "last5":      games[-5:],
+            "stat_key":   stat_key,
         })
     return out
 
 
+def _mini_last5_options(last5: list[dict], stat_key: str,
+                        line_f: Optional[float]) -> dict:
+    """Compact ECharts bar config for a similar player's last 5 games:
+    bars coloured over/under the line, a dashed markline at the line, no
+    axes/labels (it's a sparkline-style mini chart)."""
+    from src.player_profile_client import gamelog_stat_value
+    vals: list[float] = []
+    for g in last5:
+        v = gamelog_stat_value(g, stat_key)
+        vals.append(float(v) if isinstance(v, (int, float)) else 0.0)
+    has_line = isinstance(line_f, (int, float))
+    items = [{
+        "value": v,
+        "itemStyle": {"color": (t.POS if (has_line and v > line_f)
+                                 else t.NEG if has_line else t.PRIMARY),
+                      "borderRadius": [2, 2, 0, 0]},
+    } for v in vals]
+    mark = ({"silent": True, "symbol": ["none", "none"],
+             "lineStyle": {"color": t.WARN, "type": "dashed", "width": 1},
+             "label": {"show": False},
+             "data": [{"yAxis": line_f}]} if has_line else None)
+    return {
+        "grid": {"left": 2, "right": 2, "top": 6, "bottom": 2, "containLabel": False},
+        "xAxis": {"type": "category", "show": False,
+                  "data": list(range(len(vals) or 1))},
+        "yAxis": {"type": "value", "show": False, "min": 0},
+        "series": [{
+            "type": "bar", "data": items, "barMaxWidth": 12,
+            "markLine": mark,
+        }],
+    }
+
+
 def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
-    """One similar-player card: name + team + similarity score, then their
-    result the last time they faced today's opponent (line being analyzed
-    vs what they actually recorded), or a season-average fallback with a
-    'No H2H vs [team]' note when they've never faced that opponent."""
+    """One similar-player card: name + team + similarity score, the
+    player's season average for the market stat, their L10 hit rate vs
+    today's line, and a mini bar chart of their last 5 games."""
     from src.utils import strip_formatting
     name = strip_formatting(s.get("name") or "—")
     team = strip_formatting(s.get("team") or "")
     slug = (s.get("name") or "").lower().replace(" ", "-")
     stat_key = s.get("stat_key") or "H"
-    opp = (s.get("opp") or "").strip().upper()
 
     score = s.get("score")
     try:
@@ -2369,16 +2379,19 @@ def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
     avg_str = f"{season_avg:.1f}" if isinstance(season_avg, (int, float)) else "—"
     line_str = f"{line_f:g}" if isinstance(line_f, (int, float)) else "—"
 
-    recorded = s.get("h2h_recorded")
-    has_h2h  = recorded is not None
-    h2h_count = int(s.get("h2h_count") or 0)
-    rec_date  = _fmt_short_date(s.get("h2h_date"))
-
-    # Color the recorded value vs the analyzed line (over = green).
-    if has_h2h and isinstance(line_f, (int, float)):
-        rec_color = t.POS if float(recorded) > float(line_f) else t.NEG
+    h = s.get("l10_hits")
+    g = s.get("l10_games")
+    if isinstance(h, int) and isinstance(g, int) and g > 0:
+        rate = h / g
+        l10_str = f"{h}/{g}"
+        l10_pct = f"{rate * 100:.0f}%"
+        l10_color = t.POS if rate >= 0.5 else t.NEG
     else:
-        rec_color = t.TEXT
+        l10_str = "—"
+        l10_pct = ""
+        l10_color = t.TEXT_DIM
+
+    last5 = s.get("last5") or []
 
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
@@ -2404,41 +2417,33 @@ def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
                 f"font-family: monospace;"
             )
 
-        if has_h2h:
-            # Last time this similar player faced today's opponent.
-            label = f"LAST VS {opp}" + (f" · {rec_date}" if rec_date else "")
-            with ui.row().classes("items-center w-full").style(
-                "gap: 16px; flex-wrap: nowrap;"
-            ):
-                with ui.column().style("gap: 2px; flex-shrink: 0;"):
-                    ui.label(label).style(
-                        f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
-                        f"color: {t.TEXT_DIM2};"
-                    )
-                    ui.label(
-                        f"Line {line_str} {stat_key} · Got {float(recorded):g}"
-                    ).style(
-                        f"font-size: 12px; font-weight: 800; color: {rec_color}; "
-                        f"font-family: monospace;"
-                    )
-                if h2h_count > 1:
-                    ui.label(f"{h2h_count} H2H games").style(
-                        f"font-size: 10px; color: {t.TEXT_DIM2}; "
-                        f"font-family: monospace;"
-                    )
-        else:
-            # Never faced today's opponent -> season average fallback.
-            with ui.column().style("gap: 2px;"):
-                ui.label(
-                    f"No H2H vs {opp}" if opp else "No opponent set today"
-                ).style(
-                    f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
-                    f"color: {t.TEXT_DIM2};"
-                )
-                ui.label(f"Season avg {avg_str} {stat_key}").style(
+        # Stats row: season avg + L10 hit rate vs the line.
+        with ui.row().classes("items-center w-full").style(
+            "gap: 16px; flex-wrap: nowrap;"
+        ):
+            with ui.column().style("gap: 1px; flex-shrink: 0;"):
+                ui.label("SEASON AVG").style(
+                    f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
+                    f"color: {t.TEXT_DIM2};")
+                ui.label(f"{avg_str} {stat_key}").style(
                     f"font-size: 12px; font-weight: 800; color: {t.TEXT}; "
-                    f"font-family: monospace;"
-                )
+                    f"font-family: monospace;")
+            with ui.column().style("gap: 1px; flex-shrink: 0;"):
+                ui.label(f"L10 vs {line_str}").style(
+                    f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
+                    f"color: {t.TEXT_DIM2};")
+                ui.label(f"{l10_str}" + (f"  {l10_pct}" if l10_pct else "")).style(
+                    f"font-size: 12px; font-weight: 800; color: {l10_color}; "
+                    f"font-family: monospace;")
+            ui.element("div").style("flex: 1;")
+            # Mini bar chart of the last 5 games.
+            if last5:
+                with ui.column().style("gap: 1px; align-items: flex-end;"):
+                    ui.label("LAST 5").style(
+                        f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
+                        f"color: {t.TEXT_DIM2};")
+                    ui.echart(_mini_last5_options(last5, stat_key, line_f)).style(
+                        "width: 96px; height: 40px;")
 
 
 def _fmt_short_date(iso: Optional[str]) -> str:
