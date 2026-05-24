@@ -469,6 +469,9 @@ def _prop_card(r: dict, backend) -> None:
         # ── Inline performance summary chips ─────────────────────────────
         _card_summary_chips(r)
 
+        # ── AI summary (short, cached; never generated at render) ────────
+        _card_ai_summary(r)
+
         # ── Opposing-team rank chip ──────────────────────────────────────
         _card_opp_rank_chip(r)
 
@@ -677,6 +680,31 @@ def _card_summary_chips(r: dict) -> None:
                             f"font-size: 8.5px; color: {t.TEXT_DIM2}; "
                             f"font-family: monospace;"
                         )
+
+
+def _card_ai_summary(r: dict) -> None:
+    """Short cached AI blurb for this prop.  Renders nothing when no summary
+    is cached -- never generates at render time."""
+    try:
+        from src import ai_summaries
+        text = ai_summaries.get_prop_summary(r)
+    except Exception:                                                     # noqa: BLE001
+        text = None
+    if not text:
+        return
+    with ui.row().classes("items-start w-full").style(
+        f"gap: 6px; padding: 6px 8px; "
+        f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM};"
+    ):
+        ui.label("AI").style(
+            f"font-size: 8px; font-weight: 800; letter-spacing: .5px; "
+            f"color: {t.PRIMARY_HI}; background: {t.CARD}; "
+            f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
+        )
+        ui.label(text).style(
+            f"font-size: 11px; color: {t.TEXT_DIM}; line-height: 1.35; "
+            f"font-style: italic; white-space: normal;"
+        )
 
 
 def _card_opp_rank_chip(r: dict) -> None:

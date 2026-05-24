@@ -463,6 +463,13 @@ def run_tier_1_refresh() -> None:
             f"TIER1 SCORING FAILED (swallow): {type(exc).__name__}: {exc}\n"
             f"{traceback.format_exc()}"
         )
+    # AI prop summaries for the freshly-scored picks (background; cached
+    # summaries are reused, only changed/new picks are regenerated).
+    try:
+        from . import ai_summaries
+        ai_summaries.launch_summary_queue(do_games=False, do_props=True)
+    except Exception:                                                     # noqa: BLE001
+        pass
 
 
 def run_tier_2_refresh() -> None:
@@ -490,3 +497,8 @@ def run_tier_2_refresh() -> None:
             f"TIER2 SCORING FAILED (swallow): {type(exc).__name__}: {exc}\n"
             f"{traceback.format_exc()}"
         )
+    try:
+        from . import ai_summaries
+        ai_summaries.launch_summary_queue(do_games=False, do_props=True)
+    except Exception:                                                     # noqa: BLE001
+        pass
