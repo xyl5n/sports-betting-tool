@@ -1259,6 +1259,20 @@ _auto_settlement_state: dict = {
     "last_voided":  0,
 }
 
+# ── Consolidated 15-minute refresh-cycle state ────────────────────────────────
+# The auto_props_refresh job now runs one coordinated pass (schedule+scores →
+# game odds → prop lines → re-score → settlement → AI summaries).
+_refresh_cycle_lock  = threading.Lock()   # non-blocking guard against overlap
+_refresh_cycle_state: dict = {
+    "last_ran_at":   None,   # ISO UTC
+    "last_duration": None,   # seconds
+    "last_summary":  None,   # dict of per-step counts
+}
+# Last-seen game lines (per Odds-API game id) for movement detection, and last
+# probable starters (per gamePk) for pitching-change detection.  Process-local.
+_last_seen_lines: dict[str, dict] = {}
+_last_probables:  dict[str, str]  = {}
+
 # Module-level scheduler reference (set at startup)
 _sched = None
 
@@ -10351,6 +10365,195 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Consolidated 15-minute refresh cycle (auto_props_refresh job)
+#
+#  One coordinated pass, in order:
+#    1. MLB/WNBA schedule + live scores (+ Supabase) and pitching-change detect
+#    2. Game odds re-fetch + significant line-movement flagging
+#    3. Player prop lines re-fetch          (run_tier_1_refresh)
+#    4. Re-score props                      (run_tier_1_refresh)
+#    5. Settlement check                    (_run_auto_settlement_job; replaces
+#                                            the old 30-min auto_settlement job)
+#    6. Groq summary queue                  (launched by run_tier_1_refresh)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _refresh_schedule_and_scores() -> dict:
+    """Step 1: refresh today's schedule (scores/status, written to Supabase by
+    _fetch_raw_schedule), repopulate the live-score cache, and detect probable-
+    pitcher changes.  Best-effort -- never raises."""
+    import sys as _sys
+    out = {"sports": 0, "pitching_changes": 0}
+    for sport in ("mlb", "wnba"):
+        try:
+            _fetch_raw_schedule(sport, _today_et())
+            out["sports"] += 1
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"CYCLE step1 {sport} schedule error: {exc}")
+        try:
+            from components import live_score as _ls
+            _ls.fetch_live(_sys.modules.get(__name__), sport)
+        except Exception:                                                 # noqa: BLE001
+            pass
+    try:
+        out["pitching_changes"] = _detect_pitching_changes()
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"CYCLE step1 pitching-change error: {exc}")
+    return out
+
+
+def _detect_pitching_changes() -> int:
+    """Compare today's MLB probable starters to the last cycle's; log + count
+    any change.  One free MLB Stats API call per cycle (hydrate probablePitcher)."""
+    url = (f"{_MLB_STATS_BASE}/schedule?sportId=1&date={_today_et()}"
+           f"&hydrate=probablePitcher")
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "SportsBettingApp/1.0"})
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"CYCLE pitching-change fetch failed: {exc}")
+        return 0
+    changes = 0
+    for date_block in (data.get("dates") or []):
+        for g in (date_block.get("games") or []):
+            gpk = str(g.get("gamePk") or "")
+            if not gpk:
+                continue
+            teams = g.get("teams") or {}
+            ap = (((teams.get("away") or {}).get("probablePitcher") or {})
+                  .get("fullName") or "TBD")
+            hp = (((teams.get("home") or {}).get("probablePitcher") or {})
+                  .get("fullName") or "TBD")
+            cur = f"{ap}|{hp}"
+            prev = _last_probables.get(gpk)
+            if prev is not None and prev != cur and "TBD" not in cur:
+                changes += 1
+                _eprint(f"CYCLE pitching change game={gpk}: '{prev}' -> '{cur}'")
+            _last_probables[gpk] = cur
+    return changes
+
+
+def _refresh_game_odds_detect_moves() -> dict:
+    """Step 2: re-fetch current ML/RL/Total lines for today's games and flag
+    significant moves (ML > 5 cents either side, totals line > 0.5).  Returns
+    {'games','ml_moves','total_moves'}.  Best-effort -- never raises."""
+    res = {"games": 0, "ml_moves": 0, "total_moves": 0}
+    odds_key = os.getenv("ODDS_API_KEY", "")
+    if not odds_key or odds_key == "your_odds_api_key_here":
+        return res
+    try:
+        oc = OddsClient(odds_key, _cache)
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"CYCLE step2 OddsClient init failed: {exc}")
+        return res
+    for sport_key in ("baseball_mlb", "basketball_wnba"):
+        try:
+            games = oc.get_odds(sport_key, force_refresh=True) or []
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"CYCLE step2 {sport_key} odds error: {exc}")
+            continue
+        for g in games:
+            gid = str(g.get("id") or "")
+            if not gid:
+                continue
+            res["games"] += 1
+            cur = {
+                "ml_home": g.get("h2h_home_odds"),
+                "ml_away": g.get("h2h_away_odds"),
+                "total":   g.get("total_line"),
+            }
+            prev = _last_seen_lines.get(gid)
+            if prev:
+                ml_moved = False
+                for side in ("ml_home", "ml_away"):
+                    a, b = prev.get(side), cur.get(side)
+                    if isinstance(a, (int, float)) and isinstance(b, (int, float)) \
+                            and abs(b - a) > 5:
+                        ml_moved = True
+                if ml_moved:
+                    res["ml_moves"] += 1
+                    _eprint(
+                        f"CYCLE line move ML {g.get('away_team')} @ {g.get('home_team')}: "
+                        f"{prev.get('ml_away')}/{prev.get('ml_home')} -> "
+                        f"{cur.get('ml_away')}/{cur.get('ml_home')}"
+                    )
+                ta, tb = prev.get("total"), cur.get("total")
+                if isinstance(ta, (int, float)) and isinstance(tb, (int, float)) \
+                        and abs(tb - ta) > 0.5:
+                    res["total_moves"] += 1
+                    _eprint(
+                        f"CYCLE line move TOTAL {g.get('away_team')} @ {g.get('home_team')}: "
+                        f"{ta} -> {tb}"
+                    )
+            _last_seen_lines[gid] = cur
+    return res
+
+
+def _run_consolidated_refresh_cycle() -> dict:
+    """The auto_props_refresh callback: one coordinated 15-minute pass.
+    Guarded so overlapping ticks are skipped; every step is best-effort so a
+    failure in one never aborts the rest of the cycle."""
+    if not _refresh_cycle_lock.acquire(blocking=False):
+        _eprint("CYCLE: previous refresh cycle still running — skipping this tick")
+        return {}
+    started = time.time()
+    summary = {
+        "schedule_sports": 0, "pitching_changes": 0,
+        "odds_games": 0, "ml_moves": 0, "total_moves": 0,
+        "props_refreshed": False, "settled": 0, "props_settled": 0, "voided": 0,
+    }
+    try:
+        # 1) schedule + live scores + pitching changes
+        s1 = _refresh_schedule_and_scores()
+        summary["schedule_sports"]  = s1.get("sports", 0)
+        summary["pitching_changes"] = s1.get("pitching_changes", 0)
+
+        # 2) game odds + line-move flagging
+        s2 = _refresh_game_odds_detect_moves()
+        summary["odds_games"]  = s2.get("games", 0)
+        summary["ml_moves"]    = s2.get("ml_moves", 0)
+        summary["total_moves"] = s2.get("total_moves", 0)
+
+        # 3 + 4 + 6(props): prop lines re-fetch, re-score, and the props Groq
+        # summary queue (which regenerates summaries for any pick whose line
+        # moved, via the ai_summaries line/side/pv fingerprint).
+        try:
+            from src.props_client import run_tier_1_refresh
+            run_tier_1_refresh()
+            summary["props_refreshed"] = True
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"CYCLE step3-4 props error: {type(exc).__name__}: {exc}")
+
+        # 5) settlement (replaces the standalone 30-min auto_settlement job)
+        try:
+            st = _run_auto_settlement_job(force=True) or {}
+            summary["settled"]       = int(st.get("settled") or 0)
+            summary["props_settled"] = int(st.get("props_settled") or 0)
+            summary["voided"]        = int(st.get("voided") or 0)
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"CYCLE step5 settlement error: {type(exc).__name__}: {exc}")
+    finally:
+        duration = round(time.time() - started, 1)
+        _refresh_cycle_state.update({
+            "last_ran_at":   datetime.now(timezone.utc).isoformat(),
+            "last_duration": duration,
+            "last_summary":  dict(summary),
+        })
+        _eprint(
+            "CYCLE COMPLETE in %ss | schedule=%d sports, pitching_changes=%d | "
+            "odds: %d games, %d ML moves, %d total moves | props_refreshed=%s | "
+            "settled: %d game + %d props (%d voided)" % (
+                duration, summary["schedule_sports"], summary["pitching_changes"],
+                summary["odds_games"], summary["ml_moves"], summary["total_moves"],
+                summary["props_refreshed"], summary["settled"],
+                summary["props_settled"], summary["voided"],
+            )
+        )
+        _refresh_cycle_lock.release()
+    return summary
+
+
 @app.route("/api/admin/settle_now", methods=["POST"])
 def admin_settle_now():
     """Force the auto-settlement job to run immediately, bypassing the
@@ -10466,21 +10669,18 @@ if not _in_debug_mode or _werkzeug_main:
                     max_instances=1,
                     kwargs={"label": "noon"},
                 )
-                # Intraday settlement runs every 30 minutes during the
-                # game-hours window (11 AM ET through 12:30 AM ET the
-                # next morning).  The window ends at 12:30 because the
-                # 1 AM JOB 1 below is the definitive final settlement
-                # pass; running the 30-min job past 1 AM would just
-                # race the clean nightly cycle for no benefit.
-                _sched.add_job(
-                    _run_auto_settlement_job,
-                    _CronTrigger(hour="11-23,0", minute="0,30",
-                                 timezone=_ET),
-                    id="auto_settlement",
-                    replace_existing=True,
-                    misfire_grace_time=1800,
-                    max_instances=1,
-                )
+                # NOTE: the standalone 30-min auto_settlement job has been
+                # folded into the consolidated 15-min auto_props_refresh cycle
+                # below (step 5 calls _run_auto_settlement_job every 15 min).
+                # Remove any auto_settlement job a prior deploy registered so
+                # settlement isn't run twice.
+                try:
+                    _sched.remove_job("auto_settlement")
+                    print("STARTUP: removed standalone auto_settlement job "
+                          "(now part of the 15-min cycle)",
+                          flush=True, file=sys.stderr)
+                except Exception:                                          # noqa: BLE001
+                    pass
                 # ── Nightly three-job cycle ──────────────────────────────
                 # JOB 1  1:00 AM ET  final settlement
                 # JOB 2  2:00 AM ET  full clear
@@ -10518,21 +10718,19 @@ if not _in_debug_mode or _werkzeug_main:
                           flush=True, file=sys.stderr)
                 except Exception:                                          # noqa: BLE001
                     pass
-                print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET", flush=True, file=sys.stderr)
-                print("STARTUP: auto-settlement job scheduled — every 30 min during 11 AM–12:30 AM ET window", flush=True, file=sys.stderr)
+                print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET (full model re-analysis)", flush=True, file=sys.stderr)
                 print("STARTUP: nightly cycle scheduled — JOB1 settle 1 AM, JOB2 clear 2 AM, JOB3 prefetch 3 AM ET", flush=True, file=sys.stderr)
 
-                # Player-props Tier 1 refresh -- every 15 min during game
-                # hours (11 AM-11 PM ET).  Tier 1 covers the four high-
-                # volume markets (pitcher_strikeouts, pitcher_outs,
-                # batter_hits, batter_total_bases).  Tier 2 fires once
-                # per day from inside /api/analyze; Tier 3 is on-demand
-                # only.  See src/props_client.py for the full tier
-                # taxonomy + The Odds API quota math.
+                # Consolidated 15-min refresh cycle (keeps the historic
+                # auto_props_refresh job id).  One coordinated pass during game
+                # hours (11 AM-11 PM ET): schedule + live scores → game odds
+                # (line-move flagging) → prop lines → re-score → settlement →
+                # Groq summary queue.  This single cycle now also performs the
+                # intraday settlement that used to live in the standalone
+                # 30-min auto_settlement job.
                 try:
-                    from src.props_client import run_tier_1_refresh as _props_tier_1
                     _sched.add_job(
-                        _props_tier_1,
+                        _run_consolidated_refresh_cycle,
                         _CronTrigger(hour="11-23", minute="0,15,30,45",
                                      timezone=_ET),
                         id="auto_props_refresh",
@@ -10541,8 +10739,10 @@ if not _in_debug_mode or _werkzeug_main:
                         max_instances=1,
                     )
                     print(
-                        "STARTUP: auto_props_refresh job scheduled — "
-                        "every 15 min during 11 AM–11 PM ET (Tier 1 markets)",
+                        "STARTUP: auto_props_refresh job scheduled — CONSOLIDATED "
+                        "15-min cycle, every :00/:15/:30/:45 during 11 AM–11 PM ET "
+                        "(schedule+scores → odds → props → re-score → settlement → "
+                        "AI summaries)",
                         flush=True, file=sys.stderr,
                     )
                 except Exception as _pe:
