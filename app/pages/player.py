@@ -154,10 +154,29 @@ def _local_css() -> str:
     """
     return f"""
     <style>
-      /* Tabs at the top of /player/<id> get a green indicator (per
-         spec) rather than the purple-gradient one the global theme
-         paints.  Scope via .player-market-tabs so the rule doesn't
-         leak to /mybets etc. */
+      /* The 4 top-level profile tabs (Pick / Overview / Matchup / Game
+         Log) use the app's purple accent: purple underline + purple
+         active text, plain white inactive text on a transparent strip. */
+      .player-main-tabs .q-tab__indicator {{
+        background: {t.PRIMARY} !important;
+        height: 3px !important;
+        box-shadow: 0 0 8px rgba({t.PRIMARY_R}, {t.PRIMARY_G}, {t.PRIMARY_B}, 0.55) !important;
+      }}
+      .player-main-tabs .q-tab {{
+        color: {t.TEXT} !important;
+        opacity: 1 !important;
+      }}
+      .player-main-tabs .q-tab--active {{
+        color: {t.PRIMARY_HI} !important;
+      }}
+      .player-main-tabs .q-tabs__content {{
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+      }}
+
+      /* The per-market sub-tabs inside the Pick tab keep the original
+         green indicator -- this tab's content is unchanged.  Scope via
+         .player-market-tabs so the rule doesn't leak elsewhere. */
       .player-market-tabs .q-tab__indicator {{
         background: {t.POS} !important;
         height: 3px !important;
@@ -166,8 +185,6 @@ def _local_css() -> str:
       .player-market-tabs .q-tab--active {{
         color: {t.POS} !important;
       }}
-      /* Force horizontal scroll instead of squashing when there are
-         more tabs than fit on a phone width. */
       .player-market-tabs .q-tabs__content {{
         overflow-x: auto !important;
         -webkit-overflow-scrolling: touch;
@@ -246,45 +263,463 @@ def _layout(backend, player_id_slug: str) -> None:
         _log(f"render {info['name']} (id={player_id}, pitcher={is_pitcher}, "
              f"props={len(today_props_all)}, opp={opp_abbrev}, games={len(games)})")
 
-        # No-props fallback: render the basic header + game log only.
-        if not today_props_all:
-            _section_player_header(info, today_prop, opp_abbrev, prop=None, grade=None)
-            if started_filtered:
-                ui.label(
-                    "No upcoming props — this player's game has already started. "
-                    "Check back tomorrow."
-                ).style(
-                    f"font-size: 13px; font-weight: 700; color: {t.TEXT_DIM}; "
-                    f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
-                    f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
-                    f"text-align: center; width: 100%;"
-                )
-            else:
-                _empty_state_message(info, raw_games, is_pitcher)
-            _section_game_log(games, is_pitcher, [])
-            return
+        # Highlighted game-log column = the strongest prop's stat (else
+        # the default per role).
+        if today_props_all:
+            _hl_market = today_props_all[0].get("market", "")
+            highlighted = _MARKET_TO_STAT.get(_hl_market) or ("K" if is_pitcher else "H")
+        else:
+            highlighted = "K" if is_pitcher else "H"
 
-        # ── Market tabs at the top, per spec ─────────────────────────────
-        tab_refs: list[tuple] = []
-        with ui.tabs().props("dense align=left inline-label").classes(
-            "player-market-tabs w-full"
+        # ── 4 top-level profile tabs ─────────────────────────────────────
+        with ui.tabs().props("dense align=left no-caps").classes(
+            "player-main-tabs w-full"
         ).style(
-            f"border-bottom: 1px solid {t.BORDER}; min-height: 40px;"
-        ) as tabs:
-            for prop in today_props_all:
-                market = prop.get("market", "")
-                label  = _MARKET_TAB_LABEL.get(market, market.upper())
-                tab_refs.append((ui.tab(label), prop))
+            f"border-bottom: 1px solid {t.BORDER}; min-height: 44px;"
+        ) as main_tabs:
+            tab_pick     = ui.tab("Pick")
+            tab_overview = ui.tab("Overview")
+            tab_matchup  = ui.tab("Matchup")
+            tab_log      = ui.tab("Game Log")
 
-        with ui.tab_panels(tabs, value=tab_refs[0][0]).classes("w-full").style(
-            f"background: transparent; padding: 0;"
+        with ui.tab_panels(main_tabs, value=tab_pick).classes("w-full").style(
+            "background: transparent; padding: 0;"
         ):
-            for tab_obj, prop in tab_refs:
-                with ui.tab_panel(tab_obj).style(f"padding: {t.SPACE_MD} 0 0 0;"):
-                    _render_market_view(info, games, is_pitcher, prop, opp_abbrev)
+            with ui.tab_panel(tab_pick).style(f"padding: {t.SPACE_MD} 0 0 0;"):
+                _tab_pick(backend, info, games, raw_games, is_pitcher,
+                          today_props_all, today_prop, opp_abbrev, started_filtered)
+            with ui.tab_panel(tab_overview).style(f"padding: {t.SPACE_MD} 0 0 0;"):
+                _tab_overview(info, is_pitcher)
+            with ui.tab_panel(tab_matchup).style(f"padding: {t.SPACE_MD} 0 0 0;"):
+                _tab_matchup(info, today_prop, opp_abbrev, games, is_pitcher)
+            with ui.tab_panel(tab_log).style(f"padding: {t.SPACE_MD} 0 0 0;"):
+                _tab_game_log(games, is_pitcher, highlighted)
 
-        # Game log table at the very bottom -- shared across markets.
-        _section_game_log(games, is_pitcher, today_props_all)
+
+# ── TAB 1: PICK (the original player-profile content, unchanged) ────────────
+
+def _tab_pick(
+    backend,
+    info: dict,
+    games: list[dict],
+    raw_games: list[dict],
+    is_pitcher: bool,
+    today_props_all: list[dict],
+    today_prop: Optional[dict],
+    opp_abbrev: Optional[str],
+    started_filtered: bool,
+) -> None:
+    """All the existing player-profile content: per-market sub-tabs with
+    header, AI breakdown, chart, time pills, and similar players.  The
+    game-log table now lives in its own tab (TAB 4)."""
+    # No-props fallback: header + message only.
+    if not today_props_all:
+        _section_player_header(info, today_prop, opp_abbrev, prop=None, grade=None)
+        if started_filtered:
+            ui.label(
+                "No upcoming props — this player's game has already started. "
+                "Check back tomorrow."
+            ).style(
+                f"font-size: 13px; font-weight: 700; color: {t.TEXT_DIM}; "
+                f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+                f"text-align: center; width: 100%;"
+            )
+        else:
+            _empty_state_message(info, raw_games, is_pitcher)
+        return
+
+    # ── Per-market sub-tabs (green indicator, unchanged) ─────────────────
+    tab_refs: list[tuple] = []
+    with ui.tabs().props("dense align=left inline-label").classes(
+        "player-market-tabs w-full"
+    ).style(
+        f"border-bottom: 1px solid {t.BORDER}; min-height: 40px;"
+    ) as tabs:
+        for prop in today_props_all:
+            market = prop.get("market", "")
+            label  = _MARKET_TAB_LABEL.get(market, market.upper())
+            tab_refs.append((ui.tab(label), prop))
+
+    with ui.tab_panels(tabs, value=tab_refs[0][0]).classes("w-full").style(
+        "background: transparent; padding: 0;"
+    ):
+        for tab_obj, prop in tab_refs:
+            with ui.tab_panel(tab_obj).style(f"padding: {t.SPACE_MD} 0 0 0;"):
+                _render_market_view(info, games, is_pitcher, prop, opp_abbrev)
+
+
+# ── TAB 4: GAME LOG (always expanded) ───────────────────────────────────────
+
+def _tab_game_log(games: list[dict], is_pitcher: bool, highlighted: str) -> None:
+    """The full game-log table, always expanded (no collapse toggle)."""
+    if not games:
+        ui.label("No game log available for this player.").style(
+            f"font-size: 13px; font-weight: 700; color: {t.TEXT_DIM}; "
+            f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+            f"text-align: center; width: 100%;"
+        )
+        return
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        _game_log_table(games, is_pitcher, highlighted)
+
+
+# ── Shared helpers for the Overview / Matchup tabs ─────────────────────────
+
+def _clr(name: str) -> str:
+    """Semantic colour name -> theme hex."""
+    return {
+        "pos": t.POS, "neg": t.NEG, "warn": t.WARN, "dim": t.TEXT_DIM,
+        "primary": t.PRIMARY, "primary_hi": t.PRIMARY_HI,
+    }.get(name, t.TEXT)
+
+
+def _section_label(text: str) -> None:
+    ui.label(text).style(
+        f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+        f"color: {t.PRIMARY_HI};"
+    )
+
+
+def _card():
+    return ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 10px; "
+        f"min-width: 0;"
+    )
+
+
+def _note(msg: str, *, dashed: bool = False) -> None:
+    border = "1px dashed" if dashed else "0"
+    ui.label(msg).style(
+        f"font-size: 12px; font-weight: 600; color: {t.TEXT_DIM2}; "
+        f"font-style: italic; padding: 4px 2px; border: {border} {t.BORDER}; "
+        f"border-radius: {t.RADIUS_SM}; white-space: normal; line-height: 1.5;"
+    )
+
+
+def _lazy(loader, render, *, unavailable: str, spinner_text: str = "Loading…") -> None:
+    """Per-section async loader: shows a spinner, runs the blocking
+    *loader* in a thread, then calls *render(data)*.  On failure / None /
+    ``{"available": False}`` it shows the *unavailable* note instead of
+    crashing.  Never blocks page load."""
+    holder = ui.column().classes("w-full").style("gap: 10px; min-width: 0;")
+    with holder:
+        with ui.row().classes("items-center").style("gap: 8px; padding: 4px 2px;"):
+            ui.spinner(size="sm").style(f"color: {t.PRIMARY};")
+            ui.label(spinner_text).style(
+                f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic;")
+
+    async def _run() -> None:                                             # noqa: WPS430
+        try:
+            data = await asyncio.to_thread(loader)
+        except Exception as exc:                                          # noqa: BLE001
+            _log(f"lazy section error: {type(exc).__name__}: {exc}")
+            data = None
+        holder.clear()
+        with holder:
+            ok = data is not None and (
+                not isinstance(data, dict) or data.get("available", True)
+            )
+            if ok:
+                try:
+                    render(data)
+                except Exception as exc:                                  # noqa: BLE001
+                    _log(f"lazy render error: {type(exc).__name__}: {exc}")
+                    _note(unavailable)
+            else:
+                _note(unavailable)
+
+    ui.timer(0.05, _run, once=True)
+
+
+def _stat_box(label: str, value: str, *, color: Optional[str] = None) -> None:
+    with ui.column().classes("flex-grow").style(
+        f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 2px; "
+        f"min-width: 0; flex: 1 1 0; align-items: center;"
+    ):
+        ui.label(label).style(
+            f"font-size: 9.5px; font-weight: 800; letter-spacing: .6px; "
+            f"color: {t.TEXT_DIM2};")
+        ui.label(value).style(
+            f"font-size: 17px; font-weight: 800; font-family: monospace; "
+            f"color: {color or t.TEXT};")
+
+
+def _pct_badge(pct: Optional[float]) -> str:
+    """Return an inline-HTML percentile badge (colored pill) string."""
+    from src import player_matchup as _pm
+    if pct is None:
+        return ""
+    color = _clr(_pm.percentile_color(pct))
+    return (
+        f'<span style="display:inline-block; font-size:9.5px; font-weight:800; '
+        f'font-family:monospace; color:{color}; border:1px solid {color}; '
+        f'border-radius:999px; padding:1px 7px; margin-left:6px; '
+        f'background:rgba(0,0,0,.2);">{int(pct)}th</span>'
+    )
+
+
+# ── TAB 2: OVERVIEW ─────────────────────────────────────────────────────────
+
+def _tab_overview(info: dict, is_pitcher: bool) -> None:
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_MD}; min-width: 0;"):
+        # Section A — Season Averages (batters only).
+        if not is_pitcher:
+            with _card():
+                _section_label("SEASON AVERAGES")
+
+                def _load_season():                                       # noqa: WPS430
+                    from src.player_profile_client import get_season_stats
+                    return get_season_stats(info["id"], is_pitcher=False)
+
+                _lazy(_load_season, _render_season_averages,
+                      unavailable="Season averages unavailable.",
+                      spinner_text="Loading season averages…")
+
+        # Section B — Statcast Percentiles (foundation placeholder).
+        with _card():
+            _section_label("STATCAST PERCENTILES")
+            _note(
+                "Statcast percentile bars — xwOBA, exit velocity, barrel%, "
+                "hard-hit%, chase%, whiff%, and more, computed from pybaseball "
+                "and colored by percentile — are coming in the next update.",
+                dashed=True,
+            )
+
+
+def _render_season_averages(stats: dict) -> None:
+    rows = (("AVG", "avg"), ("OBP", "obp"), ("SLG", "slg"), ("OPS", "ops"))
+    if not any(stats.get(k) for _, k in rows):
+        _note("No season batting stats yet for this player.")
+        return
+    with ui.row().classes("items-stretch w-full").style(
+        "gap: 8px; flex-wrap: nowrap;"
+    ):
+        for label, key in rows:
+            v = stats.get(key)
+            try:
+                txt = f"{float(v):.3f}".lstrip("0") if v else "—"
+            except (TypeError, ValueError):
+                txt = "—"
+            _stat_box(label, txt)
+
+
+# ── TAB 3: MATCHUP ──────────────────────────────────────────────────────────
+
+def _tab_matchup(
+    info: dict,
+    prop: Optional[dict],
+    opp_abbrev: Optional[str],
+    games: list[dict],
+    is_pitcher: bool,
+) -> None:
+    name      = info.get("name", "")
+    home_team = (prop or {}).get("home_team") or ""
+    commence  = (prop or {}).get("commence_time")
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_MD}; min-width: 0;"):
+        # Section A — Overall matchup grade.
+        with _card():
+            _section_label("MATCHUP GRADE")
+            if prop:
+                def _load_grade():                                        # noqa: WPS430
+                    from src import player_matchup as _pm
+                    return _pm.get_matchup_grade(info, prop, games, is_pitcher)
+                _lazy(_load_grade, _render_matchup_grade,
+                      unavailable="Matchup grade unavailable.",
+                      spinner_text="Grading matchup…")
+            else:
+                _note("No upcoming game to grade.")
+
+        # Section B — Weather & Park (two side-by-side cards).
+        with ui.row().classes("items-stretch w-full").style(
+            "gap: 8px; flex-wrap: wrap;"
+        ):
+            with ui.column().style("flex: 1 1 240px; min-width: 0; gap: 0;"):
+                with _card():
+                    _section_label("WEATHER")
+                    if home_team:
+                        def _load_wx():                                   # noqa: WPS430
+                            from src import player_matchup as _pm
+                            return _pm.get_weather(home_team, commence)
+                        _lazy(_load_wx, _render_weather,
+                              unavailable="Weather unavailable.",
+                              spinner_text="Loading weather…")
+                    else:
+                        _note("No game venue resolved.")
+            with ui.column().style("flex: 1 1 240px; min-width: 0; gap: 0;"):
+                with _card():
+                    _section_label("PARK FACTORS")
+                    if home_team:
+                        def _load_park():                                 # noqa: WPS430
+                            from src import player_matchup as _pm
+                            return _pm.get_park(home_team)
+                        _lazy(_load_park, _render_park,
+                              unavailable="Park data unavailable.",
+                              spinner_text="Loading park factors…")
+                    else:
+                        _note("No game venue resolved.")
+
+        # Section C — Tonight's starter (batters) / opposing lineup (pitchers).
+        if is_pitcher:
+            with _card():
+                _section_label("OPPOSING LINEUP")
+                _note(
+                    "The opposing batting order with splits vs your handedness "
+                    "is coming in the next update.",
+                    dashed=True,
+                )
+        else:
+            with _card():
+                _section_label("TONIGHT'S STARTER")
+                if prop:
+                    def _load_starter():                                  # noqa: WPS430
+                        from src import player_matchup as _pm
+                        return _pm.get_opposing_starter(prop, name)
+                    _lazy(_load_starter, _render_starter,
+                          unavailable="Opposing starter not announced yet.",
+                          spinner_text="Loading opposing starter…")
+            with _card():
+                _section_label("CAREER H2H")
+                if prop:
+                    def _load_h2h():                                      # noqa: WPS430
+                        from src.player_profile_client import get_batter_vs_pitcher
+                        return get_batter_vs_pitcher(prop, name)
+                    _lazy(_load_h2h, _render_h2h,
+                          unavailable="No prior matchups.",
+                          spinner_text="Loading head-to-head…")
+                else:
+                    _note("No upcoming game.")
+
+        # Section D — Pitcher Arsenal (deferred to follow-up).
+        if not is_pitcher:
+            with _card():
+                _section_label("PITCHER ARSENAL")
+                _note(
+                    "The opposing pitcher's pitch-mix donut (usage % and "
+                    "velocity per pitch type) is coming in the next update.",
+                    dashed=True,
+                )
+
+        # Section E — Team Bullpen (deferred to follow-up).
+        with _card():
+            _section_label("TEAM BULLPEN")
+            _note(
+                "Bullpen ERA, R/9, and WHIP with league rank badges are "
+                "coming in the next update.",
+                dashed=True,
+            )
+
+
+def _render_matchup_grade(d: dict) -> None:
+    color = _clr(d.get("color", "dim"))
+    with ui.row().classes("items-center w-full").style("gap: 14px;"):
+        ui.label(d.get("grade", "—")).style(
+            f"font-size: 40px; font-weight: 900; color: {color}; "
+            f"line-height: 1; font-family: monospace; flex-shrink: 0; "
+            f"min-width: 64px; text-align: center;")
+        ui.label(d.get("summary", "")).style(
+            f"font-size: 13px; font-weight: 600; color: {t.TEXT_DIM}; "
+            f"line-height: 1.5; white-space: normal; flex: 1; min-width: 0;")
+
+
+def _render_weather(d: dict) -> None:
+    temp = d.get("temperature")
+    temp_txt = f"{int(temp)}°F" if isinstance(temp, (int, float)) else "—"
+    wind = d.get("wind_speed")
+    wind_txt = (f"{int(wind)} mph {d.get('wind_dir', '')}".strip()
+                if isinstance(wind, (int, float)) else "—")
+    with ui.column().classes("w-full").style("gap: 8px; min-width: 0;"):
+        ui.label(d.get("conditions", "—")).style(
+            f"font-size: 15px; font-weight: 800; color: {t.TEXT};")
+        with ui.row().classes("items-stretch w-full").style(
+            "gap: 8px; flex-wrap: nowrap;"
+        ):
+            _stat_box("TEMP", temp_txt)
+            _stat_box("WIND", wind_txt)
+
+
+def _render_park(d: dict) -> None:
+    with ui.column().classes("w-full").style("gap: 8px; min-width: 0;"):
+        ui.label(d.get("park_name", "—")).style(
+            f"font-size: 14px; font-weight: 800; color: {t.TEXT}; "
+            f"white-space: normal; line-height: 1.3;")
+
+        def _factor_color(f):
+            if not isinstance(f, (int, float)):
+                return t.TEXT
+            return t.POS if f > 1.02 else (t.NEG if f < 0.98 else t.TEXT_DIM)
+
+        run_f = d.get("run_factor")
+        hr_f  = d.get("hr_factor")
+        with ui.row().classes("items-stretch w-full").style(
+            "gap: 8px; flex-wrap: nowrap;"
+        ):
+            _stat_box("RUN FACTOR",
+                      f"{run_f:.2f}" if isinstance(run_f, (int, float)) else "—",
+                      color=_factor_color(run_f))
+            _stat_box("HR FACTOR",
+                      f"{hr_f:.2f}" if isinstance(hr_f, (int, float)) else "—",
+                      color=_factor_color(hr_f))
+
+
+def _render_starter(d: dict) -> None:
+    from src import player_matchup as _pm
+    hand = (d.get("hand") or "").upper()
+    hand_txt = f" ({hand})" if hand in ("L", "R") else ""
+    record = f"{d.get('wins', 0)}-{d.get('losses', 0)}"
+    with ui.column().classes("w-full").style("gap: 10px; min-width: 0;"):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label(f"{d.get('name', '—')}{hand_txt}").style(
+                f"font-size: 15px; font-weight: 800; color: {t.TEXT}; "
+                f"white-space: normal;")
+            ui.label(f"  {record}").style(
+                f"font-size: 12px; font-weight: 700; color: {t.TEXT_DIM}; "
+                f"font-family: monospace;")
+        # Rate-stat rows with percentile badges.
+        for label, key, fmt in (
+            ("ERA",  "era",  "{:.2f}"),
+            ("WHIP", "whip", "{:.2f}"),
+            ("K/9",  "k9",   "{:.1f}"),
+            ("BB/9", "bb9",  "{:.1f}"),
+        ):
+            val = d.get(key)
+            try:
+                vtxt = fmt.format(float(val)) if val is not None else "—"
+            except (TypeError, ValueError):
+                vtxt = "—"
+            pct = _pm.pitcher_stat_percentile(key, val)
+            with ui.row().classes("items-center w-full").style(
+                f"gap: 8px; padding: 6px 0; border-bottom: 1px solid {t.BORDER_SOFT};"
+            ):
+                ui.label(label).style(
+                    f"font-size: 11px; font-weight: 800; letter-spacing: .4px; "
+                    f"color: {t.TEXT_DIM2}; min-width: 48px;")
+                ui.label(vtxt).style(
+                    f"font-size: 14px; font-weight: 800; font-family: monospace; "
+                    f"color: {t.TEXT}; flex: 1;")
+                ui.html(_pct_badge(pct))
+
+
+def _render_h2h(d: dict) -> None:
+    if not d.get("available") or int(d.get("ab", 0)) < 5:
+        _note("No prior matchups (fewer than 5 PA).")
+        return
+    ab = int(d.get("ab", 0))
+    h  = int(d.get("h", 0))
+    hr = int(d.get("hr", 0))
+    so = int(d.get("so", 0))
+    k_pct = f"{(so / ab * 100):.0f}%" if ab else "—"
+    with ui.row().classes("items-stretch w-full").style(
+        "gap: 8px; flex-wrap: nowrap;"
+    ):
+        _stat_box("PA", str(ab))
+        _stat_box("AVG", d.get("avg", "—"))
+        _stat_box("HR", str(hr))
+        _stat_box("K%", k_pct)
 
 
 # ── Per-market view (everything below the tabs) ─────────────────────────────
@@ -1929,49 +2364,6 @@ def _per_prop_chart_options(
 
 
 # ── Game log table (preserved) ──────────────────────────────────────────────
-
-def _section_game_log(
-    games: list[dict],
-    is_pitcher: bool,
-    today_props: list[dict],
-) -> None:
-    """Collapsible game log at the very bottom of the page.
-
-    Hidden by default behind a pill toggle ("Game Log ▼"); tapping
-    expands the full table ("Game Log ▲") and tapping again collapses
-    it.  Highlights the column matching the strongest prop's stat."""
-    if not games:
-        return
-    if today_props:
-        top_market = today_props[0].get("market", "")
-        highlighted = _MARKET_TO_STAT.get(top_market) or ("K" if is_pitcher else "H")
-    else:
-        highlighted = "K" if is_pitcher else "H"
-
-    state = {"open": False}
-
-    @ui.refreshable
-    def render() -> None:                                                 # noqa: WPS430
-        arrow = "▲" if state["open"] else "▼"
-        ui.button(
-            f"Game Log  {arrow}", on_click=_toggle,
-        ).props("no-caps unelevated dense").style(
-            f"background: {t.CARD}; color: {t.TEXT}; "
-            f"border: 1px solid {t.BORDER}; "
-            f"font-size: 11px; font-weight: 800; letter-spacing: .6px; "
-            f"padding: 8px 14px; border-radius: {t.RADIUS_PILL}; "
-            f"align-self: flex-start; min-height: 0;"
-        )
-        if state["open"]:
-            _game_log_table(games, is_pitcher, highlighted)
-
-    def _toggle() -> None:
-        state["open"] = not state["open"]
-        render.refresh()
-
-    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
-        render()
-
 
 def _game_log_table(
     games: list[dict],
