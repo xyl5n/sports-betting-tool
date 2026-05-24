@@ -54,6 +54,7 @@ def render(active: str = t.TAB_HOME) -> None:
         f"padding: 0 8px max(12px, env(safe-area-inset-bottom)) 8px;"
     ):
         with ui.element("div").style(
+            f"width: 100%; box-sizing: border-box; "
             f"height: {t.BOTTOM_NAV_HEIGHT}; "
             f"background: {t.CARD}; "
             f"border: 1px solid {t.BORDER}; "
