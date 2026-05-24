@@ -81,27 +81,37 @@ CREATE TABLE IF NOT EXISTS records (
 );
 
 -- ──────────────────────────────────────────────────────────────
--- model_picks — the model's daily picks (snapshot per analysis run).
--- Populated in PR #18.  Schema defined here so all five tables
--- exist after a single CREATE-TABLE pass.
+-- model_picks — per-model performance tracking.  One row per
+-- (model, game/prop, day) for every individual model (XGB/LR/NN per
+-- bet type), the ensemble, and the user-facing consensus; results are
+-- settled in the 15-minute cycle.  Dedup is on the UNIQUE
+-- (date, game_id, model_name, pick_type) key (game_id holds the
+-- player|market|line key for props so props are distinguished too).
+--
+-- NOTE: this replaces the earlier (unused) model_picks snapshot schema.
+-- For an existing project that still has the old table, the app runs the
+-- ADD COLUMN / DROP NOT NULL repair migration on startup (see
+-- src/db.py:ensure_model_picks_schema), or run this block by hand.
 -- ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS model_picks (
-  id              TEXT        PRIMARY KEY,       -- f"{game_id}:{bet_type}"
-  date            TEXT        NOT NULL,
-  sport           TEXT        NOT NULL,
-  bet_type        TEXT        NOT NULL,          -- 'ml' | 'run_line' | 'spread' | 'totals'
-  game_id         TEXT        NOT NULL,
-  teams           TEXT        NOT NULL,
-  pick            TEXT        NOT NULL,
+  pick_id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  date            DATE,
+  sport           TEXT,
+  game_id         TEXT,
+  prop_id         TEXT,
+  model_name      TEXT,
+  pick_type       TEXT,                           -- ML | RL | Spread | Total | <prop_market>
+  pick_side       TEXT,                           -- home/away/over/under/Over/Under
   odds            INTEGER,
-  pick_prob       DOUBLE PRECISION,
-  edge            DOUBLE PRECISION,
-  confidence_tier TEXT,
-  value_pick      BOOLEAN     DEFAULT FALSE,
-  meta            JSONB,
-  analyzed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  confidence      DOUBLE PRECISION,
+  projected_value DOUBLE PRECISION,
+  line            DOUBLE PRECISION,
+  result          TEXT         DEFAULT 'pending', -- pending | correct | incorrect | void
+  settled_at      TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ  DEFAULT NOW(),
+  CONSTRAINT model_picks_dedup_key UNIQUE (date, game_id, model_name, pick_type)
 );
-CREATE INDEX IF NOT EXISTS model_picks_date_sport_idx ON model_picks (date DESC, sport);
+CREATE INDEX IF NOT EXISTS model_picks_date_model_idx ON model_picks (date DESC, model_name);
 
 -- ──────────────────────────────────────────────────────────────
 -- model_history — per-classifier (XGB / LR / NN) individual picks

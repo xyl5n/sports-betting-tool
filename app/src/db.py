@@ -109,7 +109,101 @@ def _init() -> None:
         )
 
 
+# ── model_picks schema migration ──────────────────────────────────────────────
+# Idempotent DDL that creates the model-performance table with the correct
+# schema and repairs an older/partial table (the legacy "model_picks" from the
+# original schema had id/bet_type/teams/pick/... and is missing confidence /
+# result / model_name etc.).  ADD COLUMN IF NOT EXISTS backfills the new
+# columns; the DO blocks drop NOT NULL on the legacy columns so inserts that
+# don't supply them succeed; the UNIQUE constraint powers insert de-dup.
+_MODEL_PICKS_DDL = """
+CREATE TABLE IF NOT EXISTS public.model_picks (
+  pick_id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  date            date,
+  sport           text,
+  game_id         text,
+  prop_id         text,
+  model_name      text,
+  pick_type       text,
+  pick_side       text,
+  odds            integer,
+  confidence      double precision,
+  projected_value double precision,
+  line            double precision,
+  result          text DEFAULT 'pending',
+  settled_at      timestamptz,
+  created_at      timestamptz DEFAULT now()
+);
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS prop_id text;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS model_name text;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS pick_type text;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS pick_side text;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS odds integer;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS confidence double precision;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS projected_value double precision;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS line double precision;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS result text DEFAULT 'pending';
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS settled_at timestamptz;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS sport text;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS game_id text;
+ALTER TABLE public.model_picks ADD COLUMN IF NOT EXISTS date date;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name='model_picks' AND column_name='bet_type') THEN
+    ALTER TABLE public.model_picks ALTER COLUMN bet_type DROP NOT NULL;
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name='model_picks' AND column_name='teams') THEN
+    ALTER TABLE public.model_picks ALTER COLUMN teams DROP NOT NULL;
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name='model_picks' AND column_name='pick') THEN
+    ALTER TABLE public.model_picks ALTER COLUMN pick DROP NOT NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='model_picks_dedup_key') THEN
+    ALTER TABLE public.model_picks
+      ADD CONSTRAINT model_picks_dedup_key
+      UNIQUE (date, game_id, model_name, pick_type);
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS model_picks_date_model_idx
+  ON public.model_picks (date DESC, model_name);
+"""
+
+
+def ensure_model_picks_schema() -> None:
+    """Best-effort: make the Supabase model_picks table match the performance
+    schema on startup.  Probes the table; if the new columns are missing it
+    runs _MODEL_PICKS_DDL via a SQL-exec RPC if the project exposes one
+    (exec_sql / exec / execute_sql).  When no RPC is available -- the common
+    case, since PostgREST can't run DDL -- it logs the migration to run by
+    hand in the Supabase SQL editor (also shipped as db/schema.sql)."""
+    if _mode != "supabase" or _client is None:
+        return
+    try:
+        _client.table("model_picks").select(
+            "result,confidence,model_name,prop_id").limit(1).execute()
+        return  # already on the correct schema
+    except Exception:                                                     # noqa: BLE001
+        pass  # table missing or wrong schema -> attempt migration
+    for fn, arg in (("exec_sql", "sql"), ("exec_sql", "query"),
+                    ("exec", "sql"), ("execute_sql", "sql"), ("query", "query")):
+        try:
+            _client.rpc(fn, {arg: _MODEL_PICKS_DDL}).execute()
+            _logger.info("model_picks schema migration applied via rpc(%s).", fn)
+            return
+        except Exception:                                                 # noqa: BLE001
+            continue
+    _logger.warning(
+        "model_picks table needs migration but no SQL-exec RPC is available. "
+        "Run db/schema.sql (model_picks block) in the Supabase SQL editor:\n%s",
+        _MODEL_PICKS_DDL,
+    )
+
+
 _init()
+ensure_model_picks_schema()
 
 
 def is_supabase() -> bool:
@@ -413,13 +507,16 @@ def cache_set(key: str, sport: Optional[str], date: str, data: dict) -> bool:
 # same pick logged twice in a day is a no-op insert.
 
 def model_picks_insert(rows: list[dict]) -> int:
-    """Insert NEW model-pick rows only -- existing pick_ids are ignored so a
-    settled result is never overwritten.  Returns the number of rows sent."""
+    """Insert NEW model-pick rows only.  De-duplication is on the UNIQUE
+    (date, game_id, model_name, pick_type) constraint with ignore_duplicates,
+    so re-logging the same pick is a no-op and a settled result is never
+    overwritten.  Returns the number of rows sent."""
     if _mode != "supabase" or _client is None or not rows:
         return 0
     try:
         (_client.table("model_picks")
-         .upsert(rows, on_conflict="pick_id", ignore_duplicates=True)
+         .upsert(rows, on_conflict="date,game_id,model_name,pick_type",
+                 ignore_duplicates=True)
          .execute())
         return len(rows)
     except Exception as exc:                                              # noqa: BLE001

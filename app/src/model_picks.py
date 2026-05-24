@@ -17,6 +17,7 @@ never overwritten.
 from __future__ import annotations
 
 import sys
+import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -45,17 +46,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _pid(date: str, sport: str, ref: str, model: str, pick_type: str) -> str:
-    return f"{date}|{sport}|{ref}|{model}|{pick_type}"
-
-
 def _row(date, sport, ref, model, pick_type, side, *, odds=None,
-         confidence=None, projected=None, line=None) -> dict:
+         confidence=None, projected=None, line=None, prop_id=None) -> dict:
+    # pick_id is a random uuid (table PK); de-duplication is enforced by the
+    # UNIQUE (date, game_id, model_name, pick_type) constraint via upsert, so
+    # logging the same pick twice a day is a no-op.  *ref* fills game_id (a
+    # real game id for games, or the player|market|line key for props, so the
+    # constraint distinguishes props too); prop_id additionally carries it.
     return {
-        "pick_id":         _pid(date, sport, ref, model, pick_type),
+        "pick_id":         str(uuid.uuid4()),
         "date":            date,
         "sport":           sport,
         "game_id":         ref,
+        "prop_id":         prop_id,
         "model_name":      model,
         "pick_type":       pick_type,
         "pick_side":       side,
@@ -162,15 +165,16 @@ def prop_rows(p: dict, date: str) -> list[dict]:
     pv = p.get("predicted_value")
     rows = [
         _row(date, sport, ref, f"props_{bucket}_classifier", market, side,
-             odds=p.get("best_odds"), confidence=conf, line=line),
+             odds=p.get("best_odds"), confidence=conf, line=line, prop_id=ref),
     ]
     stat = _MARKET_STAT.get(market, market)
     if isinstance(pv, (int, float)) and isinstance(line, (int, float)):
         reg_side = "Over" if pv > line else "Under"
         rows.append(_row(date, sport, ref, f"props_{bucket}_reg_{stat}", market,
-                         reg_side, projected=pv, line=line))
+                         reg_side, projected=pv, line=line, prop_id=ref))
     rows.append(_row(date, sport, ref, "consensus", market, side,
-                     odds=p.get("best_odds"), confidence=conf, projected=pv, line=line))
+                     odds=p.get("best_odds"), confidence=conf, projected=pv,
+                     line=line, prop_id=ref))
     return rows
 
 
