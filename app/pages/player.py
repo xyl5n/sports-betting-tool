@@ -1108,28 +1108,53 @@ def _section_ai_breakdown(
         if not bd:
             return  # API failed / no data -> show nothing (page still loads)
 
-        from src.player_ai_breakdown import approach_label
-        sections = [
-            ("matchup",     "MATCHUP"),
-            ("trends",      "TRENDS"),
-            ("approach",    approach_label(is_pitcher)),
-            ("game_script", "GAME SCRIPT"),
-        ]
+        from src.player_ai_breakdown import approach_label, verdict_label
         with holder:
-            for key, label in sections:
-                text = (bd.get(key) or "").strip()
-                if not text:
-                    continue
-                with ui.column().classes("w-full").style(
-                    f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-                    f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 6px;"
-                ):
-                    ui.label(label).style(
+            # ── AI Verdict box (full width, above the grid) ──────────────
+            label, color_tok = verdict_label(prop.get("confidence"), prop.get("edge"))
+            vcolor = {"pos": t.POS, "warn": t.WARN, "neg": t.NEG}.get(color_tok, t.TEXT_DIM)
+            verdict_text = (bd.get("verdict") or "").strip()
+            with ui.column().classes("w-full").style(
+                f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                f"border-left: 4px solid {vcolor}; border-radius: {t.RADIUS_MD}; "
+                f"padding: {t.SPACE_MD}; gap: 6px;"
+            ):
+                with ui.row().classes("items-center w-full").style("gap: 8px;"):
+                    ui.label("AI VERDICT").style(
                         f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
-                        f"color: {t.PRIMARY_HI};")
-                    ui.label(text).style(
-                        f"font-size: 12.5px; color: {t.TEXT_DIM}; line-height: 1.5; "
+                        f"color: {t.TEXT_DIM2};")
+                    ui.label(label.upper()).style(
+                        f"background: {vcolor}; color: {t.BG}; font-size: 10px; "
+                        f"font-weight: 800; letter-spacing: .5px; padding: 2px 9px; "
+                        f"border-radius: {t.RADIUS_PILL};")
+                if verdict_text:
+                    ui.label(verdict_text).style(
+                        f"font-size: 12.5px; color: {t.TEXT}; line-height: 1.5; "
                         f"white-space: normal;")
+
+            # ── 2x2 insight grid ────────────────────────────────────────
+            sections = [
+                ("matchup",     "MATCHUP"),
+                ("trends",      "TRENDS"),
+                ("approach",    approach_label(is_pitcher)),
+                ("game_script", "GAME SCRIPT"),
+            ]
+            with ui.element("div").classes("w-full").style(
+                "display: grid; grid-template-columns: 1fr 1fr; gap: 8px;"
+            ):
+                for key, lbl in sections:
+                    text = (bd.get(key) or "").strip()
+                    with ui.column().style(
+                        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 4px; "
+                        f"min-width: 0;"
+                    ):
+                        ui.label(lbl).style(
+                            f"font-size: 9.5px; font-weight: 800; letter-spacing: .6px; "
+                            f"color: {t.PRIMARY_HI};")
+                        ui.label(text or "—").style(
+                            f"font-size: 11.5px; color: {t.TEXT_DIM}; line-height: 1.45; "
+                            f"white-space: normal;")
 
     ui.timer(0.05, _load, once=True)
 
