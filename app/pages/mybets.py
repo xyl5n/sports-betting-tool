@@ -71,19 +71,33 @@ def _personal_bankroll(backend) -> None:
         _stat("P / L",   f"{pnl_sign}${abs(pnl):,.2f}", pnl_color)
         _stat("AT RISK", f"${at_risk:,.2f}",           t.WARN)
 
-    # Today's conservative bet budget (FIX 4).
+    # Today's bet budget — 20% of the current personal bankroll, with the
+    # amount already staked today and what's left (FIX 2/3).
     budget = _todays_budget(current)
-    ui.label(
-        f"Today's Budget: ${budget['total']:,.2f} total "
-        f"/ ${budget['max_per_bet']:,.2f} max per bet"
-    ).style(
-        f"font-size: 12px; font-weight: 700; color: {t.TEXT_DIM}; "
-        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_MD}; padding: 8px 12px; width: 100%;"
+    try:
+        today_et = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        spent_today = (mlb._daily_exposure(today_et, confirmed_only=True)
+                       + wnba._daily_exposure(today_et, confirmed_only=True))
+    except Exception:                                                      # noqa: BLE001
+        spent_today = 0.0
+    remaining = max(0.0, float(budget.get("total", 0.0)) - spent_today)
+    rem_color = t.POS if remaining > 0 else t.NEG
+    with ui.row().classes("items-center w-full").style(
+        f"gap: 8px; background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 8px 12px;"
     ).tooltip(
-        "Conservative daily cap: 20% of your bankroll across all bets, "
-        "5% on any single bet. Recalculated each night at 2 AM ET."
-    )
+        "Daily cap: 20% of your current bankroll across all bets, 5% max on "
+        "any single bet. Resets at 2 AM ET; updates when your bankroll changes."
+    ):
+        ui.label(
+            f"Today's Budget: ${budget['total']:,.0f} total "
+            f"/ ${budget['max_per_bet']:,.0f} max per bet"
+        ).style(
+            f"font-size: 12px; font-weight: 700; color: {t.TEXT_DIM}; flex: 1; "
+            f"min-width: 0;")
+        ui.label(f"${remaining:,.0f} left today").style(
+            f"font-size: 12px; font-weight: 800; color: {rem_color}; "
+            f"font-family: monospace; white-space: nowrap;")
 
 
 def _todays_budget(current_bankroll: float) -> dict:
@@ -892,20 +906,15 @@ def _matchup_str(b: dict) -> str:
 
 
 def _kelly_rec_label(prob, american_odds, bankroll: float) -> None:
-    """Small 'Rec ½K $X' line under a tracked bet (FIX 3).  Shows the
-    half-Kelly stake off the current bankroll, '$1 min' when a real edge
-    rounds to zero, or 'No edge — skip this bet' on a negative edge."""
+    """Small 'Rec ½K $X' line under a tracked bet.  Always shows a stake
+    sized off the personal bankroll (half-Kelly when there's an edge, else
+    1% flat) -- never $0.  A '(1% flat)' hint marks the no-edge fallback."""
     from src.kelly import tracked_bet_kelly
     dollars, flag = tracked_bet_kelly(prob, american_odds, bankroll)
     if flag == "invalid":
         return
-    if flag == "no_edge":
-        ui.label("No edge — skip this bet").style(
-            f"font-size: 10.5px; font-weight: 700; color: {t.TEXT_DIM2}; "
-            f"font-family: monospace;"
-        )
-        return
-    ui.label(f"Rec ½-Kelly: ${dollars:,.0f}").style(
+    suffix = " (1% flat)" if flag == "flat" else ""
+    ui.label(f"Rec ½-Kelly: ${dollars:,.0f}{suffix}").style(
         f"font-size: 10.5px; font-weight: 800; color: {t.PRIMARY_HI}; "
         f"font-family: monospace;"
     )
@@ -1114,9 +1123,7 @@ def _prop_bet_row(backend, b: dict, settled: bool, bankroll: float = 0.0) -> Non
                     _mini_stat("ACTUAL", actual_s, _actual_color)
                 from src.kelly import tracked_bet_kelly
                 _k_dollars, _k_flag = tracked_bet_kelly(conf, odds, bankroll)
-                if _k_flag == "no_edge":
-                    _mini_stat("REC ½K", "no edge — skip", t.TEXT_DIM2)
-                elif _k_flag is None:
+                if _k_flag != "invalid":
                     _mini_stat("REC ½K", f"${_k_dollars:,.0f}", t.PRIMARY_HI)
                 ui.element("div").style("flex: 1;")
                 _mini_stat("ODDS", odds_s)
@@ -1454,16 +1461,14 @@ def _render_add(backend, s: dict, refresh, dialog, bankroll: float) -> None:
             f"padding: 10px 12px; gap: 2px;"):
             ui.label("RECOMMENDED BET SIZE (½ KELLY)").style(
                 f"font-size: 9px; font-weight: 800; letter-spacing: .5px; color: {t.TEXT_DIM2};")
-            if rec_flag == "no_edge":
-                ui.label("No edge — skip this bet").style(
-                    f"font-size: 15px; font-weight: 800; color: {t.WARN};")
-            elif rec_flag is None:
-                ui.label(f"${rec_dollars:,.0f}").style(
-                    f"font-size: 22px; font-weight: 800; color: {t.PRIMARY_HI}; "
-                    f"font-family: monospace;")
-            else:
+            if rec_flag == "invalid":
                 ui.label("Enter confidence + odds to size").style(
                     f"font-size: 13px; color: {t.TEXT_DIM};")
+            else:
+                suffix = " (1% flat)" if rec_flag == "flat" else ""
+                ui.label(f"${rec_dollars:,.0f}{suffix}").style(
+                    f"font-size: 22px; font-weight: 800; color: {t.PRIMARY_HI}; "
+                    f"font-family: monospace;")
 
         async def _track() -> None:                                        # noqa: WPS430
             if s["submitting"]:

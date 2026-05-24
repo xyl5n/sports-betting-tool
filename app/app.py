@@ -7442,11 +7442,68 @@ def _american_to_prob(american: int) -> float:
     return abs(american) / (abs(american) + 100.0)
 
 
+# ── Daily budget helpers (FIX 2/3) ───────────────────────────────────────────
+
+def _personal_bankroll_now() -> float:
+    """Current personal bankroll -- the single source of truth for all bet
+    sizing + budget math.  Read from the MLB ledger (which restores from
+    Supabase on boot)."""
+    try:
+        _l = Ledger(path="data/ledger.json", starting_bankroll=1000.0)
+        return float(_l.data.get("personal_bankroll")
+                     or _l.data.get("personal_starting_bankroll") or 0.0)
+    except Exception:                                                      # noqa: BLE001
+        return 0.0
+
+
+def _persist_daily_budget(bankroll: float) -> dict:
+    """Recompute the daily budget off *bankroll* and persist it for today
+    (ET) so the My Bets banner + budget gate reflect a bankroll change
+    immediately.  Returns the budget dict."""
+    from src.ledger import compute_daily_budget
+    budget = compute_daily_budget(bankroll)
+    try:
+        from src import db as _db
+        if _db.is_supabase():
+            _db.cache_set("daily_budget", None, _today_et(), budget)
+    except Exception as _e:                                                # noqa: BLE001
+        _eprint(f"daily budget persist failed: {_e}")
+    return budget
+
+
+def _personal_spent_today() -> float:
+    """Sum of confirmed personal-side stakes on open bets placed today (ET)
+    across both sport ledgers -- the running daily total for budget gating."""
+    today = _today_et()
+    total = 0.0
+    for _p in ("data/ledger.json", "data/wnba_ledger.json"):
+        try:
+            _l = Ledger(path=_p, starting_bankroll=1000.0)
+            total += _l._daily_exposure(today, confirmed_only=True)
+        except Exception:                                                  # noqa: BLE001
+            pass
+    return total
+
+
+def _budget_status(new_amount: float) -> dict:
+    """Snapshot for gating a new *new_amount* stake against today's budget
+    (20% of the current personal bankroll).  ``over`` = adding it would
+    exceed the remaining daily budget."""
+    from src.ledger import compute_daily_budget
+    budget = compute_daily_budget(_personal_bankroll_now())["total"]
+    spent = _personal_spent_today()
+    remaining = max(0.0, budget - spent)
+    over = (spent + float(new_amount or 0.0)) > budget + 0.001
+    return {"budget": round(budget, 2), "spent": round(spent, 2),
+            "remaining": round(remaining, 2), "over": bool(over)}
+
+
 @app.route("/api/ledger/confirm/<game_id>", methods=["POST"])
 def confirm_bet(game_id: str):
     """Mark a model-tracked bet as user-confirmed, or add it fresh if missing."""
     data     = request.get_json() or {}
     bankroll = float(data.get("bankroll", _analysis_state["bankroll"] or 250))
+    force    = bool(data.get("force"))
     sport    = _analysis_state.get("sport") or "mlb"
     sport_cfg = SPORTS[sport]
     ledger   = Ledger(path="data/ledger.json", starting_bankroll=bankroll)
@@ -7458,6 +7515,9 @@ def confirm_bet(game_id: str):
                 return jsonify({"error": "Already confirmed"}), 409
             _, conf_amt = ledger.kelly_amounts(bet["model_prob"], bet["american_odds"])
             conf_amt = round(conf_amt, 2)
+            gate = _budget_status(conf_amt)
+            if gate["over"] and not force:
+                return jsonify({"over_budget": True, "amount": conf_amt, **gate})
             bet["confirmed"]        = True
             bet["confirmed_amount"] = conf_amt
             # Immediately deduct confirmed stake from personal bankroll
@@ -7494,6 +7554,9 @@ def confirm_bet(game_id: str):
     # Tier from the picked-outcome probability (model_p), not model agreement.
     ml_conf = confidence_tier_from_prob(model_p)
     model_amt, conf_amt = ledger.kelly_amounts(model_p, odds)
+    gate = _budget_status(conf_amt)
+    if gate["over"] and not force:
+        return jsonify({"over_budget": True, "amount": round(conf_amt, 2), **gate})
     ledger.add_bet(
         game=g, sport=sport, sport_key=sport_cfg.odds_key,
         side=side, team=team, odds=odds,
@@ -7518,6 +7581,7 @@ def confirm_bet_wnba(game_id: str):
     """
     data     = request.get_json() or {}
     bankroll = float(data.get("bankroll", _wnba_analysis_state["bankroll"] or 1000))
+    force    = bool(data.get("force"))
     sport_cfg = SPORTS["wnba"]
     ledger   = Ledger(path="data/wnba_ledger.json", starting_bankroll=bankroll)
 
@@ -7527,6 +7591,9 @@ def confirm_bet_wnba(game_id: str):
                 return jsonify({"error": "Already confirmed"}), 409
             _, conf_amt = ledger.kelly_amounts(bet["model_prob"], bet["american_odds"])
             conf_amt = round(conf_amt, 2)
+            gate = _budget_status(conf_amt)
+            if gate["over"] and not force:
+                return jsonify({"over_budget": True, "amount": conf_amt, **gate})
             bet["confirmed"]        = True
             bet["confirmed_amount"] = conf_amt
             if conf_amt > 0:
@@ -7556,6 +7623,9 @@ def confirm_bet_wnba(game_id: str):
 
     ml_conf = confidence_tier_from_prob(model_p)
     model_amt, conf_amt = ledger.kelly_amounts(model_p, odds)
+    gate = _budget_status(conf_amt)
+    if gate["over"] and not force:
+        return jsonify({"over_budget": True, "amount": round(conf_amt, 2), **gate})
     ledger.add_bet(
         game=g, sport="wnba", sport_key=sport_cfg.odds_key,
         side=side, team=team, odds=odds,
@@ -7635,6 +7705,7 @@ def track_prop():
     game_id   = data.get("game_id")
     bet_type  = data.get("bet_type", "run_line")   # "run_line" or "totals"
     bankroll  = float(data.get("bankroll", _analysis_state["bankroll"] or 250))
+    force     = bool(data.get("force"))
     sport     = _analysis_state.get("sport") or "mlb"
     sport_cfg = SPORTS[sport]
 
@@ -7691,6 +7762,10 @@ def track_prop():
     # Deduplication guard: prevent tracking the same game+bet_type twice
     if ledger.has_bet(game_id, label):
         return jsonify({"error": f"Bet already tracked for this game ({label})"}), 409
+
+    gate = _budget_status(conf_dollars)
+    if gate["over"] and not force:
+        return jsonify({"over_budget": True, "amount": conf_dollars, **gate})
 
     ledger.add_bet(
         game=g, sport=sport, sport_key=sport_cfg.odds_key,
@@ -7822,7 +7897,11 @@ def set_bankroll():
         ledger.save()
     _analysis_state["bankroll"]      = new_br
     _wnba_analysis_state["bankroll"] = new_br
-    return jsonify({"success": True, "bankroll": new_br})
+    # Editing the bankroll immediately recalculates the daily budget (20% of
+    # the new bankroll) + per-bet floor/ceiling so the My Bets banner and the
+    # budget gate reflect the change right away (FIX 3).
+    budget = _persist_daily_budget(new_br)
+    return jsonify({"success": True, "bankroll": new_br, "budget": budget})
 
 
 @app.route("/api/ledger/set_model_bankroll", methods=["POST"])
@@ -10406,6 +10485,16 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         f"model bankroll ${model_before:.2f} -> ${model_after:.2f} | "
         f"personal bankroll ${mlb_pers_before:.2f} -> ${mlb_pers_after:.2f}"
     )
+
+    # ── Recalculate the daily budget off the post-settlement bankroll ─────────
+    # A win adds profit / a loss removes the stake from the personal bankroll,
+    # so the budget (20% of bankroll), floor (1%) and ceiling (5%) must track
+    # the new total immediately (FIX 3).
+    if settled or voided:
+        try:
+            _persist_daily_budget(mlb_pers_after)
+        except Exception as _be:                                           # noqa: BLE001
+            _eprint(f"AUTO-SETTLE: budget recalc failed: {_be}")
 
     # ── Update state ──────────────────────────────────────────────────────────
     with _auto_settlement_lock:

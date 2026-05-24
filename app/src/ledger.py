@@ -98,16 +98,23 @@ DAILY_BUDGET_MAX_BET_PCT = 0.05
 
 
 def compute_daily_budget(personal_bankroll: float) -> dict:
-    """Return the conservative daily budget for *personal_bankroll*:
-    ``{"bankroll", "total", "max_per_bet"}`` (all rounded dollars)."""
+    """Return the daily budget + per-bet sizing bounds for
+    *personal_bankroll* (all rounded dollars):
+      ``total``       -- 20% of bankroll (the daily cap),
+      ``max_per_bet`` / ``ceiling`` -- 5% of bankroll,
+      ``floor``       -- 1% of bankroll (never below $1)."""
     try:
         bk = max(0.0, float(personal_bankroll or 0.0))
     except (TypeError, ValueError):
         bk = 0.0
+    from .kelly import bet_size_bounds
+    floor, ceiling = bet_size_bounds(bk)
     return {
         "bankroll":    round(bk, 2),
         "total":       round(bk * DAILY_BUDGET_TOTAL_PCT, 2),
         "max_per_bet": round(bk * DAILY_BUDGET_MAX_BET_PCT, 2),
+        "floor":       floor,
+        "ceiling":     ceiling,
     }
 
 # ── Permanent archive (never cleared by reset) ────────────────────────────────
