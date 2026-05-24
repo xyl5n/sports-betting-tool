@@ -230,6 +230,39 @@ def _section_chips(backend) -> None:
     best_m  = hs.best_classifier(backend)
     best_t  = hs.best_bet_type(backend)
 
+    # ── AUDIT DEBUG (W/L tracking audit) ─────────────────────────────────────
+    # Prints exactly what the home page has access to at render time vs. the
+    # Supabase-backed ledger + props tracker, so the divergence between the
+    # per-model tracker files (home page source) and the ledger is visible in
+    # the Railway logs.  Safe/no-op on any error.
+    try:
+        import sys as _sys
+        _led_rec = {}
+        try:
+            _led = backend.Ledger(path="data/ledger.json", starting_bankroll=1000.0)
+            _s = _led.get_summary()
+            _led_rec = {"model_record": _s.get("model_record"),
+                        "confirmed_record": _s.get("confirmed_record")}
+        except Exception:                                                   # noqa: BLE001
+            pass
+        _props_rec = {}
+        try:
+            from src import props_picks_tracker as _ppt
+            _ppt.reload()
+            _props_rec = _ppt.get_record()
+        except Exception:                                                   # noqa: BLE001
+            pass
+        _sys.stderr.write(
+            "WL-AUDIT [home render]: "
+            f"overall(trackers)={overall.get('wins')}-{overall.get('losses')} "
+            f"best_model={best_m} best_bet_type={best_t} | "
+            f"ledger_summary={_led_rec} | props_record={_props_rec}\n"
+        )
+        _sys.stderr.flush()
+    except Exception:                                                       # noqa: BLE001
+        pass
+    # ── END AUDIT DEBUG ──────────────────────────────────────────────────────
+
     # Single row with nowrap so chips stay side-by-side at every viewport.
     # min-width:0 on each child lets them shrink past content with ellipsis
     # instead of overflowing the page width.
