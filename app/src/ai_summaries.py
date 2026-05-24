@@ -418,6 +418,53 @@ def get_prop_summary(pick: dict) -> str | None:
 # now regenerate only when an entry is missing).  Used after a model re-run so
 # only picks that actually changed get a fresh Groq summary.
 
+def ensure_game_summary(sport: str, g: dict) -> str:
+    """Generate the game-pick summary for one game if it isn't already
+    cached.  Returns 'cached' / 'generated' / 'failed' / 'skipped'.  Does NOT
+    sleep -- the caller paces calls (150 ms).  Used by the on-demand admin
+    'Run AI Analysis' job for live progress + skip counts."""
+    if not _have_supabase():
+        return "skipped"
+    gid = _game_id(g)
+    if not gid or not g.get("pick_team"):
+        return "skipped"
+    sport = (sport or "mlb").lower()
+    key = f"{sport}:{gid}"
+    store = _load("game")
+    old = store.get(key)
+    if isinstance(old, dict) and old.get("summary"):
+        return "cached"
+    from .groq_client import generate_summary
+    text = generate_summary(_game_prompt(sport, g), max_tokens=160)
+    if not text:
+        return "failed"
+    store[key] = {"summary": text, "fp": _game_fp(g), "updated_at": _now_iso()}
+    _flush("game")
+    return "generated"
+
+
+def ensure_prop_summary(r: dict) -> str:
+    """Generate the prop summary for one pick if it isn't already cached.
+    Returns 'cached' / 'generated' / 'failed' / 'skipped'.  No internal sleep."""
+    if not _have_supabase():
+        return "skipped"
+    player, market = r.get("player"), r.get("market")
+    if not player or not market:
+        return "skipped"
+    key = _prop_key(r)
+    store = _load("prop")
+    old = store.get(key)
+    if isinstance(old, dict) and old.get("summary"):
+        return "cached"
+    from .groq_client import generate_summary
+    text = generate_summary(_prop_prompt(r), max_tokens=120)
+    if not text:
+        return "failed"
+    store[key] = {"summary": text, "fp": _prop_fp(r), "updated_at": _now_iso()}
+    _flush("prop")
+    return "generated"
+
+
 def invalidate_game(sport: str, game_id) -> bool:
     """Drop the cached game summary for {sport}:{game_id} so it regenerates
     next batch.  Returns True if an entry was removed."""

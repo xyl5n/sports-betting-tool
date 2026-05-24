@@ -10995,6 +10995,146 @@ def admin_props_refresh_now():
                         "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+# ── On-demand "Run AI Analysis" (admin) ───────────────────────────────────────
+# Generates the Groq game summaries, prop summaries, and player breakdowns
+# that aren't already cached -- the same logic the post-analysis queue runs,
+# but on demand with live progress.  Sequential, 150 ms between Groq calls.
+_ai_run_lock  = threading.Lock()
+_ai_run_state: dict = {
+    "running": False, "phase": "", "done": 0, "total": 0,
+    "games_generated": 0, "props_generated": 0, "breakdowns_generated": 0,
+    "skipped": 0, "failed": 0,
+    "started_at": None, "finished_at": None, "elapsed": None, "summary": None,
+}
+_AI_RUN_DELAY = 0.15   # 150 ms between Groq calls (free-tier friendly)
+
+
+def _run_ai_analysis_job() -> None:
+    """Background worker for the admin 'Run AI Analysis' button.  Generates
+    every missing Groq summary/breakdown sequentially, updating
+    _ai_run_state for the live progress poll.  Releases _ai_run_lock when
+    done."""
+    import time as _t
+    started = _t.monotonic()
+    try:
+        from src import ai_summaries
+        # Game picks (both sports) that carry a model pick.
+        game_results = []
+        for sport, state in (("mlb", _analysis_state), ("wnba", _wnba_analysis_state)):
+            for r in (state.get("results") or []):
+                if isinstance(r, dict) and r.get("pick_team") and (r.get("game_id") or r.get("id")):
+                    game_results.append((sport, r))
+        # Scored props, highest confidence first.
+        try:
+            from src.props_scored_cache import load_scored_props
+            props = list((load_scored_props() or {}).get("picks") or [])
+        except Exception:                                                 # noqa: BLE001
+            props = []
+        props.sort(key=lambda p: -float(p.get("confidence") or 0.0))
+        # One breakdown per player (their highest-confidence pick).
+        player_items: list = []
+        seen_players: set = set()
+        for p in props:
+            pl = p.get("player")
+            if pl and pl not in seen_players:
+                seen_players.add(pl)
+                player_items.append(p)
+
+        _ai_run_state.update({
+            "total": len(game_results) + len(props) + len(player_items),
+            "done": 0, "games_generated": 0, "props_generated": 0,
+            "breakdowns_generated": 0, "skipped": 0, "failed": 0,
+        })
+
+        def _bump(status: str, gen_key: str) -> None:
+            if status == "generated":
+                _ai_run_state[gen_key] += 1
+                _t.sleep(_AI_RUN_DELAY)        # pace only real Groq calls
+            elif status == "cached":
+                _ai_run_state["skipped"] += 1
+            else:
+                _ai_run_state["failed"] += 1
+            _ai_run_state["done"] += 1
+
+        # Phase 1 — game summaries
+        _ai_run_state["phase"] = "game summaries"
+        for sport, g in game_results:
+            _bump(ai_summaries.ensure_game_summary(sport, g), "games_generated")
+
+        # Phase 2 — prop summaries (desc confidence)
+        _ai_run_state["phase"] = "prop summaries"
+        for r in props:
+            _bump(ai_summaries.ensure_prop_summary(r), "props_generated")
+
+        # Phase 3 — player breakdowns
+        _ai_run_state["phase"] = "player breakdowns"
+        for p in player_items:
+            from src import player_ai_breakdown
+            _bump(player_ai_breakdown.generate_for_pick(p), "breakdowns_generated")
+
+        elapsed = round(_t.monotonic() - started, 1)
+        summary = {
+            "games_generated":      _ai_run_state["games_generated"],
+            "props_generated":      _ai_run_state["props_generated"],
+            "breakdowns_generated": _ai_run_state["breakdowns_generated"],
+            "skipped":              _ai_run_state["skipped"],
+            "failed":               _ai_run_state["failed"],
+            "elapsed":              elapsed,
+        }
+        _ai_run_state["summary"]     = summary
+        _ai_run_state["elapsed"]     = elapsed
+        _ai_run_state["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _eprint(
+            "AI-ANALYSIS COMPLETE in %ss | game summaries: %d generated | "
+            "prop summaries: %d generated | player breakdowns: %d generated | "
+            "%d already cached/skipped | %d failed" % (
+                elapsed, summary["games_generated"], summary["props_generated"],
+                summary["breakdowns_generated"], summary["skipped"], summary["failed"],
+            )
+        )
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"AI-ANALYSIS FAILED: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+    finally:
+        _ai_run_state["running"] = False
+        try:
+            _ai_run_lock.release()
+        except Exception:                                                 # noqa: BLE001
+            pass
+
+
+@app.route("/api/admin/ai_analysis/run", methods=["POST"])
+def admin_ai_analysis_run():
+    """Kick off the on-demand AI summary/breakdown generation on a daemon
+    thread.  Returns immediately; the admin page polls /status for progress.
+    Guarded so it can't be double-started."""
+    if not _ai_run_lock.acquire(blocking=False):
+        return jsonify({"success": True, "already_running": True})
+    _ai_run_state.update({
+        "running": True, "phase": "starting", "done": 0, "total": 0,
+        "games_generated": 0, "props_generated": 0, "breakdowns_generated": 0,
+        "skipped": 0, "failed": 0, "summary": None, "elapsed": None,
+        "finished_at": None,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    })
+    _eprint("[ADMIN-ROUTE] /api/admin/ai_analysis/run invoked — starting AI analysis")
+    try:
+        threading.Thread(target=_run_ai_analysis_job, daemon=True).start()
+    except Exception as exc:                                              # noqa: BLE001
+        _ai_run_state["running"] = False
+        try:
+            _ai_run_lock.release()
+        except Exception:                                                 # noqa: BLE001
+            pass
+        return jsonify({"success": False, "error": str(exc)}), 500
+    return jsonify({"success": True, "started": True})
+
+
+@app.route("/api/admin/ai_analysis/status", methods=["GET"])
+def admin_ai_analysis_status():
+    """Live progress for the on-demand AI analysis run."""
+    return jsonify({"success": True, **_ai_run_state})
+
+
 # ── Nightly retrain scheduler ─────────────────────────────────────────────────
 print("STARTUP: all routes registered — starting scheduler...", flush=True, file=sys.stderr)
 
