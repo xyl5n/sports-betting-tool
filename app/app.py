@@ -9799,6 +9799,12 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
         except Exception as _se:                                          # noqa: BLE001
             _eprint(f"AUTO-ANALYSIS [{label}]: summary launch failed: {_se}")
 
+    # Log every model's picks for this run (PART 1/2).
+    try:
+        _log_model_picks()
+    except Exception as _mpe:                                             # noqa: BLE001
+        _eprint(f"AUTO-ANALYSIS [{label}]: model-pick log failed: {_mpe}")
+
     if not overall_ok and not is_retry:
         _schedule_auto_retry(label)
 
@@ -10318,6 +10324,62 @@ def _grade_model_trackers(oc, sport_keys: list[str], scores_by_sport=None) -> di
     return graded
 
 
+def _log_model_picks() -> None:
+    """Log every individual model's current picks (+ ensemble + consensus)
+    to the model_picks table.  Deduped per model/game/day, so safe to call
+    on every analysis run and every 15-minute cycle (PART 1/2)."""
+    try:
+        from src import model_picks as _mp
+        _mp.log_games(_analysis_state.get("results") or [], "mlb")
+        _mp.log_games(_wnba_analysis_state.get("results") or [], "wnba")
+        from src.props_scored_cache import load_scored_props
+        _mp.log_props((load_scored_props() or {}).get("picks") or [])
+    except Exception as exc:                                               # noqa: BLE001
+        _eprint(f"MODEL-PICKS: log failed: {type(exc).__name__}: {exc}")
+
+
+def _model_pick_stat_lookup(player: str, market: str, date: str):
+    """Actual stat for a player's game on *date* (for settling prop picks)."""
+    try:
+        from src import model_picks as _mp
+        from src.player_profile_client import (
+            search_player_by_name, get_player_gamelog, gamelog_stat_value,
+            _CURRENT_SEASON,
+        )
+        pid = search_player_by_name(player)
+        if not pid:
+            return None
+        is_pitcher = (market or "").startswith("pitcher_")
+        games = get_player_gamelog(int(pid), _CURRENT_SEASON, is_pitcher=is_pitcher) or []
+        g = next((x for x in games if (x.get("date") or "")[:10] == date), None)
+        if not g:
+            return None
+        return gamelog_stat_value(g, _mp._MARKET_STAT.get(market, market))
+    except Exception:                                                      # noqa: BLE001
+        return None
+
+
+def _final_scores_from(scores_by_sport: dict) -> dict:
+    """Build {game_id: (home_score, away_score)} from completed Odds API
+    score rows, for model_picks game settlement."""
+    out: dict = {}
+    for rows in (scores_by_sport or {}).values():
+        for row in (rows or []):
+            if not row.get("completed"):
+                continue
+            gid = str(row.get("id") or "")
+            if not gid:
+                continue
+            sc = {s.get("name"): s.get("score") for s in (row.get("scores") or [])}
+            try:
+                hs = int(sc.get(row.get("home_team")))
+                as_ = int(sc.get(row.get("away_team")))
+            except (TypeError, ValueError):
+                continue
+            out[gid] = (hs, as_)
+    return out
+
+
 def _run_auto_settlement_job(force: bool = False) -> dict:
     """
     APScheduler callback: every 30 min.
@@ -10507,6 +10569,22 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         f"model bankroll ${model_before:.2f} -> ${model_after:.2f} | "
         f"personal bankroll ${mlb_pers_before:.2f} -> ${mlb_pers_after:.2f}"
     )
+
+    # ── Per-model pick logging + settlement (PART 1-3) ────────────────────────
+    # Log the current picks (deduped) then settle today's pending ones against
+    # the final scores fetched above + each player's actual stat line.
+    try:
+        from src import model_picks as _mp
+        _log_model_picks()
+        _summary = _mp.settle(
+            final_scores=_final_scores_from(scores_by_sport),
+            stat_lookup=_model_pick_stat_lookup,
+        )
+        if _summary:
+            _eprint("MODEL-PICKS settled: "
+                    + ", ".join(f"{m}={n}" for m, n in sorted(_summary.items())))
+    except Exception as _mpx:                                              # noqa: BLE001
+        _eprint(f"MODEL-PICKS: settle pass failed: {type(_mpx).__name__}: {_mpx}")
 
     # ── Recalculate the daily budget off the post-settlement bankroll ─────────
     # A win adds profit / a loss removes the stake from the personal bankroll,
