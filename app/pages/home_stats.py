@@ -55,21 +55,43 @@ def _all_history(backend) -> list[dict]:
 # ── Chip #1 -- overall win rate ────────────────────────────────────────────
 
 def overall_record(backend) -> dict:
-    """Return {'wins': N, 'losses': N, 'pct': float | None}.
+    """Return {'wins': N, 'losses': N, 'pct': float | None} for the model's
+    settled game bets.
 
-    Reads from the per-classifier tracker files via tracker_records()
-    so the chip matches the Model page's MODEL BANKROLL Record line +
-    CLASSIFIER ACCURACY card by construction.  Tracker files have an
-    entry per analyzed game per bet_type per classifier; this aggregate
-    counts the union across all three classifiers + all three bet
-    types.  See tracker_records() docstring for the counting rule.
+    FIX 4: reads from the LEDGER history (data/ledger.json +
+    data/wnba_ledger.json) -- the Supabase-backed, correctly-settled single
+    source of truth -- instead of the local-only per-classifier tracker
+    files.  The ledger is restored from Supabase on boot, so this survives
+    Railway redeploys and updates after every settlement run.
     """
-    overall = tracker_records()["overall"]
-    return {
-        "wins":   overall["wins"],
-        "losses": overall["losses"],
-        "pct":    overall["pct"],
-    }
+    wins = losses = 0
+    for h in _all_history(backend):
+        r = (h.get("result") or "").lower()
+        if r == "win":
+            wins += 1
+        elif r == "loss":
+            losses += 1
+    total = wins + losses
+    return {"wins": wins, "losses": losses,
+            "pct": (wins / total) if total else None}
+
+
+def props_record(backend) -> dict:
+    """Return {'wins': N, 'losses': N, 'pct': float | None} for settled
+    player-prop picks (props_picks_history.json, Supabase-backed).
+
+    FIX 5: surfaced as a SEPARATE row on the home page rather than mixed
+    into the game-bet record.  Best-effort -- zeros on any error.
+    """
+    try:
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        rec = _ppt.get_record()
+        return {"wins":   int(rec.get("wins") or 0),
+                "losses": int(rec.get("losses") or 0),
+                "pct":    rec.get("pct")}
+    except Exception:                                                      # noqa: BLE001
+        return {"wins": 0, "losses": 0, "pct": None}
 
 
 # ── Model Performance section (bottom of home page) ───────────────────────
@@ -93,14 +115,13 @@ def model_performance(backend) -> dict:
         loss             ->  -1      units
         push / void      ->   0      units (no W/L change either)
     """
-    overall = tracker_records()["overall"]
-    wins   = overall["wins"]
-    losses = overall["losses"]
-    pct    = overall["pct"]
-
-    # Units P/L stays ledger-derived -- tracker entries don't have
-    # american_odds or stake fields.
+    # FIX 4: W/L now comes from the ledger history too (single source of
+    # truth), so the record and the units below are computed from the same
+    # settled bets and can never disagree.
     history = _all_history(backend)
+    wins   = sum(1 for h in history if (h.get("result") or "").lower() == "win")
+    losses = sum(1 for h in history if (h.get("result") or "").lower() == "loss")
+    pct    = (wins / (wins + losses)) if (wins + losses) else None
     units = 0.0
     for h in history:
         result = (h.get("result") or "").lower()
@@ -239,27 +260,34 @@ def classifier_accuracy_from_trackers() -> dict:
 
 def best_classifier(backend) -> dict | None:
     """Return {'model': 'XGBoost'|..., 'correct': N, 'total': N, 'pct': float}
-    for the classifier with the highest correct-call rate across all
-    settled predictions, or None if fewer than 10 settled predictions
-    exist in any classifier's tracker.
+    for the classifier with the highest correct-call rate, or None if no
+    classifier has >= 10 settled predictions.
 
-    Reads from the per-classifier tracker files (not ledger history) so
-    EVERY analyzed game contributes -- not just the top-5 placed bets.
-    The Model page's CLASSIFIER ACCURACY card uses the same source so
-    the chip and that card always agree.
+    FIX 4: computed from the LEDGER history -- each settled bet stores the
+    per-model probabilities (xgb_prob / lr_prob / nn_prob) it was placed on.
+    A model is "correct" on a bet when (its prob >= 0.5) == (the bet won),
+    mirroring Ledger.get_model_weights().  Ledger-sourced so it's
+    Supabase-durable and updates after every settlement.
     """
-    tallies = classifier_accuracy_from_trackers()
     pretty = {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}
+    counts = {m: [0, 0] for m in ("xgb", "lr", "nn")}   # [correct, total]
+    for h in _all_history(backend):
+        r = (h.get("result") or "").lower()
+        if r not in ("win", "loss"):
+            continue
+        won = r == "win"
+        for m, key in (("xgb", "xgb_prob"), ("lr", "lr_prob"), ("nn", "nn_prob")):
+            p = h.get(key)
+            if p is None:
+                continue
+            counts[m][1] += 1
+            if (float(p) >= 0.5) == won:
+                counts[m][0] += 1
 
-    qualified = [
-        (m, *tallies[m]["overall"])
-        for m in tallies
-        if tallies[m]["overall"][1] >= 10
-    ]
+    qualified = [(m, c, tot) for m, (c, tot) in counts.items() if tot >= 10]
     if not qualified:
         return None
-    best = max(qualified, key=lambda r: (r[1] / r[2]) if r[2] else 0)
-    m, correct, total = best
+    m, correct, total = max(qualified, key=lambda r: (r[1] / r[2]) if r[2] else 0)
     return {
         "model":   pretty[m],
         "correct": correct,
@@ -270,32 +298,41 @@ def best_classifier(backend) -> dict | None:
 
 # ── Chip #3 -- best bet type ────────────────────────────────────────────────
 
+_BET_TYPE_CAT = {
+    "single":    "Moneyline",
+    "moneyline": "Moneyline",
+    "run_line":  "Run Line / Spread",
+    "runline":   "Run Line / Spread",
+    "spread":    "Run Line / Spread",
+    "totals":    "Totals",
+    "total":     "Totals",
+}
+
+
 def best_bet_type(backend) -> dict | None:
     """Return {'label': str, 'wins': N, 'losses': N, 'pct': float} for the
-    bet type with the highest W/(W+L) rate, or None if no bet type has
-    at least 5 settled picks across all three tracker files.
+    bet-type category with the highest W/(W+L) rate, or None if none has
+    >= 5 settled bets.
 
-    Source: tracker_records()["by_bet_type"] -- same aggregation rule
-    every other Model-page card uses, so the chip pct here lines up
-    with the Model tab's RECORDS BY BET TYPE row.
+    FIX 4: computed from the LEDGER history grouped by bet_type (the same
+    data the Supabase `records` table aggregates by (sport, bet_type)), so
+    the chip is durable + updates after every settlement.
     """
-    by_cat = tracker_records()["by_bet_type"]
+    by_cat: dict[str, list[int]] = {}   # label -> [wins, losses]
+    for h in _all_history(backend):
+        r = (h.get("result") or "").lower()
+        if r not in ("win", "loss"):
+            continue
+        label = _BET_TYPE_CAT.get((h.get("bet_type") or "single").lower(), "Moneyline")
+        slot = by_cat.setdefault(label, [0, 0])
+        slot[0 if r == "win" else 1] += 1
 
-    # Friendly label per bet_type category key.
-    _LABEL = {
-        "moneyline":       "Moneyline",
-        "run_line_spread": "Run Line / Spread",
-        "totals":          "Totals",
-    }
     qualified = [
-        (_LABEL.get(cat, cat.title()), counts["wins"], counts["losses"])
-        for cat, counts in by_cat.items()
-        if (counts["wins"] + counts["losses"]) >= 5
+        (label, w, l) for label, (w, l) in by_cat.items() if (w + l) >= 5
     ]
     if not qualified:
         return None
-    best = max(qualified, key=lambda r: (r[1] / (r[1] + r[2])) if (r[1] + r[2]) else 0)
-    label, w, l = best
+    label, w, l = max(qualified, key=lambda r: (r[1] / (r[1] + r[2])) if (r[1] + r[2]) else 0)
     total = w + l
     return {
         "label":  label,

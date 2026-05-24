@@ -59,7 +59,45 @@ _PICKS_PATH = Path(".cache/xgb_picks_history.json")
 
 # ── File I/O ─────────────────────────────────────────────────────────────────
 
+# Supabase durability (FIX 3): mirror writes + restore once on first read so
+# Railway redeploys don't revert graded picks to the git-committed snapshot.
+# Key contains "history" so the daily cache cleaner never purges it.
+_SUPA_KEY = "xgb_picks_history"
+_restored_from_supabase = False
+
+
+def _restore_once() -> None:
+    global _restored_from_supabase
+    if _restored_from_supabase:
+        return
+    _restored_from_supabase = True
+    try:
+        from . import db
+        if not db.is_supabase():
+            return
+        row = db.cache_get(_SUPA_KEY)
+        if not isinstance(row, dict):
+            return
+        data = row.get("data") if isinstance(row.get("data"), dict) else row
+        if isinstance(data, dict) and isinstance(data.get("picks"), list):
+            _save_history(data, _mirror=False)   # overwrite stale local copy
+    except Exception:
+        pass
+
+
+def _mirror_to_supabase(data: dict) -> None:
+    try:
+        from . import db
+        if not db.is_supabase():
+            return
+        today = datetime.now(timezone.utc).date().isoformat()
+        db.cache_set(_SUPA_KEY, None, today, data)
+    except Exception:
+        pass
+
+
 def _load_history() -> dict:
+    _restore_once()
     if not _PICKS_PATH.exists():
         return {"picks": []}
     try:
@@ -69,7 +107,7 @@ def _load_history() -> dict:
         return {"picks": []}
 
 
-def _save_history(data: dict) -> None:
+def _save_history(data: dict, *, _mirror: bool = True) -> None:
     """Atomic write: tmp -> os.replace, so a crash mid-write can't corrupt the file."""
     _PICKS_PATH.parent.mkdir(exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -86,6 +124,9 @@ def _save_history(data: dict) -> None:
         except Exception:
             pass
         # Swallow -- tracker must never break prediction flow.
+        return
+    if _mirror:
+        _mirror_to_supabase(data)
 
 
 # ── Confidence bucketing (uniform across all bet types) ──────────────────────

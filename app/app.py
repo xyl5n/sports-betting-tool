@@ -10101,6 +10101,74 @@ def _settle_freshly_recorded_picks() -> dict:
     }
 
 
+def _completed_games_from_scores(scores: list) -> list[dict]:
+    """Normalize Odds API score rows into {id, home_team, away_team,
+    home_score, away_score, total_runs, game_date} for the tracker grader.
+    Only completed games with both scores are returned."""
+    out: list[dict] = []
+    for s in (scores or []):
+        if not isinstance(s, dict) or not s.get("completed"):
+            continue
+        gid = str(s.get("id") or "")
+        ht, at = s.get("home_team"), s.get("away_team")
+        hs = as_ = None
+        for nm in (s.get("scores") or []):
+            if not isinstance(nm, dict):
+                continue
+            try:
+                sc = int(nm.get("score"))
+            except (TypeError, ValueError):
+                continue
+            if nm.get("name") == ht:
+                hs = sc
+            elif nm.get("name") == at:
+                as_ = sc
+        if hs is None or as_ is None:
+            continue
+        out.append({
+            "id":         gid,
+            "home_team":  ht,
+            "away_team":  at,
+            "home_score": hs,
+            "away_score": as_,
+            "total_runs": hs + as_,
+            "game_date":  (s.get("commence_time") or "")[:10],
+        })
+    return out
+
+
+def _grade_model_trackers(oc, sport_keys: list[str]) -> dict:
+    """Grade all pending XGB/LR/NN tracker picks against completed games.
+    Returns {'xgb': n, 'lr': n, 'nn': n} newly graded.  No new API call --
+    reuses the OddsClient's cached scores."""
+    graded = {"xgb": 0, "lr": 0, "nn": 0}
+    for sk in sport_keys:
+        try:
+            scores = oc.get_scores(sport_key=sk, days_from=3) or []
+        except Exception:                                                   # noqa: BLE001
+            continue
+        games = _completed_games_from_scores(scores)
+        if not games:
+            continue
+        try:
+            from src import xgb_picks_tracker as _xgb
+            graded["xgb"] += _xgb.settle_picks(games)
+        except Exception as _e:                                             # noqa: BLE001
+            _eprint(f"TRACKER-GRADE xgb error: {_e}")
+        try:
+            from src import lr_picks_tracker as _lr
+            for g in games:
+                graded["lr"] += _lr.settle_lr_pick(g["id"], g["home_score"], g["away_score"])
+        except Exception as _e:                                             # noqa: BLE001
+            _eprint(f"TRACKER-GRADE lr error: {_e}")
+        try:
+            from src import nn_picks as _nn
+            graded["nn"] += _nn.settle_completed_games(games)
+        except Exception as _e:                                             # noqa: BLE001
+            _eprint(f"TRACKER-GRADE nn error: {_e}")
+    return graded
+
+
 def _run_auto_settlement_job(force: bool = False) -> dict:
     """
     APScheduler callback: every 30 min.
@@ -10191,6 +10259,19 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     except Exception as _pe:
         _eprint(f"PROPS-SETTLE: error: {type(_pe).__name__}: {_pe}")
     props_settled = props_summary.get("settled", 0)
+
+    # ── FIX 2: bulk-grade the per-model trackers (XGB/LR/NN) ──────────────────
+    # The per-bet ledger hook only grades trackers for games we actually
+    # placed bets on.  Grade EVERY analyzed pick whose game just completed by
+    # pulling the same Odds API scores and matching by game_id (XGB/LR) and
+    # matchup+date (NN).  Runs on every settlement pass (auto + nightly force).
+    try:
+        graded = _grade_model_trackers(oc, ["baseball_mlb", "basketball_wnba"])
+        if any(graded.values()):
+            _eprint(f"TRACKER-GRADE: newly graded xgb={graded['xgb']} "
+                    f"lr={graded['lr']} nn={graded['nn']}")
+    except Exception as _ge:
+        _eprint(f"TRACKER-GRADE: error: {type(_ge).__name__}: {_ge}")
 
     # ── Terminal summary ──────────────────────────────────────────────────────
     wins   = sum(1 for s in settled if s.get("result") == "win")

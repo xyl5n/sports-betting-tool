@@ -45,28 +45,47 @@ except Exception as _e:  # pragma: no cover
     _logger.debug("lr tracker unavailable: %s", _e)
     _settle_lr = None  # type: ignore[assignment]
 
+# FIX 1: the NN tracker lives in src/nn_picks (not nn_picks_tracker, which
+# never existed) and is keyed by (game_date, matchup) rather than game_id, so
+# it's graded via settle_completed_games() using the bet's matchup + scores.
 try:
-    from .nn_picks_tracker import settle_nn_pick as _settle_nn  # type: ignore[import]
+    from .nn_picks import settle_completed_games as _settle_nn_games  # type: ignore[import]
 except Exception as _e:  # pragma: no cover
     _logger.debug("nn tracker unavailable: %s", _e)
-    _settle_nn = None  # type: ignore[assignment]
+    _settle_nn_games = None  # type: ignore[assignment]
 
 
-def _settle_model_trackers(game_id: str, home_score: int, away_score: int) -> None:
+def _settle_model_trackers(bet: dict, home_score: int, away_score: int) -> None:
     """
     Propagate a finished game's scores to each individual-model tracker so
     their history files stay in sync with the main ledger settlement.
 
+    XGB + LR are keyed by game_id; NN by (game_date, matchup), so NN is fed
+    the bet's matchup + scores via settle_completed_games().
+
     Silently catches per-tracker failures — the main settlement flow must
     never be interrupted by a tracker error.
     """
-    for tag, fn in (("xgb", _settle_xgb), ("lr", _settle_lr), ("nn", _settle_nn)):
+    game_id = str(bet.get("game_id") if isinstance(bet, dict) else bet)
+    for tag, fn in (("xgb", _settle_xgb), ("lr", _settle_lr)):
         if fn is None:
             continue
         try:
-            fn(str(game_id), int(home_score), int(away_score))
+            fn(game_id, int(home_score), int(away_score))
         except Exception as exc:
             _logger.warning("model tracker settle failed [%s] game=%s: %s", tag, game_id, exc)
+
+    if _settle_nn_games is not None and isinstance(bet, dict):
+        try:
+            _settle_nn_games([{
+                "game_date":  (bet.get("commence_time") or "")[:10],
+                "home_team":  bet.get("home_team"),
+                "away_team":  bet.get("away_team"),
+                "home_score": int(home_score),
+                "away_score": int(away_score),
+            }])
+        except Exception as exc:
+            _logger.warning("model tracker settle failed [nn] game=%s: %s", game_id, exc)
 
 DAILY_EXPOSURE_PCT = 0.50   # 50 % of starting bankroll per day (hard ceiling)
 
@@ -784,7 +803,7 @@ class Ledger:
             newly_settled.append(settled)
 
             # Propagate final scores to per-model history trackers
-            _settle_model_trackers(bet["game_id"], home_runs, away_runs)
+            _settle_model_trackers(bet, home_runs, away_runs)
 
         # Persist whenever open_bets shrank, not just when we newly
         # settled.  The defensive-skip branch above moves already-
