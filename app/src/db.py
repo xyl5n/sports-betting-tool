@@ -497,6 +497,26 @@ def cache_delete_keys_like(substrings: list[str]) -> tuple[int, list[str]]:
         return len(deleted_keys), deleted_keys
 
 
+def cache_list_all(limit: int = 2000) -> list[dict]:
+    """Return every app_cache row (key, sport, date, updated_at, data) for
+    the admin Data Explorer.  Empty list when Supabase is off or on error.
+    Callers that only need metadata should size + drop ``data`` themselves
+    so big base64 model blobs aren't shipped to the browser."""
+    if _mode != "supabase" or _client is None:
+        return []
+    try:
+        resp = (
+            _client.table("app_cache")
+            .select("key, sport, date, data, updated_at")
+            .limit(limit)
+            .execute()
+        )
+        return list(resp.data or [])
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("cache_list_all failed: %s", exc)
+        return []
+
+
 # ════════════════════════════════════════════════════════════════
 #  Serialization helpers
 # ════════════════════════════════════════════════════════════════

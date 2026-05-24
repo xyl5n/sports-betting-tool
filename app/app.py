@@ -6768,6 +6768,358 @@ def admin_model_reset():
                         "detail": _redact(traceback.format_exc())}), 500
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  Admin "Supabase Data Explorer" -- read/inspect/edit app_cache + ledger
+# ══════════════════════════════════════════════════════════════════════
+
+def _explorer_row_size(data) -> int:
+    """Byte size of an app_cache row's data payload (best-effort)."""
+    try:
+        return len(json.dumps(data, default=str).encode("utf-8"))
+    except Exception:                                                       # noqa: BLE001
+        return 0
+
+
+@app.route("/api/admin/explorer/cache_keys", methods=["POST"])
+def admin_explorer_cache_keys():
+    """List every app_cache key with sport/date/size/updated_at (no blobs)."""
+    try:
+        from src import db as _db
+        if not _db.is_supabase():
+            return jsonify({"success": True, "supabase": False, "keys": []})
+        rows = _db.cache_list_all()
+        out = [{
+            "key":        r.get("key"),
+            "sport":      r.get("sport"),
+            "date":       r.get("date"),
+            "updated_at": r.get("updated_at"),
+            "size":       _explorer_row_size(r.get("data")),
+        } for r in rows]
+        out.sort(key=lambda x: (x.get("key") or ""))
+        return jsonify({"success": True, "supabase": True, "keys": out})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/explorer/cache_value", methods=["POST"])
+def admin_explorer_cache_value():
+    """Raw stored value (the `data` payload) for one app_cache key."""
+    key = (request.get_json() or {}).get("key")
+    if not key:
+        return jsonify({"success": False, "error": "key required"}), 400
+    try:
+        from src import db as _db
+        row = _db.cache_get(key)
+        if row is None:
+            return jsonify({"success": False, "error": "key not found"}), 404
+        value = row.get("data") if isinstance(row, dict) else row
+        return jsonify({"success": True, "key": key,
+                        "sport": row.get("sport"), "date": row.get("date"),
+                        "updated_at": row.get("updated_at"),
+                        "value": _py(value)})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/explorer/cache_save", methods=["POST"])
+def admin_explorer_cache_save():
+    """Raw-editor save: overwrite one app_cache key's JSON value.  Preserves
+    the existing row's sport/date when present."""
+    body = request.get_json() or {}
+    key  = body.get("key")
+    raw  = body.get("value")
+    if not key:
+        return jsonify({"success": False, "error": "key required"}), 400
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": f"invalid JSON: {exc}"}), 400
+    if not isinstance(parsed, (dict, list)):
+        return jsonify({"success": False, "error": "value must be a JSON object or array"}), 400
+    try:
+        from src import db as _db
+        existing = _db.cache_get(key) or {}
+        sport = existing.get("sport")
+        date  = existing.get("date") or _today_et()
+        ok = _db.cache_set(key, sport, date, parsed)
+        return jsonify({"success": bool(ok), "key": key})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/explorer/cache_delete", methods=["POST"])
+def admin_explorer_cache_delete():
+    """Delete one app_cache key (models, props dates, any key)."""
+    key = (request.get_json() or {}).get("key")
+    if not key:
+        return jsonify({"success": False, "error": "key required"}), 400
+    try:
+        from src import db as _db
+        ok = _db.cache_delete(key)
+        return jsonify({"success": bool(ok), "key": key})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/explorer/models", methods=["POST"])
+def admin_explorer_models():
+    """List joblib/model artifacts stored in app_cache with key, size,
+    sha256 and last-updated.  Models are stored base64 in data['b64']
+    (date column == 'models')."""
+    try:
+        import base64 as _b64
+        import hashlib as _hl
+        from src import db as _db
+        if not _db.is_supabase():
+            return jsonify({"success": True, "supabase": False, "models": []})
+        out = []
+        for r in _db.cache_list_all():
+            key  = r.get("key") or ""
+            data = r.get("data") or {}
+            is_model = (r.get("date") == "models") or key.startswith("props_model") \
+                or (isinstance(data, dict) and "b64" in data)
+            if not is_model:
+                continue
+            size, sha = 0, None
+            try:
+                b64 = data.get("b64") if isinstance(data, dict) else None
+                if b64:
+                    blob = _b64.b64decode(b64)
+                    size = len(blob)
+                    sha  = _hl.sha256(blob).hexdigest()
+                else:
+                    size = _explorer_row_size(data)
+            except Exception:                                               # noqa: BLE001
+                size = _explorer_row_size(data)
+            out.append({"key": key, "size": size, "sha256": sha,
+                        "updated_at": r.get("updated_at")})
+        out.sort(key=lambda x: x.get("key") or "")
+        return jsonify({"success": True, "supabase": True, "models": out})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/explorer/props_cache", methods=["POST"])
+def admin_explorer_props_cache():
+    """Props cache summary: today's market/prop counts + last write, plus
+    every date-stamped props_* app_cache row (for stale-key deletion)."""
+    try:
+        from src import db as _db
+        today = {"date": None, "markets": 0, "total": 0, "generated_at": None}
+        try:
+            from src.props_scored_cache import load_scored_props
+            payload = load_scored_props() or {}
+            picks = payload.get("picks") or []
+            today = {
+                "date":         payload.get("date"),
+                "markets":      len({p.get("market") for p in picks if p.get("market")}),
+                "total":        len(picks),
+                "generated_at": payload.get("generated_at"),
+            }
+        except Exception:                                                   # noqa: BLE001
+            pass
+        rows = []
+        if _db.is_supabase():
+            for r in _db.cache_list_all():
+                key = (r.get("key") or "")
+                if "props" in key and "mlb" in key:
+                    rows.append({"key": key, "date": r.get("date"),
+                                 "updated_at": r.get("updated_at"),
+                                 "size": _explorer_row_size(r.get("data"))})
+            rows.sort(key=lambda x: x.get("key") or "")
+        return jsonify({"success": True, "supabase": _db.is_supabase(),
+                        "today": today, "rows": rows})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+def _explorer_bet_brief(b: dict) -> dict:
+    return {
+        "id":          b.get("id"),
+        "sport":       b.get("sport"),
+        "team":        b.get("bet_team") or b.get("parlay_name"),
+        "bet_type":    b.get("bet_type"),
+        "odds":        b.get("american_odds"),
+        "amount":      b.get("confirmed_amount"),
+        "result":      b.get("result"),
+        "model_pnl":   b.get("model_pnl"),
+        "confirmed_pnl": b.get("confirmed_pnl"),
+        "placed_at":   b.get("placed_at"),
+        "settled_at":  b.get("settled_at"),
+    }
+
+
+@app.route("/api/admin/explorer/picks", methods=["POST"])
+def admin_explorer_picks():
+    """Ledger + props snapshot: bankrolls, counts, P/L, and bet lists for
+    per-row mark/delete controls."""
+    try:
+        ledgers = {}
+        open_bets, settled_bets = [], []
+        for sport, path in (("mlb", "data/ledger.json"), ("wnba", "data/wnba_ledger.json")):
+            try:
+                led = Ledger(path=path, starting_bankroll=1000.0)
+                s = led.get_summary()
+                ledgers[sport] = {
+                    "model_bankroll":    s.get("model_bankroll"),
+                    "personal_bankroll": s.get("personal_bankroll"),
+                    "open_bets":         s.get("open_bets"),
+                    "settled_bets":      len(led.data.get("history") or []),
+                    "model_pnl":         s.get("model_pnl"),
+                    "confirmed_pnl":     s.get("confirmed_pnl"),
+                }
+                for b in (led.data.get("open_bets") or []):
+                    open_bets.append(_explorer_bet_brief({**b, "sport": b.get("sport") or sport}))
+                for b in (led.data.get("history") or [])[-100:]:
+                    settled_bets.append(_explorer_bet_brief({**b, "sport": b.get("sport") or sport}))
+            except Exception:                                               # noqa: BLE001
+                ledgers[sport] = {}
+        props = {"record": {}, "picks": []}
+        try:
+            from src import props_picks_tracker as _ppt
+            _ppt.reload()
+            props["record"] = _ppt.get_record()
+            for p in _ppt.get_all()[:200]:
+                props["picks"].append({
+                    "id":         p.get("id"),
+                    "player":     p.get("player"),
+                    "market":     p.get("market"),
+                    "line":       p.get("line"),
+                    "side":       p.get("side"),
+                    "odds":       p.get("odds"),
+                    "result":     p.get("result") or "pending",
+                    "model_pnl":  p.get("model_pnl"),
+                })
+        except Exception:                                                   # noqa: BLE001
+            pass
+        return jsonify({"success": True, "ledgers": ledgers,
+                        "open_bets": _py(open_bets),
+                        "settled_bets": _py(settled_bets),
+                        "props": _py(props)})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/explorer/mark_bet", methods=["POST"])
+def admin_explorer_mark_bet():
+    """Mark a game bet or prop pick won / loss(lost) / push(void) / pending."""
+    body   = request.get_json() or {}
+    kind   = (body.get("kind") or "game").lower()
+    bet_id = body.get("id")
+    result = (body.get("result") or "").lower()
+    if not bet_id:
+        return jsonify({"success": False, "error": "id required"}), 400
+    if result not in ("win", "won", "loss", "lost", "push", "void", "pending"):
+        return jsonify({"success": False, "error": "bad result"}), 400
+    try:
+        if kind == "prop":
+            from src import props_picks_tracker as _ppt
+            _ppt.reload()
+            updated = _ppt.set_result(bet_id, result)
+            return (jsonify({"success": True, "bet": _py(updated)}) if updated
+                    else (jsonify({"success": False, "error": "pick not found"}), 404))
+        sport = (body.get("sport") or "mlb").lower()
+        path  = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
+        led   = Ledger(path=path, starting_bankroll=1000.0)
+        g_result = {"won": "win", "lost": "loss", "void": "push"}.get(result, result)
+        updated = led.set_result(bet_id, g_result)
+        return (jsonify({"success": True, "bet": _py(updated)}) if updated
+                else (jsonify({"success": False, "error": "bet not found"}), 404))
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+def _explorer_last_settlement() -> str | None:
+    """Most recent settled_at across both ledgers + props (or admin override)."""
+    latest = None
+    try:
+        from src import db as _db
+        ov = _db.cache_get("admin_last_settlement") if _db.is_supabase() else None
+        if isinstance(ov, dict):
+            v = (ov.get("data") or {}).get("value") if isinstance(ov.get("data"), dict) else None
+            if v:
+                return v
+    except Exception:                                                       # noqa: BLE001
+        pass
+    cands: list[str] = []
+    for path in ("data/ledger.json", "data/wnba_ledger.json"):
+        try:
+            led = Ledger(path=path, starting_bankroll=1000.0)
+            cands += [b.get("settled_at") for b in (led.data.get("history") or []) if b.get("settled_at")]
+        except Exception:                                                   # noqa: BLE001
+            pass
+    try:
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        cands += [p.get("settled_at") for p in _ppt.get_all() if p.get("settled_at")]
+    except Exception:                                                       # noqa: BLE001
+        pass
+    cands = [c for c in cands if c]
+    return max(cands) if cands else latest
+
+
+@app.route("/api/admin/explorer/timestamps", methods=["POST"])
+def admin_explorer_timestamps():
+    """Last analyzed (mlb/wnba), last props refresh, last settlement."""
+    try:
+        ts = _read_analysis_timestamps() or {}
+        props_refresh = None
+        try:
+            from src.props_scored_cache import load_scored_props
+            props_refresh = (load_scored_props() or {}).get("generated_at")
+        except Exception:                                                   # noqa: BLE001
+            pass
+        return jsonify({"success": True,
+                        "mlb":  (ts.get("mlb")  or {}).get("analyzed_at"),
+                        "wnba": (ts.get("wnba") or {}).get("analyzed_at"),
+                        "props_refresh": props_refresh,
+                        "settlement":    _explorer_last_settlement()})
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/admin/explorer/set_timestamp", methods=["POST"])
+def admin_explorer_set_timestamp():
+    """Override a timestamp.  field ∈ {mlb, wnba, props_refresh, settlement}."""
+    body  = request.get_json() or {}
+    field = (body.get("field") or "").lower()
+    value = (body.get("value") or "").strip()
+    if not value:
+        return jsonify({"success": False, "error": "value required"}), 400
+    try:
+        # Normalise to an aware datetime / ISO string.
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        iso = dt.isoformat()
+    except Exception:                                                       # noqa: BLE001
+        return jsonify({"success": False, "error": "value must be ISO-8601"}), 400
+    try:
+        from src import db as _db
+        if field in ("mlb", "wnba"):
+            _write_analysis_timestamp(field, dt)
+            state = _analysis_state if field == "mlb" else _wnba_analysis_state
+            try:
+                state["last_analyzed_at"] = dt
+            except Exception:                                               # noqa: BLE001
+                pass
+            return jsonify({"success": True, "field": field, "value": iso})
+        if field == "props_refresh":
+            try:
+                from src.props_scored_cache import load_scored_props
+                payload = load_scored_props() or {}
+                payload["generated_at"] = iso
+                key = f"props_scored_mlb_{payload.get('date') or _today_et()}"
+                _db.cache_set(key, "mlb", payload.get("date") or _today_et(), payload)
+            except Exception as exc:                                        # noqa: BLE001
+                return jsonify({"success": False, "error": str(exc)}), 500
+            return jsonify({"success": True, "field": field, "value": iso})
+        if field == "settlement":
+            _db.cache_set("admin_last_settlement", None, _today_et(), {"value": iso})
+            return jsonify({"success": True, "field": field, "value": iso})
+        return jsonify({"success": False, "error": "unknown field"}), 400
+    except Exception as exc:                                                # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
 @app.route("/api/admin/model/repick", methods=["POST"])
 def admin_model_repick():
     """

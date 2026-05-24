@@ -869,6 +869,46 @@ class Ledger:
         _append_to_archive([settled])
         return settled
 
+    def set_result(self, bet_id: str, result: str) -> dict | None:
+        """Mark a bet won/loss/push/pending from anywhere (open OR history),
+        keeping both bankrolls consistent.  A settled bet is first reversed
+        back to its open (stake-deducted) state, then re-settled to the new
+        result -- or left open when *result* is 'pending'.  Returns the bet."""
+        result = (result or "").strip().lower()
+        # Locate the bet.
+        in_hist = next((b for b in self.data.get("history") or [] if b.get("id") == bet_id), None)
+        in_open = next((b for b in self.data.get("open_bets") or [] if b.get("id") == bet_id), None)
+        bet = in_hist or in_open
+        if bet is None:
+            return None
+
+        # Reverse a settled bet's credited P&L back to the open state.  The
+        # credit applied at settlement was (model_pnl + stake) on a win/push
+        # and 0 on a loss, so subtracting (pnl + stake) restores the
+        # placement-only (stake-deducted) balance for every outcome.
+        if in_hist is not None:
+            limit_hit = bet.get("limit_reached", False)
+            model_amt = float(bet.get("model_amount") or 0.0)
+            conf_amt  = float(bet.get("confirmed_amount") or 0.0)
+            if not limit_hit and model_amt > 0:
+                self.data["model_bankroll"] = round(
+                    self.data["model_bankroll"]
+                    - (float(bet.get("model_pnl") or 0.0) + model_amt), 2)
+            if bet.get("confirmed") and not limit_hit and conf_amt > 0:
+                self.data["personal_bankroll"] = round(
+                    self.data["personal_bankroll"]
+                    - (float(bet.get("confirmed_pnl") or 0.0) + conf_amt), 2)
+            for k in ("result", "model_pnl", "confirmed_pnl", "settled_at"):
+                bet.pop(k, None)
+            self.data["history"] = [b for b in self.data["history"] if b.get("id") != bet_id]
+            self.data["open_bets"].append(bet)
+
+        if result == "pending":
+            self.save()
+            return bet
+        # Re-settle the now-open bet to the requested result.
+        return self.settle_manual(bet_id, result if result in ("win", "loss", "push") else "loss")
+
     # ── summary ───────────────────────────────────────────────────────────────
 
     def get_summary(self) -> dict:
