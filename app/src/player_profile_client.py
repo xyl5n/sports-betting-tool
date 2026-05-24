@@ -1341,6 +1341,64 @@ def get_today_opposing_pitcher(prop: dict, player_name: str) -> Optional[dict]:
             "hand": pitcher.get("hand", "")}
 
 
+def get_opposing_lineup_basic(prop: dict, player_name: str) -> dict:
+    """Expected opposing batting order with each batter's season slash line.
+
+    For a *pitcher's* matchup view: returns the other team's lineup with
+    name, handedness, and season AVG/OBP/SLG (all three come from a single
+    season-stats call per batter).  Cached per game_pk for the ET day.
+
+    Shape::
+        {"available": bool, "note": str,
+         "batters": [{order, name, position, hand, avg, obp, slg}]}
+    """
+    empty = {"available": False, "note": "Lineup not posted yet.", "batters": []}
+    game = _find_todays_game(prop, player_name)
+    if not game or not game.get("game_pk"):
+        return dict(empty, note="Game not found on today's schedule.")
+
+    opp_side = game.get("opp_side") or ""
+    lineup = (game.get("lineups") or {}).get(opp_side) or []
+    if not lineup:
+        return dict(empty, note="Opposing lineup not posted yet.")
+
+    cache_key = f"lineup_basic_{game['game_pk']}_{opp_side}"
+    today = _today_str()
+    try:
+        row = _db.cache_get(cache_key)
+        if row and row.get("date") == today and (row.get("data") or {}).get("available"):
+            return row["data"]
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    def _fmt3(v) -> str:
+        try:
+            return f"{float(v):.3f}".lstrip("0") or ".000"
+        except (TypeError, ValueError):
+            return "—"
+
+    batters: list[dict] = []
+    for b in lineup[:9]:
+        bid = b.get("id")
+        ss = get_season_stats(bid, is_pitcher=False) if bid else {}
+        batters.append({
+            "order":    b.get("order"),
+            "name":     b.get("name") or "",
+            "position": b.get("position") or "",
+            "hand":     b.get("hand") or "",
+            "avg":      _fmt3(ss.get("avg")),
+            "obp":      _fmt3(ss.get("obp")),
+            "slg":      _fmt3(ss.get("slg")),
+        })
+
+    out = {"available": bool(batters), "note": "", "batters": batters}
+    try:
+        _db.cache_set(cache_key, "mlb", today, out)
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Opposing-team rank vs each prop market
 # ---------------------------------------------------------------------------

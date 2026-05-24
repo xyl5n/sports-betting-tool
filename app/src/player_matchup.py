@@ -391,6 +391,107 @@ def percentile_color(pct: Optional[float]) -> str:
     return "neg"
 
 
+def rank_color(rank: Optional[int]) -> str:
+    """League-rank badge colour: top 10 -> 'pos', 11-20 -> 'warn',
+    21-30 -> 'neg'.  None -> 'dim'."""
+    if not rank:
+        return "dim"
+    if rank <= 10:
+        return "pos"
+    if rank <= 20:
+        return "warn"
+    return "neg"
+
+
+def _ip_to_float(value) -> float:
+    """MLB innings-pitched string ('123.2') -> float innings (123.667)."""
+    try:
+        s = str(value)
+        whole, frac = s.split(".") if "." in s else (s, "0")
+        return float(whole) + float(frac) / 3.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_bullpen_stats(team_abbrev: str, season: Optional[int] = None) -> dict:
+    """Pitching-staff aggregate (ERA / R9 / WHIP) for *team_abbrev* with
+    league rank badges, from the MLB Stats API team-stats endpoint.
+
+    Note: the free team-stats endpoint reports the full pitching staff,
+    not a bullpen-only split, so these are season staff aggregates ranked
+    across all 30 teams (rank 1 = best).  Cached per team per day.
+
+    Shape: ``{"available", "team", "era", "r9", "whip",
+    "era_rank", "r9_rank", "whip_rank", "n_teams"}``.
+    """
+    season = int(season or _ppc._CURRENT_SEASON)
+    abbrev = (team_abbrev or "").upper()
+    out = {"available": False, "note": "Bullpen data unavailable.", "team": abbrev}
+    if not abbrev:
+        return out
+
+    cache_key = f"bullpen_{abbrev}_{season}"
+    today = _today_str()
+    try:
+        row = _db.cache_get(cache_key)
+        if row and row.get("date") == today and (row.get("data") or {}).get("available"):
+            return row["data"]
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    try:
+        teams = _ppc._fetch_team_stats("pitching", season)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"get_bullpen_stats fetch error: {exc}")
+        teams = []
+    if not teams:
+        return out
+
+    rows: list[dict] = []
+    for tm in teams:
+        st = tm.get("stat") or {}
+        ip = _ip_to_float(st.get("inningsPitched"))
+        if ip <= 0:
+            continue
+        try:
+            era = float(st.get("era") or 0.0)
+            whip = float(st.get("whip") or 0.0)
+            runs = float(st.get("runs") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        rows.append({"abbrev": tm.get("abbrev", ""), "era": era,
+                     "whip": whip, "r9": round(runs * 9.0 / ip, 2)})
+    if not rows:
+        return out
+
+    n = len(rows)
+
+    def _rank(metric: str, value: float) -> int:
+        # Lower is better for all three -> rank 1 = lowest value.
+        ordered = sorted(rows, key=lambda r: r[metric])
+        for i, r in enumerate(ordered):
+            if r["abbrev"] == abbrev:
+                return i + 1
+        return sum(1 for r in rows if r[metric] < value) + 1
+
+    me = next((r for r in rows if r["abbrev"] == abbrev), None)
+    if me is None:
+        return dict(out, note="Team not found in league stats.")
+
+    out = {
+        "available": True, "note": "", "team": abbrev, "n_teams": n,
+        "era": me["era"], "r9": me["r9"], "whip": me["whip"],
+        "era_rank":  _rank("era", me["era"]),
+        "r9_rank":   _rank("r9", me["r9"]),
+        "whip_rank": _rank("whip", me["whip"]),
+    }
+    try:
+        _db.cache_set(cache_key, "mlb", today, out)
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return out
+
+
 def _norm_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 

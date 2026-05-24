@@ -479,15 +479,20 @@ def _tab_overview(info: dict, is_pitcher: bool) -> None:
                       unavailable="Season averages unavailable.",
                       spinner_text="Loading season averages…")
 
-        # Section B — Statcast Percentiles (foundation placeholder).
+        # Section B — Statcast Percentiles (pybaseball, weekly cache).
         with _card():
             _section_label("STATCAST PERCENTILES")
-            _note(
-                "Statcast percentile bars — xwOBA, exit velocity, barrel%, "
-                "hard-hit%, chase%, whiff%, and more, computed from pybaseball "
-                "and colored by percentile — are coming in the next update.",
-                dashed=True,
-            )
+            pid = info["id"]
+
+            def _load_pct():                                              # noqa: WPS430
+                from src import statcast_client as _sc
+                fn = (_sc.get_pitcher_percentiles if is_pitcher
+                      else _sc.get_batter_percentiles)
+                return fn(pid)
+
+            _lazy(_load_pct, _render_statcast_percentiles,
+                  unavailable="Statcast data unavailable.",
+                  spinner_text="Loading Statcast data…")
 
 
 def _render_season_averages(stats: dict) -> None:
@@ -567,11 +572,15 @@ def _tab_matchup(
         if is_pitcher:
             with _card():
                 _section_label("OPPOSING LINEUP")
-                _note(
-                    "The opposing batting order with splits vs your handedness "
-                    "is coming in the next update.",
-                    dashed=True,
-                )
+                if prop:
+                    def _load_lineup():                                   # noqa: WPS430
+                        from src.player_profile_client import get_opposing_lineup_basic
+                        return get_opposing_lineup_basic(prop, name)
+                    _lazy(_load_lineup, _render_lineup,
+                          unavailable="Opposing lineup not posted yet.",
+                          spinner_text="Loading opposing lineup…")
+                else:
+                    _note("No upcoming game.")
         else:
             with _card():
                 _section_label("TONIGHT'S STARTER")
@@ -593,25 +602,58 @@ def _tab_matchup(
                           spinner_text="Loading head-to-head…")
                 else:
                     _note("No upcoming game.")
+            with _card():
+                _section_label("BATTER VS PITCH TYPE")
+                if prop:
+                    bid = info["id"]
 
-        # Section D — Pitcher Arsenal (deferred to follow-up).
+                    def _load_bvp():                                      # noqa: WPS430
+                        from src import statcast_client as _sc
+                        from src.player_profile_client import get_today_opposing_pitcher
+                        pit = get_today_opposing_pitcher(prop, name)
+                        if not pit or not pit.get("id"):
+                            return {"available": False,
+                                    "note": "No opposing starter announced yet."}
+                        return _sc.get_batter_vs_pitch_types(bid, pit["id"])
+                    _lazy(_load_bvp, _render_bvp_table,
+                          unavailable="Statcast data unavailable.",
+                          spinner_text="Loading pitch-type splits…")
+                else:
+                    _note("No upcoming game.")
+
+        # Section D — Pitcher Arsenal donut (batters; opposing starter).
         if not is_pitcher:
             with _card():
                 _section_label("PITCHER ARSENAL")
-                _note(
-                    "The opposing pitcher's pitch-mix donut (usage % and "
-                    "velocity per pitch type) is coming in the next update.",
-                    dashed=True,
-                )
+                if prop:
+                    def _load_arsenal():                                  # noqa: WPS430
+                        from src import statcast_client as _sc
+                        from src.player_profile_client import get_today_opposing_pitcher
+                        pit = get_today_opposing_pitcher(prop, name)
+                        if not pit or not pit.get("id"):
+                            return {"available": False,
+                                    "note": "No opposing starter announced yet."}
+                        return _sc.get_pitch_mix(pit["id"])
+                    _lazy(_load_arsenal, _render_arsenal,
+                          unavailable="Pitch data unavailable.",
+                          spinner_text="Loading pitch arsenal…")
+                else:
+                    _note("No upcoming game.")
 
-        # Section E — Team Bullpen (deferred to follow-up).
+        # Section E — Team Bullpen (pitching-staff aggregate + league ranks).
         with _card():
             _section_label("TEAM BULLPEN")
-            _note(
-                "Bullpen ERA, R/9, and WHIP with league rank badges are "
-                "coming in the next update.",
-                dashed=True,
-            )
+            # Pitching team = opponent for a batter; own team for a pitcher.
+            team_abbrev = (info.get("team_abbrev") if is_pitcher else opp_abbrev) or ""
+            if team_abbrev:
+                def _load_pen():                                          # noqa: WPS430
+                    from src import player_matchup as _pm
+                    return _pm.get_bullpen_stats(team_abbrev)
+                _lazy(_load_pen, _render_bullpen,
+                      unavailable="Bullpen data unavailable.",
+                      spinner_text="Loading bullpen stats…")
+            else:
+                _note("No pitching team resolved.")
 
 
 def _render_matchup_grade(d: dict) -> None:
@@ -720,6 +762,250 @@ def _render_h2h(d: dict) -> None:
         _stat_box("AVG", d.get("avg", "—"))
         _stat_box("HR", str(hr))
         _stat_box("K%", k_pct)
+
+
+# ── Statcast percentile bars (Tab 2) ────────────────────────────────────────
+
+def _percentile_bar(label: str, value: str, pct: Optional[float]) -> None:
+    """One metric row: name | gradient track w/ colored circle | raw value."""
+    from src import player_matchup as _pm
+    color = _clr(_pm.percentile_color(pct))
+    pos = pct if isinstance(pct, (int, float)) else 50
+    track = (
+        f'<div style="position:relative; height:8px; border-radius:999px; '
+        f'background:linear-gradient(90deg, rgba(244,63,94,.30), '
+        f'rgba(245,158,11,.30), rgba(16,185,129,.30)); width:100%;">'
+        f'<div style="position:absolute; top:50%; left:{pos}%; '
+        f'transform:translate(-50%,-50%); width:14px; height:14px; '
+        f'border-radius:50%; background:{color}; border:2px solid {t.BG}; '
+        f'box-shadow:0 0 6px {color};"></div></div>'
+    )
+    with ui.row().classes("items-center w-full").style(
+        "gap: 10px; padding: 5px 0; min-width: 0;"
+    ):
+        ui.label(label).style(
+            f"font-size: 11px; font-weight: 700; color: {t.TEXT_DIM}; "
+            f"min-width: 104px; white-space: nowrap;")
+        ui.html(track).style("flex: 1; min-width: 0;")
+        ui.label(value).style(
+            f"font-size: 12px; font-weight: 800; font-family: monospace; "
+            f"color: {t.TEXT}; min-width: 52px; text-align: right;")
+
+
+def _render_statcast_percentiles(data: dict) -> None:
+    splits = data.get("splits", {}) or {}
+    state = {"split": "all"}
+    options = (("all", "SZN"), ("rhp", "vs RHP"), ("lhp", "vs LHP"))
+
+    @ui.refreshable
+    def render_pills() -> None:                                           # noqa: WPS430
+        with ui.row().classes("items-center").style(
+            "gap: 6px; flex-wrap: wrap; padding-bottom: 8px;"
+        ):
+            for key, plabel in options:
+                active = state["split"] == key
+                bg = t.PRIMARY if active else "transparent"
+                fg = t.TEXT if active else t.TEXT_DIM
+                bd = t.PRIMARY if active else t.BORDER
+                ui.button(plabel, on_click=lambda k=key: _set(k)).props(
+                    "no-caps unelevated dense"
+                ).style(
+                    f"background: {bg}; color: {fg}; border: 1px solid {bd}; "
+                    f"font-size: 10.5px; font-weight: 800; letter-spacing: .4px; "
+                    f"padding: 4px 12px; border-radius: {t.RADIUS_PILL}; "
+                    f"min-height: 0;")
+
+    @ui.refreshable
+    def render_bars() -> None:                                            # noqa: WPS430
+        sp = splits.get(state["split"]) or {}
+        if not sp.get("available"):
+            _note(sp.get("note") or "Not enough data for this split.")
+            return
+        for r in sp.get("rows", []):
+            _percentile_bar(r["label"], r["value"], r["percentile"])
+
+    def _set(split: str) -> None:
+        state["split"] = split
+        render_pills.refresh()
+        render_bars.refresh()
+
+    render_pills()
+    render_bars()
+
+
+# ── Opposing lineup (Tab 3, pitcher view) ───────────────────────────────────
+
+def _render_lineup(d: dict) -> None:
+    batters = d.get("batters") or []
+    if not batters:
+        _note("Opposing lineup not posted yet.")
+        return
+    th = (f"font-size:9.5px; font-weight:800; letter-spacing:.4px; "
+          f"color:{t.TEXT_DIM2}; padding:5px 6px; text-align:right; "
+          f"border-bottom:1px solid {t.BORDER};")
+    th_l = th.replace("text-align:right", "text-align:left")
+    head = (f"<th style='{th_l}'>#</th><th style='{th_l}'>Batter</th>"
+            f"<th style='{th}'>AVG</th><th style='{th}'>OBP</th><th style='{th}'>SLG</th>")
+    body = ""
+    for b in batters:
+        td = (f"font-size:12px; font-family:monospace; padding:5px 6px; "
+              f"text-align:right; color:{t.TEXT}; "
+              f"border-bottom:1px solid {t.BORDER_SOFT};")
+        td_l = td.replace("text-align:right", "text-align:left")
+        hand = f" ({b.get('hand')})" if b.get("hand") in ("L", "R") else ""
+        name = f"{b.get('name', '')}{hand}"
+        body += (
+            f"<tr><td style='{td_l} color:{t.TEXT_DIM2};'>{b.get('order', '')}</td>"
+            f"<td style='{td_l}'>{name}</td>"
+            f"<td style='{td}'>{b.get('avg', '—')}</td>"
+            f"<td style='{td}'>{b.get('obp', '—')}</td>"
+            f"<td style='{td}'>{b.get('slg', '—')}</td></tr>"
+        )
+    ui.html(
+        f"<div style='overflow-x:auto; width:100%;'>"
+        f"<table style='width:100%; border-collapse:collapse;'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
+# ── Batter vs pitch type (Tab 3, batter view) ───────────────────────────────
+
+def _render_bvp_table(d: dict) -> None:
+    rows = d.get("rows") or []
+    if not rows:
+        _note("No pitch-type data available.")
+        return
+    th = (f"font-size:9.5px; font-weight:800; letter-spacing:.4px; "
+          f"color:{t.TEXT_DIM2}; padding:5px 6px; text-align:right; "
+          f"border-bottom:1px solid {t.BORDER};")
+    th_l = th.replace("text-align:right", "text-align:left")
+    head = (f"<th style='{th_l}'>Pitch</th><th style='{th}'>Faced</th>"
+            f"<th style='{th}'>AVG</th><th style='{th}'>SLG</th>"
+            f"<th style='{th}'>HR</th><th style='{th}'>K%</th>")
+    body = ""
+    for r in rows:
+        td = (f"font-size:12px; font-family:monospace; padding:5px 6px; "
+              f"text-align:right; color:{t.TEXT}; "
+              f"border-bottom:1px solid {t.BORDER_SOFT};")
+        td_l = td.replace("text-align:right", "text-align:left")
+        body += (
+            f"<tr><td style='{td_l}'>{r.get('pitch', '')}</td>"
+            f"<td style='{td}'>{r.get('faced', 0)}</td>"
+            f"<td style='{td}'>{r.get('avg', '—')}</td>"
+            f"<td style='{td}'>{r.get('slg', '—')}</td>"
+            f"<td style='{td}'>{r.get('hr', 0)}</td>"
+            f"<td style='{td}'>{r.get('k_pct', '—')}</td></tr>"
+        )
+    ui.html(
+        f"<div style='overflow-x:auto; width:100%;'>"
+        f"<table style='width:100%; border-collapse:collapse;'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
+# ── Pitcher arsenal donut (Tab 3, batter view) ──────────────────────────────
+
+_ARSENAL_PALETTE = [
+    t.PRIMARY, t.PRIMARY_HI, t.POS, t.WARN, t.NEG,
+    "#3b82f6", "#14b8a6", "#eab308", "#ec4899", "#8b5cf6",
+]
+
+
+def _render_arsenal(mix: dict) -> None:
+    pitches = mix.get("pitches") or []
+    if not pitches:
+        _note("Pitch data unavailable.")
+        return
+    data = []
+    for i, p in enumerate(pitches):
+        data.append({
+            "value": p.get("usage", 0),
+            "name":  p.get("name", p.get("type", "?")),
+            "itemStyle": {"color": _ARSENAL_PALETTE[i % len(_ARSENAL_PALETTE)]},
+        })
+    opts = {
+        "backgroundColor": "transparent",
+        "title": {
+            "text": str(mix.get("total_types", len(pitches))),
+            "subtext": "Pitches",
+            "left": "center", "top": "36%",
+            "textStyle": {"color": t.TEXT, "fontSize": 22, "fontWeight": "bold"},
+            "subtextStyle": {"color": t.TEXT_DIM2, "fontSize": 10},
+        },
+        "tooltip": {"trigger": "item", "formatter": "{b}: {c}%"},
+        "series": [{
+            "type": "pie", "radius": ["52%", "74%"],
+            "avoidLabelOverlap": False,
+            "label": {"show": False},
+            "labelLine": {"show": False},
+            "data": data,
+        }],
+    }
+    with ui.row().classes("items-center w-full").style(
+        "gap: 14px; flex-wrap: wrap; min-width: 0;"
+    ):
+        ui.echart(opts).style("width: 160px; height: 160px; flex-shrink: 0;")
+        with ui.column().style("gap: 5px; flex: 1; min-width: 140px;"):
+            for i, p in enumerate(pitches):
+                color = _ARSENAL_PALETTE[i % len(_ARSENAL_PALETTE)]
+                velo = p.get("velocity")
+                velo_txt = f"{velo:.1f} mph" if isinstance(velo, (int, float)) else "—"
+                ui.html(
+                    f"<div style='display:flex; align-items:center; gap:8px; "
+                    f"font-size:12px;'>"
+                    f"<span style='width:10px; height:10px; border-radius:50%; "
+                    f"background:{color}; flex-shrink:0;'></span>"
+                    f"<span style='color:{t.TEXT}; font-weight:700; flex:1;'>"
+                    f"{p.get('name', '')}</span>"
+                    f"<span style='color:{t.TEXT_DIM}; font-family:monospace; "
+                    f"font-weight:800;'>{p.get('usage', 0):.0f}%</span>"
+                    f"<span style='color:{t.TEXT_DIM2}; font-family:monospace; "
+                    f"min-width:64px; text-align:right;'>{velo_txt}</span></div>"
+                )
+
+
+# ── Team bullpen (Tab 3) ────────────────────────────────────────────────────
+
+def _render_bullpen(d: dict) -> None:
+    from src import player_matchup as _pm
+    n = d.get("n_teams", 30)
+
+    def _rank_badge(rank) -> str:
+        if not rank:
+            return ""
+        color = _clr(_pm.rank_color(rank))
+        return (
+            f'<span style="display:inline-block; font-size:9px; font-weight:800; '
+            f'font-family:monospace; color:{color}; border:1px solid {color}; '
+            f'border-radius:999px; padding:1px 6px; margin-top:3px; '
+            f'background:rgba(0,0,0,.2);">#{rank} of {n}</span>'
+        )
+
+    items = (
+        ("ERA",  d.get("era"),  d.get("era_rank")),
+        ("R/9",  d.get("r9"),   d.get("r9_rank")),
+        ("WHIP", d.get("whip"), d.get("whip_rank")),
+    )
+    with ui.column().classes("w-full").style("gap: 8px; min-width: 0;"):
+        ui.label("Season pitching-staff aggregate").style(
+            f"font-size: 10.5px; font-style: italic; color: {t.TEXT_DIM2};")
+        with ui.row().classes("items-stretch w-full").style(
+            "gap: 8px; flex-wrap: nowrap;"
+        ):
+            for label, val, rank in items:
+                vtxt = f"{val:.2f}" if isinstance(val, (int, float)) else "—"
+                with ui.column().classes("flex-grow").style(
+                    f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 2px; "
+                    f"min-width: 0; flex: 1 1 0; align-items: center;"
+                ):
+                    ui.label(label).style(
+                        f"font-size: 9.5px; font-weight: 800; letter-spacing: .6px; "
+                        f"color: {t.TEXT_DIM2};")
+                    ui.label(vtxt).style(
+                        f"font-size: 17px; font-weight: 800; font-family: monospace; "
+                        f"color: {t.TEXT};")
+                    ui.html(_rank_badge(rank))
 
 
 # ── Per-market view (everything below the tabs) ─────────────────────────────
