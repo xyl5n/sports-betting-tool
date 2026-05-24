@@ -38,7 +38,48 @@ _TIER_MED_MAX = 0.30
 
 # ── Disk I/O ────────────────────────────────────────────────────────────────
 
+# Supabase durability (FIX 3): mirror every write to app_cache and restore
+# from it once on first read, so Railway redeploys don't revert graded picks
+# to the git-committed snapshot.  Key contains "history" so the daily cache
+# cleaner never purges it.
+_SUPA_KEY = "nn_picks_history"
+_restored_from_supabase = False
+
+
+def _restore_once() -> None:
+    global _restored_from_supabase
+    if _restored_from_supabase:
+        return
+    _restored_from_supabase = True
+    try:
+        from . import db
+        if not db.is_supabase():
+            return
+        row = db.cache_get(_SUPA_KEY)
+        if not isinstance(row, dict):
+            return
+        data = row.get("data") if isinstance(row.get("data"), dict) else row
+        if isinstance(data, dict) and isinstance(data.get("picks"), list):
+            # Supabase is the durable source of truth -- overwrite the (possibly
+            # stale, git-committed) local file with it.
+            _save_atomic(data, _mirror=False)
+    except Exception:                                                       # noqa: BLE001
+        pass
+
+
+def _mirror_to_supabase(data: dict) -> None:
+    try:
+        from . import db
+        if not db.is_supabase():
+            return
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        db.cache_set(_SUPA_KEY, None, today, data)
+    except Exception:                                                       # noqa: BLE001
+        pass
+
+
 def _load() -> dict:
+    _restore_once()
     if not HISTORY_PATH.exists():
         return {"version": _SCHEMA_VERSION, "picks": []}
     try:
@@ -51,7 +92,7 @@ def _load() -> dict:
         return {"version": _SCHEMA_VERSION, "picks": []}
 
 
-def _save_atomic(data: dict) -> None:
+def _save_atomic(data: dict, *, _mirror: bool = True) -> None:
     HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
         prefix=".nn_picks_", suffix=".json", dir=HISTORY_PATH.parent
@@ -64,6 +105,8 @@ def _save_atomic(data: dict) -> None:
         try: os.unlink(tmp_path)
         except OSError: pass
         raise
+    if _mirror:
+        _mirror_to_supabase(data)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -191,6 +234,66 @@ def settle_nn_pick(
                 return False
             return True
     return False
+
+
+def settle_completed_games(completed_games: list[dict]) -> int:
+    """Bulk-grade pending NN picks against completed games.
+
+    NN picks are keyed by (game_date, matchup) -- not game_id -- so each
+    completed game must carry game_date + home_team/away_team + scores.
+    Grades moneyline (by final score), run_line/spread (default ±1.5:
+    home covers iff margin >= 2), and totals (only when the pick stored a
+    `line`).  Writes correct/settled back.  Returns count newly settled.
+    """
+    if not completed_games:
+        return 0
+    idx: dict[tuple, dict] = {}
+    for g in completed_games:
+        gd = (g.get("game_date") or "")[:10]
+        mu = f"{g.get('away_team')} @ {g.get('home_team')}"
+        if gd and g.get("home_score") is not None and g.get("away_score") is not None:
+            idx[(gd, mu)] = g
+    if not idx:
+        return 0
+
+    data  = _load()
+    newly = 0
+    for p in data.get("picks", []):
+        if p.get("settled"):
+            continue
+        g = idx.get((p.get("game_date"), p.get("matchup")))
+        if not g:
+            continue
+        try:
+            hs = int(g["home_score"]); as_ = int(g["away_score"])
+        except (TypeError, ValueError):
+            continue
+        bt = (p.get("bet_type") or "moneyline").lower()
+        outcome = None
+        if bt == "moneyline":
+            outcome = "home" if hs > as_ else ("away" if as_ > hs else None)
+        elif bt in ("run_line", "spread"):
+            outcome = "home" if (hs - as_) >= 2 else "away"
+        elif bt == "totals":
+            line = p.get("line")
+            if line is None and isinstance(p.get("extra"), dict):
+                line = p["extra"].get("line")
+            if line is None:
+                continue                       # can't grade O/U without the line
+            total = hs + as_
+            if abs(total - float(line)) < 1e-9:
+                continue                       # push -- leave for explicit handling
+            outcome = "over" if total > float(line) else "under"
+        if outcome is None:
+            continue
+        p["settled"]        = True
+        p["actual_outcome"] = outcome
+        p["correct"]        = bool(p.get("nn_pick") == outcome)
+        newly += 1
+
+    if newly:
+        _save_atomic(data)
+    return newly
 
 
 def compute_nn_accuracy() -> dict:

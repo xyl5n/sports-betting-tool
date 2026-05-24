@@ -79,7 +79,46 @@ def _make_pick_id(sport: str, date: str, away: str, home: str, bet_type: str) ->
     return f"{_slugify(sport)}_{date}_{_slugify(away)}_at_{_slugify(home)}_{bet_type}"
 
 
+# Supabase durability (FIX 3): mirror writes + restore once on first read so
+# Railway redeploys don't revert graded picks to the git-committed snapshot.
+# Key contains "history" so the daily cache cleaner never purges it.
+_SUPA_KEY = "lr_picks_history"
+_restored_from_supabase = False
+
+
+def _restore_once(path: Path) -> None:
+    global _restored_from_supabase
+    if _restored_from_supabase:
+        return
+    _restored_from_supabase = True
+    try:
+        from . import db
+        if not db.is_supabase():
+            return
+        row = db.cache_get(_SUPA_KEY)
+        if not isinstance(row, dict):
+            return
+        data = row.get("data") if isinstance(row.get("data"), dict) else row
+        if isinstance(data, dict) and isinstance(data.get("picks"), list):
+            _save(data, path, _mirror=False)   # overwrite stale local copy
+    except Exception:
+        pass
+
+
+def _mirror_to_supabase(d: dict) -> None:
+    try:
+        from . import db
+        if not db.is_supabase():
+            return
+        today = datetime.now(timezone.utc).date().isoformat()
+        db.cache_set(_SUPA_KEY, None, today, d)
+    except Exception:
+        pass
+
+
 def _load(path: Path = _HISTORY_PATH) -> dict:
+    if path == _HISTORY_PATH:
+        _restore_once(path)
     if not path.exists():
         return {"version": _SCHEMA_VERSION, "picks": []}
     try:
@@ -92,11 +131,13 @@ def _load(path: Path = _HISTORY_PATH) -> dict:
         return {"version": _SCHEMA_VERSION, "picks": []}
 
 
-def _save(d: dict, path: Path = _HISTORY_PATH) -> None:
+def _save(d: dict, path: Path = _HISTORY_PATH, *, _mirror: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
     tmp.replace(path)
+    if _mirror and path == _HISTORY_PATH:
+        _mirror_to_supabase(d)
 
 
 # ── recording ─────────────────────────────────────────────────────────────────

@@ -229,6 +229,19 @@ def _section_chips(backend) -> None:
     overall = hs.overall_record(backend)
     best_m  = hs.best_classifier(backend)
     best_t  = hs.best_bet_type(backend)
+    props   = hs.props_record(backend)
+
+    # AUDIT/FIX debug: surface what the home page now reads (ledger-backed)
+    # so the W/L numbers are visible + verifiable in the Railway logs.
+    try:
+        print(
+            f"[WL] home render: overall(ledger)={overall.get('wins')}-{overall.get('losses')} "
+            f"props={props.get('wins')}-{props.get('losses')} "
+            f"best_model={best_m} best_bet_type={best_t}",
+            flush=True, file=sys.stderr,
+        )
+    except Exception:                                                      # noqa: BLE001
+        pass
 
     # Single row with nowrap so chips stay side-by-side at every viewport.
     # min-width:0 on each child lets them shrink past content with ellipsis
@@ -238,6 +251,7 @@ def _section_chips(backend) -> None:
     ):
         if show_overall:
             _chip_overall(overall)
+        _chip_props(props)
         _chip_best_model(best_m)
         _chip_best_bet_type(best_t)
 
@@ -407,6 +421,15 @@ def _chip_overall(overall: dict) -> None:
     main  = f"{w}-{l}"
     pct_s = f"{pct * 100:.0f}%" if pct is not None else "—"
     _chip(label="OVERALL", main=main, suffix=pct_s, color=color)
+
+
+def _chip_props(props: dict) -> None:
+    """Settled player-prop record, shown as its own row (FIX 5) so it isn't
+    mixed into the game-pick W/L."""
+    w, l, pct = props.get("wins", 0), props.get("losses", 0), props.get("pct")
+    color = hs.winrate_color(pct, t)
+    pct_s = f"{pct * 100:.0f}%" if pct is not None else "—"
+    _chip(label="PROPS", main=f"{w}-{l}", suffix=pct_s, color=color)
 
 
 def _chip_best_model(best: dict | None) -> None:
