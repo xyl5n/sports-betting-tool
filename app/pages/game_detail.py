@@ -87,7 +87,7 @@ def register(backend) -> None:
                 # swaps in Model Prediction probabilities instead of
                 # the actual odds table.
                 _section_header(backend, raw or serialized, serialized, sport)
-                _section_betting_lines(serialized, sport)
+                _section_ai_analysis(backend, serialized, sport)
                 if raw:
                     _section_model_picks(backend, raw, serialized, sport, game_id)
                 _section_pitching_or_lineup(serialized, sport)
@@ -342,6 +342,19 @@ def _back_button(sport: str) -> None:
 #  Section 1 -- Header
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _team_odds_lines(ml: str, rl: Optional[str], sport: str) -> None:
+    """ML + run-line/spread lines shown under a team in the matchup box."""
+    rl_label = "RL" if sport == "mlb" else "SPD"
+    if ml and ml != "—":
+        ui.label(f"ML {ml}").style(
+            f"font-size: 12px; font-weight: 800; color: {t.TEXT}; "
+            f"font-family: monospace;")
+    if rl:
+        ui.label(f"{rl_label} {rl}").style(
+            f"font-size: 11px; font-weight: 700; color: {t.TEXT_DIM}; "
+            f"font-family: monospace;")
+
+
 def _section_header(backend, raw: dict, ser: dict, sport: str) -> None:
     # Tolerate two shapes:
     #   - raw analysis dict: nested {game: {away_team, home_team, ...}}
@@ -410,176 +423,111 @@ def _section_header(backend, raw: dict, ser: dict, sport: str) -> None:
                     f"color: {t.TEXT_DIM}; margin-left: auto;"
                 )
 
-        # Big matchup row -- logos + names.  Score block below if live/final.
-        with ui.row().classes("items-center w-full").style("gap: 16px;"):
-            with ui.column().classes("items-center").style("gap: 6px; flex: 1;"):
+        # Odds folded into the matchup box (CHANGE 1): ML + run line on each
+        # team side, total line + projected runs in the center.
+        away_ml = _odds_str(ser.get("away_odds"))
+        home_ml = _odds_str(ser.get("home_odds"))
+        rl = ser.get("run_line") or ser.get("spread_pick") or {}
+        _pt = rl.get("run_line_point") if sport == "mlb" else rl.get("spread_line")
+        away_rl = home_rl = None
+        if isinstance(_pt, (int, float)):
+            _h_odds = _odds_str(rl.get("run_line_home_odds") or rl.get("pick_odds"))
+            _a_odds = _odds_str(rl.get("run_line_away_odds") or rl.get("pick_odds"))
+            home_rl = f"{float(_pt):+g} {_h_odds}".strip()
+            away_rl = f"{(-float(_pt)):+g} {_a_odds}".strip()
+        tot = ser.get("totals") or {}
+        total_line = tot.get("total_line")
+        proj_total = tot.get("predicted_total")
+
+        # Big matchup row -- logos + names + odds.  Score block below if live/final.
+        with ui.row().classes("items-start w-full").style("gap: 12px;"):
+            with ui.column().classes("items-center").style("gap: 6px; flex: 1; min-width: 0;"):
                 team_logo.render(away_full, sport=sport, size=64)
                 ui.label(away_full).style(
                     f"font-size: 16px; font-weight: 700; color: {t.TEXT}; "
                     f"text-align: center;"
                 )
-            ui.label("@").style(f"color: {t.TEXT_DIM2}; font-size: 18px;")
-            with ui.column().classes("items-center").style("gap: 6px; flex: 1;"):
+                _team_odds_lines(away_ml, away_rl, sport)
+            with ui.column().classes("items-center").style(
+                "gap: 2px; flex-shrink: 0; align-self: center;"
+            ):
+                if total_line is not None:
+                    ui.label(f"O/U {total_line}").style(
+                        f"font-size: 14px; font-weight: 800; color: {t.TEXT}; "
+                        f"font-family: monospace;")
+                    if isinstance(proj_total, (int, float)):
+                        ui.label(f"{float(proj_total):.1f} proj").style(
+                            f"font-size: 11px; font-weight: 700; color: {t.PRIMARY_HI}; "
+                            f"font-family: monospace;")
+                else:
+                    ui.label("@").style(f"color: {t.TEXT_DIM2}; font-size: 18px;")
+            with ui.column().classes("items-center").style("gap: 6px; flex: 1; min-width: 0;"):
                 team_logo.render(home_full, sport=sport, size=64)
                 ui.label(home_full).style(
                     f"font-size: 16px; font-weight: 700; color: {t.TEXT}; "
                     f"text-align: center;"
                 )
+                _team_odds_lines(home_ml, home_rl, sport)
 
         if state in ("live", "final") and live is not None:
             live_score.render_score_block(live, sport)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Section 2 -- Betting Lines
+#  Section 2 -- AI Analysis (Moneyline / Run Line / Run Total)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _section_betting_lines(ser: dict, sport: str) -> None:
-    # Schedule-only games (no Odds API entry) get the Model Prediction
-    # block instead of the empty odds table.  Per user spec: "if no odds
-    # available show Model Prediction instead with the raw probability
-    # percentages."
-    if ser.get("_no_odds"):
-        _section_card(
-            "MODEL PREDICTION",
-            rows_renderer=lambda: _model_prediction_rows(ser),
-        )
-        return
-
+def _section_ai_analysis(backend, ser: dict, sport: str) -> None:
+    """Three tabbed Groq analyses (Moneyline, Run Line, Run Total), each a
+    2-3 sentence analytical take on that specific bet type.  Cached per game
+    per day; lazy-loaded so the page never blocks.  Replaces the old odds
+    table (odds now live inside the matchup box)."""
     is_mlb = sport == "mlb"
-    rl_pick = ser.get("run_line") or ser.get("spread_pick") or {}
-    tot     = ser.get("totals") or {}
-    away_team = ser.get("away_team", "Away")
-    home_team = ser.get("home_team", "Home")
-
-    rows: list[tuple[str, str, str]] = [
-        ("Moneyline (Away)", away_team, _odds_str(ser.get("away_odds"))),
-        ("Moneyline (Home)", home_team, _odds_str(ser.get("home_odds"))),
-    ]
-    if rl_pick:
-        line = rl_pick.get("run_line_point") if is_mlb else rl_pick.get("spread_line")
-        line_str = f"{float(line):+g}" if isinstance(line, (int, float)) else "—"
-        label_root = "Run Line" if is_mlb else "Spread"
-        rows.append((
-            f"{label_root} (Home)",
-            f"{home_team} {line_str}",
-            _odds_str(rl_pick.get("run_line_home_odds") or rl_pick.get("pick_odds")),
-        ))
-        rows.append((
-            f"{label_root} (Away)",
-            f"{away_team} {(-float(line)):+g}" if isinstance(line, (int, float)) else away_team,
-            _odds_str(rl_pick.get("run_line_away_odds") or rl_pick.get("pick_odds")),
-        ))
-    if tot and tot.get("total_line") is not None:
-        ln = tot.get("total_line")
-        rows.append(("Total (Over)",  f"O {ln}", _odds_str(tot.get("over_odds"))))
-        rows.append(("Total (Under)", f"U {ln}", _odds_str(tot.get("under_odds"))))
-
-    _section_card("BETTING LINES", rows_renderer=lambda: _odds_table(rows))
-
-
-def _model_prediction_rows(ser: dict) -> None:
-    """Render the model's raw probability estimates for moneyline,
-    run-line/spread, and totals when no sportsbook lines are
-    available.  Data comes from the schedule endpoint's
-    _model_prediction sub-dict (set by app.py when the schedule
-    short-circuits the no-odds path).  Missing keys render '—'."""
-    pred = ser.get("_model_prediction") or {}
-    home_team = ser.get("home_team", "Home")
-    away_team = ser.get("away_team", "Away")
-
-    rows: list[tuple[str, str]] = []
-
-    # Moneyline -- both sides as raw % from the model.
-    ml_h = pred.get("ml_prob_home")
-    ml_a = pred.get("ml_prob_away")
-    rows.append((
-        f"Moneyline ({away_team})",
-        f"{float(ml_a) * 100:.1f}%" if isinstance(ml_a, (int, float)) else "—",
-    ))
-    rows.append((
-        f"Moneyline ({home_team})",
-        f"{float(ml_h) * 100:.1f}%" if isinstance(ml_h, (int, float)) else "—",
-    ))
-
-    # Run-line / spread
-    rl_team = pred.get("rl_pick_team")
-    rl_prob = pred.get("rl_prob")
-    rl_line = pred.get("rl_line")
-    if rl_team and isinstance(rl_prob, (int, float)):
-        line_s = f" {float(rl_line):+g}" if isinstance(rl_line, (int, float)) else ""
-        rows.append((
-            "Run Line" if sport_default_is_mlb(ser) else "Spread",
-            f"{rl_team}{line_s}: {float(rl_prob) * 100:.1f}%",
-        ))
-
-    # Totals -- projected total + over/under direction relative to baseline.
-    proj = pred.get("totals_projected")
-    baseline = pred.get("totals_baseline")
-    if isinstance(proj, (int, float)):
-        base = float(baseline) if isinstance(baseline, (int, float)) else 9.0
-        direction = "Over" if proj > base else ("Under" if proj < base else "Even")
-        rows.append((
-            "Projected Total",
-            f"{float(proj):.1f}  ({direction} vs {base:g})",
-        ))
-
-    if not rows:
-        ui.label("Model has no prediction for this matchup yet.").style(
-            f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic;"
-        )
-        return
-
-    with ui.column().classes("w-full").style("gap: 0;"):
-        for label, value in rows:
-            with ui.row().classes("items-center w-full").style(
-                f"padding: 8px 0; gap: 12px; "
-                f"border-bottom: 1px solid {t.BORDER_SOFT};"
-            ):
-                ui.label(label).style(
-                    f"flex: 0 0 40%; font-size: 12px; color: {t.TEXT_DIM};"
-                )
-                ui.label(value).style(
-                    f"flex: 1; font-size: 13px; color: {t.TEXT}; "
-                    f"font-weight: 600; font-family: monospace;"
-                )
-    ui.label(
-        "Estimates only — no sportsbook lines available."
-    ).style(
-        f"font-size: 11px; color: {t.TEXT_DIM2}; font-style: italic; "
-        f"margin-top: 6px;"
+    labels = (
+        ("moneyline", "Moneyline"),
+        ("run_line",  "Run Line" if is_mlb else "Spread"),
+        ("run_total", "Run Total" if is_mlb else "Total"),
     )
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 8px;"
+    ):
+        ui.label("AI ANALYSIS").style(
+            f"font-size: 12px; font-weight: 800; letter-spacing: .8px; color: {t.TEXT};")
+        body = ui.column().classes("w-full").style("gap: 8px;")
+        with body:
+            with ui.row().classes("items-center").style("gap: 8px;"):
+                ui.spinner(size="sm").style(f"color: {t.PRIMARY};")
+                ui.label("Generating analysis…").style(
+                    f"font-size: 12px; color: {t.TEXT_DIM2}; font-style: italic;")
 
+        async def _load() -> None:                                       # noqa: WPS430
+            try:
+                from src import ai_summaries as _ais
+                data = await asyncio.to_thread(_ais.get_game_bet_analysis, sport, ser)
+            except Exception:                                            # noqa: BLE001
+                data = None
+            body.clear()
+            with body:
+                if not data or not any((data.get(k) or "").strip() for k, _ in labels):
+                    ui.label("AI analysis unavailable for this game.").style(
+                        f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic;")
+                    return
+                with ui.tabs().props("dense no-caps").classes("w-full").style(
+                    f"color: {t.TEXT_DIM};"
+                ) as tabs:
+                    tab_objs = {k: ui.tab(lbl) for k, lbl in labels}
+                with ui.tab_panels(tabs, value=tab_objs[labels[0][0]]).classes(
+                    "w-full"
+                ).style("background: transparent;"):
+                    for k, _lbl in labels:
+                        with ui.tab_panel(tab_objs[k]).style("padding: 8px 2px;"):
+                            ui.label((data.get(k) or "").strip()
+                                     or "No analysis available for this bet type.").style(
+                                f"font-size: 12.5px; color: {t.TEXT_DIM}; "
+                                f"line-height: 1.5; white-space: normal;")
 
-def sport_default_is_mlb(ser: dict) -> bool:
-    """Heuristic used by the Model Prediction block to label the
-    spread line.  MLB games carry park / pitcher fields; WNBA games
-    don't.  Defaults to MLB when neither hint is present."""
-    if ser.get("home_sp") or ser.get("away_sp") or ser.get("park_run_factor"):
-        return True
-    if ser.get("_sport") == "wnba":
-        return False
-    return True
-
-
-def _odds_table(rows: list[tuple[str, str, str]]) -> None:
-    with ui.column().classes("w-full").style("gap: 0;"):
-        for label, value, odds in rows:
-            with ui.row().classes("items-center w-full").style(
-                f"padding: 8px 0; gap: 12px; "
-                f"border-bottom: 1px solid {t.BORDER_SOFT};"
-            ):
-                ui.label(label).style(
-                    f"flex: 0 0 35%; font-size: 12px; color: {t.TEXT_DIM};"
-                )
-                ui.label(value).style(
-                    f"flex: 1; font-size: 13px; color: {t.TEXT}; font-weight: 600; "
-                    f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
-                )
-                ui.label(odds).style(
-                    f"font-size: 13px; font-weight: 700; color: {t.PRIMARY}; "
-                    f"font-family: monospace; flex-shrink: 0;"
-                )
+        ui.timer(0.05, _load, once=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

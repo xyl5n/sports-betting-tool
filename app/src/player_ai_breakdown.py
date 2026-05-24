@@ -39,7 +39,26 @@ _MARKET_STAT = {
     "batter_strikeouts":    "SO",
 }
 
-_SECTION_KEYS = ("matchup", "trends", "approach", "game_script")
+_SECTION_KEYS = ("verdict", "matchup", "trends", "approach", "game_script")
+
+
+def verdict_label(confidence, edge=None) -> tuple[str, str]:
+    """Map model confidence (the prob the picked side hits) to a verdict
+    badge + colour token: Strong Lean / Lean (pos) · Neutral (warn) ·
+    Fade / Strong Fade (neg)."""
+    try:
+        c = float(confidence)
+    except (TypeError, ValueError):
+        return ("Neutral", "warn")
+    if c >= 0.62:
+        return ("Strong Lean", "pos")
+    if c >= 0.565:
+        return ("Lean", "pos")
+    if c >= 0.50:
+        return ("Neutral", "warn")
+    if c >= 0.45:
+        return ("Fade", "neg")
+    return ("Strong Fade", "neg")
 
 
 def _log(msg: str) -> None:
@@ -235,6 +254,10 @@ def _system_prompt(is_pitcher: bool) -> str:
         "dashes — 2-4 sentences per section.\n\n"
         "Return ONLY a JSON object (no prose around it) with exactly these string "
         "keys:\n"
+        '  "verdict": your overall independent take in 2-3 sentences — weigh every '
+        "signal and state plainly whether this prop is a lean or a fade and why, "
+        "even if that disagrees with the model's confidence. This is the headline "
+        "opinion.\n"
         '  "matchup": how the player fares against today\'s specific opponent — H2H '
         "history if present, the opponent's rank versus this prop type, home/away "
         "(and vs LHP/RHP) splits, and the opposing pitcher's arsenal where relevant.\n"

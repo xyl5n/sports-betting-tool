@@ -581,3 +581,123 @@ def invalidate_prop(player: str, market: str) -> bool:
     except Exception as exc:                                              # noqa: BLE001
         _log(f"invalidate_prop({player}|{market}) failed: {exc}")
     return False
+
+
+# ── Per-bet-type game analysis (AI Analysis section on the matchup page) ──────
+
+def _game_bets_prompt(sport: str, g: dict) -> str:
+    away = g.get("away_team") or "Away"
+    home = g.get("home_team") or "Home"
+    facts: list[str] = [f"Matchup: {away} at {home}."]
+    if g.get("pick_team"):
+        facts.append(
+            f"Model moneyline lean: {g.get('pick_team')} at {_odds(g.get('pick_odds'))}, "
+            f"confidence {_pct(g.get('pick_prob'))}, edge {_pct(g.get('pick_edge'))}."
+        )
+    rl = g.get("run_line") or {}
+    if rl.get("pick_team"):
+        facts.append(
+            f"Run line: model leans {rl.get('pick_team')} "
+            f"{_signed(rl.get('run_line_point'))} (confidence {_pct(rl.get('pick_prob'))})."
+        )
+    tot = g.get("totals") or {}
+    if tot.get("total_line") is not None:
+        facts.append(
+            f"Total line {tot.get('total_line')}; model projects "
+            f"{_num(tot.get('predicted_total'))} runs (lean "
+            f"{(tot.get('direction') or '').title() or 'n/a'})."
+        )
+    if (sport or "").lower() == "mlb":
+        for sp, label in ((g.get("away_sp") or {}, away), (g.get("home_sp") or {}, home)):
+            if not sp.get("full_name"):
+                continue
+            facts.append(
+                f"{label} SP {sp.get('full_name')}: {_num(sp.get('era'))} ERA, "
+                f"{_num(sp.get('whip'))} WHIP, {_num(sp.get('k_per_9'))} K/9, "
+                f"last-3 starts {_num(sp.get('last3_era'))} ERA."
+            )
+            try:
+                from . import ai_context as _aic
+                mt = _aic.pitch_mix_text(_aic.pitch_mix(_aic.resolve_player_id(sp.get("full_name"))))
+                if mt:
+                    facts.append(f"{label} SP {mt.replace('Arsenal: ', 'throws ')}")
+            except Exception:                                             # noqa: BLE001
+                pass
+        try:
+            from .park_factors import get_park_factors
+            rf, hf = get_park_factors(home)
+            facts.append(f"Park factors: run {rf:.2f}, HR {hf:.2f} (1.00 = neutral).")
+        except Exception:                                                 # noqa: BLE001
+            pass
+    for key, label in (("h2h", "Season head-to-head"), ("bullpen", "Bullpens"),
+                       ("team_ranks", "Team offensive ranks"),
+                       ("home_away", "Home/away splits")):
+        v = g.get(key)
+        if isinstance(v, str) and v.strip():
+            facts.append(f"{label}: {v.strip()}.")
+
+    return (
+        "You are an experienced sports-betting analyst, not a data reader. Using "
+        "ONLY the facts provided (never invent numbers), return ONLY a JSON object "
+        "with exactly these three string keys, each a 2-3 sentence plain-text "
+        "analysis (no markdown, no bold) that gives a clear directional opinion "
+        "rather than recapping numbers:\n"
+        '  "moneyline": weigh the starting-pitcher matchup and team offensive '
+        "context; name the key edge and any risk and lean a side.\n"
+        '  "run_line": which team is more likely to win by multiple runs, and why.\n'
+        '  "run_total": park factor, both pitchers\' recent form, and the projected '
+        "scoring environment; lean over or under.\n\nFACTS: " + " ".join(facts)
+    )
+
+
+def _parse_bet_analysis(text: str | None) -> dict:
+    if not text:
+        return {}
+    import json as _json
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw[:4].lower() == "json":
+            raw = raw[4:]
+    try:
+        obj = _json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+    except (ValueError, _json.JSONDecodeError):
+        return {}
+    keys = ("moneyline", "run_line", "run_total")
+    out = {k: (str(obj.get(k)).strip() if obj.get(k) else "") for k in keys}
+    return out if any(out.values()) else {}
+
+
+def get_game_bet_analysis(sport: str, g: dict) -> dict:
+    """Return {moneyline, run_line, run_total} -- 2-3 sentence Groq analyses
+    per bet type, cached per game per day.  Empty dict on failure."""
+    gid = _game_id(g)
+    today = _today_et()
+    cache_key = f"ai_game_bets_{(sport or 'mlb').lower()}_{gid}" if gid else None
+    if cache_key:
+        try:
+            from . import db
+            if db.is_supabase():
+                row = db.cache_get(cache_key)
+                if isinstance(row, dict):
+                    d = row.get("data") if isinstance(row.get("data"), dict) else row
+                    if (isinstance(d, dict) and d.get("date") == today
+                            and isinstance(d.get("analysis"), dict)):
+                        return d["analysis"]
+        except Exception:                                                 # noqa: BLE001
+            pass
+    try:
+        from .groq_client import generate_summary
+        text = generate_summary(_game_bets_prompt(sport, g), max_tokens=400)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"game-bets analysis failed: {exc}")
+        return {}
+    out = _parse_bet_analysis(text)
+    if out and cache_key:
+        try:
+            from . import db
+            if db.is_supabase():
+                db.cache_set(cache_key, None, today, {"date": today, "analysis": out})
+        except Exception:                                                 # noqa: BLE001
+            pass
+    return out
