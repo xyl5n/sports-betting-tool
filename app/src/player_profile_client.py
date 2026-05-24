@@ -530,7 +530,13 @@ def get_player_gamelog(
                 st          = split.get("stat") or {}
                 date_str    = split.get("date", "")
                 opp_info    = split.get("opponent") or {}
-                opp_abbrev  = opp_info.get("abbreviation", "")
+                # The gameLog `opponent` object usually carries only
+                # id/name/link (no abbreviation), so fall back to mapping
+                # the full team name -> abbrev (fixes the OPP column showing
+                # dashes for every row).
+                opp_abbrev  = (opp_info.get("abbreviation")
+                               or team_name_to_abbrev(opp_info.get("name", ""))
+                               or "")
                 team_info   = split.get("team") or {}
                 team_abbrev = team_info.get("abbreviation", "")
                 is_home     = bool(split.get("isHome", False))
@@ -1408,6 +1414,148 @@ def get_today_opposing_pitcher(prop: dict, player_name: str) -> Optional[dict]:
             "hand": pitcher.get("hand", "")}
 
 
+def _batter_split_vs_hand(batter_id: int, sit_code: str) -> Optional[dict]:
+    """Hitting split vs a pitcher handedness for *batter_id*.
+
+    *sit_code* is ``"vr"`` (vs RHP) or ``"vl"`` (vs LHP).  Returns
+    ``{pa, avg, woba, iso, k_pct}`` (floats) or None.  MLB Stats API
+    doesn't expose wOBA, so it's estimated from the split's component
+    stats with standard linear weights; ISO = SLG - AVG."""
+    if not batter_id:
+        return None
+    url = (
+        f"{_STATS_BASE}/people/{batter_id}/stats"
+        f"?stats=statSplits&group=hitting&sitCodes={sit_code}&season={_CURRENT_SEASON}"
+    )
+    data = _fetch_json(url, label=f"_batter_split_vs_hand({batter_id},{sit_code})")
+    if not data:
+        return None
+    try:
+        splits = (data.get("stats") or [{}])[0].get("splits") or []
+        if not splits:
+            return None
+        st = splits[0].get("stat") or {}
+
+        def _i(k):  # safe int
+            try:
+                return int(st.get(k) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        def _f(k):  # safe float (MLB returns avg/slg as strings like ".287")
+            v = st.get(k)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        pa  = _i("plateAppearances")
+        ab  = _i("atBats")
+        h   = _i("hits")
+        d2  = _i("doubles")
+        t3  = _i("triples")
+        hr  = _i("homeRuns")
+        bb  = _i("baseOnBalls")
+        ibb = _i("intentionalWalks")
+        hbp = _i("hitByPitch")
+        sf  = _i("sacFlies")
+        so  = _i("strikeOuts")
+
+        avg = _f("avg")
+        if avg is None:
+            avg = (h / ab) if ab else 0.0
+        slg = _f("slg")
+        if slg is None:
+            slg = ((h - d2 - t3 - hr) + 2 * d2 + 3 * t3 + 4 * hr) / ab if ab else 0.0
+        iso = max(0.0, slg - avg)
+
+        singles = max(0, h - d2 - t3 - hr)
+        ubb = max(0, bb - ibb)
+        woba_num = (0.69 * ubb + 0.72 * hbp + 0.89 * singles
+                    + 1.27 * d2 + 1.62 * t3 + 2.10 * hr)
+        woba_den = ab + (bb - ibb) + sf + hbp
+        woba = (woba_num / woba_den) if woba_den else 0.0
+        k_pct = (so / pa * 100.0) if pa else 0.0
+        return {"pa": pa, "avg": avg, "woba": woba, "iso": iso, "k_pct": k_pct}
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"_batter_split_vs_hand({batter_id}) parse error: {exc}")
+        return None
+
+
+def get_opposing_lineup_basic(prop: dict, player_name: str,
+                              pitcher_hand: str = "") -> dict:
+    """Expected opposing batting order for a *pitcher's* matchup view.
+
+    Each batter carries season AVG/OBP/SLG plus their split vs the
+    pitcher's handedness (PA / AVG / wOBA / ISO / K%).  *pitcher_hand* is
+    'L'/'R' (the viewing pitcher's throwing hand); the split uses the
+    batters-vs-that-hand situational code.  Cached per game_pk + hand for
+    the ET day.
+
+    Shape::
+        {"available", "note", "split_label",
+         "batters": [{order, name, position, hand, avg, obp, slg,
+                      split_pa, split_avg, split_woba, split_iso, split_k_pct}]}
+    """
+    empty = {"available": False, "note": "Lineup not posted yet.",
+             "split_label": "", "batters": []}
+    game = _find_todays_game(prop, player_name)
+    if not game or not game.get("game_pk"):
+        return dict(empty, note="Game not found on today's schedule.")
+
+    opp_side = game.get("opp_side") or ""
+    lineup = (game.get("lineups") or {}).get(opp_side) or []
+    if not lineup:
+        return dict(empty, note="Opposing lineup not posted yet.")
+
+    ph = (pitcher_hand or "").upper()
+    sit = "vl" if ph == "L" else "vr"          # batters vs LHP / vs RHP
+    split_label = "vs LHP" if ph == "L" else "vs RHP"
+
+    cache_key = f"lineup_basic_{game['game_pk']}_{opp_side}_{sit}"
+    today = _today_str()
+    try:
+        row = _db.cache_get(cache_key)
+        if row and row.get("date") == today and (row.get("data") or {}).get("available"):
+            return row["data"]
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    def _fmt3(v) -> str:
+        try:
+            return f"{float(v):.3f}".lstrip("0") or ".000"
+        except (TypeError, ValueError):
+            return "—"
+
+    batters: list[dict] = []
+    for b in lineup[:9]:
+        bid = b.get("id")
+        ss = get_season_stats(bid, is_pitcher=False) if bid else {}
+        spl = _batter_split_vs_hand(bid, sit) if bid else None
+        batters.append({
+            "order":    b.get("order"),
+            "name":     b.get("name") or "",
+            "position": b.get("position") or "",
+            "hand":     b.get("hand") or "",
+            "avg":      _fmt3(ss.get("avg")),
+            "obp":      _fmt3(ss.get("obp")),
+            "slg":      _fmt3(ss.get("slg")),
+            "split_pa":    (spl or {}).get("pa"),
+            "split_avg":   (spl or {}).get("avg"),
+            "split_woba":  (spl or {}).get("woba"),
+            "split_iso":   (spl or {}).get("iso"),
+            "split_k_pct": (spl or {}).get("k_pct"),
+        })
+
+    out = {"available": bool(batters), "note": "",
+           "split_label": split_label, "batters": batters}
+    try:
+        _db.cache_set(cache_key, "mlb", today, out)
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Opposing-team rank vs each prop market
 # ---------------------------------------------------------------------------
@@ -1468,6 +1616,37 @@ def _fetch_team_stats(group: str, season: int) -> list[dict]:
         return out
     except Exception as exc:                                                  # noqa: BLE001
         _log(f"_fetch_team_stats({group}, {season}) parse error: {exc}")
+        return []
+
+
+def _fetch_team_pitching_relief(season: int) -> list[dict]:
+    """League-wide team RELIEF (bullpen) pitching aggregate for *season*,
+    via the statSplits ``sitCodes=rp`` (relief-pitcher) situational split.
+
+    Same ``[{"abbrev", "stat"}]`` shape as _fetch_team_stats.  Returns an
+    empty list on failure or if the endpoint doesn't surface the relief
+    split, so callers can fall back to the full-staff aggregate.
+    """
+    url = (
+        f"{_STATS_BASE}/teams/stats"
+        f"?stats=statSplits&group=pitching&sitCodes=rp"
+        f"&season={season}&sportIds=1"
+    )
+    data = _fetch_json(url, label=f"_fetch_team_pitching_relief({season})")
+    if not data:
+        return []
+    try:
+        out: list[dict] = []
+        for block in (data.get("stats") or []):
+            for sp in (block.get("splits") or []):
+                team = sp.get("team") or {}
+                abbrev = team.get("abbreviation") or team.get("triCode") or ""
+                if not abbrev:
+                    continue
+                out.append({"abbrev": abbrev.upper(), "stat": sp.get("stat") or {}})
+        return out
+    except Exception as exc:                                                  # noqa: BLE001
+        _log(f"_fetch_team_pitching_relief({season}) parse error: {exc}")
         return []
 
 

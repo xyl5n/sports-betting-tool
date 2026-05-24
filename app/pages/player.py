@@ -81,6 +81,16 @@ _TIME_WINDOWS: tuple[tuple[str, str], ...] = (
     ("Last 20", "L20"),
 )
 
+# Short tag shown on the chart AVG badge so it's clear which time window
+# the displayed average reflects (FIX 1).
+_WINDOW_TAG: dict[str, str] = {
+    "Season":  "SZN",
+    "H2H":     "H2H",
+    "Last 5":  "L5",
+    "Last 10": "L10",
+    "Last 20": "L20",
+}
+
 # Per-market gamelog stat key.  Same map as
 # ``src.player_profile_client._MARKET_TO_GAMELOG_STAT`` but kept local
 # so the page can render even when the client's mapping is stale.
@@ -264,10 +274,16 @@ def _layout(backend, player_id_slug: str) -> None:
              f"props={len(today_props_all)}, opp={opp_abbrev}, games={len(games)})")
 
         # Highlighted game-log column = the strongest prop's stat (else
-        # the default per role).
+        # the default per role).  The strongest prop's book line is the
+        # over/under threshold used to colour that column green/red (FIX 6).
+        hl_line: Optional[float] = None
         if today_props_all:
             _hl_market = today_props_all[0].get("market", "")
             highlighted = _MARKET_TO_STAT.get(_hl_market) or ("K" if is_pitcher else "H")
+            try:
+                hl_line = float(today_props_all[0].get("line"))
+            except (TypeError, ValueError):
+                hl_line = None
         else:
             highlighted = "K" if is_pitcher else "H"
 
@@ -293,7 +309,7 @@ def _layout(backend, player_id_slug: str) -> None:
             with ui.tab_panel(tab_matchup).style(f"padding: {t.SPACE_MD} 0 0 0;"):
                 _tab_matchup(info, today_prop, opp_abbrev, games, is_pitcher)
             with ui.tab_panel(tab_log).style(f"padding: {t.SPACE_MD} 0 0 0;"):
-                _tab_game_log(games, is_pitcher, highlighted)
+                _tab_game_log(games, is_pitcher, highlighted, hl_line)
 
 
 # ── TAB 1: PICK (the original player-profile content, unchanged) ────────────
@@ -351,7 +367,8 @@ def _tab_pick(
 
 # ── TAB 4: GAME LOG (always expanded) ───────────────────────────────────────
 
-def _tab_game_log(games: list[dict], is_pitcher: bool, highlighted: str) -> None:
+def _tab_game_log(games: list[dict], is_pitcher: bool, highlighted: str,
+                  line: Optional[float] = None) -> None:
     """The full game-log table, always expanded (no collapse toggle)."""
     if not games:
         ui.label("No game log available for this player.").style(
@@ -362,7 +379,7 @@ def _tab_game_log(games: list[dict], is_pitcher: bool, highlighted: str) -> None
         )
         return
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
-        _game_log_table(games, is_pitcher, highlighted)
+        _game_log_table(games, is_pitcher, highlighted, line)
 
 
 # ── Shared helpers for the Overview / Matchup tabs ─────────────────────────
@@ -479,15 +496,20 @@ def _tab_overview(info: dict, is_pitcher: bool) -> None:
                       unavailable="Season averages unavailable.",
                       spinner_text="Loading season averages…")
 
-        # Section B — Statcast Percentiles (foundation placeholder).
+        # Section B — Statcast Percentiles (pybaseball, weekly cache).
         with _card():
             _section_label("STATCAST PERCENTILES")
-            _note(
-                "Statcast percentile bars — xwOBA, exit velocity, barrel%, "
-                "hard-hit%, chase%, whiff%, and more, computed from pybaseball "
-                "and colored by percentile — are coming in the next update.",
-                dashed=True,
-            )
+            pid = info["id"]
+
+            def _load_pct():                                              # noqa: WPS430
+                from src import statcast_client as _sc
+                fn = (_sc.get_pitcher_percentiles if is_pitcher
+                      else _sc.get_batter_percentiles)
+                return fn(pid)
+
+            _lazy(_load_pct, _render_statcast_percentiles,
+                  unavailable="Statcast data unavailable.",
+                  spinner_text="Loading Statcast data…")
 
 
 def _render_season_averages(stats: dict) -> None:
@@ -567,11 +589,17 @@ def _tab_matchup(
         if is_pitcher:
             with _card():
                 _section_label("OPPOSING LINEUP")
-                _note(
-                    "The opposing batting order with splits vs your handedness "
-                    "is coming in the next update.",
-                    dashed=True,
-                )
+                if prop:
+                    _pitcher_hand = info.get("throws") or ""
+
+                    def _load_lineup():                                   # noqa: WPS430
+                        from src.player_profile_client import get_opposing_lineup_basic
+                        return get_opposing_lineup_basic(prop, name, _pitcher_hand)
+                    _lazy(_load_lineup, _render_lineup,
+                          unavailable="Opposing lineup not posted yet.",
+                          spinner_text="Loading opposing lineup…")
+                else:
+                    _note("No upcoming game.")
         else:
             with _card():
                 _section_label("TONIGHT'S STARTER")
@@ -593,37 +621,73 @@ def _tab_matchup(
                           spinner_text="Loading head-to-head…")
                 else:
                     _note("No upcoming game.")
+            with _card():
+                _section_label("BATTER VS PITCH TYPE")
+                if prop:
+                    bid = info["id"]
 
-        # Section D — Pitcher Arsenal (deferred to follow-up).
+                    def _load_bvp():                                      # noqa: WPS430
+                        from src import statcast_client as _sc
+                        from src.player_profile_client import get_today_opposing_pitcher
+                        pit = get_today_opposing_pitcher(prop, name)
+                        if not pit or not pit.get("id"):
+                            return {"available": False,
+                                    "note": "No opposing starter announced yet."}
+                        return _sc.get_batter_vs_pitch_types(bid, pit["id"])
+                    _lazy(_load_bvp, _render_bvp_table,
+                          unavailable="Statcast data unavailable.",
+                          spinner_text="Loading pitch-type splits…")
+                else:
+                    _note("No upcoming game.")
+
+        # Section D — Pitcher Arsenal donut (batters; opposing starter).
         if not is_pitcher:
             with _card():
                 _section_label("PITCHER ARSENAL")
-                _note(
-                    "The opposing pitcher's pitch-mix donut (usage % and "
-                    "velocity per pitch type) is coming in the next update.",
-                    dashed=True,
-                )
+                if prop:
+                    def _load_arsenal():                                  # noqa: WPS430
+                        from src import statcast_client as _sc
+                        from src.player_profile_client import get_today_opposing_pitcher
+                        pit = get_today_opposing_pitcher(prop, name)
+                        if not pit or not pit.get("id"):
+                            return {"available": False,
+                                    "note": "No opposing starter announced yet."}
+                        return _sc.get_pitch_mix(pit["id"])
+                    _lazy(_load_arsenal, _render_arsenal,
+                          unavailable="Pitch data unavailable.",
+                          spinner_text="Loading pitch arsenal…")
+                else:
+                    _note("No upcoming game.")
 
-        # Section E — Team Bullpen (deferred to follow-up).
+        # Section E — Team Bullpen (pitching-staff aggregate + league ranks).
         with _card():
             _section_label("TEAM BULLPEN")
-            _note(
-                "Bullpen ERA, R/9, and WHIP with league rank badges are "
-                "coming in the next update.",
-                dashed=True,
-            )
+            # Pitching team = opponent for a batter; own team for a pitcher.
+            team_abbrev = (info.get("team_abbrev") if is_pitcher else opp_abbrev) or ""
+            if team_abbrev:
+                def _load_pen():                                          # noqa: WPS430
+                    from src import player_matchup as _pm
+                    return _pm.get_bullpen_stats(team_abbrev)
+                _lazy(_load_pen, _render_bullpen,
+                      unavailable="Bullpen data unavailable.",
+                      spinner_text="Loading bullpen stats…")
+            else:
+                _note("No pitching team resolved.")
 
 
 def _render_matchup_grade(d: dict) -> None:
+    """Numeric matchup score out of 100 (FIX 3).  No explanatory sentence
+    -- the Weather / Park / Starter / Bullpen cards below convey the why."""
     color = _clr(d.get("color", "dim"))
-    with ui.row().classes("items-center w-full").style("gap: 14px;"):
-        ui.label(d.get("grade", "—")).style(
+    score = d.get("score")
+    score_txt = f"{int(round(score))}/100" if isinstance(score, (int, float)) else "—"
+    with ui.row().classes("items-baseline w-full").style("gap: 4px;"):
+        ui.label(score_txt.split("/")[0]).style(
             f"font-size: 40px; font-weight: 900; color: {color}; "
-            f"line-height: 1; font-family: monospace; flex-shrink: 0; "
-            f"min-width: 64px; text-align: center;")
-        ui.label(d.get("summary", "")).style(
-            f"font-size: 13px; font-weight: 600; color: {t.TEXT_DIM}; "
-            f"line-height: 1.5; white-space: normal; flex: 1; min-width: 0;")
+            f"line-height: 1; font-family: monospace;")
+        ui.label("/100").style(
+            f"font-size: 18px; font-weight: 800; color: {t.TEXT_DIM2}; "
+            f"font-family: monospace;")
 
 
 def _render_weather(d: dict) -> None:
@@ -720,6 +784,292 @@ def _render_h2h(d: dict) -> None:
         _stat_box("AVG", d.get("avg", "—"))
         _stat_box("HR", str(hr))
         _stat_box("K%", k_pct)
+
+
+# ── Statcast percentile bars (Tab 2) ────────────────────────────────────────
+
+def _percentile_bar(label: str, value: str, pct: Optional[float]) -> None:
+    """One metric row: name | gradient track w/ colored circle | raw value."""
+    from src import player_matchup as _pm
+    color = _clr(_pm.percentile_color(pct))
+    pos = pct if isinstance(pct, (int, float)) else 50
+    track = (
+        f'<div style="position:relative; height:8px; border-radius:999px; '
+        f'background:linear-gradient(90deg, rgba(244,63,94,.30), '
+        f'rgba(245,158,11,.30), rgba(16,185,129,.30)); width:100%;">'
+        f'<div style="position:absolute; top:50%; left:{pos}%; '
+        f'transform:translate(-50%,-50%); width:14px; height:14px; '
+        f'border-radius:50%; background:{color}; border:2px solid {t.BG}; '
+        f'box-shadow:0 0 6px {color};"></div></div>'
+    )
+    with ui.row().classes("items-center w-full").style(
+        "gap: 10px; padding: 5px 0; min-width: 0;"
+    ):
+        ui.label(label).style(
+            f"font-size: 11px; font-weight: 700; color: {t.TEXT_DIM}; "
+            f"min-width: 104px; white-space: nowrap;")
+        ui.html(track).style("flex: 1; min-width: 0;")
+        ui.label(value).style(
+            f"font-size: 12px; font-weight: 800; font-family: monospace; "
+            f"color: {t.TEXT}; min-width: 52px; text-align: right;")
+
+
+def _render_statcast_percentiles(data: dict) -> None:
+    splits = data.get("splits", {}) or {}
+    state = {"split": "all"}
+    options = (("all", "SZN"), ("rhp", "vs RHP"), ("lhp", "vs LHP"))
+
+    @ui.refreshable
+    def render_pills() -> None:                                           # noqa: WPS430
+        with ui.row().classes("items-center").style(
+            "gap: 6px; flex-wrap: wrap; padding-bottom: 8px;"
+        ):
+            for key, plabel in options:
+                active = state["split"] == key
+                bg = t.PRIMARY if active else "transparent"
+                fg = t.TEXT if active else t.TEXT_DIM
+                bd = t.PRIMARY if active else t.BORDER
+                ui.button(plabel, on_click=lambda k=key: _set(k)).props(
+                    "no-caps unelevated dense"
+                ).style(
+                    f"background: {bg}; color: {fg}; border: 1px solid {bd}; "
+                    f"font-size: 10.5px; font-weight: 800; letter-spacing: .4px; "
+                    f"padding: 4px 12px; border-radius: {t.RADIUS_PILL}; "
+                    f"min-height: 0;")
+
+    @ui.refreshable
+    def render_bars() -> None:                                            # noqa: WPS430
+        sp = splits.get(state["split"]) or {}
+        if not sp.get("available"):
+            _note(sp.get("note") or "Not enough data for this split.")
+            return
+        for r in sp.get("rows", []):
+            _percentile_bar(r["label"], r["value"], r["percentile"])
+
+    def _set(split: str) -> None:
+        state["split"] = split
+        render_pills.refresh()
+        render_bars.refresh()
+
+    render_pills()
+    render_bars()
+
+
+# ── Opposing lineup (Tab 3, pitcher view) ───────────────────────────────────
+
+# League-average baselines for the lineup split arrows (FIX 4).
+_LG_SPLIT = {"avg": 0.245, "woba": 0.315, "iso": 0.155, "k_pct": 22.5}
+
+
+def _split_arrow(metric: str, value) -> str:
+    """Inline ▲/▼ vs league average for a split metric.  Up+green = better
+    than league (for K% 'better' means lower); down+red = worse."""
+    if not isinstance(value, (int, float)):
+        return ""
+    base = _LG_SPLIT[metric]
+    better = (value < base) if metric == "k_pct" else (value > base)
+    sym = "▲" if better else "▼"
+    color = t.POS if better else t.NEG
+    return (f"<span style='color:{color}; font-size:10px; "
+            f"margin-left:2px;'>{sym}</span>")
+
+
+def _render_lineup(d: dict) -> None:
+    batters = d.get("batters") or []
+    if not batters:
+        _note("Opposing lineup not posted yet.")
+        return
+    split_label = d.get("split_label") or "vs RHP"
+
+    def _r3(v):  # rate -> '.287'
+        return f"{v:.3f}".lstrip("0") if isinstance(v, (int, float)) else "—"
+
+    with ui.column().classes("w-full").style("gap: 0; min-width: 0;"):
+        for b in batters:
+            hand = f" ({b.get('hand')})" if b.get("hand") in ("L", "R", "S") else ""
+            with ui.column().classes("w-full").style(
+                f"gap: 3px; padding: 8px 0; "
+                f"border-bottom: 1px solid {t.BORDER_SOFT}; min-width: 0;"
+            ):
+                # Row 1: order, name (hand), season slash.
+                with ui.row().classes("items-center w-full").style("gap: 8px;"):
+                    ui.label(str(b.get("order") or "")).style(
+                        f"font-size: 11px; font-weight: 800; color: {t.TEXT_DIM2}; "
+                        f"font-family: monospace; min-width: 16px;")
+                    ui.label(f"{b.get('name', '')}{hand}").style(
+                        f"font-size: 13px; font-weight: 700; color: {t.TEXT}; "
+                        f"flex: 1; min-width: 0; white-space: nowrap; "
+                        f"overflow: hidden; text-overflow: ellipsis;")
+                    ui.label(
+                        f"{b.get('avg','—')}/{b.get('obp','—')}/{b.get('slg','—')}"
+                    ).style(
+                        f"font-size: 11px; font-weight: 700; color: {t.TEXT_DIM}; "
+                        f"font-family: monospace; flex-shrink: 0;")
+                # Row 2: split vs pitcher hand with arrows.
+                pa = b.get("split_pa")
+                if isinstance(pa, (int, float)) and pa > 0:
+                    parts = [
+                        f"<span style='color:{t.TEXT_DIM2};'>{split_label}</span>",
+                        f"PA {int(pa)}",
+                        f"AVG {_r3(b.get('split_avg'))}{_split_arrow('avg', b.get('split_avg'))}",
+                        f"wOBA {_r3(b.get('split_woba'))}{_split_arrow('woba', b.get('split_woba'))}",
+                        f"ISO {_r3(b.get('split_iso'))}{_split_arrow('iso', b.get('split_iso'))}",
+                        (f"K% {b.get('split_k_pct'):.0f}%{_split_arrow('k_pct', b.get('split_k_pct'))}"
+                         if isinstance(b.get('split_k_pct'), (int, float)) else "K% —"),
+                    ]
+                    ui.html(
+                        "<div style='display:flex; flex-wrap:wrap; gap:10px; "
+                        "font-size:11px; font-family:monospace; "
+                        f"color:{t.TEXT}; padding-left:24px;'>"
+                        + "".join(f"<span>{p}</span>" for p in parts)
+                        + "</div>"
+                    )
+                else:
+                    ui.label(f"{split_label}: no split data").style(
+                        f"font-size: 10.5px; font-style: italic; "
+                        f"color: {t.TEXT_DIM2}; padding-left: 24px;")
+
+
+# ── Batter vs pitch type (Tab 3, batter view) ───────────────────────────────
+
+def _render_bvp_table(d: dict) -> None:
+    rows = d.get("rows") or []
+    if not rows:
+        _note("No pitch-type data available.")
+        return
+    th = (f"font-size:9.5px; font-weight:800; letter-spacing:.4px; "
+          f"color:{t.TEXT_DIM2}; padding:5px 6px; text-align:right; "
+          f"border-bottom:1px solid {t.BORDER};")
+    th_l = th.replace("text-align:right", "text-align:left")
+    head = (f"<th style='{th_l}'>Pitch</th><th style='{th}'>Faced</th>"
+            f"<th style='{th}'>AVG</th><th style='{th}'>SLG</th>"
+            f"<th style='{th}'>HR</th><th style='{th}'>K%</th>")
+    body = ""
+    for r in rows:
+        td = (f"font-size:12px; font-family:monospace; padding:5px 6px; "
+              f"text-align:right; color:{t.TEXT}; "
+              f"border-bottom:1px solid {t.BORDER_SOFT};")
+        td_l = td.replace("text-align:right", "text-align:left")
+        body += (
+            f"<tr><td style='{td_l}'>{r.get('pitch', '')}</td>"
+            f"<td style='{td}'>{r.get('faced', 0)}</td>"
+            f"<td style='{td}'>{r.get('avg', '—')}</td>"
+            f"<td style='{td}'>{r.get('slg', '—')}</td>"
+            f"<td style='{td}'>{r.get('hr', 0)}</td>"
+            f"<td style='{td}'>{r.get('k_pct', '—')}</td></tr>"
+        )
+    ui.html(
+        f"<div style='overflow-x:auto; width:100%;'>"
+        f"<table style='width:100%; border-collapse:collapse;'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
+# ── Pitcher arsenal donut (Tab 3, batter view) ──────────────────────────────
+
+_ARSENAL_PALETTE = [
+    t.PRIMARY, t.PRIMARY_HI, t.POS, t.WARN, t.NEG,
+    "#3b82f6", "#14b8a6", "#eab308", "#ec4899", "#8b5cf6",
+]
+
+
+def _render_arsenal(mix: dict) -> None:
+    pitches = mix.get("pitches") or []
+    if not pitches:
+        _note("Pitch data unavailable.")
+        return
+    data = []
+    for i, p in enumerate(pitches):
+        data.append({
+            "value": p.get("usage", 0),
+            "name":  p.get("name", p.get("type", "?")),
+            "itemStyle": {"color": _ARSENAL_PALETTE[i % len(_ARSENAL_PALETTE)]},
+        })
+    opts = {
+        "backgroundColor": "transparent",
+        "title": {
+            "text": str(mix.get("total_types", len(pitches))),
+            "subtext": "Pitches",
+            "left": "center", "top": "36%",
+            "textStyle": {"color": t.TEXT, "fontSize": 22, "fontWeight": "bold"},
+            "subtextStyle": {"color": t.TEXT_DIM2, "fontSize": 10},
+        },
+        "tooltip": {"trigger": "item", "formatter": "{b}: {c}%"},
+        "series": [{
+            "type": "pie", "radius": ["52%", "74%"],
+            "avoidLabelOverlap": False,
+            "label": {"show": False},
+            "labelLine": {"show": False},
+            "data": data,
+        }],
+    }
+    with ui.row().classes("items-center w-full").style(
+        "gap: 14px; flex-wrap: wrap; min-width: 0;"
+    ):
+        ui.echart(opts).style("width: 160px; height: 160px; flex-shrink: 0;")
+        with ui.column().style("gap: 5px; flex: 1; min-width: 140px;"):
+            for i, p in enumerate(pitches):
+                color = _ARSENAL_PALETTE[i % len(_ARSENAL_PALETTE)]
+                velo = p.get("velocity")
+                velo_txt = f"{velo:.1f} mph" if isinstance(velo, (int, float)) else "—"
+                ui.html(
+                    f"<div style='display:flex; align-items:center; gap:8px; "
+                    f"font-size:12px;'>"
+                    f"<span style='width:10px; height:10px; border-radius:50%; "
+                    f"background:{color}; flex-shrink:0;'></span>"
+                    f"<span style='color:{t.TEXT}; font-weight:700; flex:1;'>"
+                    f"{p.get('name', '')}</span>"
+                    f"<span style='color:{t.TEXT_DIM}; font-family:monospace; "
+                    f"font-weight:800;'>{p.get('usage', 0):.0f}%</span>"
+                    f"<span style='color:{t.TEXT_DIM2}; font-family:monospace; "
+                    f"min-width:64px; text-align:right;'>{velo_txt}</span></div>"
+                )
+
+
+# ── Team bullpen (Tab 3) ────────────────────────────────────────────────────
+
+def _render_bullpen(d: dict) -> None:
+    from src import player_matchup as _pm
+    n = d.get("n_teams", 30)
+
+    def _rank_badge(rank) -> str:
+        if not rank:
+            return ""
+        color = _clr(_pm.rank_color(rank))
+        return (
+            f'<span style="display:inline-block; font-size:9px; font-weight:800; '
+            f'font-family:monospace; color:{color}; border:1px solid {color}; '
+            f'border-radius:999px; padding:1px 6px; margin-top:3px; '
+            f'background:rgba(0,0,0,.2);">#{rank} of {n}</span>'
+        )
+
+    items = (
+        ("ERA",  d.get("era"),  d.get("era_rank")),
+        ("R/9",  d.get("r9"),   d.get("r9_rank")),
+        ("WHIP", d.get("whip"), d.get("whip_rank")),
+    )
+    with ui.column().classes("w-full").style("gap: 8px; min-width: 0;"):
+        ui.label("Season bullpen (relief) aggregate"
+                 if d.get("scope") == "relief"
+                 else "Season pitching-staff aggregate").style(
+            f"font-size: 10.5px; font-style: italic; color: {t.TEXT_DIM2};")
+        with ui.row().classes("items-stretch w-full").style(
+            "gap: 8px; flex-wrap: nowrap;"
+        ):
+            for label, val, rank in items:
+                vtxt = f"{val:.2f}" if isinstance(val, (int, float)) else "—"
+                with ui.column().classes("flex-grow").style(
+                    f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 2px; "
+                    f"min-width: 0; flex: 1 1 0; align-items: center;"
+                ):
+                    ui.label(label).style(
+                        f"font-size: 9.5px; font-weight: 800; letter-spacing: .6px; "
+                        f"color: {t.TEXT_DIM2};")
+                    ui.label(vtxt).style(
+                        f"font-size: 17px; font-weight: 800; font-family: monospace; "
+                        f"color: {t.TEXT};")
+                    ui.html(_rank_badge(rank))
 
 
 # ── Per-market view (everything below the tabs) ─────────────────────────────
@@ -951,19 +1301,36 @@ def _section_chart_block(
 
     state = {"window": "Last 10", "context": "all"}
 
+    def _windowed_games() -> list[dict]:
+        f = _apply_window_filter(games, state["window"], opp_abbrev)
+        return _apply_context_filter(
+            f, state["context"], is_pitcher, opp_abbrev=opp_abbrev,
+        )
+
+    def _windowed_avg() -> Optional[float]:
+        """Mean of the active stat over the games matching the current
+        window + context filter -- so the badge tracks the selected
+        time-filter pill (L5/L10/L20/Season/H2H) instead of always the
+        season average."""
+        vals = [g.get(stat_key) for g in _windowed_games()
+                if isinstance(g.get(stat_key), (int, float))]
+        return (sum(vals) / len(vals)) if vals else None
+
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
         f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 10px;"
     ):
-        # AVG badge -- season avg vs the line, coloured red/green.
-        _section_avg_badge(summary.get("season_avg"), line_f, stat_key)
+        # AVG badge -- average for the ACTIVE window vs the line (FIX 1).
+        @ui.refreshable
+        def render_badge() -> None:                                       # noqa: WPS430
+            _section_avg_badge(_windowed_avg(), line_f, stat_key,
+                               window_tag=_WINDOW_TAG.get(state["window"], ""))
+
+        render_badge()
 
         @ui.refreshable
         def render_chart() -> None:                                       # noqa: WPS430
-            filtered = _apply_window_filter(games, state["window"], opp_abbrev)
-            filtered = _apply_context_filter(
-                filtered, state["context"], is_pitcher, opp_abbrev=opp_abbrev,
-            )
+            filtered = _windowed_games()
             if not filtered:
                 ui.label(
                     f"No games match the current filter "
@@ -980,29 +1347,39 @@ def _section_chart_block(
         with ui.column().classes("w-full").style("gap: 6px;"):
             render_chart()
 
+        def _on_window_change() -> None:                                  # noqa: WPS430
+            render_badge.refresh()
+            render_chart.refresh()
+
         _render_time_pills_with_rates(
             summary, line_f, side, state,
-            on_change=render_chart.refresh,
+            on_change=_on_window_change,
             ctx_options=_stat_context_options(is_pitcher, opp_abbrev),
         )
 
 
 def _section_avg_badge(
-    season_avg: Optional[float],
+    avg_value: Optional[float],
     line_f: Optional[float],
     stat_key: str,
+    *,
+    window_tag: str = "",
 ) -> None:
-    """Small pill: 'AVG 1.4 hits', coloured against the line."""
-    if season_avg is None:
+    """Small pill: '{tag} AVG 1.4 H', coloured against the line.  *avg_value*
+    is the average for the currently-active time window (FIX 1), and
+    *window_tag* (e.g. 'L5', 'SZN') prefixes the label so it's clear which
+    window the average reflects."""
+    if avg_value is None:
         return
     if line_f is None:
         color = t.TEXT_DIM
-    elif season_avg >= line_f:
+    elif avg_value >= line_f:
         color = t.POS
     else:
         color = t.NEG
     stat_label = stat_key if stat_key else ""
-    ui.label(f"AVG {season_avg:.2f} {stat_label}".strip()).style(
+    prefix = f"{window_tag} " if window_tag else ""
+    ui.label(f"{prefix}AVG {avg_value:.2f} {stat_label}".strip()).style(
         f"background: rgba(16, 185, 129, .08); color: {color}; "
         f"font-size: 11.5px; font-weight: 800; letter-spacing: .4px; "
         f"padding: 4px 10px; border-radius: {t.RADIUS_PILL}; "
@@ -2369,9 +2746,14 @@ def _game_log_table(
     games: list[dict],
     is_pitcher: bool,
     highlighted_stat: str,
+    line: Optional[float] = None,
 ) -> None:
     """Single ui.html block -- avoids NiceGUI's per-element div wrapping
-    that would otherwise break <tr>/<td> nesting."""
+    that would otherwise break <tr>/<td> nesting.
+
+    When *line* is given, the highlighted stat column is coloured per row
+    against that book line (FIX 6): green if the value exceeded the line,
+    red if it fell short, amber on an exact push -- instead of a flat green."""
     if is_pitcher:
         cols = ["Date", "OPP", "IP", "H", "ER", "BB", "K"]
         col_min_w = {
@@ -2424,10 +2806,23 @@ def _game_log_table(
         f"border-bottom:1px solid {t.BORDER}; white-space:nowrap;"
     )
 
-    def _td(col: str, extra: str = "") -> str:
+    def _td(col: str, value=None, extra: str = "") -> str:
         highlighted = col_stat_map.get(col) == hl
-        color  = t.POS if highlighted else t.TEXT
-        weight = "800" if highlighted else "400"
+        if highlighted and line is not None and isinstance(value, (int, float)):
+            # Per-row over/under colouring vs the active market's book line.
+            if value > line:
+                color = t.POS          # exceeded the line
+            elif value < line:
+                color = t.NEG          # fell short
+            else:
+                color = t.WARN         # exact push
+            weight = "800"
+        elif highlighted:
+            color  = t.POS             # highlighted column, no line known
+            weight = "800"
+        else:
+            color  = t.TEXT
+            weight = "400"
         return (
             f"font-size:12px; font-family:monospace; font-weight:{weight}; "
             f"padding:6px 10px; text-align:right; color:{color}; "
@@ -2470,7 +2865,8 @@ def _game_log_table(
                     cells += f"<td style='{_td(col)}'>{_safe_ip(g)}</td>"
                 else:
                     raw_key = col_stat_map.get(col, col)
-                    cells += f"<td style='{_td(col)}'>{_safe_num(g.get(raw_key))}</td>"
+                    raw_val = g.get(raw_key)
+                    cells += f"<td style='{_td(col, raw_val)}'>{_safe_num(raw_val)}</td>"
             body_rows += f"<tr class='game-log-row'>{cells}</tr>"
         except Exception as _row_exc:                                      # noqa: BLE001
             _log(f"game log row skipped ({type(_row_exc).__name__}: {_row_exc})")
