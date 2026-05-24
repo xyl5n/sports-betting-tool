@@ -109,45 +109,63 @@ def confidence_tier_from_prob(pick_prob: float | None) -> str:
     return "low"
 
 
-def tracked_bet_kelly(prob, american_odds, bankroll) -> tuple[float, Optional[str]]:
-    """Recommended stake for a tracked bet using the textbook half-Kelly
-    formula, sized off the *current* bankroll.
+def bet_size_bounds(bankroll) -> tuple[float, float]:
+    """Per-bet dollar (floor, ceiling) for a personal bankroll: a 1% floor
+    (never below $1) and a 5% ceiling, each rounded to the nearest dollar.
+    So $100 -> ($1, $5), $200 -> ($2, $10)."""
+    try:
+        bk = max(0.0, float(bankroll or 0.0))
+    except (TypeError, ValueError):
+        bk = 0.0
+    floor = max(1.0, float(round(bk * 0.01)))
+    ceiling = max(floor, float(round(bk * 0.05)))
+    return floor, ceiling
 
-        b    = decimal_odds - 1
-        p    = model win probability,  q = 1 - p
-        full = (b*p - q) / b
-        half = full / 2
-        $    = half * bankroll
+
+def tracked_bet_kelly(prob, american_odds, bankroll) -> tuple[float, Optional[str]]:
+    """Recommended personal-bankroll stake for a tracked bet.  ALWAYS
+    returns a positive dollar amount -- never $0:
+
+      * half-Kelly off the *current* bankroll when there's a positive edge,
+      * 1% of bankroll (flat) when there's no edge or no usable confidence,
+
+    then clamped to ``[1% of bankroll (min $1), 5% of bankroll]`` and
+    rounded to the nearest dollar.  Sizing is always off the personal
+    bankroll the caller passes in (never the model bankroll).
 
     Returns ``(dollars, flag)``:
-      * positive edge -> (dollars, None), with a $1 floor when the raw
-        amount rounds below a dollar (so a real edge never displays $0).
-      * no edge (half-Kelly <= 0) -> (0.0, "no_edge").
-      * bad inputs -> (0.0, "invalid").
-
-    Unlike :func:`size_bet`, this applies NO confidence-tier / upset /
-    hard-cap reductions and NO minimum-edge gate -- every tracked bet is
-    sized by the same formula off the same bankroll, so two bets can no
-    longer disagree on method (the $2-vs-$0 bug)."""
+      * ``None``      -> Kelly-sized (a real edge was present)
+      * ``"flat"``    -> 1% flat fallback (no edge / no usable confidence)
+      * ``"invalid"`` -> bankroll <= 0, can't size (dollars 0.0)
+    """
     try:
-        p  = float(prob)
         bk = float(bankroll)
-        odds = int(american_odds)
     except (TypeError, ValueError):
         return 0.0, "invalid"
-    if not (0.0 < p < 1.0) or bk <= 0:
+    if bk <= 0:
         return 0.0, "invalid"
-    b = american_to_decimal(odds) - 1.0
-    if b <= 0:
-        return 0.0, "invalid"
-    q = 1.0 - p
-    half = ((b * p - q) / b) / 2.0
-    if half <= 0:
-        return 0.0, "no_edge"
-    dollars = half * bk
-    if dollars < 1.0:
-        return 1.0, None          # positive edge but rounds to $0 -> $1 floor
-    return float(round(dollars)), None
+
+    floor, ceiling = bet_size_bounds(bk)
+    flat = floor                       # 1% of bankroll (min $1) == the floor
+
+    # Half-Kelly stake when we have a usable probability + odds + positive edge.
+    kelly_dollars: Optional[float] = None
+    try:
+        p = float(prob)
+        odds = int(american_odds)
+        if 0.0 < p < 1.0:
+            b = american_to_decimal(odds) - 1.0
+            if b > 0:
+                half = ((b * p - (1.0 - p)) / b) / 2.0
+                if half > 0:
+                    kelly_dollars = half * bk
+    except (TypeError, ValueError):
+        kelly_dollars = None
+
+    if kelly_dollars is None:
+        return float(flat), "flat"     # no edge -> 1% flat (never $0)
+    clamped = min(ceiling, max(floor, kelly_dollars))
+    return float(round(clamped)), None
 
 
 def size_bet(

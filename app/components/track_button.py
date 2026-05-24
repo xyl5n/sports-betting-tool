@@ -99,6 +99,74 @@ def render(
     )
     btn = ui.button(label).props("no-caps unelevated dense").style(base_style)
 
+    def _on_success(data: dict) -> None:
+        team = data.get("team")
+        amt  = data.get("confirmed_amount")
+        if team and amt is not None:
+            msg = f"Tracked {short}: {team} (${amt:.2f})"
+        elif amt is not None:
+            msg = f"Tracked {short} (${amt:.2f})"
+        else:
+            msg = f"Tracked {short}."
+        ui.notify(msg, type="positive")
+        btn.text = f"{short} ✓"
+        btn.props("disable")
+        if on_tracked is not None:
+            try:
+                on_tracked()
+            except Exception:                                             # noqa: BLE001
+                pass
+
+    async def _attempt(force: bool) -> None:
+        path, body = _endpoint_and_body(bet_type, game_id, sport)
+        if force:
+            body = {**body, "force": True}
+        ok, data, status = await asyncio.to_thread(_post, backend, path, body)
+        # Over-daily-budget gate: the server didn't track; ask to confirm.
+        if ok and data.get("over_budget") and not force:
+            _confirm_over_budget(data)
+            return
+        if ok:
+            _on_success(data)
+        elif status < 400 and (data.get("unavailable") or data.get("message")):
+            ui.notify(data.get("message") or "Not available for this game.",
+                      type="warning", multi_line=True)
+        else:
+            err = data.get("error") or data.get("message") or "unknown error"
+            ui.notify(f"Track {short} failed ({status}): {err}",
+                      type="negative", multi_line=True)
+
+    def _confirm_over_budget(data: dict) -> None:
+        budget    = float(data.get("budget") or 0.0)
+        remaining = float(data.get("remaining") or 0.0)
+        with ui.dialog() as dialog, ui.card().style("gap: 12px; max-width: 360px;"):
+            ui.label("Over daily budget").style(
+                f"font-size: 15px; font-weight: 800; color: {t.TEXT};")
+            ui.label(
+                f"This bet would put you over your daily budget of "
+                f"${budget:,.0f}. You have ${remaining:,.0f} remaining today. "
+                f"Do you still want to track it?"
+            ).style(f"font-size: 12.5px; color: {t.TEXT_DIM}; line-height: 1.5;")
+            with ui.row().classes("w-full").style("justify-content: flex-end; gap: 8px;"):
+                ui.button("Cancel", on_click=dialog.close).props(
+                    "flat no-caps").style(f"color: {t.TEXT_DIM};")
+
+                async def _track_anyway():
+                    dialog.close()
+                    btn.props("loading")
+                    btn.disable()
+                    try:
+                        await _attempt(force=True)
+                    finally:
+                        btn.props(remove="loading")
+                        if btn.text == label:
+                            btn.enable()
+
+                ui.button("Track Anyway", on_click=_track_anyway).props(
+                    "unelevated no-caps").style(
+                    f"background: {t.PRIMARY}; color: {t.BG}; font-weight: 800;")
+        dialog.open()
+
     async def _click():
         if disabled_reason:
             ui.notify(disabled_reason, type="warning")
@@ -114,34 +182,7 @@ def render(
         btn.props("loading")
         btn.disable()
         try:
-            path, body = _endpoint_and_body(bet_type, game_id, sport)
-            ok, data, status = await asyncio.to_thread(_post, backend, path, body)
-            if ok:
-                team = data.get("team")
-                amt  = data.get("confirmed_amount")
-                if team and amt is not None:
-                    msg = f"Tracked {short}: {team} (${amt:.2f})"
-                elif amt is not None:
-                    msg = f"Tracked {short} (${amt:.2f})"
-                else:
-                    msg = f"Tracked {short}."
-                ui.notify(msg, type="positive")
-                btn.text = f"{short} ✓"
-                btn.props("disable")
-                if on_tracked is not None:
-                    try:
-                        on_tracked()
-                    except Exception:                                     # noqa: BLE001
-                        pass
-            elif status < 400 and (data.get("unavailable") or data.get("message")):
-                # Graceful "prediction not available" — not an error, just
-                # nothing to track for this bet type on this game.
-                ui.notify(data.get("message") or "Not available for this game.",
-                          type="warning", multi_line=True)
-            else:
-                err = data.get("error") or data.get("message") or "unknown error"
-                ui.notify(f"Track {short} failed ({status}): {err}",
-                          type="negative", multi_line=True)
+            await _attempt(force=False)
         except Exception as exc:                                          # noqa: BLE001
             ui.notify(f"Track failed: {type(exc).__name__}: {exc}",
                       type="negative", multi_line=True)
