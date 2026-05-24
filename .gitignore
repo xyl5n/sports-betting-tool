@@ -43,3 +43,8 @@ env/
 # file is restored from Supabase on cold boot when present.  Stop tracking
 # it in git so PR-merge conflicts on this one file never happen again.
 **/.cache/props_reg_metadata.json
+
+# Player-similarity clusters — regenerated nightly by the 3 AM prefetch job
+# (recompute_clusters) and mirrored to Supabase as similarity_{market}_{date}.
+# It's a derived artifact, not source, so keep it out of the repo.
+**/.cache/player_similarity_clusters.json
