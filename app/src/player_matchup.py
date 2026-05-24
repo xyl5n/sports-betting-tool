@@ -439,8 +439,14 @@ def get_bullpen_stats(team_abbrev: str, season: Optional[int] = None) -> dict:
     except Exception:                                                     # noqa: BLE001
         pass
 
+    # Prefer the relief-only (bullpen) split; fall back to the full
+    # pitching staff when the relief situational split isn't available.
+    scope = "relief"
     try:
-        teams = _ppc._fetch_team_stats("pitching", season)
+        teams = _ppc._fetch_team_pitching_relief(season)
+        if not teams:
+            scope = "staff"
+            teams = _ppc._fetch_team_stats("pitching", season)
     except Exception as exc:                                              # noqa: BLE001
         _log(f"get_bullpen_stats fetch error: {exc}")
         teams = []
@@ -480,6 +486,7 @@ def get_bullpen_stats(team_abbrev: str, season: Optional[int] = None) -> dict:
 
     out = {
         "available": True, "note": "", "team": abbrev, "n_teams": n,
+        "scope": scope,
         "era": me["era"], "r9": me["r9"], "whip": me["whip"],
         "era_rank":  _rank("era", me["era"]),
         "r9_rank":   _rank("r9", me["r9"]),
