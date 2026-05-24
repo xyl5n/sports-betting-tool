@@ -8085,7 +8085,8 @@ def mybets_edit():
     bet_id = data.get("id")
     if not bet_id:
         return jsonify({"error": "id required"}), 400
-    fields = {k: data.get(k) for k in ("odds", "line", "amount", "actual_payout", "notes")
+    fields = {k: data.get(k) for k in ("odds", "line", "amount", "actual_payout",
+                                       "notes", "confidence")
               if data.get(k) is not None}
 
     if kind == "prop":

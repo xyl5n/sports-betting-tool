@@ -495,6 +495,7 @@ class Ledger:
         amount=None,
         actual_payout=None,
         notes=None,
+        confidence=None,
     ) -> dict | None:
         """Edit fields on a single bet (open or settled) and persist.  Only
         provided fields change.  *line* is the bettor-facing handicap/total;
@@ -516,6 +517,17 @@ class Ledger:
         if odds is not None:
             try:
                 bet["american_odds"] = int(odds)
+            except (TypeError, ValueError):
+                pass
+        if confidence is not None:
+            # The user's confidence estimate drives both the displayed
+            # confidence % and the Kelly recommendation for this bet.
+            try:
+                cv = float(confidence)
+                if cv > 1.0:           # tolerate a percent (e.g. 58 -> 0.58)
+                    cv = cv / 100.0
+                if 0.0 < cv < 1.0:
+                    bet["model_prob"] = cv
             except (TypeError, ValueError):
                 pass
         if line is not None:

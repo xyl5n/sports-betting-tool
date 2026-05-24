@@ -422,6 +422,7 @@ def update_pick(
     amount=None,      # noqa: ARG001 (props are flat-stake; accepted + ignored)
     actual_payout=None,
     notes=None,
+    confidence=None,
 ) -> Optional[dict]:
     """Edit fields on a single tracked prop pick and persist.  Only the
     provided fields are changed.  Props use a flat-stake tracker (no
@@ -439,6 +440,16 @@ def update_pick(
     if line is not None:
         try:
             pick["line"] = float(line)
+        except (TypeError, ValueError):
+            pass
+    if confidence is not None:
+        # Drives both the displayed confidence and the Kelly recommendation.
+        try:
+            cv = float(confidence)
+            if cv > 1.0:
+                cv = cv / 100.0
+            if 0.0 < cv < 1.0:
+                pick["confidence"] = cv
         except (TypeError, ValueError):
             pass
     if notes is not None:
