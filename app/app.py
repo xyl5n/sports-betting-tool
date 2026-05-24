@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request as _urlreq
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
