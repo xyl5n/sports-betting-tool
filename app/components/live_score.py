@@ -145,29 +145,45 @@ def _team_pair_key(away: str, home: str) -> str:
 
 def state_of(live: Optional[dict]) -> str:
     """One of 'live', 'final', 'scheduled' from the stats-API game dict.
-    Returns 'scheduled' when live is None."""
+    Returns 'scheduled' when live is None.
+
+    A game counts as LIVE only when it is actually in progress:
+    ``codedGameState == "I"`` or ``abstractGameState == "Live"`` with a
+    coded state that isn't pre-game.  The MLB Stats API reports
+    ``abstractGameState == "Live"`` during Warmup / Pre-Game / Delayed
+    Start too (those carry ``codedGameState == "P"``), so a "P" coded
+    state is treated as pre-game and shows the scheduled time instead of
+    a premature 0-0 score."""
     if not live:
         return "scheduled"
-    s = ((live.get("status") or {}).get("abstractGameState") or "").lower()
-    if s == "live":
-        return "live"
-    if s == "final":
+    status   = live.get("status") or {}
+    abstract = (status.get("abstractGameState") or "").strip().lower()
+    coded    = (status.get("codedGameState") or "").strip().upper()
+    if abstract == "final" or coded == "F":
         return "final"
+    if coded == "I" or (abstract == "live" and coded != "P"):
+        return "live"
     return "scheduled"
 
 
 def state_from_schedule(sched: Optional[dict]) -> str:
     """Live/final/scheduled derived from the flat schedule fields stashed
-    on a card row's ``_sched`` (is_live / status / coded_status).  Used as
-    a fallback when the live-score cache misses."""
+    on a card row's ``_sched`` (status = abstractGameState, coded_status =
+    codedGameState).  Used as a fallback when the live-score cache misses.
+
+    Mirrors :func:`state_of`: in-progress only for codedGameState "I" or a
+    true "Live" abstract state that isn't the pre-game "P" coded state, so
+    Pre-Game / Warmup games show their start time rather than a 0-0 score.
+    The precomputed ``is_live`` flag is intentionally NOT trusted here
+    because it also flips on during Warmup."""
     if not sched:
         return "scheduled"
-    coded = (sched.get("coded_status") or "").upper()
-    status = (sched.get("status") or "").lower()
-    if sched.get("is_live") or status == "live" or coded == "I":
-        return "live"
-    if status == "final" or coded == "F":
+    abstract = (sched.get("status") or "").strip().lower()        # abstractGameState
+    coded    = (sched.get("coded_status") or "").strip().upper()  # codedGameState
+    if abstract == "final" or coded == "F":
         return "final"
+    if coded == "I" or (abstract == "live" and coded != "P"):
+        return "live"
     return "scheduled"
 
 
