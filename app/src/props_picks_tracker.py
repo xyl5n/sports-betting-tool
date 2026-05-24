@@ -452,6 +452,37 @@ def update_pick(
     return pick
 
 
+def set_result(pick_id: str, result: str) -> Optional[dict]:
+    """Manually mark a tracked prop pick as won / lost / void / pending and
+    recompute its flat-stake model_pnl, then persist.  'pending' clears the
+    settlement (pnl 0, no settled_at).  Returns the updated pick or None."""
+    _ensure_loaded()
+    pick = next((p for p in _picks if p.get("id") == pick_id), None)
+    if pick is None:
+        return None
+    r = (result or "").strip().lower()
+    if r in ("win", "won"):
+        r = "won"
+        pick["model_pnl"]  = round(_FLAT_STAKE * _payout_multiplier(pick.get("odds")), 2)
+        pick["settled_at"] = datetime.now(timezone.utc).isoformat()
+    elif r in ("loss", "lost"):
+        r = "lost"
+        pick["model_pnl"]  = -_FLAT_STAKE
+        pick["settled_at"] = datetime.now(timezone.utc).isoformat()
+    elif r in ("push", "void"):
+        r = "void"
+        pick["model_pnl"]  = 0.0
+        pick["settled_at"] = datetime.now(timezone.utc).isoformat()
+    else:  # pending -> un-settle
+        r = "pending"
+        pick["model_pnl"]  = 0.0
+        pick["settled_at"] = None
+        pick.pop("actual_value", None)
+    pick["result"] = r
+    _save()
+    return pick
+
+
 def add_manual_pick(
     *,
     player: str,

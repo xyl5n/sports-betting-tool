@@ -23,8 +23,9 @@ button shows a spinner while the work runs.  Destructive actions
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from nicegui import ui
@@ -64,6 +65,7 @@ def register(backend) -> None:
                 _section_model_bets(backend, _refresh)
                 _section_my_bets(backend, _refresh)
                 _section_data_reset(backend, _refresh)
+                _section_data_explorer(backend)
                 _section_diagnostics(backend)
                 _refresh()
 
@@ -1930,3 +1932,487 @@ async def _number_dialog(title: str, placeholder: str) -> float | None:
                 .style(f"background: {t.PRIMARY}; color: {t.BG}; font-weight: 700;")
     result = await dlg
     return None if result is None else float(result)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Supabase Data Explorer -- live view of app_cache + ledger, with edits
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _age_str(iso) -> str:
+    """Compact 'how long ago' from an ISO-8601 timestamp."""
+    if not iso:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:                                                       # noqa: BLE001
+        return str(iso)[:19]
+    if secs < 0:
+        return "future"
+    if secs < 90:
+        return f"{int(secs)}s ago"
+    if secs < 5400:
+        return f"{int(secs // 60)}m ago"
+    if secs < 172800:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
+
+
+def _fmt_bytes(n) -> str:
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return "—"
+    for unit in ("B", "KB", "MB"):
+        if n < 1024 or unit == "MB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} MB"
+
+
+def _xr_row():
+    """One compact data row inside an explorer panel."""
+    return ui.row().classes("items-center w-full").style(
+        f"gap: 8px; padding: 6px 8px; background: {t.CARD_HI}; "
+        f"border-radius: {t.RADIUS_SM}; flex-wrap: wrap;"
+    )
+
+
+def _xr_mini_btn(label: str, color: str, on_click):
+    return ui.button(label, on_click=on_click).props("no-caps unelevated dense").style(
+        f"background: {color}; color: {t.BG}; font-size: 10px; font-weight: 800; "
+        f"padding: 3px 9px; border-radius: {t.RADIUS_SM}; min-height: 0;"
+    )
+
+
+def _xr_mono(text: str, *, flex: bool = False, dim: bool = False) -> None:
+    ui.label(text).style(
+        f"font-size: 11px; font-family: monospace; "
+        f"color: {t.TEXT_DIM if dim else t.TEXT}; "
+        + ("flex: 1; min-width: 120px; white-space: nowrap; overflow: hidden; "
+           "text-overflow: ellipsis;" if flex else "white-space: nowrap;")
+    )
+
+
+def _explorer_panel(backend, *, title: str, path: str, render_body, post_body=None):
+    """Collapsible category that lazily fetches `path` on first expand and
+    re-fetches on its own Refresh button.  Returns the async loader so the
+    top-level 'Refresh All' can drive it too."""
+    st = {"loaded": False, "loading": False, "data": None, "error": None}
+
+    exp = ui.expansion(title).classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; color: {t.TEXT};"
+    )
+    with exp:
+        status = _make_status_holder()
+
+        @ui.refreshable
+        def body() -> None:                                               # noqa: WPS430
+            async def _rc() -> None:
+                await _load(force=True)
+            with ui.row().classes("items-center w-full").style("gap: 8px; margin-bottom: 6px;"):
+                ui.button("↻ Refresh", on_click=_rc).props("no-caps flat dense").style(
+                    f"color: {t.PRIMARY}; font-size: 11px; font-weight: 700; min-height: 0;"
+                )
+            if st["loading"]:
+                with ui.row().classes("items-center").style("gap: 8px;"):
+                    ui.spinner(size="sm")
+                    ui.label("Loading…").style(f"color: {t.TEXT_DIM}; font-size: 12px;")
+                return
+            if st["error"]:
+                ui.label(f"⚠ {st['error']}").style(
+                    f"color: {t.NEG}; font-size: 12px; white-space: normal; word-break: break-word;"
+                )
+                return
+            if not st["loaded"]:
+                ui.label("Expand to load…").style(f"color: {t.TEXT_DIM2}; font-size: 12px;")
+                return
+            try:
+                render_body(backend, st["data"], _load, status)
+            except Exception as exc:                                       # noqa: BLE001
+                ui.label(f"render error: {exc}").style(f"color: {t.NEG}; font-size: 12px;")
+
+        body()
+
+    async def _load(force: bool = False) -> None:
+        if st["loading"]:
+            return
+        if st["loaded"] and not force:
+            return
+        st["loading"], st["error"] = True, None
+        body.refresh()
+        ok, data, _ = await asyncio.to_thread(_call, backend, "POST", path, post_body or {})
+        st["loading"] = False
+        if ok:
+            st["data"], st["loaded"] = data, True
+        else:
+            st["error"] = data.get("error") or "fetch failed"
+        body.refresh()
+
+    async def _on_toggle(e) -> None:                                       # noqa: WPS430
+        if getattr(e, "value", False) and not st["loaded"] and not st["loading"]:
+            await _load()
+    exp.on_value_change(_on_toggle)
+    return _load
+
+
+# ── Per-category render bodies ─────────────────────────────────────────────
+
+def _xr_models(backend, data, reload, status) -> None:
+    if not data.get("supabase"):
+        ui.label("Supabase not configured — nothing stored remotely.").style(
+            f"color: {t.TEXT_DIM}; font-size: 12px;")
+        return
+    models = data.get("models") or []
+    if not models:
+        ui.label("No model rows found in app_cache.").style(
+            f"color: {t.TEXT_DIM}; font-size: 12px;")
+        return
+    for m in models:
+        with _xr_row():
+            _xr_mono(m.get("key") or "?", flex=True)
+            _xr_mono(_fmt_bytes(m.get("size")), dim=True)
+            _xr_mono((m.get("sha256") or "—")[:12], dim=True)
+            _xr_mono(_age_str(m.get("updated_at")), dim=True)
+            async def _del(key=m.get("key")) -> None:
+                if not await _confirm_dialog(f"Delete model cache row '{key}'?"):
+                    return
+                ok, d, _ = await asyncio.to_thread(
+                    _call, backend, "POST", "/api/admin/explorer/cache_delete", {"key": key})
+                _show_inline_status(status, f"Deleted {key}" if ok
+                                    else f"Failed: {d.get('error')}",
+                                    "success" if ok else "error")
+                if ok:
+                    await reload(force=True)
+            _xr_mini_btn("Delete", t.NEG, _del)
+
+
+def _xr_props_cache(backend, data, reload, status) -> None:
+    today = data.get("today") or {}
+    ui.label(
+        f"Today ({today.get('date') or '—'}): {today.get('markets', 0)} markets · "
+        f"{today.get('total', 0)} props · written {_age_str(today.get('generated_at'))}"
+    ).style(f"color: {t.TEXT}; font-size: 12px; font-weight: 600;")
+    rows = data.get("rows") or []
+    if not rows:
+        ui.label("No props_* rows in app_cache.").style(
+            f"color: {t.TEXT_DIM}; font-size: 12px;")
+        return
+    for r in rows:
+        with _xr_row():
+            _xr_mono(r.get("key") or "?", flex=True)
+            _xr_mono(str(r.get("date") or "—"), dim=True)
+            _xr_mono(_fmt_bytes(r.get("size")), dim=True)
+            _xr_mono(_age_str(r.get("updated_at")), dim=True)
+            async def _del(key=r.get("key")) -> None:
+                if not await _confirm_dialog(f"Delete props cache key '{key}'?"):
+                    return
+                ok, d, _ = await asyncio.to_thread(
+                    _call, backend, "POST", "/api/admin/explorer/cache_delete", {"key": key})
+                _show_inline_status(status, f"Deleted {key}" if ok
+                                    else f"Failed: {d.get('error')}",
+                                    "success" if ok else "error")
+                if ok:
+                    await reload(force=True)
+            _xr_mini_btn("Delete", t.NEG, _del)
+
+
+def _xr_bet_row(backend, b, *, kind, reload, status) -> None:
+    with _xr_row():
+        if kind == "prop":
+            label = f"{b.get('player')} {b.get('side')} {b.get('line')} ({b.get('market')})"
+        else:
+            label = f"{b.get('sport', '').upper()} {b.get('team')} {b.get('bet_type')}"
+        _xr_mono(label, flex=True)
+        res = (b.get("result") or "pending")
+        rc = {"win": t.POS, "won": t.POS, "loss": t.NEG, "lost": t.NEG}.get(res, t.TEXT_DIM)
+        ui.label(res.upper()).style(f"font-size: 10px; font-weight: 800; color: {rc};")
+        sport = b.get("sport") or "mlb"
+        bet_id = b.get("id")
+
+        async def _mark(result: str) -> None:
+            if not await _confirm_dialog(f"Mark this {kind} bet as {result.upper()}?"):
+                return
+            ok, d, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/admin/explorer/mark_bet",
+                {"kind": kind, "id": bet_id, "sport": sport, "result": result})
+            _show_inline_status(status, "Updated" if ok else f"Failed: {d.get('error')}",
+                                "success" if ok else "error")
+            if ok:
+                await reload(force=True)
+
+        async def _del() -> None:
+            if not await _confirm_dialog(f"Delete this {kind} bet record permanently?"):
+                return
+            ok, d, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/mybets/remove",
+                {"kind": kind, "id": bet_id, "sport": sport})
+            _show_inline_status(status, "Deleted" if ok else f"Failed: {d.get('error')}",
+                                "success" if ok else "error")
+            if ok:
+                await reload(force=True)
+
+        _xr_mini_btn("Won", t.POS, lambda: _mark("won"))
+        _xr_mini_btn("Lost", t.NEG, lambda: _mark("lost"))
+        _xr_mini_btn("Pending", t.TEXT_DIM, lambda: _mark("pending"))
+        _xr_mini_btn("Delete", t.WARN, _del)
+
+
+def _xr_picks(backend, data, reload, status) -> None:
+    ledgers = data.get("ledgers") or {}
+    mlb = ledgers.get("mlb") or {}
+
+    # ── Bankroll editors (set_* routes write both sports) ────────────────
+    with ui.row().classes("items-center w-full").style("gap: 8px; flex-wrap: wrap;"):
+        model_in = ui.number("Model bankroll", value=mlb.get("model_bankroll"), format="%.2f") \
+            .props("outlined dense dark").style(f"background: {t.CARD_HI}; flex: 1; min-width: 140px;")
+        pers_in = ui.number("Personal bankroll", value=mlb.get("personal_bankroll"), format="%.2f") \
+            .props("outlined dense dark").style(f"background: {t.CARD_HI}; flex: 1; min-width: 140px;")
+
+        async def _save_model() -> None:
+            v = model_in.value
+            if v is None or float(v) <= 0:
+                return
+            if not await _confirm_dialog(f"Set MODEL bankroll to ${float(v):,.2f}?"):
+                return
+            ok, d, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/ledger/set_model_bankroll", {"bankroll": float(v)})
+            _show_inline_status(status, "Model bankroll set" if ok else f"Failed: {d.get('error')}",
+                                "success" if ok else "error")
+            if ok:
+                await reload(force=True)
+
+        async def _save_pers() -> None:
+            v = pers_in.value
+            if v is None or float(v) <= 0:
+                return
+            if not await _confirm_dialog(f"Set PERSONAL bankroll to ${float(v):,.2f}?"):
+                return
+            ok, d, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/ledger/set_bankroll", {"bankroll": float(v)})
+            _show_inline_status(status, "Personal bankroll set" if ok else f"Failed: {d.get('error')}",
+                                "success" if ok else "error")
+            if ok:
+                await reload(force=True)
+
+        _xr_mini_btn("Save model", t.PRIMARY, _save_model)
+        _xr_mini_btn("Save personal", t.PRIMARY, _save_pers)
+
+    for sport in ("mlb", "wnba"):
+        s = ledgers.get(sport) or {}
+        if not s:
+            continue
+        ui.label(
+            f"{sport.upper()}: model ${s.get('model_bankroll')} · personal ${s.get('personal_bankroll')} · "
+            f"open {s.get('open_bets', 0)} · settled {s.get('settled_bets', 0)} · "
+            f"model P/L {s.get('model_pnl')} · personal P/L {s.get('confirmed_pnl')}"
+        ).style(f"color: {t.TEXT_DIM}; font-size: 11.5px; font-family: monospace;")
+
+    rec = (data.get("props") or {}).get("record") or {}
+    ui.label(
+        f"PROPS: {rec.get('total', 0)} settled · {rec.get('open', 0)} pending · "
+        f"{rec.get('wins', 0)}W-{rec.get('losses', 0)}L-{rec.get('voids', 0)}V"
+    ).style(f"color: {t.TEXT_DIM}; font-size: 11.5px; font-family: monospace;")
+
+    open_bets = data.get("open_bets") or []
+    settled = data.get("settled_bets") or []
+    if open_bets:
+        ui.label("OPEN GAME BETS").style(
+            f"font-size: 10px; font-weight: 800; color: {t.TEXT_DIM2}; margin-top: 4px;")
+        for b in open_bets:
+            _xr_bet_row(backend, b, kind="game", reload=reload, status=status)
+    if settled:
+        ui.label("SETTLED GAME BETS").style(
+            f"font-size: 10px; font-weight: 800; color: {t.TEXT_DIM2}; margin-top: 4px;")
+        for b in settled:
+            _xr_bet_row(backend, b, kind="game", reload=reload, status=status)
+    props_picks = (data.get("props") or {}).get("picks") or []
+    if props_picks:
+        ui.label("PROP PICKS").style(
+            f"font-size: 10px; font-weight: 800; color: {t.TEXT_DIM2}; margin-top: 4px;")
+        for p in props_picks:
+            _xr_bet_row(backend, p, kind="prop", reload=reload, status=status)
+
+
+def _xr_timestamps(backend, data, reload, status) -> None:
+    fields = (
+        ("MLB last analyzed",  "mlb",           data.get("mlb")),
+        ("WNBA last analyzed", "wnba",          data.get("wnba")),
+        ("Last props refresh", "props_refresh", data.get("props_refresh")),
+        ("Last settlement",    "settlement",    data.get("settlement")),
+    )
+    for label, field, value in fields:
+        with _xr_row():
+            ui.label(label).style(f"font-size: 11.5px; color: {t.TEXT}; min-width: 150px;")
+            _xr_mono(str(value or "—"), flex=True, dim=True)
+            inp = ui.input(value=str(value or ""), placeholder="ISO-8601") \
+                .props("outlined dense dark").style(
+                    f"background: {t.CARD_HI}; min-width: 180px;")
+
+            async def _save(field=field, inp=inp) -> None:
+                v = (inp.value or "").strip()
+                if not v:
+                    return
+                if not await _confirm_dialog(f"Override {field} to '{v}'?"):
+                    return
+                ok, d, _ = await asyncio.to_thread(
+                    _call, backend, "POST", "/api/admin/explorer/set_timestamp",
+                    {"field": field, "value": v})
+                _show_inline_status(status, "Overridden" if ok else f"Failed: {d.get('error')}",
+                                    "success" if ok else "error")
+                if ok:
+                    await reload(force=True)
+            _xr_mini_btn("Override", t.PRIMARY, _save)
+
+
+def _xr_key_detail(backend, key: str, status) -> None:
+    """Per-key expandable: lazily fetch + show the raw JSON value."""
+    kst = {"loaded": False, "loading": False, "text": "", "error": None}
+    inner = ui.expansion("▸ view raw").classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER_SOFT}; "
+        f"border-radius: {t.RADIUS_SM}; color: {t.TEXT_DIM};")
+    with inner:
+        @ui.refreshable
+        def vb() -> None:                                                  # noqa: WPS430
+            if kst["loading"]:
+                ui.spinner(size="sm")
+                return
+            if kst["error"]:
+                ui.label(f"⚠ {kst['error']}").style(f"color: {t.NEG}; font-size: 11px;")
+                return
+            ui.code(kst["text"] or "—").style(
+                "width: 100%; max-height: 320px; overflow: auto; font-size: 10.5px;")
+        vb()
+
+    async def _on_toggle(e) -> None:                                       # noqa: WPS430
+        if getattr(e, "value", False) and not kst["loaded"] and not kst["loading"]:
+            kst["loading"] = True
+            vb.refresh()
+            ok, d, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/admin/explorer/cache_value", {"key": key})
+            kst["loading"] = False
+            if ok:
+                try:
+                    kst["text"] = json.dumps(d.get("value"), indent=2, default=str)
+                except Exception:                                          # noqa: BLE001
+                    kst["text"] = str(d.get("value"))
+                kst["loaded"] = True
+            else:
+                kst["error"] = d.get("error") or "fetch failed"
+            vb.refresh()
+    inner.on_value_change(_on_toggle)
+
+
+def _xr_cache_keys(backend, data, reload, status) -> None:
+    if not data.get("supabase"):
+        ui.label("Supabase not configured.").style(f"color: {t.TEXT_DIM}; font-size: 12px;")
+        return
+    keys = data.get("keys") or []
+    ui.label(f"{len(keys)} keys in app_cache").style(
+        f"color: {t.TEXT}; font-size: 12px; font-weight: 600;")
+    for k in keys:
+        with ui.column().classes("w-full").style(
+            f"gap: 4px; padding: 6px 8px; background: {t.CARD_HI}; "
+            f"border-radius: {t.RADIUS_SM};"
+        ):
+            with ui.row().classes("items-center w-full").style("gap: 8px; flex-wrap: wrap;"):
+                _xr_mono(k.get("key") or "?", flex=True)
+                _xr_mono(_fmt_bytes(k.get("size")), dim=True)
+                _xr_mono(_age_str(k.get("updated_at")), dim=True)
+                async def _del(key=k.get("key")) -> None:
+                    if not await _confirm_dialog(f"Delete app_cache key '{key}'?"):
+                        return
+                    ok, d, _ = await asyncio.to_thread(
+                        _call, backend, "POST", "/api/admin/explorer/cache_delete", {"key": key})
+                    _show_inline_status(status, f"Deleted {key}" if ok
+                                        else f"Failed: {d.get('error')}",
+                                        "success" if ok else "error")
+                    if ok:
+                        await reload(force=True)
+                _xr_mini_btn("Delete", t.NEG, _del)
+            _xr_key_detail(backend, k.get("key") or "", status)
+
+
+def _xr_raw_editor(backend) -> None:
+    """Power-user panel: load any app_cache key's JSON, edit, save back."""
+    exp = ui.expansion("Raw Editor").classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; color: {t.TEXT};")
+    with exp:
+        status = _make_status_holder()
+        key_in = ui.input(placeholder="app_cache key (e.g. analysis_timestamps)") \
+            .props("outlined dense dark").style(f"background: {t.CARD_HI}; width: 100%;")
+        area = ui.textarea(placeholder="JSON value — load a key, edit, then Save") \
+            .props("outlined dense dark").style(
+                f"background: {t.CARD_HI}; width: 100%; font-family: monospace;")
+
+        async def _load() -> None:
+            key = (key_in.value or "").strip()
+            if not key:
+                _show_inline_status(status, "Enter a key first.", "warning")
+                return
+            ok, d, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/admin/explorer/cache_value", {"key": key})
+            if ok:
+                try:
+                    area.value = json.dumps(d.get("value"), indent=2, default=str)
+                except Exception:                                          # noqa: BLE001
+                    area.value = str(d.get("value"))
+                _show_inline_status(status, f"Loaded {key}", "success")
+            else:
+                _show_inline_status(status, f"Failed: {d.get('error')}", "error")
+
+        async def _save() -> None:
+            key = (key_in.value or "").strip()
+            if not key:
+                _show_inline_status(status, "Enter a key first.", "warning")
+                return
+            # Validate JSON locally before the confirm prompt.
+            try:
+                json.loads(area.value or "")
+            except Exception as exc:                                       # noqa: BLE001
+                _show_inline_status(status, f"Invalid JSON: {exc}", "error")
+                return
+            if not await _confirm_dialog(
+                    f"Overwrite Supabase key '{key}' with the edited JSON? "
+                    "This cannot be undone."):
+                return
+            ok, d, _ = await asyncio.to_thread(
+                _call, backend, "POST", "/api/admin/explorer/cache_save",
+                {"key": key, "value": area.value})
+            _show_inline_status(status, f"Saved {key}" if ok else f"Failed: {d.get('error')}",
+                                "success" if ok else "error")
+
+        with ui.row().classes("w-full").style("gap: 8px;"):
+            _xr_mini_btn("Load", t.PRIMARY, _load)
+            _xr_mini_btn("Save", t.WARN, _save)
+
+
+def _section_data_explorer(backend) -> None:
+    loaders: list = []
+    with _card("SUPABASE DATA EXPLORER",
+               "Live view of what's stored in Supabase. Expand a category to load it."):
+        async def _refresh_all() -> None:
+            for ld in loaders:
+                try:
+                    await ld(force=True)
+                except Exception:                                          # noqa: BLE001
+                    pass
+        ui.button("↻ Refresh All", on_click=_refresh_all).props("no-caps unelevated dense").style(
+            f"background: {t.PRIMARY}; color: {t.BG}; font-size: 11px; font-weight: 800; "
+            f"padding: 5px 14px; border-radius: {t.RADIUS_SM}; min-height: 0; align-self: flex-start;")
+
+        loaders.append(_explorer_panel(
+            backend, title="Models", path="/api/admin/explorer/models", render_body=_xr_models))
+        loaders.append(_explorer_panel(
+            backend, title="Props Cache", path="/api/admin/explorer/props_cache", render_body=_xr_props_cache))
+        loaders.append(_explorer_panel(
+            backend, title="Picks & Ledger", path="/api/admin/explorer/picks", render_body=_xr_picks))
+        loaders.append(_explorer_panel(
+            backend, title="Timestamps", path="/api/admin/explorer/timestamps", render_body=_xr_timestamps))
+        loaders.append(_explorer_panel(
+            backend, title="App Cache Keys", path="/api/admin/explorer/cache_keys", render_body=_xr_cache_keys))
+        _xr_raw_editor(backend)
