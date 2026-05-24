@@ -402,6 +402,64 @@ def cache_set(key: str, sport: Optional[str], date: str, data: dict) -> bool:
         return False
 
 
+# ── model_picks (per-model performance tracking) ──────────────────────────────
+# Schema (Supabase table "model_picks"):
+#   pick_id text PRIMARY KEY, date text, sport text, game_id text,
+#   model_name text, pick_type text, pick_side text, odds int,
+#   confidence float8, projected_value float8, line float8,
+#   result text default 'pending', settled_at timestamptz,
+#   created_at timestamptz default now()
+# pick_id is deterministic (date|sport|game_id|model_name|pick_type) so the
+# same pick logged twice in a day is a no-op insert.
+
+def model_picks_insert(rows: list[dict]) -> int:
+    """Insert NEW model-pick rows only -- existing pick_ids are ignored so a
+    settled result is never overwritten.  Returns the number of rows sent."""
+    if _mode != "supabase" or _client is None or not rows:
+        return 0
+    try:
+        (_client.table("model_picks")
+         .upsert(rows, on_conflict="pick_id", ignore_duplicates=True)
+         .execute())
+        return len(rows)
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("model_picks_insert(%d rows) failed: %s", len(rows), exc)
+        return 0
+
+
+def model_picks_upsert(rows: list[dict]) -> int:
+    """Upsert full rows (used by settlement to write back result/settled_at).
+    Overwrites by pick_id.  Returns rows sent."""
+    if _mode != "supabase" or _client is None or not rows:
+        return 0
+    try:
+        _client.table("model_picks").upsert(rows, on_conflict="pick_id").execute()
+        return len(rows)
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("model_picks_upsert(%d rows) failed: %s", len(rows), exc)
+        return 0
+
+
+def model_picks_list(date_from: Optional[str] = None,
+                     result: Optional[str] = None,
+                     sport: Optional[str] = None) -> list[dict]:
+    """List model picks, optionally filtered by date>=date_from, result, sport."""
+    if _mode != "supabase" or _client is None:
+        return []
+    try:
+        q = _client.table("model_picks").select("*")
+        if date_from:
+            q = q.gte("date", date_from)
+        if result:
+            q = q.eq("result", result)
+        if sport:
+            q = q.eq("sport", sport)
+        return q.execute().data or []
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("model_picks_list failed: %s", exc)
+        return []
+
+
 def cache_delete(key: str) -> bool:
     """Delete one cache row by key.  Returns True on success."""
     if _mode != "supabase" or _client is None:

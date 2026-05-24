@@ -63,6 +63,7 @@ def register(backend) -> None:
                 _section_props(backend, _refresh)
                 _section_ai_analysis(backend)
                 _section_models(backend, _refresh)
+                _section_model_performance(backend)
                 _section_model_bets(backend, _refresh)
                 _section_my_bets(backend, _refresh)
                 _section_data_reset(backend, _refresh)
@@ -1628,6 +1629,92 @@ def _fmt_ts(iso: str | None) -> str:
 # ───────────────────────────────────────────────────────────────────────────
 #  Reusable widgets
 # ───────────────────────────────────────────────────────────────────────────
+
+def _section_model_performance(backend) -> None:
+    """PART 4 -- per-model W/L table with a date-range filter.  Reads the
+    aggregated model_picks rows directly (in-process) and refreshes on load."""
+    state = {"range": "all"}
+    _RANGES = {"all": "All-time", "30d": "Last 30d", "7d": "Last 7d", "today": "Today"}
+
+    with _card("MODEL PERFORMANCE",
+               "Per-model record from every logged pick. Sorted by win% desc."):
+        with ui.row().classes("items-center").style("gap: 8px;"):
+            def _on_range(e) -> None:
+                state["range"] = e.value or "all"
+                _table.refresh()
+            ui.toggle(_RANGES, value="all", on_change=_on_range).props(
+                "dense no-caps").style(f"color: {t.TEXT_DIM};")
+
+        @ui.refreshable
+        def _table() -> None:                                             # noqa: WPS430
+            from src import model_picks as _mp
+            from datetime import date as _date, timedelta as _td
+            since = None
+            if state["range"] != "all":
+                days = {"today": 0, "7d": 6, "30d": 29}.get(state["range"], 0)
+                try:
+                    since = (_date.fromisoformat(_mp._today_et()) - _td(days=days)).isoformat()
+                except Exception:                                         # noqa: BLE001
+                    since = None
+            try:
+                data = _mp.performance(since)
+            except Exception as exc:                                      # noqa: BLE001
+                ui.label(f"Model performance unavailable: {exc}").style(
+                    f"font-size: 12px; color: {t.TEXT_DIM};")
+                return
+            rows = data.get("rows") or []
+            ts = (data.get("updated_at") or "")[:19].replace("T", " ")
+            ui.label(f"Updated {ts} UTC · {len(rows)} model rows").style(
+                f"font-size: 11px; color: {t.TEXT_DIM2};")
+            if not rows:
+                ui.label("No settled model picks in this range yet. Rows appear "
+                         "once the model_picks Supabase table exists and games "
+                         "settle in the 15-minute cycle.").style(
+                    f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic;")
+                return
+
+            th = (f"font-size:10px; font-weight:800; letter-spacing:.4px; "
+                  f"color:{t.TEXT_DIM2}; padding:6px 8px; text-align:right; "
+                  f"border-bottom:1px solid {t.BORDER}; white-space:nowrap;")
+            th_l = th.replace("text-align:right", "text-align:left")
+            head = (f"<th style='{th_l}'>Model</th><th style='{th_l}'>Sport</th>"
+                    f"<th style='{th_l}'>Type</th><th style='{th}'>W</th>"
+                    f"<th style='{th}'>L</th><th style='{th}'>Win%</th>"
+                    f"<th style='{th_l}'>Last 10</th><th style='{th}'>Avg Conf</th>")
+            body = ""
+            for r in rows:
+                td = (f"font-size:12px; font-family:monospace; padding:6px 8px; "
+                      f"text-align:right; color:{t.TEXT}; "
+                      f"border-bottom:1px solid {t.BORDER_SOFT}; white-space:nowrap;")
+                td_l = td.replace("text-align:right", "text-align:left")
+                wp = r.get("win_pct")
+                wp_s = f"{wp:.1f}%" if isinstance(wp, (int, float)) else "—"
+                wp_color = (t.POS if (wp or 0) >= 55 else
+                            t.NEG if (wp is not None and wp < 50) else t.TEXT)
+                last10 = "".join(
+                    f"<span style='color:{t.POS if c == 'W' else t.NEG};'>{c}</span>"
+                    for c in (r.get("last10") or "")
+                ) or "—"
+                ac = r.get("avg_confidence")
+                ac_s = f"{ac * 100:.0f}%" if isinstance(ac, (int, float)) else "—"
+                body += (
+                    f"<tr><td style='{td_l}'>{r.get('model_name', '')}</td>"
+                    f"<td style='{td_l} color:{t.TEXT_DIM};'>{(r.get('sport') or '').upper()}</td>"
+                    f"<td style='{td_l} color:{t.TEXT_DIM};'>{r.get('pick_type', '')}</td>"
+                    f"<td style='{td} color:{t.POS};'>{r.get('wins', 0)}</td>"
+                    f"<td style='{td} color:{t.NEG};'>{r.get('losses', 0)}</td>"
+                    f"<td style='{td} font-weight:800; color:{wp_color};'>{wp_s}</td>"
+                    f"<td style='{td_l} font-family:monospace; font-weight:800;'>{last10}</td>"
+                    f"<td style='{td} color:{t.TEXT_DIM};'>{ac_s}</td></tr>"
+                )
+            ui.html(
+                f"<div style='overflow-x:auto; width:100%;'>"
+                f"<table style='width:100%; border-collapse:collapse;'>"
+                f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+            )
+
+        _table()
+
 
 def _card(title: str, subtitle: str | None = None):
     """Context-manager card.  Body of caller's `with` block goes inside."""
