@@ -819,7 +819,7 @@ def _fetch_pitchers_direct(
     try:
         from src.pitcher_client import get_pitcher_client
         data = get_pitcher_client().get_starters_for_game(
-            home_team, away_team, game_date,
+            home_team, away_team, game_date, commence_time=commence,
         )
     except Exception as exc:                                              # noqa: BLE001
         _log(f"  _fetch_pitchers_direct: ERROR  "

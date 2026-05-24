@@ -228,7 +228,7 @@ class MLBFeatureBuilder:
 
         # Starting pitchers (basic season stats + handedness)
         pitcher_data = get_pitcher_client().get_starters_for_game(
-            home_team, away_team, game_date
+            home_team, away_team, game_date, commence_time=commence
         )
         home_sp = dict(pitcher_data["home"])
         away_sp = dict(pitcher_data["away"])

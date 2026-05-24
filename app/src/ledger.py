@@ -23,7 +23,7 @@ Daily exposure cap:
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from .kelly import american_to_decimal, size_bet, tracked_bet_kelly
@@ -605,30 +605,26 @@ class Ledger:
                 sport_key, len(open_for_sport),
             )
 
-        # ── Primary lookup: by Odds API game id ──────────────────────────────
+        # ── Lookup strictly by Odds API game id (BUG 2) ─────────────────────
+        # Each bet is matched to its score row by the game_id stored on the
+        # bet — never by team names + date.  The old (team-pair, date) fallback
+        # was removed: on a doubleheader it could match the wrong twin, and in
+        # general it could settle a bet against a completed game from earlier
+        # in the day or a prior day.
         score_map = {s["id"]: s for s in scores if s.get("id")}
 
-        # ── Fallback lookup: by (team-pair, date) ─────────────────────────────
-        # The Odds API occasionally rotates game IDs between pre-game odds and
-        # post-game scores.  When that happens the bet's stored game_id no
-        # longer maps to a score row and the bet sits open forever.  Build a
-        # secondary index keyed by the (away+home) team set so we can rescue
-        # those orphans.
-        def _norm(t: str | None) -> str:
-            return (t or "").strip().lower()
-        pair_map: dict[tuple[frozenset[str], str], dict] = {}
-        for s in scores:
-            teams: set[str] = set()
-            ht, at = _norm(s.get("home_team")), _norm(s.get("away_team"))
-            if ht: teams.add(ht)
-            if at: teams.add(at)
-            for nm in (s.get("scores") or []):
-                n = _norm(nm.get("name") if isinstance(nm, dict) else None)
-                if n: teams.add(n)
-            if len(teams) < 2:
-                continue
-            date_str = (s.get("commence_time") or "")[:10]
-            pair_map[(frozenset(teams), date_str)] = s
+        def _starts_more_than_30min_out(commence: str) -> bool:
+            """True when *commence* (ISO) is more than 30 minutes in the
+            future -- used to refuse settling a game that hasn't started."""
+            if not commence:
+                return False
+            try:
+                ct = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return False
+            if ct.tzinfo is None:
+                ct = ct.replace(tzinfo=timezone.utc)
+            return ct > datetime.now(timezone.utc) + timedelta(minutes=30)
 
         newly_settled: list[dict] = []
         remaining:     list[dict] = []
@@ -661,29 +657,29 @@ class Ledger:
                 self.data["history"].append(cleaned)
                 continue   # do NOT add to remaining (= drop from open_bets)
 
+            # Match strictly by the bet's stored game_id (BUG 2) -- no
+            # team-name/date fallback.
             score = score_map.get(bet["game_id"])
             if score is None:
-                # Fallback: same team pair on same date
-                key = (
-                    frozenset({_norm(bet.get("home_team")), _norm(bet.get("away_team"))}),
-                    (bet.get("commence_time") or "")[:10],
-                )
-                score = pair_map.get(key)
-                if score is not None:
-                    _logger.info(
-                        "settle: rescued bet %s via team-name fallback "
-                        "(stored game_id=%s -> Odds API id=%s)",
-                        bet.get("id"), bet.get("game_id"), score.get("id"),
-                    )
-
-            if score is None:
                 _logger.debug(
-                    "settle: no score row for bet %s (%s @ %s on %s) — leaving open",
-                    bet.get("id"), bet.get("away_team"), bet.get("home_team"),
-                    (bet.get("commence_time") or "")[:10],
+                    "settle: no score row for bet %s game_id=%s (%s @ %s) — leaving open",
+                    bet.get("id"), bet.get("game_id"),
+                    bet.get("away_team"), bet.get("home_team"),
                 )
                 remaining.append(bet)
                 continue
+
+            # Time guard (BUG 2): never settle a game that hasn't started yet
+            # (more than 30 min in the future), regardless of available scores.
+            commence = score.get("commence_time") or bet.get("commence_time") or ""
+            if _starts_more_than_30min_out(commence):
+                _logger.info(
+                    "SETTLE SKIP — game has not started yet: %s commence=%s",
+                    bet.get("game_id"), commence,
+                )
+                remaining.append(bet)
+                continue
+
             if not score.get("completed"):
                 remaining.append(bet)
                 continue

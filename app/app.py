@@ -8827,7 +8827,8 @@ def _resolve_pitcher_data_for_ai(raw: dict, sport: str) -> tuple[dict, dict]:
             except Exception:                                              # noqa: BLE001
                 pass
         from src.pitcher_client import get_pitcher_client
-        data = get_pitcher_client().get_starters_for_game(home, away, game_date)
+        data = get_pitcher_client().get_starters_for_game(
+            home, away, game_date, commence_time=commence)
         return (
             (data or {}).get("home") or home_sp,
             (data or {}).get("away") or away_sp,
