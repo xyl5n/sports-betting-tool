@@ -10178,16 +10178,22 @@ def _completed_games_from_scores(scores: list) -> list[dict]:
     return out
 
 
-def _grade_model_trackers(oc, sport_keys: list[str]) -> dict:
+def _grade_model_trackers(oc, sport_keys: list[str], scores_by_sport=None) -> dict:
     """Grade all pending XGB/LR/NN tracker picks against completed games.
-    Returns {'xgb': n, 'lr': n, 'nn': n} newly graded.  No new API call --
-    reuses the OddsClient's cached scores."""
+    Returns {'xgb': n, 'lr': n, 'nn': n} newly graded.
+
+    *scores_by_sport* may be a {sport_key: [score rows]} map pre-fetched
+    earlier in the same cycle; when present it's reused instead of calling
+    get_scores again (avoids a duplicate Odds API call)."""
     graded = {"xgb": 0, "lr": 0, "nn": 0}
     for sk in sport_keys:
-        try:
-            scores = oc.get_scores(sport_key=sk, days_from=3) or []
-        except Exception:                                                   # noqa: BLE001
-            continue
+        if scores_by_sport is not None and sk in scores_by_sport:
+            scores = scores_by_sport.get(sk) or []
+        else:
+            try:
+                scores = oc.get_scores(sport_key=sk, days_from=3) or []
+            except Exception:                                               # noqa: BLE001
+                continue
         games = _completed_games_from_scores(scores)
         if not games:
             continue
@@ -10245,24 +10251,56 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
 
     settled: list = []
 
+    # ── Fetch scores ONCE per sport for this pass ──────────────────────────────
+    # The same score rows feed ledger settlement AND the bulk tracker grader
+    # below; fetching here (and passing the result down) guarantees a single
+    # Odds API scores call per sport per cycle instead of one per consumer.
+    scores_by_sport: dict[str, list] = {}
+    for _sk, _ck in (("baseball_mlb",    "scores_baseball_mlb_3"),
+                     ("basketball_wnba", "scores_basketball_wnba_3")):
+        try:
+            # Invalidate the stale cache so we always see fresh completions.
+            _cache.invalidate(_ck)
+            scores_by_sport[_sk] = oc.get_scores(sport_key=_sk, days_from=3) or []
+        except Exception as _sx:                                            # noqa: BLE001
+            _eprint(f"AUTO-SETTLE: get_scores({_sk}) failed: "
+                    f"{type(_sx).__name__}: {_sx}")
+            scores_by_sport[_sk] = []
+
+    # ── Open both ledgers up front so we can log bankroll before/after ─────────
+    def _open_ledger(_path):
+        try:
+            return Ledger(path=_path, starting_bankroll=250)
+        except Exception as _le:                                            # noqa: BLE001
+            _eprint(f"AUTO-SETTLE: open {_path} failed: "
+                    f"{type(_le).__name__}: {_le}")
+            return None
+
+    def _bankrolls(_ldr):
+        if _ldr is None:
+            return (0.0, 0.0)
+        return (float(_ldr.data.get("model_bankroll") or 0.0),
+                float(_ldr.data.get("personal_bankroll") or 0.0))
+
+    _mlb_ldr  = _open_ledger("data/ledger.json")
+    _wnba_ldr = _open_ledger("data/wnba_ledger.json")
+
+    mlb_model_before,  mlb_pers_before  = _bankrolls(_mlb_ldr)
+    wnba_model_before, wnba_pers_before = _bankrolls(_wnba_ldr)
+
     # ── MLB ───────────────────────────────────────────────────────────────────
     try:
-        _mlb_ldr = Ledger(path="data/ledger.json", starting_bankroll=250)
-        if _mlb_ldr.data.get("open_bets"):
-            # Invalidate stale scores cache so we always see fresh completions
-            _cache.invalidate("scores_baseball_mlb_3")
-            _new = _mlb_ldr.settle(oc, "baseball_mlb")
-            settled.extend(_new)
+        if _mlb_ldr is not None and _mlb_ldr.data.get("open_bets"):
+            settled.extend(_mlb_ldr.settle(
+                oc, "baseball_mlb", scores=scores_by_sport.get("baseball_mlb")))
     except Exception as _exc:
         _eprint(f"AUTO-SETTLE: MLB error: {type(_exc).__name__}: {_exc}")
 
     # ── WNBA ──────────────────────────────────────────────────────────────────
     try:
-        _wnba_ldr = Ledger(path="data/wnba_ledger.json", starting_bankroll=250)
-        if _wnba_ldr.data.get("open_bets"):
-            _cache.invalidate("scores_basketball_wnba_3")
-            _new = _wnba_ldr.settle(oc, "basketball_wnba")
-            settled.extend(_new)
+        if _wnba_ldr is not None and _wnba_ldr.data.get("open_bets"):
+            settled.extend(_wnba_ldr.settle(
+                oc, "basketball_wnba", scores=scores_by_sport.get("basketball_wnba")))
     except Exception as _exc:
         _eprint(f"AUTO-SETTLE: WNBA error: {type(_exc).__name__}: {_exc}")
 
@@ -10306,8 +10344,12 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     # placed bets on.  Grade EVERY analyzed pick whose game just completed by
     # pulling the same Odds API scores and matching by game_id (XGB/LR) and
     # matchup+date (NN).  Runs on every settlement pass (auto + nightly force).
+    graded = {"xgb": 0, "lr": 0, "nn": 0}
     try:
-        graded = _grade_model_trackers(oc, ["baseball_mlb", "basketball_wnba"])
+        graded = _grade_model_trackers(
+            oc, ["baseball_mlb", "basketball_wnba"],
+            scores_by_sport=scores_by_sport,
+        )
         if any(graded.values()):
             _eprint(f"TRACKER-GRADE: newly graded xgb={graded['xgb']} "
                     f"lr={graded['lr']} nn={graded['nn']}")
@@ -10346,6 +10388,23 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     game_pnl  = sum(float(s.get("model_pnl") or 0.0) for s in settled)
     props_pnl = float(props_summary.get("pnl") or 0.0)
     total_pnl = game_pnl + props_pnl
+
+    # ── Pass summary: per-tracker settled counts + bankroll before/after ──────
+    # ledger.settle() mutated the same instances we opened above, so reading
+    # their bankrolls now reflects the post-settlement balances.  Personal
+    # bankroll is unified across sports and lives in data/ledger.json.
+    mlb_model_after,  mlb_pers_after  = _bankrolls(_mlb_ldr)
+    wnba_model_after, _               = _bankrolls(_wnba_ldr)
+    model_before = mlb_model_before + wnba_model_before
+    model_after  = mlb_model_after  + wnba_model_after
+    _eprint(
+        "SETTLE-SUMMARY: game picks settled — "
+        f"xgb={graded.get('xgb', 0)} lr={graded.get('lr', 0)} "
+        f"nn={graded.get('nn', 0)} | ledger bets {len(settled)} "
+        f"({wins}W/{losses}L) | props settled {props_settled} | "
+        f"model bankroll ${model_before:.2f} -> ${model_after:.2f} | "
+        f"personal bankroll ${mlb_pers_before:.2f} -> ${mlb_pers_after:.2f}"
+    )
 
     # ── Update state ──────────────────────────────────────────────────────────
     with _auto_settlement_lock:
@@ -10889,13 +10948,23 @@ def _run_consolidated_refresh_cycle() -> dict:
         summary["groq_queued"] = groq_queued
 
         # 5) Settlement (replaces the standalone 30-min auto_settlement job).
-        try:
-            st = _run_auto_settlement_job(force=True) or {}
-            summary["settled"]       = int(st.get("settled") or 0)
-            summary["props_settled"] = int(st.get("props_settled") or 0)
-            summary["voided"]        = int(st.get("voided") or 0)
-        except Exception as exc:                                          # noqa: BLE001
-            _eprint(f"CYCLE settlement error: {type(exc).__name__}: {exc}")
+        #    Gated to 12 PM-1 AM ET: games rarely finish before noon, so
+        #    running settlement earlier just burns an Odds API scores call
+        #    with nothing to grade.  et_hour was computed at the top of this
+        #    cycle.  Window = hour >= 12 (noon-11:59 PM) OR hour == 0
+        #    (midnight-12:59 AM, i.e. up through 1 AM).
+        in_settlement_window = (et_hour >= 12) or (et_hour == 0)
+        if in_settlement_window:
+            try:
+                st = _run_auto_settlement_job(force=True) or {}
+                summary["settled"]       = int(st.get("settled") or 0)
+                summary["props_settled"] = int(st.get("props_settled") or 0)
+                summary["voided"]        = int(st.get("voided") or 0)
+            except Exception as exc:                                      # noqa: BLE001
+                _eprint(f"CYCLE settlement error: {type(exc).__name__}: {exc}")
+        else:
+            _eprint(f"CYCLE: settlement skipped — {et_hour:02d}:xx ET is "
+                    f"outside the 12 PM-1 AM settlement window")
     finally:
         duration = round(time.time() - started, 1)
         _refresh_cycle_state.update({
