@@ -7948,6 +7948,17 @@ def set_bankroll():
         ledger.save()
     _analysis_state["bankroll"]      = new_br
     _wnba_analysis_state["bankroll"] = new_br
+    # Persist the real balance to the Supabase personal pool -- this is the
+    # source of truth the My Bets bankroll card + daily limit read from, so
+    # without this write the admin value never actually shows up.  Refresh
+    # the daily limit immediately so it tracks the new bankroll.
+    try:
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            _sl.personal().set_bankroll(new_br)
+            _sl.personal().refresh_daily_limit()
+    except Exception as _be:                                               # noqa: BLE001
+        _eprint(f"SET-BANKROLL personal pool write failed: {_be}")
     # Editing the bankroll immediately recalculates the daily budget (20% of
     # the new bankroll) + per-bet floor/ceiling so the My Bets banner and the
     # budget gate reflect the change right away (FIX 3).
@@ -7976,6 +7987,14 @@ def set_model_bankroll():
         ledger.data["personal_bankroll"]          = saved_personal_bankroll
         ledger.data["personal_starting_bankroll"] = saved_personal_starting
         ledger.save()
+    # Persist to the Supabase model pool (the source of truth the Model
+    # bankroll card reads from).
+    try:
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            _sl.model().set_bankroll(new_br)
+    except Exception as _be:                                               # noqa: BLE001
+        _eprint(f"SET-MODEL-BANKROLL pool write failed: {_be}")
     return jsonify({"success": True, "bankroll": new_br})
 
 

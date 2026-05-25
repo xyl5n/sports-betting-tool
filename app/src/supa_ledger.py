@@ -104,6 +104,17 @@ class Ledger:
         db.ledger_pool_upsert(self.system,
                               {"current_balance": round(float(new_balance), 2)})
 
+    def set_bankroll(self, amount: float, *, reset_starting: bool = True) -> bool:
+        """Admin 'Set Bankroll': write the real balance to current_balance
+        (and reset starting_balance to match so P/L re-bases off the new
+        number).  Always sends current_balance, so it can never trip the
+        NOT NULL constraint, and it persists to the pool the UI reads from."""
+        amount = round(float(amount), 2)
+        fields = {"current_balance": amount}
+        if reset_starting:
+            fields["starting_balance"] = amount
+        return db.ledger_pool_upsert(self.system, fields)
+
     # ── placement (freeze stake, deduct once) ─────────────────────────────────
     def place(self, *, bet_id: str, sport: str, bet_type: str, selection: str,
               odds, stake: float, kind: str = "game",
@@ -194,14 +205,20 @@ class Ledger:
         if pool.get("daily_limit_date") != today:
             self.refresh_daily_limit()
             pool = self._pool()
-        total = float(pool.get("daily_limit") or 0.0)
+        bankroll = self.bankroll()
+        # Always derive from the current saved bankroll as a floor: if the
+        # stored snapshot is missing/zero (e.g. it never persisted on an
+        # older build) but a real bankroll exists, the limit must still show
+        # 20% of it rather than $0.
+        stored = float(pool.get("daily_limit") or 0.0)
+        total = stored if stored > 0 else round(bankroll * DAILY_BUDGET_TOTAL_PCT, 2)
         spent = sum(float(b.get("stake") or 0.0)
                     for b in self.active_bets() + self.settled_bets()
                     if b.get("placed_date") == today)
         return {
-            "bankroll":    self.bankroll(),
+            "bankroll":    bankroll,
             "total":       round(total, 2),
-            "max_per_bet": round(self.bankroll() * DAILY_BUDGET_MAX_BET_PCT, 2),
+            "max_per_bet": round(bankroll * DAILY_BUDGET_MAX_BET_PCT, 2),
             "spent":       round(spent, 2),
             "remaining":   round(max(0.0, total - spent), 2),
             "date":        pool.get("daily_limit_date"),
@@ -209,7 +226,12 @@ class Ledger:
 
     def refresh_daily_limit(self) -> float:
         """Take a fresh daily-limit snapshot off the CURRENT bankroll and
-        store it (called at 4 AM ET, and lazily if missing for today)."""
+        store it (called at 4 AM ET, and lazily if missing for today).
+
+        Seeds the pool first so this daily-limit-only write always patches an
+        existing row (current_balance stays populated) instead of attempting
+        a partial INSERT that would violate the NOT NULL constraint."""
+        db.ledger_pool_seed_if_absent("personal", STARTING_BANKROLL["personal"])
         limit = round(self.bankroll() * DAILY_BUDGET_TOTAL_PCT, 2)
         db.ledger_pool_upsert("personal", {
             "daily_limit":      limit,
