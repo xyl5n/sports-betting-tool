@@ -1280,8 +1280,25 @@ def _section_player_header(
 
 # ── Section: info row (OPP + GAME TIME) ─────────────────────────────────────
 
+def _opp_full_name(opp_abbrev: Optional[str], prop: Optional[dict]) -> Optional[str]:
+    """Full opponent team name for the OPP box.  Prefers the prop's own
+    home/away full names (matched to the abbrev); falls back to the static
+    abbrev->name map; else the abbrev itself."""
+    if not opp_abbrev:
+        return None
+    try:
+        from src.player_profile_client import team_name_to_abbrev, team_abbrev_to_name
+        for full in ((prop or {}).get("home_team"), (prop or {}).get("away_team")):
+            if full and team_name_to_abbrev(full) == opp_abbrev:
+                return full
+        return team_abbrev_to_name(opp_abbrev) or opp_abbrev
+    except Exception:                                                     # noqa: BLE001
+        return opp_abbrev
+
+
 def _section_info_row(opp_abbrev: Optional[str], prop: Optional[dict]) -> None:
-    opp_text  = f"@ {opp_abbrev}" if opp_abbrev else "—"
+    opp_full  = _opp_full_name(opp_abbrev, prop)
+    opp_text  = f"@ {opp_full}" if opp_full else "—"
     time_text = _format_game_time(prop.get("commence_time") if prop else None) or "—"
     with ui.row().classes("items-stretch w-full").style(
         f"gap: {t.SPACE_SM}; flex-wrap: nowrap;"
@@ -2279,55 +2296,32 @@ def _section_similar_players(
             f"color: {t.TEXT_DIM2};"
         )
 
-    # ── Pitchers: two Past-Games-style tables (Section 1 vs opponent,
-    #    Section 2 the viewed pitcher's last 5).  Batters keep the existing
-    #    single per-opponent summary table unchanged. ──────────────────────
+    # ── Pitchers: two Past-Games-style tables SIDE BY SIDE (50/50) in one
+    #    ui.html() block -- Box 1 similar pitchers vs opponent (flat, newest
+    #    first, ≤5); Box 2 the last 5 pitchers (any) to face the opponent.
+    #    Batters keep the existing single per-opponent summary table. ───────
     if is_pitcher:
         stat_key = _MARKET_TO_STAT.get(market) or "K"
-        with ui.column().classes("w-full").style(f"gap: {t.SPACE_MD};"):
-            # Section 1 — similar pitchers vs this opponent.
-            sec1 = ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};")
-            with sec1:
-                _title(f"SIMILAR PITCHERS VS {opp_u}" if opp_u
-                       else "SIMILAR PITCHERS VS OPPONENT")
-                ui.label("Loading matchup history…").style(
-                    f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
-                    f"font-style: italic; padding: 8px 4px;"
-                )
-            # Section 2 — the viewed pitcher's last 5 games.
-            sec2 = ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};")
-            with sec2:
-                _title(f"LAST 5 GAMES — {strip_formatting(player_name).upper()}")
-                ui.label("Loading recent games…").style(
-                    f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
-                    f"font-style: italic; padding: 8px 4px;"
-                )
+        opp_full = _opp_full_name(opp_abbrev, prop) or opp_u
+        holder = ui.column().classes("w-full").style("gap: 0; min-width: 0;")
+        with holder:
+            ui.label("Loading matchup history…").style(
+                f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
+                f"font-style: italic; padding: 8px 4px;"
+            )
 
         async def _load_pitcher() -> None:                               # noqa: WPS430
             try:
                 data = await asyncio.to_thread(
-                    _build_pitcher_sections, sims, info, market, stat_key, opp_u,
+                    _build_pitcher_sections, sims, market, stat_key, opp_u,
                 )
             except Exception as exc:                                      # noqa: BLE001
                 _log(f"pitcher similar build failed: {exc}")
-                data = {"groups": [], "last5": []}
-            sec1.clear()
-            with sec1:
-                _title(f"SIMILAR PITCHERS VS {opp_u}" if opp_u
-                       else "SIMILAR PITCHERS VS OPPONENT")
-                if not opp_u:
-                    _note("Opponent unknown for this game — no head-to-head data.")
-                elif not data["groups"]:
-                    _note(f"No similar pitchers have faced {opp_u}.")
-                else:
-                    ui.html(_pitcher_vs_opp_table_html(data["groups"], stat_key))
-            sec2.clear()
-            with sec2:
-                _title(f"LAST 5 GAMES — {strip_formatting(player_name).upper()}")
-                if not data["last5"]:
-                    _note("No recent games found.")
-                else:
-                    ui.html(_pitcher_games_table_html(data["last5"], stat_key))
+                data = {"similar": [], "recent": []}
+            holder.clear()
+            with holder:
+                ui.html(_pitcher_dual_box_html(
+                    data["similar"], data["recent"], stat_key, opp_u, opp_full))
 
         ui.timer(0.05, _load_pitcher, once=True)
         return
@@ -2570,34 +2564,71 @@ def _pitcher_game_rows(pid, name: str, market: str, stat_key: str,
     return rows
 
 
-def _build_pitcher_sections(sims: list[dict], info: dict, market: str,
+def _stat_for_pitcher_game(pid, name: str, date10: str, stat_key: str):
+    """The pitcher's *stat_key* value in their game on *date10*, from the
+    cached gamelog (this + last season).  None when not found."""
+    from src.player_profile_client import (
+        get_player_gamelog, gamelog_stat_value, _CURRENT_SEASON,
+    )
+    if not pid or not date10:
+        return None
+    try:
+        yr = int(date10[:4])
+    except (TypeError, ValueError):
+        yr = _CURRENT_SEASON
+    for season in (yr, yr - 1):
+        try:
+            games = get_player_gamelog(int(pid), season, is_pitcher=True) or []
+        except Exception:                                                 # noqa: BLE001
+            continue
+        g = next((x for x in games if (x.get("date") or "")[:10] == date10), None)
+        if g:
+            return gamelog_stat_value(g, stat_key)
+    return None
+
+
+def _build_pitcher_sections(sims: list[dict], market: str,
                             stat_key: str, opp_u: str) -> dict:
     """Background-thread builder.  Returns:
-      groups -> [{name, team, rows}] for each SIMILAR pitcher that has at
-                least one start vs opp_u (pitchers with none are dropped),
-      last5  -> the VIEWED pitcher's last 5 starts (rows).
+      similar -> ONE flat, newest-first list (≤5) of the similar pitchers'
+                 games vs opp_u (not grouped by pitcher).
+      recent  -> the last 5 pitchers (any) to face opp_u, newest first.
     """
     hist_idx = _prop_history_index()
 
-    groups: list[dict] = []
+    # Box 1 -- flatten every similar pitcher's vs-opp starts into one list.
+    similar: list[dict] = []
     if opp_u:
         for s in sims:
-            rows = _pitcher_game_rows(
+            similar.extend(_pitcher_game_rows(
                 s.get("id"), s.get("name") or "", market, stat_key,
                 hist_idx, opp_u=opp_u,
-            )
-            if rows:                                  # drop pitchers w/ no H2H
-                groups.append({
-                    "name": s.get("name") or "—",
-                    "team": s.get("team") or "",
-                    "rows": rows,
-                })
+            ))
+        similar.sort(key=lambda r: (r.get("date") or ""), reverse=True)
+        similar = similar[:5]
 
-    last5 = _pitcher_game_rows(
-        info.get("id"), info.get("name") or "", market, stat_key,
-        hist_idx, last_n=5,
-    )
-    return {"groups": groups, "last5": last5}
+    # Box 2 -- the most recent pitchers to face this opponent (any pitcher).
+    recent: list[dict] = []
+    if opp_u:
+        try:
+            from src.player_profile_client import get_recent_pitchers_vs_team
+            for rp in get_recent_pitchers_vs_team(opp_u, limit=5):
+                date10 = rp.get("date") or ""
+                stat = _stat_for_pitcher_game(
+                    rp.get("player_id"), rp.get("name") or "", date10, stat_key)
+                hist = hist_idx.get(
+                    ((rp.get("name") or "").strip().lower(), market, date10)) or {}
+                recent.append({
+                    "date":    date10,
+                    "opp":     opp_u,
+                    "is_home": bool(rp.get("is_home_pitcher")),
+                    "stat":    stat,
+                    "line":    hist.get("line"),
+                    "odds":    hist.get("odds"),
+                })
+        except Exception as exc:                                          # noqa: BLE001
+            _log(f"recent opp pitchers failed: {exc}")
+    return {"similar": similar, "recent": recent}
 
 
 def _pg_date_opp(row: dict) -> str:
@@ -2689,32 +2720,60 @@ def _pg_table_wrap(inner: str) -> str:
 
 
 def _pitcher_games_table_html(rows: list[dict], stat_key: str) -> str:
-    """Section 2 — a flat Past-Games table for one pitcher's recent games."""
+    """A flat Past-Games table: DATE/OPP · stat · LINE · ODDS, newest first."""
     body = "".join(_pg_game_tr(r) for r in rows)
     return _pg_table_wrap(_pg_header(stat_key) + f"<tbody>{body}</tbody>")
 
 
-def _pitcher_vs_opp_table_html(groups: list[dict], stat_key: str) -> str:
-    """Section 1 — Past-Games table grouped by similar pitcher.  Each group is
-    a player sub-header row spanning the table, then that pitcher's games vs
-    the opponent."""
+def _pg_heading_html(text: str) -> str:
     import html as _html
-    parts: list[str] = [_pg_header(stat_key)]
-    for grp in groups:
-        name = _html.escape(grp.get("name") or "—")
-        team = _html.escape(grp.get("team") or "")
-        team_html = (f'<span style="font-size:10px;color:{t.TEXT_DIM2};'
-                     f'font-family:monospace;margin-left:6px;">{team}</span>'
-                     if team else "")
-        parts.append(
-            f'<tbody><tr><td colspan="4" style="text-align:left;padding:8px 10px;'
-            f'font-size:12.5px;font-weight:800;color:{t.TEXT};'
-            f'background:{t.CARD_HI};border-bottom:1px solid {t.BORDER};">'
-            f'{name}{team_html}</td></tr>'
-            + "".join(_pg_game_tr(r) for r in grp.get("rows") or [])
-            + '</tbody>'
-        )
-    return _pg_table_wrap("".join(parts))
+    return (
+        f'<div style="font-size:10px;font-weight:800;letter-spacing:.8px;'
+        f'color:{t.TEXT_DIM2};margin-bottom:6px;">{_html.escape(text)}</div>'
+    )
+
+
+def _pg_note_html(msg: str) -> str:
+    import html as _html
+    return (
+        f'<div style="font-size:11.5px;color:{t.TEXT_DIM2};font-style:italic;'
+        f'background:{t.CARD};border:1px solid {t.BORDER};'
+        f'border-radius:{t.RADIUS_MD};padding:14px;text-align:center;">'
+        f'{_html.escape(msg)}</div>'
+    )
+
+
+def _pitcher_dual_box_html(similar_rows: list[dict], recent_rows: list[dict],
+                           stat_key: str, opp_u: str, opp_full: str) -> str:
+    """Both pitcher boxes SIDE BY SIDE (50/50) as a single ui.html() string.
+
+    Box 1 — similar pitchers vs the opponent (flat, newest first, ≤5).
+    Box 2 — the last 5 pitchers (any) to face the opponent, newest first.
+    Each column wraps to full width on narrow screens.
+    """
+    team = opp_full or opp_u or "OPP"
+
+    if not opp_u:
+        box1 = _pg_heading_html("SIMILAR PITCHERS VS OPPONENT") + \
+            _pg_note_html("Opponent unknown for this game — no head-to-head data.")
+        box2 = _pg_heading_html("LAST 5 PITCHERS VS OPPONENT") + \
+            _pg_note_html("Opponent unknown for this game.")
+    else:
+        box1 = _pg_heading_html(f"SIMILAR PITCHERS VS {team}") + (
+            _pitcher_games_table_html(similar_rows, stat_key) if similar_rows
+            else _pg_note_html(f"No similar pitchers have faced {team}."))
+        box2 = _pg_heading_html(f"LAST 5 PITCHERS VS {team}") + (
+            _pitcher_games_table_html(recent_rows, stat_key) if recent_rows
+            else _pg_note_html(f"No recent pitchers found vs {team}."))
+
+    col = "flex:1 1 0;min-width:0;"
+    return (
+        f'<div style="display:flex;gap:10px;width:100%;flex-wrap:wrap;'
+        f'align-items:flex-start;">'
+        f'<div style="{col}">{box1}</div>'
+        f'<div style="{col}">{box2}</div>'
+        f'</div>'
+    )
 
 
 def _fmt_short_date(iso: Optional[str]) -> str:

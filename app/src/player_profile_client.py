@@ -1074,6 +1074,107 @@ def team_name_to_abbrev(name: str) -> Optional[str]:
     return _TEAM_NAME_TO_ABBREV.get(name.strip().lower())
 
 
+# Reverse map (abbrev -> canonical full name) for UI labels like the OPP box.
+_ABBREV_TO_TEAM_NAME: dict[str, str] = {}
+for _full, _ab in _TEAM_NAME_TO_ABBREV.items():
+    _ABBREV_TO_TEAM_NAME.setdefault(_ab, _full.title())
+# Canonical display overrides where .title() isn't quite right.
+_ABBREV_TO_TEAM_NAME.update({
+    "STL": "St. Louis Cardinals", "CWS": "Chicago White Sox",
+    "ATH": "Athletics", "OAK": "Oakland Athletics",
+})
+
+
+def team_abbrev_to_name(abbrev: str) -> Optional[str]:
+    """Full team name for a 3-letter abbreviation, or None if unknown."""
+    if not abbrev:
+        return None
+    return _ABBREV_TO_TEAM_NAME.get(abbrev.strip().upper())
+
+
+# MLB Stats API team ids (stable constants) -- used to pull a team's recent
+# schedule for the "recent pitchers vs team" list.
+_ABBREV_TO_TEAM_ID: dict[str, int] = {
+    "LAA": 108, "ARI": 109, "BAL": 110, "BOS": 111, "CHC": 112, "CIN": 113,
+    "CLE": 114, "COL": 115, "DET": 116, "HOU": 117, "KC": 118, "LAD": 119,
+    "WSH": 120, "NYM": 121, "OAK": 133, "ATH": 133, "PIT": 134, "SD": 135,
+    "SEA": 136, "SF": 137, "STL": 138, "TB": 139, "TEX": 140, "TOR": 141,
+    "MIN": 142, "PHI": 143, "ATL": 144, "CWS": 145, "MIA": 146, "NYY": 147,
+    "MIL": 158,
+}
+
+
+def get_recent_pitchers_vs_team(opp_abbrev: str, *, limit: int = 5,
+                                days_back: int = 60) -> list[dict]:
+    """The most-recent OPPOSING starting pitchers a team faced.
+
+    Pulls the team's recent completed games from the MLB Stats schedule
+    (same statsapi the gamelog uses; hydrate=probablePitcher), and for each
+    returns the OTHER side's starter -- i.e. a pitcher who pitched against
+    *opp_abbrev*.  Newest first, up to *limit*.  Cached daily in Supabase.
+
+    Returns [{player_id, name, date, is_home_pitcher}].  Empty list when the
+    team is unknown or the schedule fetch fails -- the caller shows a clear
+    'not available' note rather than a blank box.
+    """
+    ab = (opp_abbrev or "").strip().upper()
+    tid = _ABBREV_TO_TEAM_ID.get(ab)
+    if not tid:
+        return []
+    cache_key = f"recent_opp_pitchers_{ab}_{_today_str()}"
+    try:
+        row = _db.cache_get(cache_key)
+        if isinstance(row, dict) and row.get("date") == _today_str():
+            data = (row.get("data") or {}).get("pitchers")
+            if isinstance(data, list):
+                return data[:limit]
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    from datetime import date as _date, timedelta as _td
+    end = _date.today()
+    start = end - _td(days=days_back)
+    url = (f"{_STATS_BASE}/schedule?sportId=1&teamId={tid}"
+           f"&startDate={start.isoformat()}&endDate={end.isoformat()}"
+           f"&hydrate=probablePitcher")
+    data = _fetch_json(url, label=f"recent_opp_pitchers({ab})")
+    if not data:
+        return []
+
+    out: list[dict] = []
+    for d in (data.get("dates") or []):
+        for g in (d.get("games") or []):
+            state = (g.get("status") or {}).get("abstractGameState")
+            if state != "Final":
+                continue
+            teams = g.get("teams") or {}
+            for side in ("home", "away"):
+                blk = teams.get(side) or {}
+                if (blk.get("team") or {}).get("id") != tid:
+                    continue
+                other = teams.get("away" if side == "home" else "home") or {}
+                pp = other.get("probablePitcher") or {}
+                pid, name = pp.get("id"), pp.get("fullName")
+                if pid and name:
+                    out.append({
+                        "player_id":      int(pid),
+                        "name":           name,
+                        "date":           (g.get("gameDate") or d.get("date") or "")[:10],
+                        # the opposing starter is on the non-opp side; he was
+                        # home iff opp was the away team (side == "away").
+                        "is_home_pitcher": side == "away",
+                    })
+                break
+    out.sort(key=lambda x: x["date"], reverse=True)
+    out = out[:max(limit, 10)]   # cache a few extra; caller slices to limit
+    try:
+        _db.cache_set(cache_key, "mlb", _today_str(), {"pitchers": out})
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return out[:limit]
+
+
+
 def get_player_today_opponent(player_name: str, prop: dict) -> Optional[str]:
     """Return the 3-letter abbreviation of the player's opponent today,
     or None when we can't determine which side of the matchup they're on.
