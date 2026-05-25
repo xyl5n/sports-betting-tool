@@ -713,3 +713,143 @@ def _serialize_bet(bet: dict) -> dict:
         "settled_at":      settled_at,
         "meta":            meta,
     }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Rebuilt ledgers (PostgREST only) -- Model + My Bets, fully independent.
+#
+#  Bankroll lives ONLY here (never in a repo file), so it survives redeploys.
+#  Each system has a single bankroll pool row + a frozen-stake bet store:
+#     system "model"    -> model_bankroll_pool   / model_ledger_bets
+#     system "personal" -> personal_bankroll_pool / personal_ledger_bets
+#  A placed bet's stake is written once and never recalculated.
+# ════════════════════════════════════════════════════════════════════════════
+
+_LEDGER_POOL_TABLE = {
+    "model":    "model_bankroll_pool",
+    "personal": "personal_bankroll_pool",
+}
+_LEDGER_BET_TABLE = {
+    "model":    "model_ledger_bets",
+    "personal": "personal_ledger_bets",
+}
+
+
+def ledger_pool_get(system: str) -> Optional[dict]:
+    """Return the bankroll pool row for 'model' / 'personal', or None."""
+    table = _LEDGER_POOL_TABLE.get(system)
+    if not is_supabase() or table is None:
+        return None
+    try:
+        resp = _client.table(table).select("*").eq("id", system).limit(1).execute()
+        rows = resp.data or []
+        return rows[0] if rows else None
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("ledger_pool_get(%s) failed: %s", system, exc)
+        return None
+
+
+def ledger_pool_upsert(system: str, fields: dict) -> bool:
+    """Upsert the singleton bankroll pool row (id=system).  `fields` is a
+    partial set of columns (current_balance / starting_balance /
+    daily_limit / daily_limit_date) merged onto the existing row."""
+    table = _LEDGER_POOL_TABLE.get(system)
+    if not is_supabase() or table is None:
+        return False
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        row = {"id": system, "updated_at": _dt.now(_tz.utc).isoformat()}
+        row.update(fields or {})
+        _client.table(table).upsert(row, on_conflict="id").execute()
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("ledger_pool_upsert(%s) failed: %s", system, exc)
+        return False
+
+
+def ledger_pool_seed_if_absent(system: str, starting: float) -> bool:
+    """Create the pool row with current=starting=*starting* ONLY when no
+    row exists yet.  Never overwrites a live balance -- this is what lets
+    bankrolls survive redeploys.  Returns True iff a row was seeded."""
+    if not is_supabase() or _LEDGER_POOL_TABLE.get(system) is None:
+        return False
+    if ledger_pool_get(system) is not None:
+        return False
+    return ledger_pool_upsert(system, {
+        "current_balance":  round(float(starting), 2),
+        "starting_balance": round(float(starting), 2),
+    })
+
+
+def ledger_bet_insert(system: str, row: dict) -> bool:
+    """Insert one frozen bet row (upsert on bet_id so a re-run is a no-op,
+    never re-deducting).  The caller deducts the stake from the pool."""
+    table = _LEDGER_BET_TABLE.get(system)
+    if not is_supabase() or table is None or not row:
+        return False
+    try:
+        _client.table(table).upsert(row, on_conflict="bet_id",
+                                    ignore_duplicates=True).execute()
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("ledger_bet_insert(%s, %s) failed: %s",
+                        system, row.get("bet_id"), exc)
+        return False
+
+
+def ledger_bet_exists(system: str, bet_id: str) -> bool:
+    """True iff a bet with this id is already in the store (so placement
+    can skip re-deducting an already-placed pick)."""
+    table = _LEDGER_BET_TABLE.get(system)
+    if not is_supabase() or table is None or not bet_id:
+        return False
+    try:
+        resp = _client.table(table).select("bet_id").eq("bet_id", bet_id).limit(1).execute()
+        return bool(resp.data)
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("ledger_bet_exists(%s, %s) failed: %s", system, bet_id, exc)
+        return False
+
+
+def ledger_bets_list(system: str, status: Optional[str] = None) -> list[dict]:
+    """List bets for a system, optionally filtered to 'active' / 'settled'."""
+    table = _LEDGER_BET_TABLE.get(system)
+    if not is_supabase() or table is None:
+        return []
+    try:
+        q = _client.table(table).select("*")
+        if status:
+            q = q.eq("status", status)
+        return q.order("placed_at", desc=True).execute().data or []
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("ledger_bets_list(%s, %s) failed: %s", system, status, exc)
+        return []
+
+
+def ledger_bet_update(system: str, bet_id: str, fields: dict) -> bool:
+    """Patch a single bet row (used by settlement to write result / profit /
+    status / settled_at).  Never touches `stake` -- frozen at placement."""
+    table = _LEDGER_BET_TABLE.get(system)
+    if not is_supabase() or table is None or not bet_id:
+        return False
+    try:
+        patch = {k: v for k, v in (fields or {}).items() if k != "stake"}
+        _client.table(table).update(patch).eq("bet_id", bet_id).execute()
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("ledger_bet_update(%s, %s) failed: %s", system, bet_id, exc)
+        return False
+
+
+def ledger_bets_wipe(system: str) -> int:
+    """Delete every bet row for a system (fresh-start wipe).  Returns the
+    number of rows the call reports deleting."""
+    table = _LEDGER_BET_TABLE.get(system)
+    if not is_supabase() or table is None:
+        return 0
+    try:
+        resp = _client.table(table).delete().neq("bet_id", "__never__").execute()
+        return len(resp.data or [])
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("ledger_bets_wipe(%s) failed: %s", system, exc)
+        return 0

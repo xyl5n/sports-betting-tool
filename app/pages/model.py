@@ -86,20 +86,36 @@ def _all_model_history(backend) -> list[dict]:
 # ── Section: Model bankroll ─────────────────────────────────────────────────
 
 def _bankroll_card(backend, history: list[dict]) -> None:
+    # Source of truth: the rebuilt Supabase model ledger -- one combined
+    # $1000 pool across all sports (bankroll lives only in Supabase so it
+    # survives redeploys).  Falls back to the legacy per-sport ledger when
+    # Supabase is off.
+    _supa = None
     try:
-        mlb  = backend.Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
-        wnba = backend.Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
-        start = float(mlb.data.get("model_starting_bankroll", 1000.0))
-        current = float(mlb.data.get("model_bankroll", start))
-        # Open model bets across both ledgers, sum their stakes
-        at_risk = sum(
-            float(b.get("model_amount") or 0)
-            for ld in (mlb, wnba)
-            for b in (ld.data.get("open_bets") or [])
-            if not b.get("confirmed") and not b.get("limit_reached")
-        )
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            _supa = _sl.model()
     except Exception:                                                     # noqa: BLE001
-        start, current, at_risk = 1000.0, 1000.0, 0.0
+        _supa = None
+
+    if _supa is not None:
+        start   = _supa.starting()
+        current = _supa.bankroll()
+        at_risk = sum(float(b.get("stake") or 0) for b in _supa.active_bets())
+    else:
+        try:
+            mlb  = backend.Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
+            wnba = backend.Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
+            start = float(mlb.data.get("model_starting_bankroll", 1000.0))
+            current = float(mlb.data.get("model_bankroll", start))
+            at_risk = sum(
+                float(b.get("model_amount") or 0)
+                for ld in (mlb, wnba)
+                for b in (ld.data.get("open_bets") or [])
+                if not b.get("confirmed") and not b.get("limit_reached")
+            )
+        except Exception:                                                 # noqa: BLE001
+            start, current, at_risk = 1000.0, 1000.0, 0.0
 
     pnl = current - start
     # W/L is the MLB combined store from model_picks (Supabase) via

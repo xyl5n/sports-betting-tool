@@ -8160,6 +8160,23 @@ def mybets_add():
         )
         if pid is None:
             return jsonify({"error": "This pick is already tracked"}), 409
+        # Stake into the rebuilt personal ledger (frozen, Supabase-only).
+        try:
+            from src import supa_ledger as _sl
+            if _sl.db.is_supabase():
+                pled  = _sl.personal()
+                conf  = float(data.get("confidence") or 0)
+                from src.kelly import tracked_bet_kelly as _tbk
+                p_stake, _ = _tbk(conf, data.get("odds"), pled.bankroll()) \
+                    if (0.0 < conf < 1.0 and data.get("odds")) else (0.0, None)
+                if p_stake and p_stake > 0:
+                    pled.place(bet_id=str(pid), sport="mlb", bet_type=market,
+                               selection=(data.get("side") or "Over"),
+                               odds=data.get("odds"), stake=p_stake, kind="prop",
+                               game_id=str(data.get("event_id") or pid),
+                               player_name=player, meta={"line": line})
+        except Exception as _ple:                                          # noqa: BLE001
+            _eprint(f"MYBETS-ADD prop personal-ledger place failed: {_ple}")
         return jsonify({"success": True, "id": pid})
 
     # ── Game bet ────────────────────────────────────────────────────────────
@@ -8220,6 +8237,25 @@ def mybets_add():
         if b is not None:
             b["notes"] = str(data["notes"])
     ledger.save()
+
+    # Stake into the rebuilt personal ledger (frozen at placement,
+    # Supabase-only).  Sized off the personal pool's CURRENT bankroll; once
+    # placed the stake never recalculates (bankroll edits can't change it).
+    try:
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            pled = _sl.personal()
+            p_stake, _ = tracked_bet_kelly(prob, odds, pled.bankroll())
+            if not p_stake or p_stake <= 0:
+                p_stake = stake
+            if p_stake and p_stake > 0:
+                pled.place(bet_id=str(new_id), sport=sport, bet_type=label,
+                           selection=bet_team, odds=odds, stake=p_stake,
+                           kind="game", game_id=game["id"],
+                           meta={"line": prop_line, "side": side,
+                                 "home_team": home_team, "away_team": away_team})
+    except Exception as _ple:                                              # noqa: BLE001
+        _eprint(f"MYBETS-ADD game personal-ledger place failed: {_ple}")
     return jsonify({"success": True, "id": new_id, "stake": stake})
 
 
@@ -9806,8 +9842,35 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
     except Exception as _mpe:                                             # noqa: BLE001
         _eprint(f"AUTO-ANALYSIS [{label}]: model-pick log failed: {_mpe}")
 
+    # Stake today's model picks into the combined-$1000 model ledger.
+    # Idempotent per game/bet_type, so the 8 AM wave places them and the
+    # noon wave only adds genuinely new picks; after noon no analysis wave
+    # runs, so the day's stakes are LOCKED.  Stakes freeze at placement.
+    try:
+        from src.daily_picks import load_daily_picks
+        from src import ledger_integration as _li
+        _placed = _li.place_model_daily_picks(load_daily_picks())
+        if _placed.get("games") or _placed.get("props"):
+            _eprint(f"AUTO-ANALYSIS [{label}]: model ledger staked "
+                    f"{_placed['games']} game + {_placed['props']} prop bet(s)")
+    except Exception as _lpe:                                             # noqa: BLE001
+        _eprint(f"AUTO-ANALYSIS [{label}]: model-ledger placement failed: {_lpe}")
+
     if not overall_ok and not is_retry:
         _schedule_auto_retry(label)
+
+
+def _run_personal_daily_limit_refresh() -> None:
+    """4 AM ET: take a fresh My Bets daily-limit snapshot off the current
+    personal bankroll that morning (higher if the bankroll grew, lower if
+    it shrank).  Sizes NEW bets only -- never an already-placed stake."""
+    try:
+        from src import supa_ledger as _sl
+        limit = _sl.personal().refresh_daily_limit()
+        _eprint(f"DAILY-LIMIT [personal]: refreshed to ${limit:.2f} "
+                f"(20% of current bankroll)")
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"DAILY-LIMIT refresh failed: {type(exc).__name__}: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10602,6 +10665,23 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
             _eprint(f"SETTLE-SUMMARY store {_line}")
     except Exception as _mpx:                                              # noqa: BLE001
         _eprint(f"MODEL-PICKS: settle pass failed: {type(_mpx).__name__}: {_mpx}")
+
+    # ── Settle the rebuilt Supabase ledgers (Model + My Bets) ─────────────────
+    # Grades each active staked bet against the same final scores / player
+    # stats and applies the frozen-stake bankroll movement once: WIN returns
+    # stake+profit, LOSS leaves the stake out, PUSH/VOID returns the stake.
+    try:
+        from src import ledger_integration as _li
+        _lsum = _li.settle_open_ledger_bets(
+            final_scores=_final_scores_from(scores_by_sport),
+            stat_lookup=_model_pick_stat_lookup,
+        )
+        for _sys, _s in (_lsum or {}).items():
+            if _s.get("settled"):
+                _eprint(f"LEDGER-SETTLE [{_sys}]: settled {_s['settled']} "
+                        f"({_s['wins']}W/{_s['losses']}L/{_s['pushes']}P)")
+    except Exception as _lx:                                               # noqa: BLE001
+        _eprint(f"LEDGER-SETTLE failed: {type(_lx).__name__}: {_lx}")
 
     # ── Recalculate the daily budget off the post-settlement bankroll ─────────
     # A win adds profit / a loss removes the stake from the personal bankroll,
@@ -11421,6 +11501,18 @@ print("STARTUP: all routes registered — starting scheduler...", flush=True, fi
 _werkzeug_main = os.environ.get("WERKZEUG_RUN_MAIN", "false") == "true"
 _in_debug_mode  = app.debug
 if not _in_debug_mode or _werkzeug_main:
+    # Seed the rebuilt ledger bankrolls in Supabase if absent (My Bets
+    # $166.55, Model one combined $1000).  seed-if-absent never overwrites
+    # a live balance, so bankrolls survive redeploys.
+    try:
+        from src import supa_ledger as _sl_boot
+        _seeded = _sl_boot.seed_starting_bankrolls()
+        if any(_seeded.values()):
+            print(f"STARTUP: seeded ledger bankrolls {_seeded}",
+                  flush=True, file=sys.stderr)
+    except Exception as _se_boot:                                          # noqa: BLE001
+        print(f"STARTUP WARNING: ledger seed failed: {_se_boot}",
+              flush=True, file=sys.stderr)
     try:
         _sched = nightly_retrain.start()
         if _sched is None:
@@ -11484,6 +11576,15 @@ if not _in_debug_mode or _werkzeug_main:
                     _run_job3_games_prefetch,
                     _CronTrigger(hour=3, minute=0, timezone=_ET),
                     id="nightly_prefetch",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
+                )
+                # 4 AM ET: refresh the My Bets daily limit off the morning bankroll.
+                _sched.add_job(
+                    _run_personal_daily_limit_refresh,
+                    _CronTrigger(hour=4, minute=0, timezone=_ET),
+                    id="personal_daily_limit",
                     replace_existing=True,
                     misfire_grace_time=3600,
                     max_instances=1,
