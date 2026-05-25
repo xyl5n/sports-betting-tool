@@ -1142,6 +1142,14 @@ def _section_ai_breakdown(
                         f"background: {vcolor}; color: {t.BG}; font-size: 10px; "
                         f"font-weight: 800; letter-spacing: .5px; padding: 2px 9px; "
                         f"border-radius: {t.RADIUS_PILL};")
+                    _mv = (bd.get("model_version") or "").strip()
+                    if _mv:
+                        ui.label(_mv).style(
+                            f"margin-left: auto; font-size: 9px; font-weight: 800; "
+                            f"letter-spacing: .4px; color: {t.TEXT_DIM2}; "
+                            f"background: {t.CARD_HI}; padding: 2px 7px; "
+                            f"border-radius: {t.RADIUS_PILL}; font-family: monospace;"
+                        ).tooltip("AI model version that produced this breakdown")
                 if verdict_text:
                     ui.label(verdict_text).style(
                         f"font-size: 12.5px; color: {t.TEXT}; line-height: 1.5; "

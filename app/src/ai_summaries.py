@@ -409,6 +409,17 @@ def _parse_game_summary(text: str | None) -> dict | None:
     return {"summary": summary, "verdict_tier": tier}
 
 
+def _gen(prompt: str, *, prefer: str, max_tokens: int) -> tuple:
+    """Budget-aware generate -> (text, version_label).  groq_models enforces
+    per-model spacing + the daily-budget cascade, so callers don't sleep."""
+    try:
+        from .groq_models import generate
+        return generate(prompt, prefer=prefer, max_tokens=max_tokens)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"_gen failed: {type(exc).__name__}: {exc}")
+        return None, None
+
+
 def _pitcher_mix_text(name: str) -> str:
     """'throws Slider 38% 87mph, ...' for a starter, or '' if unavailable."""
     try:
@@ -558,7 +569,6 @@ def _prop_prompt(r: dict) -> str:
 
 def _generate_games(game_results: list[tuple]) -> dict:
     """game_results: list of (sport, serialized_game_dict).  Returns counts."""
-    from .groq_client import generate_summary
     store = _load("game", force=True)
     done = generated = cached = 0
     total = len(game_results)
@@ -576,12 +586,12 @@ def _generate_games(game_results: list[tuple]) -> dict:
         if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
-        parsed = _parse_game_summary(
-            generate_summary(_game_prompt(sport, g), max_tokens=340))
-        time.sleep(_DELAY_S)
+        _gtext, _gver = _gen(_game_prompt(sport, g), prefer="V3", max_tokens=340)
+        parsed = _parse_game_summary(_gtext)
         if parsed:
             store[key] = {"summary": parsed["summary"],
                           "verdict_tier": parsed["verdict_tier"],
+                          "model_version": _gver or "",
                           "fp": fp, "updated_at": _now_iso()}
             generated += 1
         done += 1
@@ -595,7 +605,6 @@ def _generate_games(game_results: list[tuple]) -> dict:
 
 
 def _generate_props() -> dict:
-    from .groq_client import generate_summary
     try:
         from .props_scored_cache import load_scored_props
         picks = list((load_scored_props() or {}).get("picks") or [])
@@ -618,10 +627,10 @@ def _generate_props() -> dict:
         if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
-        text = generate_summary(_prop_prompt(r), max_tokens=230)
-        time.sleep(_DELAY_S)
+        text, _pver = _gen(_prop_prompt(r), prefer="V2", max_tokens=230)
         if text:
-            store[key] = {"summary": text, "fp": fp, "updated_at": _now_iso()}
+            store[key] = {"summary": text, "model_version": _pver or "",
+                          "fp": fp, "updated_at": _now_iso()}
             generated += 1
         done += 1
         if done % _LOG_EVERY == 0:
@@ -668,6 +677,83 @@ def launch_summary_queue(game_results: list[tuple] | None = None,
         _log(f"launch failed: {exc}")
 
 
+# ── Overnight two-pass pre-generation (3–4 AM prefetch cycle) ────────────────
+# Pass 1: game breakdowns on 70B (V3) + ALL props on 8B (V2) -> every pick has
+#         an AI direction.
+# Pass 2: the props where the AI AGREES (Lean/Strong Lean) and model
+#         confidence is high, ranked by combined model+AI confidence, re-run
+#         on 70B (V3) -- capped so daytime line-movement re-runs keep headroom.
+_PASS2_MAX_PROPS      = 30        # at most 30 props upgraded to 70B overnight
+_PASS2_RESERVE_TOKENS = 30_000    # keep >=30k of 70B's 100k/day for daytime
+_PASS2_MIN_CONF       = 0.60      # only high-confidence model picks qualify
+
+
+def run_overnight_generation(game_results: list[tuple] | None = None) -> dict:
+    """Two-pass overnight pre-gen.  Best-effort; safe to call from the nightly
+    job.  Returns a counts summary."""
+    if not _have_supabase():
+        _log("overnight: Supabase off -- skipping")
+        return {"games": 0, "props_pass1": 0, "props_pass2_v3": 0}
+    from . import player_ai_breakdown as _pab
+    from .groq_models import remaining
+    try:
+        from .props_scored_cache import load_scored_props
+        props = list((load_scored_props() or {}).get("picks") or [])
+    except Exception:                                                     # noqa: BLE001
+        props = []
+
+    # ── Pass 1 ──────────────────────────────────────────────────────────────
+    n_games = 0
+    for sport, g in (game_results or []):
+        try:
+            if ensure_game_summary(sport, g) == "generated":   # 70B / V3
+                n_games += 1
+        except Exception:                                                 # noqa: BLE001
+            pass
+    n_props = 0
+    for p in props:
+        try:
+            if _pab.generate_for_pick(p, prefer="V2") == "generated":     # 8B / V2
+                n_props += 1
+        except Exception:                                                 # noqa: BLE001
+            pass
+    _log(f"overnight PASS 1 done: {n_games} game breakdowns (V3), "
+         f"{n_props} prop breakdowns (V2)")
+
+    # ── Pass 2: top agreeing, high-confidence props -> 70B (V3) ──────────────
+    eligible: list[tuple] = []
+    for p in props:
+        try:
+            conf = float(p.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf < _PASS2_MIN_CONF:
+            continue
+        bd = _pab.peek_breakdown(p) or {}
+        tier = (bd.get("verdict_tier") or "").strip()
+        if not _pab.agrees_with_model(tier):           # Lean / Strong Lean only
+            continue
+        # combined model+AI confidence (Strong Lean weighted above Lean)
+        rank = conf + (0.05 if tier == "Strong Lean" else 0.0)
+        eligible.append((rank, p))
+    eligible.sort(key=lambda x: -x[0])
+
+    n_upgraded = 0
+    for _, p in eligible[:_PASS2_MAX_PROPS]:
+        if remaining("V3")["tokens"] < _PASS2_RESERVE_TOKENS:
+            _log("overnight PASS 2: 70B token reserve reached -- stopping")
+            break
+        try:
+            if _pab.generate_for_pick(p, force=True, prefer="V3") == "generated":
+                n_upgraded += 1
+        except Exception:                                                 # noqa: BLE001
+            pass
+    _log(f"overnight PASS 2 done: {n_upgraded} top props upgraded to V3 "
+         f"(eligible={len(eligible)}, cap={_PASS2_MAX_PROPS}); "
+         f"70B remaining tokens={remaining('V3')['tokens']}")
+    return {"games": n_games, "props_pass1": n_props, "props_pass2_v3": n_upgraded}
+
+
 # ── UI read helpers (never generate) ────────────────────────────────────────
 
 def get_game_summary(sport: str, game: dict) -> str | None:
@@ -694,6 +780,21 @@ def get_game_verdict_tier(sport: str, game: dict) -> str | None:
         entry = _load("game").get(f"{(sport or 'mlb').lower()}:{gid}")
         if isinstance(entry, dict):
             return entry.get("verdict_tier") or None
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return None
+
+
+def get_game_model_version(sport: str, game: dict) -> str | None:
+    """The model-version label (V1/V2/V3) that produced this game's CURRENT
+    summary -- for the small badge on the sport-page AI box."""
+    try:
+        gid = _game_id(game)
+        if not gid:
+            return None
+        entry = _load("game").get(f"{(sport or 'mlb').lower()}:{gid}")
+        if isinstance(entry, dict):
+            return entry.get("model_version") or None
     except Exception:                                                     # noqa: BLE001
         pass
     return None
@@ -733,13 +834,13 @@ def ensure_game_summary(sport: str, g: dict, *, force: bool = False) -> str:
     old = store.get(key)
     if not force and isinstance(old, dict) and old.get("summary"):
         return "cached"
-    from .groq_client import generate_summary
-    parsed = _parse_game_summary(
-        generate_summary(_game_prompt(sport, g), max_tokens=340))
+    _gtext, _gver = _gen(_game_prompt(sport, g), prefer="V3", max_tokens=340)
+    parsed = _parse_game_summary(_gtext)
     if not parsed:
         return "failed"
     store[key] = {"summary": parsed["summary"],
                   "verdict_tier": parsed["verdict_tier"],
+                  "model_version": _gver or "",
                   "fp": _game_fp(g), "updated_at": _now_iso()}
     _flush("game")
     return "generated"
@@ -761,11 +862,11 @@ def ensure_prop_summary(r: dict, *, force: bool = False) -> str:
     old = store.get(key)
     if not force and isinstance(old, dict) and old.get("summary"):
         return "cached"
-    from .groq_client import generate_summary
-    text = generate_summary(_prop_prompt(r), max_tokens=230)
+    text, _pver = _gen(_prop_prompt(r), prefer="V2", max_tokens=230)
     if not text:
         return "failed"
-    store[key] = {"summary": text, "fp": _prop_fp(r), "updated_at": _now_iso()}
+    store[key] = {"summary": text, "model_version": _pver or "",
+                  "fp": _prop_fp(r), "updated_at": _now_iso()}
     _flush("prop")
     return "generated"
 
@@ -893,13 +994,12 @@ def get_game_bet_analysis(sport: str, g: dict) -> dict:
                         return d["analysis"]
         except Exception:                                                 # noqa: BLE001
             pass
-    try:
-        from .groq_client import generate_summary
-        text = generate_summary(_game_bets_prompt(sport, g), max_tokens=400)
-    except Exception as exc:                                              # noqa: BLE001
-        _log(f"game-bets analysis failed: {exc}")
+    text, _ver = _gen(_game_bets_prompt(sport, g), prefer="V3", max_tokens=400)
+    if not text:
         return {}
     out = _parse_bet_analysis(text)
+    if out:
+        out["model_version"] = _ver or ""
     if out and cache_key:
         try:
             from . import db

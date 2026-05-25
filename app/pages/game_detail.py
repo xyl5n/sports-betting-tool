@@ -513,6 +513,14 @@ def _section_ai_analysis(backend, ser: dict, sport: str) -> None:
                     ui.label("AI analysis unavailable for this game.").style(
                         f"font-size: 12px; color: {t.TEXT_DIM}; font-style: italic;")
                     return
+                _mv = (data.get("model_version") or "").strip()
+                if _mv:
+                    ui.label(_mv).style(
+                        f"align-self: flex-end; font-size: 9px; font-weight: 800; "
+                        f"color: {t.TEXT_DIM2}; background: {t.CARD_HI}; "
+                        f"padding: 1px 6px; border-radius: {t.RADIUS_PILL}; "
+                        f"font-family: monospace;"
+                    ).tooltip("AI model version that produced this analysis")
                 with ui.tabs().props("dense no-caps").classes("w-full").style(
                     f"color: {t.TEXT_DIM};"
                 ) as tabs:

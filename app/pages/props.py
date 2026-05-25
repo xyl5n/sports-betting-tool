@@ -922,21 +922,29 @@ def _card_ai_summary(r: dict) -> None:
 
     holder = ui.column().classes("w-full").style("gap: 0; min-width: 0;")
 
-    def _ai_box(text: str, tier: str = "") -> None:
+    def _ai_box(text: str, tier: str = "", version: str = "") -> None:
         # Outline by AI-vs-model agreement: green = AI backs the model's side,
         # red = AI fades it, neutral border otherwise.
         ocolor = {"pos": t.POS, "neg": t.NEG}.get(
             _pab.agreement_outline_token(tier), t.BORDER)
-        with ui.row().classes("items-start w-full").style(
-            f"gap: 6px; padding: 6px 8px; "
+        with ui.column().classes("w-full").style(
+            f"gap: 4px; padding: 6px 8px; "
             f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM}; "
-            f"border: 2px solid {ocolor};"
+            f"border: 2px solid {ocolor}; min-width: 0;"
         ):
-            ui.label("AI").style(
-                f"font-size: 8px; font-weight: 800; letter-spacing: .5px; "
-                f"color: {t.PRIMARY_HI}; background: {t.CARD}; "
-                f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
-            )
+            with ui.row().classes("items-center w-full").style("gap: 6px;"):
+                ui.label("AI").style(
+                    f"font-size: 8px; font-weight: 800; letter-spacing: .5px; "
+                    f"color: {t.PRIMARY_HI}; background: {t.CARD}; "
+                    f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
+                )
+                if version:
+                    ui.label(version).style(
+                        f"margin-left: auto; font-size: 8px; font-weight: 800; "
+                        f"color: {t.TEXT_DIM2}; background: {t.CARD}; "
+                        f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; "
+                        f"font-family: monospace;"
+                    ).tooltip("AI model version")
             ui.label(text).style(
                 f"font-size: 11px; color: {t.TEXT_DIM}; line-height: 1.35; "
                 f"font-style: italic; white-space: normal;"
@@ -948,14 +956,15 @@ def _card_ai_summary(r: dict) -> None:
             ui.label("Generating AI breakdown…").style(
                 f"font-size: 11px; color: {t.TEXT_DIM2}; font-style: italic;")
 
-    def _verdict(mem_only: bool) -> tuple[str, str] | None:
+    def _verdict(mem_only: bool) -> tuple[str, str, str] | None:
         try:
             bd = (_pab.peek_breakdown_mem(r) if mem_only
                   else _pab.peek_breakdown(r)) or {}
         except Exception:                                                 # noqa: BLE001
             bd = {}
         v = (bd.get("verdict") or "").strip()
-        return (v, (bd.get("verdict_tier") or "").strip()) if v else None
+        return (v, (bd.get("verdict_tier") or "").strip(),
+                (bd.get("model_version") or "").strip()) if v else None
 
     # First paint: one Supabase-backed read (handles already-cached props).
     v0 = _verdict(mem_only=False)

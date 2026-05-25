@@ -122,20 +122,29 @@ def _ai_summary_block(g: dict, sport: str) -> None:
     try:
         from src import ai_summaries
         text = ai_summaries.get_game_summary(sport, g)
+        version = ai_summaries.get_game_model_version(sport, g)
     except Exception:                                                     # noqa: BLE001
-        text = None
+        text, version = None, None
     if not text:
         return
-    with ui.row().classes("items-start w-full").style(
-        f"gap: 6px; margin-top: {t.SPACE_SM}; padding: 8px 10px; "
+    with ui.column().classes("w-full").style(
+        f"gap: 4px; margin-top: {t.SPACE_SM}; padding: 8px 10px; "
         f"background: {t.CARD_HI}; border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_SM};"
+        f"border-radius: {t.RADIUS_SM}; min-width: 0;"
     ):
-        ui.label("AI").style(
-            f"font-size: 8.5px; font-weight: 800; letter-spacing: .5px; "
-            f"color: {t.PRIMARY}; background: {t.CARD}; "
-            f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
-        )
+        with ui.row().classes("items-center w-full").style("gap: 6px;"):
+            ui.label("AI").style(
+                f"font-size: 8.5px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.PRIMARY}; background: {t.CARD}; "
+                f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
+            )
+            if version:
+                ui.label(version).style(
+                    f"margin-left: auto; font-size: 8.5px; font-weight: 800; "
+                    f"color: {t.TEXT_DIM2}; background: {t.CARD}; "
+                    f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; "
+                    f"font-family: monospace;"
+                ).tooltip("AI model version")
         ui.label(text).style(
             f"font-size: 11.5px; color: {t.TEXT_DIM}; line-height: 1.4; "
             f"font-style: italic; white-space: normal;"
