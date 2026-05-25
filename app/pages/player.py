@@ -1108,7 +1108,9 @@ def _section_ai_breakdown(
         if not bd:
             return  # API failed / no data -> show nothing (page still loads)
 
-        from src.player_ai_breakdown import approach_label, verdict_label, tier_color
+        from src.player_ai_breakdown import (
+            approach_label, verdict_label, tier_color, agreement_outline_token,
+        )
         with holder:
             # ── AI Verdict box (full width, above the grid) ──────────────
             # Badge comes from the AI's OWN verdict_tier (same determination
@@ -1121,10 +1123,15 @@ def _section_ai_breakdown(
             else:
                 label, color_tok = verdict_label(prop.get("confidence"), prop.get("edge"))
             vcolor = {"pos": t.POS, "warn": t.WARN, "neg": t.NEG}.get(color_tok, t.TEXT_DIM)
+            # Outline reflects AI-vs-model AGREEMENT (not the model's
+            # confidence): green when the AI backs the model's side, red when
+            # it fades it, neutral border for a Neutral verdict.
+            _ocolor = {"pos": t.POS, "neg": t.NEG}.get(
+                agreement_outline_token(ai_tier), t.BORDER)
             verdict_text = (bd.get("verdict") or "").strip()
             with ui.column().classes("w-full").style(
-                f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-                f"border-left: 4px solid {vcolor}; border-radius: {t.RADIUS_MD}; "
+                f"background: {t.CARD}; border: 2px solid {_ocolor}; "
+                f"border-radius: {t.RADIUS_MD}; "
                 f"padding: {t.SPACE_MD}; gap: 6px;"
             ):
                 with ui.row().classes("items-center w-full").style("gap: 8px;"):

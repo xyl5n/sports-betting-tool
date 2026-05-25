@@ -176,11 +176,20 @@ def _scorecard_html(sc: dict) -> str:
 
 def _card(r: dict, display_rank: int) -> None:
     vcolor = _clr(r.get("verdict_color"))
+    # Outline reflects AI-vs-model AGREEMENT (green = AI backs the model's
+    # side, red = AI fades it, neutral border otherwise), keyed off the same
+    # ai_tier the Top Plays gate uses.
+    try:
+        from src.player_ai_breakdown import agreement_outline_token
+        ocolor = {"pos": t.POS, "neg": t.NEG}.get(
+            agreement_outline_token(r.get("ai_tier")), t.BORDER)
+    except Exception:                                                     # noqa: BLE001
+        ocolor = t.BORDER
     combined_pct = f"{r.get('combined_score', 0) * 100:.0f}%"
     conf_pct = f"{r.get('confidence', 0) * 100:.0f}%"
     with ui.column().classes("w-full").style(
-        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-left: 4px solid {vcolor}; border-radius: {t.RADIUS_MD}; "
+        f"background: {t.CARD}; border: 2px solid {ocolor}; "
+        f"border-radius: {t.RADIUS_MD}; "
         f"padding: 10px 14px; gap: 6px; min-width: 0;"
     ):
         # Top row: rank · name · combined score

@@ -383,6 +383,34 @@ def tier_color(tier: str) -> str:
     return _TIER_COLOR.get((tier or "").strip(), "warn")
 
 
+# ── AI-vs-model agreement (single source for the outline colour + the Top
+#    Plays eligibility gate) ─────────────────────────────────────────────────
+# The verdict_tier is defined RELATIVE TO THE MODEL'S PICK:
+#   Lean / Strong Lean  -> AI backs the model's side      -> AGREE
+#   Fade / Strong Fade  -> AI leans the opposite side     -> DISAGREE
+#   Neutral / unknown   -> no clear directional agreement -> NEUTRAL
+def agreement(tier: str | None) -> str:
+    """'agree' | 'disagree' | 'neutral' for a verdict tier."""
+    tt = (tier or "").strip()
+    if tt in ("Lean", "Strong Lean"):
+        return "agree"
+    if tt in ("Fade", "Strong Fade"):
+        return "disagree"
+    return "neutral"
+
+
+def agreement_outline_token(tier: str | None) -> str:
+    """Outline colour token by AI-vs-model agreement:
+    'pos' (green=agree) · 'neg' (red=disagree) · 'none' (neutral/no-colour)."""
+    return {"agree": "pos", "disagree": "neg"}.get(agreement(tier), "none")
+
+
+def agrees_with_model(tier: str | None) -> bool:
+    """True only when the AI clearly agrees (Lean / Strong Lean) -- the Top
+    Plays eligibility gate.  Fade / Strong Fade / Neutral / unknown -> False."""
+    return agreement(tier) == "agree"
+
+
 # ── Caching ──────────────────────────────────────────────────────────────────
 
 # In-process mirror of generated breakdowns, keyed by the same cache key.

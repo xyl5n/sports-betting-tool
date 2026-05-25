@@ -922,10 +922,15 @@ def _card_ai_summary(r: dict) -> None:
 
     holder = ui.column().classes("w-full").style("gap: 0; min-width: 0;")
 
-    def _ai_box(text: str) -> None:
+    def _ai_box(text: str, tier: str = "") -> None:
+        # Outline by AI-vs-model agreement: green = AI backs the model's side,
+        # red = AI fades it, neutral border otherwise.
+        ocolor = {"pos": t.POS, "neg": t.NEG}.get(
+            _pab.agreement_outline_token(tier), t.BORDER)
         with ui.row().classes("items-start w-full").style(
             f"gap: 6px; padding: 6px 8px; "
-            f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM};"
+            f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM}; "
+            f"border: 2px solid {ocolor};"
         ):
             ui.label("AI").style(
                 f"font-size: 8px; font-weight: 800; letter-spacing: .5px; "
@@ -943,19 +948,19 @@ def _card_ai_summary(r: dict) -> None:
             ui.label("Generating AI breakdown…").style(
                 f"font-size: 11px; color: {t.TEXT_DIM2}; font-style: italic;")
 
-    def _verdict(mem_only: bool) -> str | None:
+    def _verdict(mem_only: bool) -> tuple[str, str] | None:
         try:
             bd = (_pab.peek_breakdown_mem(r) if mem_only
                   else _pab.peek_breakdown(r)) or {}
         except Exception:                                                 # noqa: BLE001
             bd = {}
         v = (bd.get("verdict") or "").strip()
-        return v or None
+        return (v, (bd.get("verdict_tier") or "").strip()) if v else None
 
     # First paint: one Supabase-backed read (handles already-cached props).
     v0 = _verdict(mem_only=False)
     with holder:
-        (_ai_box(v0) if v0 else _loading())
+        (_ai_box(*v0) if v0 else _loading())
 
     if v0:
         return
@@ -971,7 +976,7 @@ def _card_ai_summary(r: dict) -> None:
         if v:
             holder.clear()
             with holder:
-                _ai_box(v)
+                _ai_box(*v)
             timer.active = False
         elif attempts["n"] >= 100:        # ~5 min at 3 s
             holder.clear()                # give up quietly (matches player page)
