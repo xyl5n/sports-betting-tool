@@ -158,6 +158,42 @@ def _market_label(m: str) -> str:
     return _MARKET_LABEL.get(m or "", (m or "").replace("_", " "))
 
 
+def _present(x) -> bool:
+    """True only for a real, usable value -- filters out the None / 'n/a' /
+    'None/None' placeholders so we never feed a 'missing' fact to Groq (which
+    is what made it keep narrating 'data not available')."""
+    if x is None:
+        return False
+    s = str(x).strip().lower()
+    return s not in ("", "n/a", "none", "none/none", "0/0", "-", "+nan", "nan")
+
+
+# Shared analyst framing -- mirrors the player-profile big-breakdown system
+# prompt: an experienced bettor who INTERPRETS data for THIS matchup instead
+# of reciting it.  The two hard rules below are what fix the reported output
+# problems: (a) never echo the verdict label as if it were analysis, and
+# (b) silently omit anything not given rather than saying it's unavailable.
+_ANALYST_RULES = (
+    "You are an experienced MLB betting analyst writing for a sharp bettor -- "
+    "not a data reader. Reason ACROSS the facts to judge THIS specific matchup; "
+    "connect each number to what it means here rather than listing it (e.g. "
+    "'his 47% four-seam usage is exposed tonight because this lineup slugs .500 "
+    "on fastballs', or 'the slider should travel since these hitters whiff a lot "
+    "on breaking balls'). Name the two or three strongest factors for or against, "
+    "call out any conflicting signal that warrants caution (e.g. strong model "
+    "confidence but fading recent form, or a hitter-friendly park against a tough "
+    "arsenal), and reference the similar-player comparison when it is given and "
+    "relevant. Then give a clear directional read. "
+    "HARD RULES: Never invent or assume a number -- use only the facts provided. "
+    "If a fact is not in the list it is simply unknown: do NOT mention it, do NOT "
+    "say anything is 'not available', 'unavailable', 'unknown', or 'not provided' "
+    "-- just leave it out. Never write filler that merely restates the verdict "
+    "label (e.g. 'this prop leans toward a lean', 'this is a neutral neutral'); "
+    "say something substantive instead. Plain text only: no markdown, asterisks, "
+    "headers, bullets, or dashes."
+)
+
+
 # ── Game summaries ──────────────────────────────────────────────────────────
 
 def _game_id(g: dict) -> str:
@@ -178,6 +214,28 @@ def _game_fp(g: dict) -> dict:
         "hsp":      hsp.get("full_name"),
         "asp":      asp.get("full_name"),
     }
+
+
+def _sp_fact(sp: dict, label: str) -> str | None:
+    """One starting-pitcher fact line, including only the metrics that are
+    actually present so we never feed 'n/a ERA' into the prompt."""
+    name = (sp or {}).get("full_name")
+    if not name:
+        return None
+    bits: list[str] = []
+    for key, suffix in (("era", "ERA"), ("whip", "WHIP"), ("k_per_9", "K/9")):
+        if _present(sp.get(key)):
+            bits.append(f"{_num(sp.get(key))} {suffix}")
+    if _present(sp.get("last3_era")):
+        bits.append(f"{_num(sp.get('last3_era'))} ERA over his last 3")
+    w, l = sp.get("wins"), sp.get("losses")
+    if w is not None and l is not None:
+        bits.append(f"{w}-{l}")
+    mix = _pitcher_mix_text(name)
+    tail = f" — {mix.replace('Arsenal: ', 'throws ').rstrip('.')}" if mix else ""
+    if not bits:
+        return f"{label} starter {name}{tail}."
+    return f"{label} starter {name}: " + ", ".join(bits) + tail + "."
 
 
 def _game_prompt(sport: str, g: dict) -> str:
@@ -203,25 +261,15 @@ def _game_prompt(sport: str, g: dict) -> str:
             f"(confidence {_pct(tot.get('pick_prob'))})."
         )
     if (sport or "").lower() == "mlb":
-        asp = g.get("away_sp") or {}
-        hsp = g.get("home_sp") or {}
-        for sp, label in ((asp, away), (hsp, home)):
-            if not sp.get("full_name"):
-                continue
-            facts.append(
-                f"{label} SP {sp.get('full_name')}: {_num(sp.get('era'))} ERA, "
-                f"{_num(sp.get('whip'))} WHIP, {_num(sp.get('k_per_9'))} K/9, "
-                f"last-3 starts {_num(sp.get('last3_era'))} ERA, "
-                f"record {sp.get('wins', 0)}-{sp.get('losses', 0)}."
-            )
-            mix_txt = _pitcher_mix_text(sp.get("full_name"))
-            if mix_txt:
-                facts.append(f"{label} SP {mix_txt}")
-        # Park factor (home park).
+        for sp, lbl in ((g.get("away_sp") or {}, away), (g.get("home_sp") or {}, home)):
+            fact = _sp_fact(sp, lbl)
+            if fact:
+                facts.append(fact)
         try:
             from .park_factors import get_park_factors
             run_f, hr_f = get_park_factors(home)
-            facts.append(f"Park factors: run {run_f:.2f}, HR {hr_f:.2f} (1.00=neutral).")
+            facts.append(f"Park factors at {home}: run {run_f:.2f}, HR {hr_f:.2f} "
+                         f"(1.00 = neutral).")
         except Exception:                                                 # noqa: BLE001
             pass
     # Pass through any extra signals the analysis row already carries.
@@ -233,12 +281,11 @@ def _game_prompt(sport: str, g: dict) -> str:
             facts.append(f"{label}: {v.strip()}.")
 
     return (
-        "You are an experienced sports-betting analyst, not a data reader. Using "
-        "ONLY the facts provided (never invent numbers), reason across the signals "
-        "to explain this pick in 3-5 plain-text sentences. Identify the single key "
-        "edge driving the pick, flag any significant risk factor that could sink it, "
-        "and close with a clear directional verdict — whether the pick looks strong "
-        "or merely situational. No markdown, no bold, no bullet points.\n"
+        _ANALYST_RULES
+        + " Write 3-5 sentences on this game pick: lead with the single biggest "
+        "edge (usually the starting-pitcher matchup or the scoring environment), "
+        "weigh the opposing arsenal and park against it, and close with a clear "
+        "read on whether the pick is strong or merely situational.\n\nFACTS: "
         + " ".join(facts)
     )
 
@@ -309,20 +356,48 @@ def _prop_prompt(r: dict) -> str:
     player = r.get("player") or ""
     is_pitcher_market = market.startswith("pitcher_")
 
-    def hr(n: int) -> str:
-        h = s.get(f"last_{n}_hits"); g = s.get(f"last_{n}_games")
-        return f"L{n} {h}/{g}" if g else f"L{n} n/a"
-
     facts = [
         f"{player} {(r.get('side') or '').title()} {r.get('line')} "
-        f"{_market_label(market)}.",
-        f"Model confidence {_pct(r.get('confidence'))}, projected {_num(r.get('predicted_value'))}.",
-        f"Hit rates {hr(5)}, {hr(10)}, {hr(20)}; season avg {_num(s.get('season_avg'))}.",
+        f"{_market_label(market)}."
     ]
-    if r.get("opp_abbrev"):
-        rank = r.get("opp_rank")
-        rank_s = f"#{rank}" if rank is not None else "n/a"
-        facts.append(f"Opponent {r.get('opp_abbrev')} ranks {rank_s} vs this stat (1=toughest).")
+
+    # Model read -- always include confidence; projection only when present.
+    if _present(r.get("confidence")):
+        line = f"Model confidence {_pct(r.get('confidence'))}"
+        if _present(r.get("predicted_value")):
+            line += f", projecting {_num(r.get('predicted_value'))}"
+        facts.append(line + ".")
+
+    # Recent form -- only windows that actually have games, plus season avg.
+    rates = [f"L{n} {s.get(f'last_{n}_hits')}/{s.get(f'last_{n}_games')}"
+             for n in (5, 10, 20) if s.get(f"last_{n}_games")]
+    if _present(s.get("season_avg")):
+        rates.append(f"season avg {_num(s.get('season_avg'))}")
+    if rates:
+        facts.append("Recent form (times the line was hit): " + ", ".join(rates) + ".")
+
+    # Head-to-head vs today's opponent.
+    if s.get("h2h_games"):
+        facts.append(
+            f"Career vs {r.get('opp_abbrev') or 'this opponent'}: "
+            f"{s.get('h2h_hits')}/{s.get('h2h_games')} games over the line"
+            + (f", {_num(s.get('h2h_avg'))} average" if _present(s.get("h2h_avg")) else "")
+            + "."
+        )
+
+    # Opponent rank vs this stat -- recompute fresh if the row didn't carry it.
+    rank = r.get("opp_rank")
+    if rank is None and r.get("opp_abbrev"):
+        try:
+            from .player_profile_client import get_opp_rank_for_prop
+            rank = get_opp_rank_for_prop(r.get("opp_abbrev"), market)
+        except Exception:                                                 # noqa: BLE001
+            rank = None
+    if r.get("opp_abbrev") and rank is not None:
+        facts.append(
+            f"Opponent {r.get('opp_abbrev')} ranks #{rank} of 30 against this stat "
+            f"(1 = the toughest matchup for the over, 30 = the softest)."
+        )
 
     # Deeper signals (best-effort, cached): similar-player cluster + the
     # pitch-mix matchup (pitcher's own arsenal, or for a batter prop the
@@ -336,13 +411,13 @@ def _prop_prompt(r: dict) -> str:
         if is_pitcher_market:
             mt = _aic.pitch_mix_text(_aic.pitch_mix(_aic.resolve_player_id(player)))
             if mt:
-                facts.append(mt)
+                facts.append("His " + mt[0].lower() + mt[1:])
         else:
             opp_pid = _opposing_pitcher_id(r)
             if opp_pid:
                 mt = _aic.pitch_mix_text(_aic.pitch_mix(opp_pid))
                 if mt:
-                    facts.append("Opposing pitcher " + mt[0].lower() + mt[1:])
+                    facts.append("Opposing pitcher's " + mt[0].lower() + mt[1:])
                 bt = _aic.batter_vs_pitch_text(
                     _aic.batter_vs_pitch(_aic.resolve_player_id(player), opp_pid))
                 if bt:
@@ -351,17 +426,12 @@ def _prop_prompt(r: dict) -> str:
         pass
 
     return (
-        "You are an experienced sports-betting analyst, not a data reader. Using "
-        "ONLY the facts provided (never invent numbers), reason across the signals "
-        "in 3-5 plain-text sentences. Name the two or three strongest factors for "
-        "or against this prop; cross-reference the similar-player comparison when "
-        "present; flag any conflicting signal that suggests caution (e.g. high "
-        "confidence but poor recent form, or a favorable park but a tough pitch-mix "
-        "matchup); when a pitcher's arsenal is given, weigh whether the pitch-type "
-        "matchup favors the batter or the pitcher (e.g. a heavy slider usage against "
-        "a batter who struggles on breaking balls); and close with a clear "
-        "directional opinion on whether the factors lean for or against the pick. "
-        "No markdown, no bold tags.\n" + " ".join(facts)
+        _ANALYST_RULES
+        + " Write 3-5 sentences on this player prop. When an arsenal is given, "
+        "explicitly weigh the pitch-type matchup (e.g. heavy slider usage against "
+        "a hitter who struggles on breaking balls favors the under), and tie the "
+        "opponent rank and recent form to a concrete read on the over or under.\n\n"
+        "FACTS: " + " ".join(facts)
     )
 
 
@@ -608,25 +678,15 @@ def _game_bets_prompt(sport: str, g: dict) -> str:
             f"{(tot.get('direction') or '').title() or 'n/a'})."
         )
     if (sport or "").lower() == "mlb":
-        for sp, label in ((g.get("away_sp") or {}, away), (g.get("home_sp") or {}, home)):
-            if not sp.get("full_name"):
-                continue
-            facts.append(
-                f"{label} SP {sp.get('full_name')}: {_num(sp.get('era'))} ERA, "
-                f"{_num(sp.get('whip'))} WHIP, {_num(sp.get('k_per_9'))} K/9, "
-                f"last-3 starts {_num(sp.get('last3_era'))} ERA."
-            )
-            try:
-                from . import ai_context as _aic
-                mt = _aic.pitch_mix_text(_aic.pitch_mix(_aic.resolve_player_id(sp.get("full_name"))))
-                if mt:
-                    facts.append(f"{label} SP {mt.replace('Arsenal: ', 'throws ')}")
-            except Exception:                                             # noqa: BLE001
-                pass
+        for sp, lbl in ((g.get("away_sp") or {}, away), (g.get("home_sp") or {}, home)):
+            fact = _sp_fact(sp, lbl)
+            if fact:
+                facts.append(fact)
         try:
             from .park_factors import get_park_factors
             rf, hf = get_park_factors(home)
-            facts.append(f"Park factors: run {rf:.2f}, HR {hf:.2f} (1.00 = neutral).")
+            facts.append(f"Park factors at {home}: run {rf:.2f}, HR {hf:.2f} "
+                         f"(1.00 = neutral).")
         except Exception:                                                 # noqa: BLE001
             pass
     for key, label in (("h2h", "Season head-to-head"), ("bullpen", "Bullpens"),
@@ -637,16 +697,16 @@ def _game_bets_prompt(sport: str, g: dict) -> str:
             facts.append(f"{label}: {v.strip()}.")
 
     return (
-        "You are an experienced sports-betting analyst, not a data reader. Using "
-        "ONLY the facts provided (never invent numbers), return ONLY a JSON object "
-        "with exactly these three string keys, each a 2-3 sentence plain-text "
-        "analysis (no markdown, no bold) that gives a clear directional opinion "
-        "rather than recapping numbers:\n"
-        '  "moneyline": weigh the starting-pitcher matchup and team offensive '
-        "context; name the key edge and any risk and lean a side.\n"
-        '  "run_line": which team is more likely to win by multiple runs, and why.\n'
-        '  "run_total": park factor, both pitchers\' recent form, and the projected '
-        "scoring environment; lean over or under.\n\nFACTS: " + " ".join(facts)
+        _ANALYST_RULES
+        + " Return ONLY a JSON object with exactly these three string keys, each "
+        "2-3 sentences that interpret the matchup rather than recap numbers:\n"
+        '  "moneyline": weigh the starting-pitcher edge and offensive context, '
+        "name the key factor and the main risk, and commit to a side.\n"
+        '  "run_line": judge which team is likelier to win (or stay within) by '
+        "multiple runs, and why.\n"
+        '  "run_total": tie the park, both arsenals, and the pitchers\' form to '
+        "the scoring environment, then commit to over or under.\n\nFACTS: "
+        + " ".join(facts)
     )
 
 
