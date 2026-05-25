@@ -1,202 +1,177 @@
 """
 model_picks.py
 ==============
-Per-model performance tracking.  Logs every individual model's pick (plus
-the ensemble + the user-facing consensus) to the Supabase ``model_picks``
-table whenever the models run, settles pending picks against final scores /
-stat lines in the 15-minute cycle, and aggregates a per-model W/L table for
-the admin page.
+Single per-model performance store, backed entirely by the Supabase
+``model_picks`` table (PostgREST only -- no JSON trackers, no direct
+Postgres).  JSON files don't survive Railway redeploys, so Supabase is the
+source of truth for every record shown on the home + props pages.
 
-Best-effort throughout: when Supabase isn't configured every function is a
-safe no-op, and a malformed analysis row is skipped rather than raised.
+One row per model pick:
+  model  : 'xgb' | 'lr' | 'nn' | 'combined'  (game models / ensemble)
+           'pitcher' | 'batter'              (prop models)
+  bet_type: 'ml' | 'rl' | 'total'            (game models + combined)
+            <prop market>                    (pitcher / batter)
+  sport  : 'mlb' | 'wnba' | ...   -- the SAME six stores exist per sport
+           purely by filtering on this column (no per-sport code paths).
 
-Deterministic ``pick_id`` (date|sport|game-or-prop|model|pick_type) means a
-pick logged twice the same day is a no-op insert, so a settled result is
-never overwritten.
+pick_id is deterministic (sport:model:bet_type:game_id[:player_name]) and is
+the upsert key, so re-running a cycle never duplicates and never overwrites a
+finished result (inserts ignore existing rows).  Settlement reads pending
+rows from the table, grades them, and writes status='finished'.
 """
 from __future__ import annotations
 
 import sys
-import uuid
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 from typing import Optional
-
-_ET = ZoneInfo("America/New_York")
-
-# Market -> rolling-stat key (for naming regressor models + settling props).
-_MARKET_STAT = {
-    "pitcher_strikeouts": "K", "pitcher_earned_runs": "ER",
-    "pitcher_hits_allowed": "H", "pitcher_walks": "BB", "pitcher_outs": "outs",
-    "batter_hits": "H", "batter_total_bases": "TB", "batter_home_runs": "HR",
-    "batter_rbis": "RBI", "batter_runs_scored": "R", "batter_walks": "BB",
-    "batter_strikeouts": "SO",
-}
 
 
 def _log(msg: str) -> None:
     print(f"MODEL-PICKS: {msg}", flush=True, file=sys.stderr)
 
 
-def _today_et() -> str:
-    return datetime.now(_ET).date().isoformat()
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _row(date, sport, ref, model, pick_type, side, *, odds=None,
-         confidence=None, projected=None, line=None, prop_id=None) -> dict:
-    # pick_id is a random uuid (table PK); de-duplication is enforced by the
-    # UNIQUE (date, game_id, model_name, pick_type) constraint via upsert, so
-    # logging the same pick twice a day is a no-op.  *ref* fills game_id (a
-    # real game id for games, or the player|market|line key for props, so the
-    # constraint distinguishes props too); prop_id additionally carries it.
+def _pid(sport, model, bet_type, game_id, player=None) -> str:
+    base = f"{sport}:{model}:{bet_type}:{game_id}"
+    return f"{base}:{player}" if player else base
+
+
+def _row(sport, model, bet_type, game_id, side, *, confidence=None,
+         line=None, player=None) -> dict:
     return {
-        "pick_id":         str(uuid.uuid4()),
-        "date":            date,
-        "sport":           sport,
-        "game_id":         ref,
-        "prop_id":         prop_id,
-        "model_name":      model,
-        "pick_type":       pick_type,
-        "pick_side":       side,
-        "odds":            int(odds) if isinstance(odds, (int, float)) else None,
-        "confidence":      round(float(confidence), 4) if isinstance(confidence, (int, float)) else None,
-        "projected_value": round(float(projected), 3) if isinstance(projected, (int, float)) else None,
-        "line":            float(line) if isinstance(line, (int, float)) else None,
-        "result":          "pending",
-        "settled_at":      None,
-        "created_at":      _now_iso(),
+        "pick_id":     _pid(sport, model, bet_type, game_id, player),
+        "sport":       sport,
+        "model":       model,
+        "bet_type":    bet_type,
+        "status":      "pending",
+        "pick_side":   side,
+        "line":        float(line) if isinstance(line, (int, float)) else None,
+        "confidence":  round(float(confidence), 4) if isinstance(confidence, (int, float)) else None,
+        "result":      None,
+        "game_id":     str(game_id),
+        "player_name": player,
+        "created_at":  _now_iso(),
+        "settled_at":  None,
     }
 
 
-# ── Build rows from analysis results ─────────────────────────────────────────
-
-def _ml_side(prob):
+def _conf(prob):
+    """Pick-side confidence from a home-win/cover probability (max of p,1-p)."""
     try:
         p = float(prob)
     except (TypeError, ValueError):
-        return None, None
-    return ("home", p) if p >= 0.5 else ("away", 1.0 - p)
+        return None
+    return p if p >= 0.5 else 1.0 - p
 
 
-def game_rows(r: dict, sport: str, date: str) -> list[dict]:
-    """Per-model + ensemble + consensus rows for one analyzed game."""
+# ── Build pick rows from analysis results ────────────────────────────────────
+
+def game_rows(r: dict, sport: str) -> list[dict]:
+    """xgb/lr/nn + combined rows for ml/rl/total for one analyzed game."""
     g = r.get("game") or {}
     gid = str(g.get("id") or g.get("game_id") or "")
     if not gid:
         return []
+    home = g.get("home_team") or "home"
+    away = g.get("away_team") or "away"
     rows: list[dict] = []
-    h_odds = g.get("h2h_home_odds")
-    a_odds = g.get("h2h_away_odds")
 
-    # Moneyline — individual models + ensemble + consensus.
+    def _team(prob):  # home-win prob -> picked team name + confidence
+        try:
+            p = float(prob)
+        except (TypeError, ValueError):
+            return None, None
+        return (home if p >= 0.5 else away), (p if p >= 0.5 else 1.0 - p)
+
+    # ── Moneyline ────────────────────────────────────────────────────────────
     pred = r.get("prediction") or {}
-    ml_models = [("xgb", pred.get("xgb_prob")), ("lr", pred.get("lr_prob"))]
-    if sport == "mlb":
-        ml_models.append(("nn", pred.get("nn_prob")))
-    for mname, prob in ml_models:
-        side, conf = _ml_side(prob)
-        if side is None:
-            continue
-        rows.append(_row(date, sport, gid, f"{sport}_ml_{mname}", "ML", side,
-                         odds=h_odds if side == "home" else a_odds, confidence=conf))
-    side, conf = _ml_side(pred.get("home_win_prob"))
-    if side is not None:
-        odds = h_odds if side == "home" else a_odds
-        rows.append(_row(date, sport, gid, "ensemble", "ML", side, odds=odds, confidence=conf))
-        rows.append(_row(date, sport, gid, "consensus", "ML", side, odds=odds, confidence=conf))
+    for model, prob in (("xgb", pred.get("xgb_prob")), ("lr", pred.get("lr_prob")),
+                        ("nn", pred.get("nn_prob"))):
+        team, conf = _team(prob)
+        if team:
+            rows.append(_row(sport, model, "ml", gid, team, confidence=conf))
+    team, conf = _team(pred.get("home_win_prob"))
+    if team:
+        rows.append(_row(sport, "combined", "ml", gid, team, confidence=conf))
 
-    # Run line (MLB) / spread (WNBA) — per model + ensemble + consensus.
+    # ── Run line (MLB) / spread (WNBA) -- bet_type 'rl' for both ─────────────
     rl = r.get("rl_pred") or r.get("spread_pred") or {}
-    rl_pt = rl.get("run_line_point") if sport == "mlb" else rl.get("spread_line")
-    rl_type = "RL" if sport == "mlb" else "Spread"
+    home_line = rl.get("run_line_point") if sport == "mlb" else rl.get("spread_line")
     if rl:
-        rl_models = [("xgb", rl.get("xgb_prob")), ("lr", rl.get("lr_prob"))]
-        if rl.get("nn_prob") is not None:
-            rl_models.append(("nn", rl.get("nn_prob")))
-        for mname, prob in rl_models:
-            side, conf = _ml_side(prob)            # prob = P(home covers)
-            if side is None:
+        for model, prob in (("xgb", rl.get("xgb_prob")), ("lr", rl.get("lr_prob")),
+                            ("nn", rl.get("nn_prob"))):
+            try:
+                p = float(prob)
+            except (TypeError, ValueError):
                 continue
-            rows.append(_row(date, sport, gid, f"{sport}_rl_{mname}", rl_type, side,
-                             odds=rl.get("pick_odds"), confidence=conf, line=rl_pt))
-        # ensemble/consensus run-line pick (the side shown to the user)
-        cside = rl.get("side") or ("home" if str(rl.get("pick_team", "")) == str(g.get("home_team")) else "away")
-        if cside in ("home", "away"):
-            for m in ("ensemble", "consensus"):
-                rows.append(_row(date, sport, gid, m, rl_type, cside,
-                                 odds=rl.get("pick_odds"),
-                                 confidence=rl.get("pick_prob"), line=rl_pt))
+            # prob = P(home covers); pick the side + that side's spread line.
+            if p >= 0.5:
+                team, ln = home, home_line
+            else:
+                team, ln = away, (-home_line if isinstance(home_line, (int, float)) else None)
+            rows.append(_row(sport, model, "rl", gid, team,
+                             confidence=p if p >= 0.5 else 1.0 - p, line=ln))
+        # combined run-line pick (the side shown to the user)
+        cside = rl.get("side")
+        cteam = rl.get("pick_team") or (home if cside == "home" else away if cside == "away" else None)
+        if cteam:
+            is_home = str(cteam) == str(home) or cside == "home"
+            ln = home_line if is_home else (-home_line if isinstance(home_line, (int, float)) else None)
+            rows.append(_row(sport, "combined", "rl", gid, cteam,
+                             confidence=rl.get("pick_prob"), line=ln))
 
-    # Totals — per model (XGB, NN) + ensemble + consensus.
+    # ── Totals ───────────────────────────────────────────────────────────────
     tot = r.get("totals_pred") or {}
     line = tot.get("total_line")
     if tot and isinstance(line, (int, float)):
-        for mname, pv in (("xgb", tot.get("xgb_pred")), ("nn", tot.get("nn_pred"))):
+        for model, pv in (("xgb", tot.get("xgb_pred")), ("lr", tot.get("lr_pred")),
+                          ("nn", tot.get("nn_pred"))):
             if not isinstance(pv, (int, float)):
                 continue
-            side = "over" if pv > line else "under"
-            rows.append(_row(date, sport, gid, f"{sport}_total_{mname}", "Total", side,
-                             projected=pv, line=line))
-        cdir = tot.get("direction")
+            rows.append(_row(sport, model, "total", gid,
+                             "OVER" if pv > line else "UNDER", line=line))
+        cdir = (tot.get("direction") or "").lower()
         if cdir in ("over", "under"):
-            for m in ("ensemble", "consensus"):
-                rows.append(_row(date, sport, gid, m, "Total", cdir,
-                                 confidence=tot.get("pick_prob"),
-                                 projected=tot.get("predicted_total"), line=line))
+            rows.append(_row(sport, "combined", "total", gid, cdir.upper(),
+                             confidence=tot.get("pick_prob"), line=line))
     return rows
 
 
-def prop_rows(p: dict, date: str) -> list[dict]:
-    """Classifier + regressor + consensus rows for one scored prop pick."""
+def prop_rows(p: dict) -> list[dict]:
+    """One pitcher/batter row for a scored prop pick.  bet_type = market,
+    player_name = player; game_id ties it to the game (event id)."""
     market = p.get("market") or ""
     bucket = p.get("bucket") or ("pitcher" if market.startswith("pitcher_") else "batter")
     player = (p.get("player") or "").strip()
-    line = p.get("line")
-    side = (p.get("side") or "Over").title()
     if not player or not market:
         return []
-    ref = f"{player}|{market}|{line}"
-    sport = "mlb"
+    gid = str(p.get("event_id") or p.get("game_id") or f"{player}|{market}")
+    side = (p.get("side") or "Over").upper()
     conf = p.get("model_prob") or p.get("confidence")
-    pv = p.get("predicted_value")
-    rows = [
-        _row(date, sport, ref, f"props_{bucket}_classifier", market, side,
-             odds=p.get("best_odds"), confidence=conf, line=line, prop_id=ref),
-    ]
-    stat = _MARKET_STAT.get(market, market)
-    if isinstance(pv, (int, float)) and isinstance(line, (int, float)):
-        reg_side = "Over" if pv > line else "Under"
-        rows.append(_row(date, sport, ref, f"props_{bucket}_reg_{stat}", market,
-                         reg_side, projected=pv, line=line, prop_id=ref))
-    rows.append(_row(date, sport, ref, "consensus", market, side,
-                     odds=p.get("best_odds"), confidence=conf, projected=pv,
-                     line=line, prop_id=ref))
-    return rows
+    return [_row("mlb", bucket, market, gid, side,
+                 confidence=conf, line=p.get("line"), player=player)]
 
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging (write side) ─────────────────────────────────────────────────────
 
-def log_games(results: list, sport: str, date: Optional[str] = None) -> int:
-    date = date or _today_et()
+def log_games(results: list, sport: str) -> int:
     rows: list[dict] = []
     for r in (results or []):
         try:
-            rows.extend(game_rows(r, sport, date))
+            rows.extend(game_rows(r, sport))
         except Exception as exc:                                          # noqa: BLE001
             _log(f"game_rows failed: {exc}")
     return _insert(rows)
 
 
-def log_props(picks: list, date: Optional[str] = None) -> int:
-    date = date or _today_et()
+def log_props(picks: list) -> int:
     rows: list[dict] = []
     for p in (picks or []):
         try:
-            rows.extend(prop_rows(p, date))
+            rows.extend(prop_rows(p))
         except Exception as exc:                                          # noqa: BLE001
             _log(f"prop_rows failed: {exc}")
     return _insert(rows)
@@ -214,8 +189,8 @@ def _insert(rows: list[dict]) -> int:
 
 
 def log_all(backend) -> dict:
-    """Log every model's current picks for both sports + props.  Deduped, so
-    safe to call on every analysis run / 15-minute cycle."""
+    """Log every model's current picks for both sports + props.  Deduped by
+    pick_id, so safe to call every analysis run / 15-minute cycle."""
     out = {"game": 0, "props": 0}
     try:
         for sport, attr in (("mlb", "_analysis_state"), ("wnba", "_wnba_analysis_state")):
@@ -225,38 +200,45 @@ def log_all(backend) -> dict:
         _log(f"log_all games failed: {exc}")
     try:
         from .props_scored_cache import load_scored_props
-        picks = (load_scored_props() or {}).get("picks") or []
-        out["props"] = log_props(picks)
+        out["props"] = log_props((load_scored_props() or {}).get("picks") or [])
     except Exception as exc:                                              # noqa: BLE001
         _log(f"log_all props failed: {exc}")
     if out["game"] or out["props"]:
-        _log(f"logged picks -> game rows:{out['game']} prop rows:{out['props']}")
+        _log(f"logged -> game rows:{out['game']} prop rows:{out['props']}")
     return out
 
 
-# ── Settlement ───────────────────────────────────────────────────────────────
+# ── Settlement (pending -> finished) ─────────────────────────────────────────
 
-def _grade_game(pick: dict, hs: int, as_: int) -> Optional[str]:
-    """correct/incorrect/void for a game pick given final home/away scores."""
+def _grade_game(pick: dict, sc: dict) -> Optional[str]:
+    """win/loss/void for a game pick against a final score row
+    {home_team, away_team, home_score, away_score}."""
+    ht, at = sc.get("home_team"), sc.get("away_team")
+    hs, as_ = sc.get("home_score"), sc.get("away_score")
+    if not isinstance(hs, (int, float)) or not isinstance(as_, (int, float)):
+        return None
+    bt = pick.get("bet_type")
     side = pick.get("pick_side")
-    ptype = pick.get("pick_type")
-    margin = hs - as_                         # home minus away
-    if ptype == "ML":
-        if margin == 0:
+    if bt == "ml":
+        if hs == as_:
             return "void"
-        won = (margin > 0) if side == "home" else (margin < 0)
-        return "correct" if won else "incorrect"
-    if ptype in ("RL", "Spread"):
-        pt = pick.get("line")
-        if not isinstance(pt, (int, float)):
+        winner = ht if hs > as_ else at
+        return "win" if side == winner else "loss"
+    if bt == "rl":
+        line = pick.get("line")
+        if not isinstance(line, (int, float)):
             return None
-        # run_line_point is the HOME line (e.g. -1.5).  Home covers when
-        # margin + home_line > 0; away covers when (-margin) + (-home_line) > 0.
-        cover = (margin + pt) if side == "home" else (-margin - pt)
+        if side == ht:
+            margin = hs - as_
+        elif side == at:
+            margin = as_ - hs
+        else:
+            return None
+        cover = margin + line                 # line = picked team's spread
         if abs(cover) < 1e-9:
             return "void"
-        return "correct" if cover > 0 else "incorrect"
-    if ptype == "Total":
+        return "win" if cover > 0 else "loss"
+    if bt == "total":
         line = pick.get("line")
         if not isinstance(line, (int, float)):
             return None
@@ -264,37 +246,31 @@ def _grade_game(pick: dict, hs: int, as_: int) -> Optional[str]:
         if total == line:
             return "void"
         over = total > line
-        return "correct" if (over == (side == "over")) else "incorrect"
+        return "win" if (over == (side == "OVER")) else "loss"
     return None
 
 
-def _grade_prop(pick: dict, actual: float) -> Optional[str]:
+def _grade_prop(pick: dict, actual) -> Optional[str]:
     line = pick.get("line")
     if not isinstance(line, (int, float)) or actual is None:
         return None
-    side = (pick.get("pick_side") or "Over").lower()
+    side = (pick.get("pick_side") or "OVER").upper()
     if actual == line:
         return "void"
-    over = actual > line
-    return "correct" if (over == (side == "over")) else "incorrect"
+    return "win" if ((actual > line) == (side == "OVER")) else "loss"
 
 
-def settle(today: Optional[str] = None, final_scores: Optional[dict] = None,
-           stat_lookup=None) -> dict:
-    """Settle today's pending model picks.
-
-    *final_scores*: {game_id: (home_score, away_score)} for finished games.
-    *stat_lookup*: callable(player_name, market, date) -> actual stat (float)
-    or None.  Both are best-effort; a pick with no available result stays
-    pending.  Returns a per-model settled-count summary.
-    """
-    today = today or _today_et()
+def settle(final_scores: Optional[dict] = None, stat_lookup=None) -> dict:
+    """Move pending picks whose game has finished to status='finished' with a
+    graded result.  *final_scores*: {game_id: {home_team, away_team,
+    home_score, away_score}}.  *stat_lookup*: callable(player, market) ->
+    actual stat or None.  Returns {model_name: settled_count}."""
     final_scores = final_scores or {}
     try:
         from . import db
-        pending = db.model_picks_list(date_from=today, result="pending")
+        pending = db.model_picks_list(status="pending")
     except Exception as exc:                                              # noqa: BLE001
-        _log(f"settle: list failed: {exc}")
+        _log(f"settle: list pending failed: {exc}")
         return {}
     if not pending:
         return {}
@@ -303,25 +279,24 @@ def settle(today: Optional[str] = None, final_scores: Optional[dict] = None,
     summary: dict[str, int] = {}
     for pick in pending:
         result = None
-        if pick.get("pick_type") in ("ML", "RL", "Spread", "Total"):
-            sc = final_scores.get(pick.get("game_id"))
-            if sc:
-                result = _grade_game(pick, int(sc[0]), int(sc[1]))
-        else:  # prop
+        if pick.get("player_name"):                       # prop
             if stat_lookup is not None:
-                ref = pick.get("game_id") or ""        # "player|market|line"
-                player = ref.split("|")[0] if "|" in ref else ref
                 try:
-                    actual = stat_lookup(player, pick.get("pick_type"), today)
+                    actual = stat_lookup(pick.get("player_name"), pick.get("bet_type"))
                 except Exception:                                         # noqa: BLE001
                     actual = None
                 if actual is not None:
                     result = _grade_prop(pick, actual)
+        else:                                             # game
+            sc = final_scores.get(pick.get("game_id"))
+            if sc:
+                result = _grade_game(pick, sc)
         if result:
             pick["result"] = result
+            pick["status"] = "finished"
             pick["settled_at"] = _now_iso()
             updated.append(pick)
-            summary[pick.get("model_name", "?")] = summary.get(pick.get("model_name", "?"), 0) + 1
+            summary[pick.get("model", "?")] = summary.get(pick.get("model", "?"), 0) + 1
 
     if updated:
         try:
@@ -333,43 +308,123 @@ def settle(today: Optional[str] = None, final_scores: Optional[dict] = None,
     return summary
 
 
-# ── Aggregation for the admin table ──────────────────────────────────────────
+# ── Aggregation (read side) ──────────────────────────────────────────────────
 
-def performance(since_date: Optional[str] = None) -> dict:
-    """Per-model W/L/Win%/Last10/AvgConf, sorted by win% desc.  *since_date*
-    filters to picks on/after that ET date (None = all-time)."""
+def _all() -> list[dict]:
     try:
         from . import db
-        picks = db.model_picks_list(date_from=since_date)
-    except Exception as exc:                                              # noqa: BLE001
-        _log(f"performance list failed: {exc}")
-        picks = []
+        return db.model_picks_list()
+    except Exception:                                                     # noqa: BLE001
+        return []
 
+
+def _tally(rows) -> dict:
+    w = sum(1 for r in rows if (r.get("result") or "").lower() == "win")
+    l = sum(1 for r in rows if (r.get("result") or "").lower() == "loss")
+    total = w + l
+    return {"wins": w, "losses": l, "pct": (w / total) if total else None}
+
+
+def store_record(sport: str, model: str, bet_type: Optional[str] = None,
+                 rows: Optional[list] = None) -> dict:
+    """Finished W/L/pct for one store (sport+model[+bet_type])."""
+    rows = rows if rows is not None else _all()
+    sel = [
+        r for r in rows
+        if r.get("sport") == sport and r.get("model") == model
+        and (bet_type is None or r.get("bet_type") == bet_type)
+        and (r.get("status") or "").lower() == "finished"
+    ]
+    return _tally(sel)
+
+
+def models_record(sport: str, models: list, rows: Optional[list] = None) -> dict:
+    """Finished W/L/pct aggregated across several models for a sport."""
+    rows = rows if rows is not None else _all()
+    sel = [
+        r for r in rows
+        if r.get("sport") == sport and r.get("model") in models
+        and (r.get("status") or "").lower() == "finished"
+    ]
+    return _tally(sel)
+
+
+_PRETTY_GAME = {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}
+
+
+def best_game_model(sport: str = "mlb", min_settled: int = 1,
+                    rows: Optional[list] = None) -> Optional[dict]:
+    """The xgb/lr/nn model with the highest finished win% for *sport*."""
+    rows = rows if rows is not None else _all()
+    best = None
+    for m in ("xgb", "lr", "nn"):
+        rec = store_record(sport, m, rows=rows)
+        total = rec["wins"] + rec["losses"]
+        if total < min_settled or rec["pct"] is None:
+            continue
+        cand = {"model": _PRETTY_GAME[m], "wins": rec["wins"],
+                "losses": rec["losses"], "total": total,
+                "correct": rec["wins"], "pct": rec["pct"]}
+        if best is None or cand["pct"] > best["pct"]:
+            best = cand
+    return best
+
+
+def best_prop_model(sport: str = "mlb", min_settled: int = 1,
+                    rows: Optional[list] = None) -> Optional[dict]:
+    """Pitcher vs batter -- whichever has the higher finished win%."""
+    rows = rows if rows is not None else _all()
+    best = None
+    for m, label in (("pitcher", "Pitcher"), ("batter", "Batter")):
+        rec = store_record(sport, m, rows=rows)
+        total = rec["wins"] + rec["losses"]
+        if total < min_settled or rec["pct"] is None:
+            continue
+        cand = {"label": label, "wins": rec["wins"], "losses": rec["losses"],
+                "pct": rec["pct"]}
+        if best is None or cand["pct"] > best["pct"]:
+            best = cand
+    return best
+
+
+def prop_records(sport: str = "mlb", rows: Optional[list] = None) -> dict:
+    """{'pitcher': {...}, 'batter': {...}} finished records for the props page."""
+    rows = rows if rows is not None else _all()
+    return {
+        "pitcher": store_record(sport, "pitcher", rows=rows),
+        "batter":  store_record(sport, "batter", rows=rows),
+    }
+
+
+def performance(since_date: Optional[str] = None) -> dict:
+    """Per-(sport, model, bet_type) table for the admin Model Performance
+    section: W / L / Win% / Last 10 / Avg Confidence, sorted by win% desc.
+    *since_date* (YYYY-MM-DD) filters on created_at when given."""
+    rows = _all()
+    if since_date:
+        rows = [r for r in rows if (r.get("created_at") or "") >= since_date]
     agg: dict[tuple, dict] = {}
-    for p in picks:
-        key = (p.get("model_name"), p.get("sport"), p.get("pick_type"))
-        a = agg.setdefault(key, {
-            "model_name": p.get("model_name"), "sport": p.get("sport"),
-            "pick_type": p.get("pick_type"), "wins": 0, "losses": 0,
-            "_conf": [], "_recent": [],
-        })
-        c = p.get("confidence")
+    for r in rows:
+        key = (r.get("model"), r.get("sport"), r.get("bet_type"))
+        a = agg.setdefault(key, {"model_name": r.get("model"), "sport": r.get("sport"),
+                                 "pick_type": r.get("bet_type"), "wins": 0,
+                                 "losses": 0, "_conf": [], "_recent": []})
+        c = r.get("confidence")
         if isinstance(c, (int, float)):
             a["_conf"].append(float(c))
-        res = (p.get("result") or "pending").lower()
-        if res == "correct":
+        res = (r.get("result") or "").lower()
+        if res == "win":
             a["wins"] += 1
-            a["_recent"].append((p.get("settled_at") or "", "W"))
-        elif res == "incorrect":
+            a["_recent"].append((r.get("settled_at") or "", "W"))
+        elif res == "loss":
             a["losses"] += 1
-            a["_recent"].append((p.get("settled_at") or "", "L"))
-
-    rows: list[dict] = []
+            a["_recent"].append((r.get("settled_at") or "", "L"))
+    out: list[dict] = []
     for a in agg.values():
         w, l = a["wins"], a["losses"]
         total = w + l
         recent = [x[1] for x in sorted(a["_recent"], key=lambda t: t[0])[-10:]]
-        rows.append({
+        out.append({
             "model_name": a["model_name"], "sport": a["sport"],
             "pick_type": a["pick_type"], "wins": w, "losses": l,
             "win_pct": round(w / total * 100, 1) if total else None,
@@ -377,5 +432,27 @@ def performance(since_date: Optional[str] = None) -> dict:
             "avg_confidence": round(sum(a["_conf"]) / len(a["_conf"]), 3) if a["_conf"] else None,
             "settled": total,
         })
-    rows.sort(key=lambda r: (r["win_pct"] if r["win_pct"] is not None else -1), reverse=True)
-    return {"rows": rows, "updated_at": _now_iso()}
+    out.sort(key=lambda r: (r["win_pct"] if r["win_pct"] is not None else -1), reverse=True)
+    return {"rows": out, "updated_at": _now_iso()}
+
+
+def store_summary_counts(rows: Optional[list] = None) -> list[str]:
+    """Per (sport, model) lines for the SETTLE-SUMMARY log: pending + W/L."""
+    rows = rows if rows is not None else _all()
+    keys: dict[tuple, dict] = {}
+    for r in rows:
+        k = (r.get("sport"), r.get("model"))
+        a = keys.setdefault(k, {"pending": 0, "w": 0, "l": 0})
+        st = (r.get("status") or "").lower()
+        if st == "pending":
+            a["pending"] += 1
+        elif st == "finished":
+            res = (r.get("result") or "").lower()
+            if res == "win":
+                a["w"] += 1
+            elif res == "loss":
+                a["l"] += 1
+    out = []
+    for (sport, model), a in sorted(keys.items(), key=lambda x: (x[0][0] or "", x[0][1] or "")):
+        out.append(f"{sport}/{model}: pending={a['pending']} {a['w']}W-{a['l']}L")
+    return out

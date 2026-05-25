@@ -10339,10 +10339,20 @@ def _log_model_picks() -> None:
         _eprint(f"MODEL-PICKS: log failed: {type(exc).__name__}: {exc}")
 
 
-def _model_pick_stat_lookup(player: str, market: str, date: str):
-    """Actual stat for a player's game on *date* (for settling prop picks)."""
+_MODEL_PICK_STAT = {
+    "pitcher_strikeouts": "K", "pitcher_earned_runs": "ER",
+    "pitcher_hits_allowed": "H", "pitcher_walks": "BB", "pitcher_outs": "outs",
+    "batter_hits": "H", "batter_total_bases": "TB", "batter_home_runs": "HR",
+    "batter_rbis": "RBI", "batter_runs_scored": "R", "batter_walks": "BB",
+    "batter_strikeouts": "SO",
+}
+
+
+def _model_pick_stat_lookup(player: str, market: str):
+    """Actual stat for a player's game TODAY (for settling prop picks).  Only
+    returns a value once the player has a game logged for today's ET date, so
+    a prop never settles against an older game."""
     try:
-        from src import model_picks as _mp
         from src.player_profile_client import (
             search_player_by_name, get_player_gamelog, gamelog_stat_value,
             _CURRENT_SEASON,
@@ -10352,17 +10362,18 @@ def _model_pick_stat_lookup(player: str, market: str, date: str):
             return None
         is_pitcher = (market or "").startswith("pitcher_")
         games = get_player_gamelog(int(pid), _CURRENT_SEASON, is_pitcher=is_pitcher) or []
-        g = next((x for x in games if (x.get("date") or "")[:10] == date), None)
+        today = _today_et()
+        g = next((x for x in reversed(games) if (x.get("date") or "")[:10] == today), None)
         if not g:
             return None
-        return gamelog_stat_value(g, _mp._MARKET_STAT.get(market, market))
+        return gamelog_stat_value(g, _MODEL_PICK_STAT.get(market, market))
     except Exception:                                                      # noqa: BLE001
         return None
 
 
 def _final_scores_from(scores_by_sport: dict) -> dict:
-    """Build {game_id: (home_score, away_score)} from completed Odds API
-    score rows, for model_picks game settlement."""
+    """Build {game_id: {home_team, away_team, home_score, away_score}} from
+    completed Odds API score rows, for model_picks game settlement."""
     out: dict = {}
     for rows in (scores_by_sport or {}).values():
         for row in (rows or []):
@@ -10371,13 +10382,15 @@ def _final_scores_from(scores_by_sport: dict) -> dict:
             gid = str(row.get("id") or "")
             if not gid:
                 continue
+            ht, at = row.get("home_team"), row.get("away_team")
             sc = {s.get("name"): s.get("score") for s in (row.get("scores") or [])}
             try:
-                hs = int(sc.get(row.get("home_team")))
-                as_ = int(sc.get(row.get("away_team")))
+                hs = int(sc.get(ht))
+                as_ = int(sc.get(at))
             except (TypeError, ValueError):
                 continue
-            out[gid] = (hs, as_)
+            out[gid] = {"home_team": ht, "away_team": at,
+                        "home_score": hs, "away_score": as_}
     return out
 
 
@@ -10584,6 +10597,9 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         if _summary:
             _eprint("MODEL-PICKS settled: "
                     + ", ".join(f"{m}={n}" for m, n in sorted(_summary.items())))
+        # PART 7 — per-store status so every store can be verified in the logs.
+        for _line in _mp.store_summary_counts():
+            _eprint(f"SETTLE-SUMMARY store {_line}")
     except Exception as _mpx:                                              # noqa: BLE001
         _eprint(f"MODEL-PICKS: settle pass failed: {type(_mpx).__name__}: {_mpx}")
 
