@@ -35,8 +35,11 @@ def register(backend) -> None:
             ):
                 _add_bet_bar(backend)
                 _personal_bankroll(backend)
-                _recommendations_section(backend)
+                # User's own bets first (active, then settled — handled inside
+                # _unified_bets), with recommended/suggested bets moved to the
+                # bottom of the page below them.
                 _unified_bets(backend)
+                _recommendations_section(backend)
         bottom_nav.render(active=t.TAB_MYBETS)
 
 
