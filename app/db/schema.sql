@@ -135,3 +135,15 @@ CREATE TABLE IF NOT EXISTS model_history (
   UNIQUE (game_id, bet_type, model)
 );
 CREATE INDEX IF NOT EXISTS model_history_date_sport_model_idx ON model_history (date DESC, sport, model);
+
+-- ──────────────────────────────────────────────────────────────
+-- personal_bets — the My Bets ledger (one JSON blob per sport).
+-- Durable home for personal tracked bets + bankroll so they survive
+-- Railway redeploys / PR merges (the local JSON files get reset).
+-- Separate from model_picks: drives only the personal bankroll display.
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS personal_bets (
+  sport      TEXT        PRIMARY KEY,
+  data       JSONB,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
