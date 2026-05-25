@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -339,32 +341,132 @@ def _parse_sections(text: str | None) -> dict | None:
 
 # ── Caching ──────────────────────────────────────────────────────────────────
 
+# In-process mirror of generated breakdowns, keyed by the same cache key.
+# The props list polls each card's breakdown to populate "as they arrive";
+# without this, 150+ cards would each hit Supabase on every poll.  The
+# background breakdown queue runs in this same process, so once it generates
+# a breakdown the page reads it from memory instead of re-querying Supabase.
+_MEM_CACHE: dict[str, dict] = {}
+
+
 def _cache_key(player_id, market: str) -> str:
     return f"player_profile_{player_id}_{_today_et()}_{market}"
 
 
 def _cache_read(player_id, market: str) -> dict | None:
+    key = _cache_key(player_id, market)
+    mem = _MEM_CACHE.get(key)
+    if mem is not None:
+        return mem
     try:
         from . import db
         if not db.is_supabase():
             return None
-        row = db.cache_get(_cache_key(player_id, market))
+        row = db.cache_get(key)
         if isinstance(row, dict):
             data = row.get("data") if isinstance(row.get("data"), dict) else row
             if isinstance(data, dict) and any(data.get(k) for k in _SECTION_KEYS):
-                return {k: data.get(k, "") for k in _SECTION_KEYS}
+                sections = {k: data.get(k, "") for k in _SECTION_KEYS}
+                _MEM_CACHE[key] = sections
+                return sections
     except Exception:                                                       # noqa: BLE001
         pass
     return None
 
 
 def _cache_write(player_id, market: str, sections: dict) -> None:
+    _MEM_CACHE[_cache_key(player_id, market)] = dict(sections)
     try:
         from . import db
         if db.is_supabase():
             db.cache_set(_cache_key(player_id, market), None, _today_et(), sections)
     except Exception:                                                       # noqa: BLE001
         pass
+
+
+def peek_breakdown(pick: dict) -> dict | None:
+    """Read-only lookup of a pick's cached breakdown (memory first, then a
+    single Supabase read).  NEVER generates -- used by the props list cards
+    to render a breakdown the moment it exists without triggering 150
+    on-render Groq calls."""
+    pid = pick.get("player_id")
+    market = pick.get("market")
+    if not pid:
+        pid = resolve_player_id_for_pick(pick)
+    if not pid or not market:
+        return None
+    return _cache_read(pid, market)
+
+
+def peek_breakdown_mem(pick: dict) -> dict | None:
+    """Memory-only lookup -- no Supabase.  Used for cheap repeat polling once
+    the first (Supabase-backed) read has happened; the in-process breakdown
+    queue populates _MEM_CACHE as it generates."""
+    pid = pick.get("player_id")
+    market = pick.get("market")
+    if not pid or not market:
+        return None
+    return _MEM_CACHE.get(_cache_key(pid, market))
+
+
+def resolve_player_id_for_pick(pick: dict):
+    try:
+        from .player_profile_client import search_player_by_name
+        return pick.get("player_id") or search_player_by_name(pick.get("player") or "")
+    except Exception:                                                       # noqa: BLE001
+        return pick.get("player_id")
+
+
+# ── Background breakdown queue (props list) ──────────────────────────────────
+# Generates a breakdown for every current prop via the SAME generate_for_pick
+# path the player page uses, sequentially with the existing 150 ms spacing.
+# Cached breakdowns are skipped, so once a day's slate is generated this is a
+# cheap no-op.  Lock-guarded so concurrent page loads launch it only once.
+_bd_queue_lock = threading.Lock()
+_BD_QUEUE_DELAY = 0.15   # 150 ms between real Groq calls (matches the AI queue)
+
+
+def launch_breakdown_queue(picks: list[dict]) -> None:
+    """Fire-and-forget: generate breakdowns for all *picks* (deduped by
+    player+market) on a daemon thread.  No-op if a queue is already running.
+    Best-effort -- never raises into the caller."""
+    if not picks:
+        return
+    if not _bd_queue_lock.acquire(blocking=False):
+        return  # a queue is already running this process
+
+    def _run() -> None:
+        generated = cached = failed = 0
+        try:
+            seen: set = set()
+            for p in picks:
+                key = (p.get("player"), p.get("market"))
+                if not all(key) or key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    status = generate_for_pick(p)
+                except Exception:                                          # noqa: BLE001
+                    status = "failed"
+                if status == "generated":
+                    generated += 1
+                    time.sleep(_BD_QUEUE_DELAY)       # pace only real Groq calls
+                elif status == "cached":
+                    cached += 1
+                else:
+                    failed += 1
+            _log(f"breakdown queue done: {generated} generated, "
+                 f"{cached} cached, {failed} failed ({len(seen)} props)")
+        finally:
+            try:
+                _bd_queue_lock.release()
+            except Exception:                                              # noqa: BLE001
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+
 
 
 # ── Public entry point ───────────────────────────────────────────────────────

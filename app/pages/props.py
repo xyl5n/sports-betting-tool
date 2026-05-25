@@ -166,6 +166,16 @@ def _section_unified_props_list(backend) -> None:
         f"{len(rows)} upcoming (generated_at={cache.get('generated_at')})"
     )
 
+    # Kick the breakdown queue for the full slate so each card's AI breakdown
+    # (the same artifact the player page shows) gets generated via the
+    # existing Groq pipeline + 150 ms spacing.  Lock-guarded -> launches once;
+    # cards below show a loading state and populate as breakdowns land.
+    try:
+        from src import player_ai_breakdown as _pab
+        _pab.launch_breakdown_queue(rows)
+    except Exception as exc:                                               # noqa: BLE001
+        _dbg(f"breakdown queue launch failed: {exc}")
+
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         # Header row -- title + count + last refresh
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
@@ -903,28 +913,71 @@ def _card_summary_chips(r: dict) -> None:
 
 
 def _card_ai_summary(r: dict) -> None:
-    """Short cached AI blurb for this prop.  Renders nothing when no summary
-    is cached -- never generates at render time."""
-    try:
-        from src import ai_summaries
-        text = ai_summaries.get_prop_summary(r)
-    except Exception:                                                     # noqa: BLE001
-        text = None
-    if not text:
+    """The prop's AI breakdown verdict -- the SAME artifact the player page
+    shows (player_ai_breakdown), not a separate blurb.  Reads it from cache;
+    while the background breakdown queue is still generating this one, shows a
+    loading state and polls until it lands, then renders the verdict (matches
+    the player page's 'loading -> appears' behaviour)."""
+    from src import player_ai_breakdown as _pab
+
+    holder = ui.column().classes("w-full").style("gap: 0; min-width: 0;")
+
+    def _ai_box(text: str) -> None:
+        with ui.row().classes("items-start w-full").style(
+            f"gap: 6px; padding: 6px 8px; "
+            f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM};"
+        ):
+            ui.label("AI").style(
+                f"font-size: 8px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.PRIMARY_HI}; background: {t.CARD}; "
+                f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
+            )
+            ui.label(text).style(
+                f"font-size: 11px; color: {t.TEXT_DIM}; line-height: 1.35; "
+                f"font-style: italic; white-space: normal;"
+            )
+
+    def _loading() -> None:
+        with ui.row().classes("items-center w-full").style("gap: 6px; padding: 6px 8px;"):
+            ui.spinner(size="sm").style(f"color: {t.PRIMARY};")
+            ui.label("Generating AI breakdown…").style(
+                f"font-size: 11px; color: {t.TEXT_DIM2}; font-style: italic;")
+
+    def _verdict(mem_only: bool) -> str | None:
+        try:
+            bd = (_pab.peek_breakdown_mem(r) if mem_only
+                  else _pab.peek_breakdown(r)) or {}
+        except Exception:                                                 # noqa: BLE001
+            bd = {}
+        v = (bd.get("verdict") or "").strip()
+        return v or None
+
+    # First paint: one Supabase-backed read (handles already-cached props).
+    v0 = _verdict(mem_only=False)
+    with holder:
+        (_ai_box(v0) if v0 else _loading())
+
+    if v0:
         return
-    with ui.row().classes("items-start w-full").style(
-        f"gap: 6px; padding: 6px 8px; "
-        f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM};"
-    ):
-        ui.label("AI").style(
-            f"font-size: 8px; font-weight: 800; letter-spacing: .5px; "
-            f"color: {t.PRIMARY_HI}; background: {t.CARD}; "
-            f"padding: 1px 5px; border-radius: {t.RADIUS_PILL}; flex-shrink: 0;"
-        )
-        ui.label(text).style(
-            f"font-size: 11px; color: {t.TEXT_DIM}; line-height: 1.35; "
-            f"font-style: italic; white-space: normal;"
-        )
+
+    # Not cached yet -> poll cheaply (memory-only; the in-process queue fills
+    # _MEM_CACHE as it generates) and render the moment it arrives.  Stop after
+    # ~5 min so a never-generated prop doesn't poll forever.
+    attempts = {"n": 0}
+
+    def _poll() -> None:
+        attempts["n"] += 1
+        v = _verdict(mem_only=True)
+        if v:
+            holder.clear()
+            with holder:
+                _ai_box(v)
+            timer.active = False
+        elif attempts["n"] >= 100:        # ~5 min at 3 s
+            holder.clear()                # give up quietly (matches player page)
+            timer.active = False
+
+    timer = ui.timer(3.0, _poll, active=True)
 
 
 def _card_opp_rank_chip(r: dict) -> None:
