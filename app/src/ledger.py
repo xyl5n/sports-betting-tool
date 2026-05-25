@@ -189,46 +189,90 @@ class Ledger:
             _logger.warning("Ledger Supabase restore failed: %s", exc)
         return None
 
-    def _load(self) -> dict:
-        # Local JSON missing or empty (fresh container / post-redeploy) ->
-        # restore the full snapshot from Supabase before falling back to a
-        # blank ledger, so tracked bets are never lost on redeploy.
+    def _migrate(self, raw: dict) -> dict:
+        """Normalize an old single-bankroll ledger to the split format."""
+        if "personal_bankroll" not in raw:
+            raw["personal_bankroll"] = raw.pop("confirmed_bankroll", self._starting)
+        if "model_starting_bankroll" not in raw:
+            raw["model_starting_bankroll"] = raw.get("starting_bankroll", 1000.0)
+        if "personal_starting_bankroll" not in raw:
+            raw["personal_starting_bankroll"] = raw.get("starting_bankroll", self._starting)
+        raw.pop("starting_bankroll", None)
+        if "model_bankroll" not in raw:
+            raw["model_bankroll"] = 1000.0
+        return raw
+
+    def _read_local(self) -> dict | None:
         if (not self.path.exists()) or self.path.stat().st_size == 0:
-            restored = self._restore_snapshot_from_supabase()
-            if restored is not None:
-                try:
-                    with open(self.path, "w", encoding="utf-8") as f:
-                        json.dump(restored, f, indent=2)
-                except Exception as exc:                                  # noqa: BLE001
-                    _logger.warning("Ledger restore local write failed: %s", exc)
-                return restored
-
-        if self.path.exists():
+            return None
+        try:
             with open(self.path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
+                return json.load(f)
+        except Exception:                                                 # noqa: BLE001
+            return None
 
-            # ── Migration: convert old single-bankroll format to split format ──
-            # Old format had: starting_bankroll, model_bankroll, confirmed_bankroll
-            # New format has: model_starting_bankroll, model_bankroll,
-            #                 personal_starting_bankroll, personal_bankroll
-            if "personal_bankroll" not in raw:
-                # Carry over the old confirmed_bankroll value
-                raw["personal_bankroll"] = raw.pop("confirmed_bankroll", self._starting)
-            if "model_starting_bankroll" not in raw:
-                raw["model_starting_bankroll"] = raw.get("starting_bankroll", 1000.0)
-            if "personal_starting_bankroll" not in raw:
-                raw["personal_starting_bankroll"] = raw.get("starting_bankroll", self._starting)
-            # Remove old unified key now that it's been migrated
-            raw.pop("starting_bankroll", None)
+    def _write_local(self, data: dict) -> None:
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("Ledger local write failed: %s", exc)
 
-            # Ensure model_bankroll exists (defaults to 1000 if somehow missing)
-            if "model_bankroll" not in raw:
-                raw["model_bankroll"] = 1000.0
+    def _load_personal_bets_table(self) -> dict | None:
+        try:
+            from . import db
+            if not db.is_supabase():
+                return None
+            data = db.personal_bets_get(self._sport_key())
+            if isinstance(data, dict) and ("open_bets" in data or "history" in data):
+                return data
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("personal_bets table read failed: %s", exc)
+        return None
 
-            return raw
+    def _seed_personal_bets_table(self, data: dict) -> None:
+        try:
+            from . import db
+            if db.is_supabase():
+                db.personal_bets_set(self._sport_key(), data)
+                _logger.info("personal_bets seeded for %s (%d open, %d settled)",
+                             self._sport_key(),
+                             len(data.get("open_bets") or []),
+                             len(data.get("history") or []))
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("personal_bets seed failed: %s", exc)
 
-        # Brand-new file — model always starts at $1,000; personal starts at
-        # whatever the caller passed (e.g. the user's configured bankroll).
+    @staticmethod
+    def _bet_count(d: dict | None) -> int:
+        if not isinstance(d, dict):
+            return -1
+        return len(d.get("open_bets") or []) + len(d.get("history") or [])
+
+    def _load(self) -> dict:
+        # 1. Authoritative source: the dedicated personal_bets Supabase table.
+        #    Read it FIRST so a reset/committed local JSON can never wipe live
+        #    bets on a redeploy.
+        table = self._load_personal_bets_table()
+        if table is not None:
+            data = self._migrate(table)
+            self._write_local(data)        # refresh the local cache copy
+            return data
+
+        # 2. Migration / fallback: the table is empty (e.g. before the SQL has
+        #    been run, or first boot after it).  Carry over whatever data
+        #    already exists -- pick the RICHEST of the local JSON and the
+        #    legacy app_cache snapshot so no bets are lost -- and seed the
+        #    table from it.
+        candidates = [c for c in (self._read_local(),
+                                  self._restore_snapshot_from_supabase())
+                      if c is not None]
+        if candidates:
+            best = self._migrate(max(candidates, key=self._bet_count))
+            self._seed_personal_bets_table(best)
+            self._write_local(best)
+            return best
+
+        # 3. Brand-new ledger.
         return {
             "model_starting_bankroll":    1000.0,
             "model_bankroll":             1000.0,
@@ -239,15 +283,20 @@ class Ledger:
         }
 
     def save(self) -> None:
-        # JSON write is the source of truth in-process; Supabase is a hot
-        # backup when configured.  Both writes are best-effort: a Supabase
-        # failure logs a warning and is swallowed so the app keeps running.
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, indent=2)
+        # Local JSON is an in-process cache; the dedicated personal_bets
+        # Supabase table is the durable source of truth (survives redeploys).
+        # All writes are best-effort -- a Supabase failure is swallowed so the
+        # app keeps running off the local copy.
+        self._write_local(self.data)
         try:
-            self._sync_to_supabase()
-        except Exception as exc:                                              # noqa: BLE001
-            _logger = logging.getLogger(__name__)
+            from . import db
+            if db.is_supabase():
+                db.personal_bets_set(self._sport_key(), self.data)
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("personal_bets table write failed: %s", exc)
+        try:
+            self._sync_to_supabase()       # legacy bets/bankroll/snapshot mirror
+        except Exception as exc:                                          # noqa: BLE001
             _logger.warning("Ledger Supabase sync failed (JSON ok): %s", exc)
 
     def _sync_to_supabase(self) -> None:

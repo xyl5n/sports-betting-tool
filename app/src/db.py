@@ -487,6 +487,46 @@ def model_picks_list(sport: Optional[str] = None,
         return []
 
 
+# ── personal_bets (the My Bets ledger -- one JSON blob per sport) ─────────────
+# Dedicated, durable home for the personal-bet ledger so it survives Railway
+# redeploys / PR merges (the local JSON files get reset on every deploy).
+# Schema (db/migrations/2026_personal_bets.sql):
+#   sport text PRIMARY KEY, data jsonb, updated_at timestamptz default now()
+# Kept entirely separate from model_picks: this drives only the personal
+# bankroll + tracked-bet display, never model performance.
+
+def personal_bets_get(sport: str) -> Optional[dict]:
+    """The stored ledger JSON for *sport*, or None when absent / Supabase off."""
+    if _mode != "supabase" or _client is None:
+        return None
+    try:
+        resp = (_client.table("personal_bets").select("data")
+                .eq("sport", (sport or "mlb").lower()).limit(1).execute())
+        rows = resp.data or []
+        data = rows[0].get("data") if rows else None
+        return data if isinstance(data, dict) else None
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("personal_bets_get(%s) failed: %s", sport, exc)
+        return None
+
+
+def personal_bets_set(sport: str, data: dict) -> bool:
+    """Upsert the full ledger JSON for *sport*.  Returns True on success."""
+    if _mode != "supabase" or _client is None:
+        return False
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        _client.table("personal_bets").upsert(
+            {"sport": (sport or "mlb").lower(), "data": data,
+             "updated_at": _dt.now(_tz.utc).isoformat()},
+            on_conflict="sport",
+        ).execute()
+        return True
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("personal_bets_set(%s) failed: %s", sport, exc)
+        return False
+
+
 def cache_delete(key: str) -> bool:
     """Delete one cache row by key.  Returns True on success."""
     if _mode != "supabase" or _client is None:
