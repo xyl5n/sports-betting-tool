@@ -2715,16 +2715,18 @@ def _pg_header(stat_key: str) -> str:
 
 def _pg_game_tr(row: dict) -> str:
     import html as _html
+    # Date/Opp + Pitcher truncate (table-layout:fixed) so a long name never
+    # forces the table wider than its 50% grid track.
     date_cell = (
         f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
         f'font-family:monospace;color:{t.TEXT_DIM};'
-        f'border-bottom:1px solid {t.BORDER_SOFT};white-space:nowrap;">'
-        f'{_pg_date_opp(row)}</td>'
+        f'border-bottom:1px solid {t.BORDER_SOFT};white-space:nowrap;'
+        f'overflow:hidden;text-overflow:ellipsis;">{_pg_date_opp(row)}</td>'
     )
     name_cell = (
         f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
         f'font-weight:700;color:{t.TEXT};border-bottom:1px solid {t.BORDER_SOFT};'
-        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;">'
+        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
         f'{_html.escape(row.get("name") or "—")}</td>'
     )
     return (
@@ -2733,18 +2735,27 @@ def _pg_game_tr(row: dict) -> str:
     )
 
 
-def _pg_table_wrap(inner: str) -> str:
-    return (
-        f'<table style="width:100%;border-collapse:collapse;'
-        f'background:{t.CARD};border:1px solid {t.BORDER};'
-        f'border-radius:{t.RADIUS_MD};overflow:hidden;">{inner}</table>'
-    )
-
-
 def _pitcher_games_table_html(rows: list[dict], stat_key: str) -> str:
-    """A flat Past-Games table: DATE/OPP · stat · LINE · ODDS, newest first."""
+    """A flat Past-Games table -- identical 5-column layout in both boxes:
+    DATE/OPP · PITCHER · stat · LINE · ODDS, newest first.
+
+    table-layout:fixed + an explicit <colgroup> keeps the two boxes aligned
+    column-for-column and makes long names/teams truncate rather than push
+    the table past its 50% grid track."""
     body = "".join(_pg_game_tr(r) for r in rows)
-    return _pg_table_wrap(_pg_header(stat_key) + f"<tbody>{body}</tbody>")
+    colgroup = (
+        '<colgroup>'
+        '<col style="width:30%;"><col style="width:31%;">'   # Date/Opp, Pitcher
+        '<col style="width:13%;"><col style="width:13%;">'   # stat, Line
+        '<col style="width:13%;">'                            # Odds
+        '</colgroup>'
+    )
+    return (
+        f'<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
+        f'background:{t.CARD};border:1px solid {t.BORDER};'
+        f'border-radius:{t.RADIUS_MD};overflow:hidden;">'
+        f'{colgroup}{_pg_header(stat_key)}<tbody>{body}</tbody></table>'
+    )
 
 
 def _pg_heading_html(text: str) -> str:
@@ -2767,11 +2778,15 @@ def _pg_note_html(msg: str) -> str:
 
 def _pitcher_dual_box_html(similar_rows: list[dict], recent_rows: list[dict],
                            stat_key: str, opp_u: str, opp_full: str) -> str:
-    """Both pitcher boxes SIDE BY SIDE (50/50) as a single ui.html() string.
+    """Both pitcher boxes SIDE BY SIDE (50/50) as a single ui.html() string,
+    spanning the full width under the chart edge to edge.
 
     Box 1 — similar pitchers vs the opponent (flat, newest first, ≤5).
     Box 2 — the last 5 pitchers (any) to face the opponent, newest first.
-    Each column wraps to full width on narrow screens.
+
+    Uses a CSS grid with `minmax(0, 1fr)` tracks (not flex): the two columns
+    are exactly 50/50 and fill 100% regardless of cell content, so there's no
+    empty gap beside them and a long pitcher name can't blow out a column.
     """
     team = opp_full or opp_u or "OPP"
 
@@ -2788,13 +2803,12 @@ def _pitcher_dual_box_html(similar_rows: list[dict], recent_rows: list[dict],
             _pitcher_games_table_html(recent_rows, stat_key) if recent_rows
             else _pg_note_html(f"No recent pitchers found vs {team}."))
 
-    col = "flex:1 1 0;min-width:0;"
     return (
-        f'<div style="display:flex;gap:10px;width:100%;flex-wrap:wrap;'
-        f'align-items:flex-start;">'
-        f'<div style="{col}">{box1}</div>'
-        f'<div style="{col}">{box2}</div>'
-        f'</div>'
+        '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));'
+        'gap:10px;width:100%;box-sizing:border-box;align-items:start;">'
+        f'<div style="min-width:0;">{box1}</div>'
+        f'<div style="min-width:0;">{box2}</div>'
+        '</div>'
     )
 
 
