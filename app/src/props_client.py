@@ -90,6 +90,20 @@ ALL_BATTER_MARKETS: frozenset[str] = frozenset(
     if m.startswith("batter_")
 )
 
+# Every market that has a trained regression model in props_model
+# (_MARKET_REG_KEY) AND should therefore be scored + shown on the props
+# page.  This is the union the RECURRING cycle fetches so no model-backed
+# market is left uncovered: TIER_1 + TIER_2 + batter_runs_scored (the one
+# scored batter market that otherwise only lived in the on-demand TIER_3).
+# batter_stolen_bases is intentionally excluded -- it has no regressor.
+# Order = most-popular first so a partial/interrupted pass still lands the
+# headline markets.
+ALL_MODEL_MARKETS: tuple[str, ...] = (
+    *TIER_1_MARKETS,         # pitcher K/outs, batter hits/total-bases
+    *TIER_2_MARKETS,         # pitcher ER/H/BB, batter HR/RBI/BB
+    "batter_runs_scored",    # batter R -- model exists, was never auto-fetched
+)
+
 
 # ── Logging + low-level fetch ───────────────────────────────────────────────
 
@@ -356,6 +370,14 @@ class PropsClient:
         """Run the Tier 2 refresh.  Returns the merged payload dict."""
         return self._fetch_markets(TIER_2_MARKETS, label="TIER2")
 
+    def fetch_scored_markets(self) -> dict:
+        """Fetch every model-backed market the props page scores in one pass
+        (ALL_MODEL_MARKETS).  This is what the recurring 15-min cycle uses so
+        the scored cache always covers all pitcher (K/ER/H/BB/outs) and
+        batter (H/TB/HR/RBI/R/BB) markets -- not just whichever tier last
+        wrote.  Merges into today's cache like every other fetch pass."""
+        return self._fetch_markets(ALL_MODEL_MARKETS, label="CYCLE")
+
     def fetch_tier_3(self, markets: Optional[tuple[str, ...]] = None) -> dict:
         """On-demand fetch -- caller picks which Tier-3 markets to hit
         (or pass None for all)."""
@@ -440,13 +462,22 @@ def get_client() -> PropsClient:
 def run_tier_1_refresh() -> None:
     """APScheduler callback.  Every 15 min during 11 AM–11 PM ET.
 
-    After the raw-line fetch succeeds we kick the scoring pipeline so
-    the props page (which reads from the scored cache) sees fresh
-    picks within seconds of new lines arriving.  Scoring failures are
-    swallowed so a model glitch doesn't take down the line refresh.
+    Fetches ALL model-backed markets (ALL_MODEL_MARKETS), not just Tier 1,
+    so every pitcher + batter market that has a trained model and a posted
+    line is refreshed and scored each cycle.  Previously this fetched only
+    the four Tier-1 markets; Tier-2 markets (ER, hits-allowed, walks, HR,
+    RBI) were refreshed only once a day at /api/analyze and
+    batter_runs_scored was never auto-fetched -- so the scored slate was
+    stuck on whatever subset happened to be cached (e.g. only ER +
+    hits-allowed).
+
+    After the raw-line fetch succeeds we kick the scoring pipeline so the
+    props page (which reads from the scored cache) sees fresh picks within
+    seconds of new lines arriving.  Scoring failures are swallowed so a
+    model glitch doesn't take down the line refresh.
     """
     try:
-        get_client().fetch_tier_1()
+        get_client().fetch_scored_markets()
     except Exception as exc:                                              # noqa: BLE001
         import traceback
         _log(
