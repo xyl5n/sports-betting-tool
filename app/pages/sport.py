@@ -601,6 +601,25 @@ def _game_grid(backend, sport: str, state: dict) -> None:
         )
         return
 
+    # Ordering: not-started + in-progress games keep their start-time order
+    # at the top; fully finished games drop below them (still start-time
+    # ordered within the finished group).  Game status comes ONLY from the
+    # live_score component's detection (state_of on the live cache, falling
+    # back to state_from_schedule on the card's _sched fields) -- no separate
+    # status definition here.
+    def _is_finished(g: dict) -> bool:
+        gid = g.get("game_id") or g.get("id")
+        live = live_score.lookup(sport, gid, g.get("away_team"), g.get("home_team"))
+        st = live_score.state_of(live)
+        if st == "scheduled":
+            st = live_score.state_from_schedule(g.get("_sched"))
+        return st == "final"
+
+    games = sorted(
+        games,
+        key=lambda g: (1 if _is_finished(g) else 0, g.get("commence_time") or ""),
+    )
+
     # Two-column CSS grid on desktop, single column on mobile.  The
     # `.game-grid` class is defined in components/theme.py with a
     # 768px media query so the layout flips automatically without
