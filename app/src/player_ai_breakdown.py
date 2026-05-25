@@ -41,7 +41,17 @@ _MARKET_STAT = {
     "batter_strikeouts":    "SO",
 }
 
-_SECTION_KEYS = ("verdict", "matchup", "trends", "approach", "game_script")
+_SECTION_KEYS = ("verdict_tier", "verdict", "matchup", "trends", "approach", "game_script")
+
+# The five badge tiers, in agree -> disagree order.  The AI returns one as
+# "verdict_tier"; the badge is rendered from THAT (not from model confidence)
+# so the badge and the written verdict can never point in opposite directions.
+_VERDICT_TIERS = ("Strong Lean", "Lean", "Neutral", "Fade", "Strong Fade")
+_TIER_COLOR = {
+    "Strong Lean": "pos", "Lean": "pos",
+    "Neutral": "warn",
+    "Fade": "neg", "Strong Fade": "neg",
+}
 
 
 def verdict_label(confidence, edge=None) -> tuple[str, str]:
@@ -164,6 +174,9 @@ def _collect_context(info, games, is_pitcher, prop, market, line_f,
         "market":          market,
         "line":            line_f,
         "side":            (prop.get("side") or "Over"),
+        # The model's actual pick (side + line) the verdict is judging — so
+        # the AI knows which direction "Lean" vs "Fade" point.
+        "model_pick":      f"{(prop.get('side') or 'Over')} {line_f}",
         "model_confidence": _round(prop.get("confidence"), 3),
         "model_predicted_value": _round(prop.get("predicted_value")),
         "opponent":        opp_abbrev,
@@ -257,7 +270,12 @@ def _collect_context(info, games, is_pitcher, prop, market, line_f,
 
 # ── Prompt + Anthropic call ─────────────────────────────────────────────────
 
-def _system_prompt(is_pitcher: bool) -> str:
+def _system_prompt(is_pitcher: bool, pick_side: str = "Over",
+                   line=None, market_label: str = "") -> str:
+    pick_side = (pick_side or "Over").strip().title()
+    opp_side  = "Under" if pick_side == "Over" else "Over"
+    line_str  = f"{line:g}" if isinstance(line, (int, float)) else str(line or "")
+    pick_str  = f"{pick_side} {line_str}".strip()
     approach_label = ("Arsenal/Approach (K/9, BB/9, FIP, pitch effectiveness)"
                       if is_pitcher else
                       "Plate Discipline (contact rate, power profile, walk rate, approach)")
@@ -280,27 +298,42 @@ def _system_prompt(is_pitcher: bool) -> str:
         "tough pitch-mix matchup). When the data supports it, cross-reference the "
         "similar-player cluster. HARD RULES: do not invent numbers — use only what "
         "is given; if a fact is not in the JSON it is unknown, so simply omit it and "
-        "NEVER say anything is 'not available', 'unavailable', or 'unknown'. Never "
-        "write filler that just restates a verdict word (no 'this prop leans toward "
-        "a lean', no 'neutral neutral') — say something substantive. Plain "
+        "NEVER say anything is 'not available', 'unavailable', or 'unknown'. Plain "
         "conversational sentences only: ABSOLUTELY NO markdown, asterisks, headers, "
         "bullets or dashes — 2-4 sentences per section.\n\n"
+        f"THE PICK YOU ARE JUDGING: the model's pick is {pick_str} "
+        f"{market_label}. Your job is a single directional call on THAT pick.\n"
+        "TIER DEFINITIONS (relative to the pick side):\n"
+        f'  "Strong Lean" / "Lean" = you AGREE with the model — take the {pick_side}.\n'
+        f'  "Fade" / "Strong Fade" = you DISAGREE — take the {opp_side} instead.\n'
+        '  "Neutral" = no strong directional view either way.\n'
+        "CONSISTENCY RULES (critical):\n"
+        "  - The verdict_tier and the verdict text MUST point the SAME way. If the "
+        f"tier is a Lean, the text argues FOR the {pick_side}; if a Fade, the text "
+        f"argues FOR the {opp_side}; if Neutral, the text explains the wash.\n"
+        "  - NEVER write contradictory phrasing that mixes opposite tiers (e.g. "
+        "'lean toward a fade', 'fade the lean', 'neutral lean'). Pick ONE direction "
+        "and argue only that.\n"
+        "  - Do not echo the tier word as filler; give the actual reasoning.\n\n"
         "Return ONLY a JSON object (no prose around it) with exactly these string "
         "keys:\n"
-        '  "verdict": your overall independent take in 2-3 sentences — weigh every '
-        "signal and state plainly whether this prop is a lean or a fade and why, "
-        "even if that disagrees with the model's confidence. This is the headline "
-        "opinion.\n"
+        '  "verdict_tier": EXACTLY one of "Strong Lean", "Lean", "Neutral", "Fade", '
+        '"Strong Fade" — your single directional call on the pick above, per the '
+        "definitions. You may disagree with the model's own confidence; this tier "
+        "is the source of truth for both the badge and the text.\n"
+        '  "verdict": 2-3 sentences that argue the SAME direction as verdict_tier '
+        f"(Lean -> argue for the {pick_side}; Fade -> argue for the {opp_side}; "
+        "Neutral -> explain the wash) and say why. This is the headline opinion and "
+        "must never contradict verdict_tier.\n"
         '  "matchup": how the player fares against today\'s specific opponent — H2H '
         "history if present, the opponent's rank versus this prop type, home/away "
         "(and vs LHP/RHP) splits, and the opposing pitcher's arsenal where relevant.\n"
         '  "trends": whether the player is trending up or down — compare r7 / r14 / '
         "r30 / season for the active stat and flag any meaningful recent change.\n"
         f'  "approach": {approach_label}. Also assess {mech}.\n'
-        '  "game_script": situational factors (park, lineup/role) AND a clear '
-        "directional close — state whether, weighing everything, the factors lean "
-        "FOR or AGAINST this pick, and say so plainly even if that disagrees with "
-        "the model's confidence."
+        '  "game_script": situational factors (park, lineup/role) AND a directional '
+        "close that AGREES with verdict_tier — restate, in plain words, the same "
+        "for/against call the tier makes."
     )
 
 
@@ -333,10 +366,21 @@ def _parse_sections(text: str | None) -> dict | None:
     except (ValueError, json.JSONDecodeError):
         return None
     out = {k: (str(obj.get(k)).strip() if obj.get(k) else "") for k in _SECTION_KEYS}
-    # Need at least one non-empty section to be worth showing.
-    if not any(out.values()):
+    # Normalise verdict_tier to one of the five canonical labels (case/space
+    # tolerant); blank it if the model returned something off-menu so the
+    # renderer falls back cleanly rather than badging a bogus tier.
+    tier_raw = (out.get("verdict_tier") or "").strip().lower()
+    out["verdict_tier"] = next(
+        (t for t in _VERDICT_TIERS if t.lower() == tier_raw), "")
+    # Need at least one non-empty narrative section to be worth showing.
+    if not any(out.get(k) for k in _SECTION_KEYS if k != "verdict_tier"):
         return None
     return out
+
+
+def tier_color(tier: str) -> str:
+    """Colour token (pos|warn|neg) for a verdict tier; warn for unknown."""
+    return _TIER_COLOR.get((tier or "").strip(), "warn")
 
 
 # ── Caching ──────────────────────────────────────────────────────────────────
@@ -489,9 +533,18 @@ def get_breakdown(info, games, is_pitcher, prop, market, line_f,
 
         ctx = _collect_context(info, games, is_pitcher, prop, market, line_f,
                                summary, opp_abbrev)
+        try:
+            from pages.props import _short_market as _sm
+            mlabel = _sm(market)
+        except Exception:                                                 # noqa: BLE001
+            mlabel = (market or "").replace("_", " ")
         user = ("Generate the breakdown for this prop. Data JSON:\n"
                 + json.dumps(ctx, default=str))
-        text = _call_groq(_system_prompt(is_pitcher), user)
+        text = _call_groq(
+            _system_prompt(is_pitcher, pick_side=(prop.get("side") or "Over"),
+                           line=line_f, market_label=mlabel),
+            user,
+        )
         sections = _parse_sections(text)
         if sections is None:
             return None
