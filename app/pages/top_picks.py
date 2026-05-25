@@ -53,6 +53,17 @@ def _layout(backend) -> None:
     cache = {"data": None}
 
     def _rebuild() -> None:
+        # Hydrate today's analysis into the in-memory state first -- game
+        # picks come from backend._analysis_state, which is empty on a cold
+        # process (post-redeploy) until something populates it.  Without this
+        # the tab shows "No picks available" even though today's picks exist
+        # on disk / in Supabase.  Mirrors what the home/sport pages do, so the
+        # tab reflects the current day's picks with no manual analysis run.
+        try:
+            backend.hydrate_state()
+        except Exception as exc:                                          # noqa: BLE001
+            print(f"[TOP-PICKS] hydrate_state failed: {exc}",
+                  flush=True, file=sys.stderr)
         from src.top_picks import build_rankings
         cache["data"] = build_rankings(backend)
 

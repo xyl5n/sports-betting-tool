@@ -41,8 +41,22 @@ def _verdict(confidence) -> tuple[str, str]:
         return ("Neutral", "warn")
 
 
-def _entry(kind, name, pick_type, side, confidence, reasoning, track=None) -> dict:
-    label, color = _verdict(confidence)
+def _entry(kind, name, pick_type, side, confidence, reasoning, track=None,
+           verdict_tier=None) -> dict:
+    # When the AI supplied its own verdict tier (prop breakdown / game
+    # verdict), the badge follows THAT single determination so the badge and
+    # the written reasoning always agree -- reusing the prop fix's tier
+    # colours.  Otherwise fall back to the confidence-derived label.
+    label = color = None
+    if verdict_tier:
+        try:
+            from .player_ai_breakdown import _VERDICT_TIERS, tier_color
+            if verdict_tier in _VERDICT_TIERS:
+                label, color = verdict_tier, tier_color(verdict_tier)
+        except Exception:                                                 # noqa: BLE001
+            label = color = None
+    if label is None:
+        label, color = _verdict(confidence)
     vscore = _VERDICT_SCORE.get(label, 0.50)
     conf = float(confidence) if isinstance(confidence, (int, float)) else 0.5
     combined = vscore * 0.60 + conf * 0.40
@@ -80,9 +94,11 @@ def _game_entries(backend) -> list[dict]:
             home = g.get("home_team") or "Home"
             name = f"{away} @ {home}"
             reasoning = None
+            game_tier = None
             if _ais is not None:
                 try:
                     reasoning = _ais.get_game_summary(sport, g)
+                    game_tier = _ais.get_game_verdict_tier(sport, g)
                 except Exception:                                         # noqa: BLE001
                     reasoning = None
 
@@ -110,7 +126,8 @@ def _game_entries(backend) -> list[dict]:
                 out.append(_entry("game", name, f"{sport.upper()} ML",
                                   side, ml_prob, reasoning,
                                   track=_track("game", "ml", side, None,
-                                               ml_odds, ml_prob, side)))
+                                               ml_odds, ml_prob, side),
+                                  verdict_tier=game_tier))
 
             rl = r.get("rl_pred") or r.get("spread_pred") or {}
             if rl.get("value_bet") and isinstance(rl.get("pick_prob"), (int, float)):

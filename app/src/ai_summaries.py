@@ -223,9 +223,9 @@ def _game_fp(g: dict) -> dict:
     }
 
 
-def _sp_fact(sp: dict, label: str) -> str | None:
-    """One starting-pitcher fact line, including only the metrics that are
-    actually present so we never feed 'n/a ERA' into the prompt."""
+def _sp_fact(sp: dict, label: str, *, is_home: bool) -> str | None:
+    """One starting-pitcher fact line -- season rate stats + recent form +
+    arsenal + home/away ERA split -- including only what's actually present."""
     name = (sp or {}).get("full_name")
     if not name:
         return None
@@ -238,6 +238,20 @@ def _sp_fact(sp: dict, label: str) -> str | None:
     w, l = sp.get("wins"), sp.get("losses")
     if w is not None and l is not None:
         bits.append(f"{w}-{l}")
+    # Home/away ERA split (this start's venue) from the splits client.
+    try:
+        from . import ai_context as _aic
+        from .pitcher_splits_client import get_pitcher_splits_client
+        from .player_profile_client import _CURRENT_SEASON
+        pid = sp.get("id") or sp.get("player_id") or _aic.resolve_player_id(name)
+        if pid:
+            sp_split = get_pitcher_splits_client().get_splits(int(pid), _CURRENT_SEASON) or {}
+            venue_era = sp_split.get("home_era") if is_home else sp_split.get("away_era")
+            if _present(venue_era):
+                bits.append(f"{_num(venue_era)} ERA "
+                            f"{'at home' if is_home else 'on the road'}")
+    except Exception:                                                     # noqa: BLE001
+        pass
     mix = _pitcher_mix_text(name)
     tail = f" — {mix.replace('Arsenal: ', 'throws ').rstrip('.')}" if mix else ""
     if not bits:
@@ -245,14 +259,56 @@ def _sp_fact(sp: dict, label: str) -> str | None:
     return f"{label} starter {name}: " + ", ".join(bits) + tail + "."
 
 
+def _bullpen_fact(home: str, away: str, commence: Optional[str]) -> str | None:
+    """Both bullpens' season ERA + recent workload (fatigue), or None."""
+    try:
+        from .bullpen_client import get_bullpen_client
+        date10 = (commence or "")[:10] or None
+        bp = get_bullpen_client().get_bullpen_for_game(home, away, date10) or {}
+        parts = []
+        for side, team in (("away", away), ("home", home)):
+            d = bp.get(side) or {}
+            if _present(d.get("era")):
+                fat = d.get("fatigue")
+                fat_s = (f", {fat} relief apps in the last 5 days"
+                         if isinstance(fat, int) else "")
+                parts.append(f"{team} bullpen {_num(d.get('era'))} ERA{fat_s}")
+        return "Bullpens: " + "; ".join(parts) + "." if parts else None
+    except Exception:                                                     # noqa: BLE001
+        return None
+
+
+def _weather_fact(home: str, commence: Optional[str]) -> str | None:
+    """Game-time weather (skipped for domes / when unavailable)."""
+    try:
+        from .player_matchup import get_weather
+        w = get_weather(home, commence) or {}
+        if not w.get("available") or w.get("dome"):
+            return None
+        bits = []
+        if _present(w.get("temperature")):
+            bits.append(f"{_num(w.get('temperature'))}°F")
+        if w.get("conditions") and w["conditions"] != "—":
+            bits.append(str(w["conditions"]))
+        if _present(w.get("wind_speed")):
+            wd = w.get("wind_dir") if w.get("wind_dir") not in (None, "—") else ""
+            bits.append(f"wind {_num(w.get('wind_speed'))} mph {wd}".strip())
+        return "Weather: " + ", ".join(bits) + "." if bits else None
+    except Exception:                                                     # noqa: BLE001
+        return None
+
+
 def _game_prompt(sport: str, g: dict) -> str:
     away = g.get("away_team") or "Away"
     home = g.get("home_team") or "Home"
+    pick = g.get("pick_team")
+    other = (away if pick == home else home) if pick else None
+    commence = g.get("commence_time")
     facts: list[str] = [f"Matchup: {away} at {home}."]
 
-    if g.get("pick_team"):
+    if pick:
         facts.append(
-            f"Model moneyline pick: {g.get('pick_team')} at {_odds(g.get('pick_odds'))}, "
+            f"Model moneyline pick: {pick} at {_odds(g.get('pick_odds'))}, "
             f"confidence {_pct(g.get('pick_prob'))}, edge {_pct(g.get('pick_edge'))}."
         )
     rl = g.get("run_line") or {}
@@ -268,10 +324,17 @@ def _game_prompt(sport: str, g: dict) -> str:
             f"(confidence {_pct(tot.get('pick_prob'))})."
         )
     if (sport or "").lower() == "mlb":
-        for sp, lbl in ((g.get("away_sp") or {}, away), (g.get("home_sp") or {}, home)):
-            fact = _sp_fact(sp, lbl)
+        for sp, lbl, is_home in ((g.get("away_sp") or {}, away, False),
+                                 (g.get("home_sp") or {}, home, True)):
+            fact = _sp_fact(sp, lbl, is_home=is_home)
             if fact:
                 facts.append(fact)
+        bp = _bullpen_fact(home, away, commence)
+        if bp:
+            facts.append(bp)
+        wx = _weather_fact(home, commence)
+        if wx:
+            facts.append(wx)
         try:
             from .park_factors import get_park_factors
             run_f, hr_f = get_park_factors(home)
@@ -287,14 +350,63 @@ def _game_prompt(sport: str, g: dict) -> str:
         if isinstance(v, str) and v.strip():
             facts.append(f"{label}: {v.strip()}.")
 
+    tier_block = ""
+    if pick and other:
+        tier_block = (
+            f"\nThe model's pick is {pick} (moneyline). TIER DEFINITIONS relative "
+            f"to that pick: \"Strong Lean\"/\"Lean\" = AGREE, back {pick}; "
+            f"\"Fade\"/\"Strong Fade\" = DISAGREE, side with {other}; \"Neutral\" "
+            f"= no strong edge. The verdict_tier and the summary MUST point the "
+            f"same way (Lean -> argue for {pick}; Fade -> argue for {other}); "
+            f"never mix opposite tiers ('lean toward a fade')."
+        )
+
     return (
         _ANALYST_RULES
-        + " Write 3-5 sentences on this game pick: lead with the single biggest "
-        "edge (usually the starting-pitcher matchup or the scoring environment), "
-        "weigh the opposing arsenal and park against it, and close with a clear "
-        "read on whether the pick is strong or merely situational.\n\nFACTS: "
-        + " ".join(facts)
+        + " Reason like an analyst across the FULL game context -- starting "
+        "pitching (arsenal, recent form, home/away split), bullpens, weather, "
+        "park, and team/offensive context -- and connect the specific factors "
+        "that drive THIS game to the pick rather than reciting them."
+        + tier_block
+        + "\n\nReturn ONLY a JSON object with exactly two string keys:\n"
+        '  "verdict_tier": EXACTLY one of "Strong Lean", "Lean", "Neutral", '
+        '"Fade", "Strong Fade" per the definitions above.\n'
+        '  "summary": 3-5 plain-text sentences (no markdown) that argue the SAME '
+        "direction as verdict_tier -- lead with the single biggest edge, weigh "
+        "the opposing starter/bullpen/park/weather against it, and close with a "
+        "clear read.\n\nFACTS: " + " ".join(facts)
     )
+
+
+def _parse_game_summary(text: str | None) -> dict | None:
+    """Parse the game JSON {verdict_tier, summary}.  Tolerates a fenced
+    ```json block and plain (non-JSON) text -- in which case the whole thing
+    is the summary with an empty tier.  Reuses the prop fix's five canonical
+    tiers so badge + text share one vocabulary.  None when there's no summary."""
+    if not text:
+        return None
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw[:4].lower() == "json":
+            raw = raw[4:]
+    summary, tier = "", ""
+    try:
+        import json as _json
+        obj = _json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+        summary = str(obj.get("summary") or "").strip()
+        tier = str(obj.get("verdict_tier") or "").strip()
+    except Exception:                                                     # noqa: BLE001
+        summary = raw                       # plain-text fallback
+    try:
+        from .player_ai_breakdown import _VERDICT_TIERS
+        tl = tier.lower()
+        tier = next((t for t in _VERDICT_TIERS if t.lower() == tl), "")
+    except Exception:                                                     # noqa: BLE001
+        tier = ""
+    if not summary:
+        return None
+    return {"summary": summary, "verdict_tier": tier}
 
 
 def _pitcher_mix_text(name: str) -> str:
@@ -464,10 +576,13 @@ def _generate_games(game_results: list[tuple]) -> dict:
         if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
-        text = generate_summary(_game_prompt(sport, g), max_tokens=230)
+        parsed = _parse_game_summary(
+            generate_summary(_game_prompt(sport, g), max_tokens=340))
         time.sleep(_DELAY_S)
-        if text:
-            store[key] = {"summary": text, "fp": fp, "updated_at": _now_iso()}
+        if parsed:
+            store[key] = {"summary": parsed["summary"],
+                          "verdict_tier": parsed["verdict_tier"],
+                          "fp": fp, "updated_at": _now_iso()}
             generated += 1
         done += 1
         if done % _LOG_EVERY == 0:
@@ -568,6 +683,22 @@ def get_game_summary(sport: str, game: dict) -> str | None:
     return None
 
 
+def get_game_verdict_tier(sport: str, game: dict) -> str | None:
+    """The AI's verdict tier for this game's moneyline pick (one of the five
+    canonical tiers), or None.  Drives the Top Plays badge so badge + text
+    share a single AI determination -- same approach as the prop verdict."""
+    try:
+        gid = _game_id(game)
+        if not gid:
+            return None
+        entry = _load("game").get(f"{(sport or 'mlb').lower()}:{gid}")
+        if isinstance(entry, dict):
+            return entry.get("verdict_tier") or None
+    except Exception:                                                     # noqa: BLE001
+        pass
+    return None
+
+
 def get_prop_summary(pick: dict) -> str | None:
     try:
         entry = _load("prop").get(_prop_key(pick))
@@ -603,10 +734,13 @@ def ensure_game_summary(sport: str, g: dict, *, force: bool = False) -> str:
     if not force and isinstance(old, dict) and old.get("summary"):
         return "cached"
     from .groq_client import generate_summary
-    text = generate_summary(_game_prompt(sport, g), max_tokens=230)
-    if not text:
+    parsed = _parse_game_summary(
+        generate_summary(_game_prompt(sport, g), max_tokens=340))
+    if not parsed:
         return "failed"
-    store[key] = {"summary": text, "fp": _game_fp(g), "updated_at": _now_iso()}
+    store[key] = {"summary": parsed["summary"],
+                  "verdict_tier": parsed["verdict_tier"],
+                  "fp": _game_fp(g), "updated_at": _now_iso()}
     _flush("game")
     return "generated"
 
