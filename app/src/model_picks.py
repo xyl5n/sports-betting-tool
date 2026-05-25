@@ -22,8 +22,11 @@ rows from the table, grades them, and writes status='finished'.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date as _date
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+_ET = ZoneInfo("America/New_York")
 
 
 def _log(msg: str) -> None:
@@ -32,6 +35,38 @@ def _log(msg: str) -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _today_et() -> str:
+    return datetime.now(_ET).date().isoformat()
+
+
+def _et_date(iso: Optional[str]) -> str:
+    """ET calendar date (YYYY-MM-DD) for an ISO timestamp (created_at is
+    stored UTC; the history view browses by ET day)."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_ET).date().isoformat()
+    except (TypeError, ValueError):
+        return str(iso)[:10]
+
+
+def date_range(preset: str) -> tuple[str, str]:
+    """(start_date, end_date) inclusive ET date strings for a preset:
+    'today' | 'yesterday' | '7d' | '30d'.  Unknown -> today only."""
+    today = _date.fromisoformat(_today_et())
+    if preset == "yesterday":
+        y = today - timedelta(days=1)
+        return y.isoformat(), y.isoformat()
+    if preset == "7d":
+        return (today - timedelta(days=6)).isoformat(), today.isoformat()
+    if preset == "30d":
+        return (today - timedelta(days=29)).isoformat(), today.isoformat()
+    return today.isoformat(), today.isoformat()   # 'today' / default
 
 
 def _pid(sport, model, bet_type, game_id, player=None) -> str:
@@ -396,13 +431,52 @@ def prop_records(sport: str = "mlb", rows: Optional[list] = None) -> dict:
     }
 
 
-def performance(since_date: Optional[str] = None) -> dict:
+def _in_range(row: dict, start: Optional[str], end: Optional[str]) -> bool:
+    """True when the row's ET created_at date is within [start, end] (each
+    inclusive; None = unbounded on that side)."""
+    if not start and not end:
+        return True
+    d = _et_date(row.get("created_at"))
+    if start and d < start:
+        return False
+    if end and d > end:
+        return False
+    return True
+
+
+def history(sport: str, model: str, start_date: str, end_date: str) -> dict:
+    """One model store's picks for an ET date range.  Returns
+    ``{"record": {wins, losses, voids, pct}, "picks": [rows newest-first]}``.
+    Pending picks are included in ``picks`` but excluded from the record."""
+    try:
+        from . import db
+        rows = db.model_picks_list(sport=sport, model=model)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"history list failed: {exc}")
+        rows = []
+    rows = [r for r in rows if _in_range(r, start_date, end_date)]
+    rows.sort(key=lambda r: (r.get("created_at") or ""), reverse=True)   # newest first
+
+    fin = [r for r in rows if (r.get("status") or "").lower() == "finished"]
+    w = sum(1 for r in fin if (r.get("result") or "").lower() == "win")
+    l = sum(1 for r in fin if (r.get("result") or "").lower() == "loss")
+    v = sum(1 for r in fin if (r.get("result") or "").lower() == "void")
+    total = w + l
+    return {
+        "record": {"wins": w, "losses": l, "voids": v,
+                   "pct": (w / total) if total else None},
+        "picks": rows,
+    }
+
+
+def performance(since_date: Optional[str] = None,
+                until_date: Optional[str] = None) -> dict:
     """Per-(sport, model, bet_type) table for the admin Model Performance
     section: W / L / Win% / Last 10 / Avg Confidence, sorted by win% desc.
-    *since_date* (YYYY-MM-DD) filters on created_at when given."""
+    *since_date* / *until_date* (YYYY-MM-DD ET) bound created_at when given."""
     rows = _all()
-    if since_date:
-        rows = [r for r in rows if (r.get("created_at") or "") >= since_date]
+    if since_date or until_date:
+        rows = [r for r in rows if _in_range(r, since_date, until_date)]
     agg: dict[tuple, dict] = {}
     for r in rows:
         key = (r.get("model"), r.get("sport"), r.get("bet_type"))

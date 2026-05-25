@@ -1633,31 +1633,43 @@ def _fmt_ts(iso: str | None) -> str:
 def _section_model_performance(backend) -> None:
     """PART 4 -- per-model W/L table with a date-range filter.  Reads the
     aggregated model_picks rows directly (in-process) and refreshes on load."""
-    state = {"range": "all"}
-    _RANGES = {"all": "All-time", "30d": "Last 30d", "7d": "Last 7d", "today": "Today"}
+    state = {"range": "all", "date": None}
+    _RANGES = {"all": "All-time", "today": "Today", "yesterday": "Yesterday",
+               "7d": "Last 7 Days", "30d": "Last 30 Days"}
 
     with _card("MODEL PERFORMANCE",
-               "Per-model record from every logged pick. Sorted by win% desc."):
-        with ui.row().classes("items-center").style("gap: 8px;"):
+               "Per-model record from every logged pick. Sorted by win% desc. "
+               "Click a row to browse that model's picks by date."):
+        with ui.row().classes("items-center").style("gap: 8px; flex-wrap: wrap;"):
             def _on_range(e) -> None:
                 state["range"] = e.value or "all"
+                state["date"] = None
                 _table.refresh()
             ui.toggle(_RANGES, value="all", on_change=_on_range).props(
                 "dense no-caps").style(f"color: {t.TEXT_DIM};")
 
+            def _on_date(e) -> None:
+                if e.value:
+                    state["date"] = e.value
+                    _table.refresh()
+            with ui.input("Custom day").props("dense outlined").style(
+                "width: 150px;") as _date_in:
+                with _date_in.add_slot("append"):
+                    ui.icon("event").classes("cursor-pointer")
+                with ui.menu() as _menu:
+                    ui.date(on_change=_on_date).bind_value(_date_in)
+                _date_in.on("click", _menu.open)
+
         @ui.refreshable
         def _table() -> None:                                             # noqa: WPS430
             from src import model_picks as _mp
-            from datetime import date as _date, timedelta as _td
-            since = None
-            if state["range"] != "all":
-                days = {"today": 0, "7d": 6, "30d": 29}.get(state["range"], 0)
-                try:
-                    since = (_date.fromisoformat(_mp._today_et()) - _td(days=days)).isoformat()
-                except Exception:                                         # noqa: BLE001
-                    since = None
+            since = until = None
+            if state.get("date"):
+                since = until = state["date"]               # single custom day
+            elif state["range"] != "all":
+                since, until = _mp.date_range(state["range"])
             try:
-                data = _mp.performance(since)
+                data = _mp.performance(since, until)
             except Exception as exc:                                      # noqa: BLE001
                 ui.label(f"Model performance unavailable: {exc}").style(
                     f"font-size: 12px; color: {t.TEXT_DIM};")
@@ -1697,9 +1709,14 @@ def _section_model_performance(backend) -> None:
                 ) or "—"
                 ac = r.get("avg_confidence")
                 ac_s = f"{ac * 100:.0f}%" if isinstance(ac, (int, float)) else "—"
+                _mn = r.get("model_name", "")
+                _sp = r.get("sport") or ""
+                _link = (f"<a href='/model-history/{_sp}/{_mn}' "
+                         f"style='color:{t.PRIMARY}; text-decoration:none; "
+                         f"font-weight:800;'>{_mn}</a>")
                 body += (
-                    f"<tr><td style='{td_l}'>{r.get('model_name', '')}</td>"
-                    f"<td style='{td_l} color:{t.TEXT_DIM};'>{(r.get('sport') or '').upper()}</td>"
+                    f"<tr><td style='{td_l}'>{_link}</td>"
+                    f"<td style='{td_l} color:{t.TEXT_DIM};'>{_sp.upper()}</td>"
                     f"<td style='{td_l} color:{t.TEXT_DIM};'>{r.get('pick_type', '')}</td>"
                     f"<td style='{td} color:{t.POS};'>{r.get('wins', 0)}</td>"
                     f"<td style='{td} color:{t.NEG};'>{r.get('losses', 0)}</td>"
