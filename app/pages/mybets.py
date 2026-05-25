@@ -642,7 +642,8 @@ def _on_card_saved(st: dict, new_bet: dict, refresh) -> None:
 
 def _card_controls(backend, *, kind: str, bet: dict, sport: str,
                    settled: bool, st: dict, refresh) -> None:
-    """The X (remove) + pencil (edit) buttons in a card's top-right."""
+    """The Edit (pencil) + X (remove) buttons in a card's top-right, in a
+    horizontal row with Edit first then X."""
     async def _remove() -> None:
         if not await _confirm_dialog("Remove this bet?"):
             return
@@ -657,10 +658,10 @@ def _card_controls(backend, *, kind: str, bet: dict, sport: str,
             ui.notify(f"Remove failed: {data.get('error') or 'error'}",
                       type="negative")
 
-    with ui.column().style("gap: 2px; align-items: center; flex-shrink: 0;"):
-        _icon_btn("✕", t.NEG, "Remove this bet", _remove)
+    with ui.row().style("gap: 4px; align-items: center; flex-shrink: 0;"):
         _icon_btn("✎", t.TEXT_DIM, "Edit this bet",
                   lambda: _toggle_edit(st, refresh))
+        _icon_btn("✕", t.NEG, "Remove this bet", _remove)
 
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
@@ -1052,8 +1053,12 @@ def _prop_bet_row(backend, b: dict, settled: bool, bankroll: float = 0.0) -> Non
                     settled=settled, st=st, refresh=card.refresh,
                 )
 
-            # Player name + side chip
+            # Player headshot + name + side chip.  Reuses the prop-card
+            # avatar from the Props page (MLB headshot URL with a generic
+            # silhouette fallback) -- no new image source.
             with ui.row().classes("items-center w-full").style("gap: 10px;"):
+                from pages.props import _card_avatar
+                _card_avatar(bet)
                 ui.label(player).style(
                     f"font-size: 14px; font-weight: 700; color: {t.TEXT}; "
                     f"flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
