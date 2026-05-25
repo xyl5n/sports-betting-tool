@@ -79,12 +79,15 @@ def _layout(backend) -> None:
 def _section_model_record(backend) -> None:
     """Two side-by-side cards showing each bucket's W-L + win%."""
     try:
-        from src.props_model import get_record
-        pitcher_rec = get_record("pitcher")
-        batter_rec  = get_record("batter")
+        from src import model_picks as _mp
+        recs = _mp.prop_records("mlb")
+        pitcher_rec, batter_rec = recs["pitcher"], recs["batter"]
     except Exception as exc:                                              # noqa: BLE001
         _dbg(f"props model record load failed: {exc}")
-        pitcher_rec = batter_rec = {"wins": 0, "losses": 0, "total": 0, "pct": None}
+        pitcher_rec = batter_rec = {"wins": 0, "losses": 0, "pct": None}
+    # _record_card expects a 'total' field.
+    for _rec in (pitcher_rec, batter_rec):
+        _rec["total"] = int(_rec.get("wins") or 0) + int(_rec.get("losses") or 0)
 
     with ui.row().classes("w-full").style(
         f"gap: {t.SPACE_SM}; flex-wrap: nowrap;"

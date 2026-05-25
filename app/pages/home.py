@@ -424,22 +424,22 @@ def _chip_overall(overall: dict) -> None:
 
 
 def _chip_props(props: dict) -> None:
-    """Settled player-prop record, shown as its own row (FIX 5) so it isn't
-    mixed into the game-pick W/L."""
+    """Model record -- MLB pitcher + batter prop models aggregated into one
+    collective W/L (from model_picks, never the ledger)."""
     w, l, pct = props.get("wins", 0), props.get("losses", 0), props.get("pct")
     color = hs.winrate_color(pct, t)
     pct_s = f"{pct * 100:.0f}%" if pct is not None else "—"
-    _chip(label="PROPS", main=f"{w}-{l}", suffix=pct_s, color=color)
+    _chip(label="MODEL", main=f"{w}-{l}", suffix=pct_s, color=color)
 
 
 def _chip_best_model(best: dict | None) -> None:
     if not best:
-        _chip(label="BEST MODEL", main="—", suffix="not enough data",
+        _chip(label="BEST GAME MODEL", main="—", suffix="not enough data",
               color=t.TEXT_DIM)
         return
     color = hs.winrate_color(best["pct"], t)
     _chip(
-        label="BEST MODEL",
+        label="BEST GAME MODEL",
         main=best["model"],
         suffix=f"{best['pct'] * 100:.0f}%",
         color=color,
@@ -448,12 +448,12 @@ def _chip_best_model(best: dict | None) -> None:
 
 def _chip_best_bet_type(best: dict | None) -> None:
     if not best:
-        _chip(label="BEST BET TYPE", main="—", suffix="not enough data",
+        _chip(label="BEST PROP MODEL", main="—", suffix="not enough data",
               color=t.TEXT_DIM)
         return
     color = hs.winrate_color(best["pct"], t)
     _chip(
-        label="BEST BET TYPE",
+        label="BEST PROP MODEL",
         main=best["label"],
         suffix=f"{best['wins']}-{best['losses']}  {best['pct'] * 100:.0f}%",
         color=color,

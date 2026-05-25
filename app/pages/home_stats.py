@@ -55,41 +55,22 @@ def _all_history(backend) -> list[dict]:
 # ── Chip #1 -- overall win rate ────────────────────────────────────────────
 
 def overall_record(backend) -> dict:
-    """Return {'wins': N, 'losses': N, 'pct': float | None} for the model's
-    settled game bets.
-
-    FIX 4: reads from the LEDGER history (data/ledger.json +
-    data/wnba_ledger.json) -- the Supabase-backed, correctly-settled single
-    source of truth -- instead of the local-only per-classifier tracker
-    files.  The ledger is restored from Supabase on boot, so this survives
-    Railway redeploys and updates after every settlement run.
-    """
-    wins = losses = 0
-    for h in _all_history(backend):
-        r = (h.get("result") or "").lower()
-        if r == "win":
-            wins += 1
-        elif r == "loss":
-            losses += 1
-    total = wins + losses
-    return {"wins": wins, "losses": losses,
-            "pct": (wins / total) if total else None}
+    """OVERALL = the MLB combined store: every finished ml+rl+total 'combined'
+    (ensemble) pick aggregated.  Reads model_picks (Supabase) -- never the
+    ledger and never JSON, so it survives Railway redeploys."""
+    try:
+        from src import model_picks as _mp
+        return _mp.store_record("mlb", "combined")
+    except Exception:                                                      # noqa: BLE001
+        return {"wins": 0, "losses": 0, "pct": None}
 
 
 def props_record(backend) -> dict:
-    """Return {'wins': N, 'losses': N, 'pct': float | None} for settled
-    player-prop picks (props_picks_history.json, Supabase-backed).
-
-    FIX 5: surfaced as a SEPARATE row on the home page rather than mixed
-    into the game-bet record.  Best-effort -- zeros on any error.
-    """
+    """MODEL = the MLB pitcher + batter prop models aggregated into one
+    collective W/L.  Reads model_picks (Supabase)."""
     try:
-        from src import props_picks_tracker as _ppt
-        _ppt.reload()
-        rec = _ppt.get_record()
-        return {"wins":   int(rec.get("wins") or 0),
-                "losses": int(rec.get("losses") or 0),
-                "pct":    rec.get("pct")}
+        from src import model_picks as _mp
+        return _mp.models_record("mlb", ["pitcher", "batter"])
     except Exception:                                                      # noqa: BLE001
         return {"wins": 0, "losses": 0, "pct": None}
 
@@ -115,13 +96,17 @@ def model_performance(backend) -> dict:
         loss             ->  -1      units
         push / void      ->   0      units (no W/L change either)
     """
-    # FIX 4: W/L now comes from the ledger history too (single source of
-    # truth), so the record and the units below are computed from the same
-    # settled bets and can never disagree.
+    # W/L for the model record comes from the MLB combined store in
+    # model_picks (the single source of truth); `units` stays a ledger-derived
+    # flat-unit P&L metric for the bets the daily-picks selector placed.
+    try:
+        from src import model_picks as _mp
+        _rec = _mp.store_record("mlb", "combined")
+        wins, losses, pct = _rec["wins"], _rec["losses"], _rec["pct"]
+    except Exception:                                                      # noqa: BLE001
+        wins = losses = 0
+        pct = None
     history = _all_history(backend)
-    wins   = sum(1 for h in history if (h.get("result") or "").lower() == "win")
-    losses = sum(1 for h in history if (h.get("result") or "").lower() == "loss")
-    pct    = (wins / (wins + losses)) if (wins + losses) else None
     units = 0.0
     for h in history:
         result = (h.get("result") or "").lower()
@@ -259,87 +244,23 @@ def classifier_accuracy_from_trackers() -> dict:
 # ── Chip #2 -- best classifier (XGB / LR / NN) ─────────────────────────────
 
 def best_classifier(backend) -> dict | None:
-    """Return {'model': 'XGBoost'|..., 'correct': N, 'total': N, 'pct': float}
-    for the classifier with the highest correct-call rate, or None if no
-    classifier has >= 10 settled predictions.
-
-    FIX 4: computed from the LEDGER history -- each settled bet stores the
-    per-model probabilities (xgb_prob / lr_prob / nn_prob) it was placed on.
-    A model is "correct" on a bet when (its prob >= 0.5) == (the bet won),
-    mirroring Ledger.get_model_weights().  Ledger-sourced so it's
-    Supabase-durable and updates after every settlement.
-    """
-    pretty = {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}
-    counts = {m: [0, 0] for m in ("xgb", "lr", "nn")}   # [correct, total]
-    for h in _all_history(backend):
-        r = (h.get("result") or "").lower()
-        if r not in ("win", "loss"):
-            continue
-        won = r == "win"
-        for m, key in (("xgb", "xgb_prob"), ("lr", "lr_prob"), ("nn", "nn_prob")):
-            p = h.get(key)
-            if p is None:
-                continue
-            counts[m][1] += 1
-            if (float(p) >= 0.5) == won:
-                counts[m][0] += 1
-
-    qualified = [(m, c, tot) for m, (c, tot) in counts.items() if tot >= 10]
-    if not qualified:
+    """BEST GAME MODEL -- whichever of MLB xgb/lr/nn has the highest finished
+    win% in model_picks.  Returns {'model','correct','total','pct'} or None."""
+    try:
+        from src import model_picks as _mp
+        return _mp.best_game_model("mlb")
+    except Exception:                                                      # noqa: BLE001
         return None
-    m, correct, total = max(qualified, key=lambda r: (r[1] / r[2]) if r[2] else 0)
-    return {
-        "model":   pretty[m],
-        "correct": correct,
-        "total":   total,
-        "pct":     (correct / total) if total else 0.0,
-    }
-
-
-# ── Chip #3 -- best bet type ────────────────────────────────────────────────
-
-_BET_TYPE_CAT = {
-    "single":    "Moneyline",
-    "moneyline": "Moneyline",
-    "run_line":  "Run Line / Spread",
-    "runline":   "Run Line / Spread",
-    "spread":    "Run Line / Spread",
-    "totals":    "Totals",
-    "total":     "Totals",
-}
 
 
 def best_bet_type(backend) -> dict | None:
-    """Return {'label': str, 'wins': N, 'losses': N, 'pct': float} for the
-    bet-type category with the highest W/(W+L) rate, or None if none has
-    >= 5 settled bets.
-
-    FIX 4: computed from the LEDGER history grouped by bet_type (the same
-    data the Supabase `records` table aggregates by (sport, bet_type)), so
-    the chip is durable + updates after every settlement.
-    """
-    by_cat: dict[str, list[int]] = {}   # label -> [wins, losses]
-    for h in _all_history(backend):
-        r = (h.get("result") or "").lower()
-        if r not in ("win", "loss"):
-            continue
-        label = _BET_TYPE_CAT.get((h.get("bet_type") or "single").lower(), "Moneyline")
-        slot = by_cat.setdefault(label, [0, 0])
-        slot[0 if r == "win" else 1] += 1
-
-    qualified = [
-        (label, w, l) for label, (w, l) in by_cat.items() if (w + l) >= 5
-    ]
-    if not qualified:
+    """BEST PROP MODEL -- pitcher vs batter, whichever has the higher finished
+    win% in model_picks.  Returns {'label','wins','losses','pct'} or None."""
+    try:
+        from src import model_picks as _mp
+        return _mp.best_prop_model("mlb")
+    except Exception:                                                      # noqa: BLE001
         return None
-    label, w, l = max(qualified, key=lambda r: (r[1] / (r[1] + r[2])) if (r[1] + r[2]) else 0)
-    total = w + l
-    return {
-        "label":  label,
-        "wins":   w,
-        "losses": l,
-        "pct":    (w / total) if total else 0.0,
-    }
 
 
 # ── Section 2 -- enumerate per-market value picks across cached games ──────
