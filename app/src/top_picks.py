@@ -113,6 +113,7 @@ def _prop_entries(backend) -> list[dict]:
     try:
         from .props_scored_cache import load_scored_props
         from . import ai_summaries as _ais
+        from components import live_score
     except Exception:                                                     # noqa: BLE001
         return out
     market_label = None
@@ -121,6 +122,19 @@ def _prop_entries(backend) -> list[dict]:
     except Exception:                                                     # noqa: BLE001
         market_label = lambda m: (m or "").replace("_", " ")
     for p in ((load_scored_props() or {}).get("picks") or []):
+        # Hide props whose game has already started -- same live_score
+        # detection the Props tab + My Bets use, so 'started' is consistent.
+        try:
+            if live_score.game_has_started(
+                backend,
+                commence_time=p.get("commence_time"),
+                home_team=p.get("home_team"),
+                away_team=p.get("away_team"),
+                sport="mlb",
+            ):
+                continue
+        except Exception:                                                 # noqa: BLE001
+            pass
         conf = p.get("confidence")
         if conf is None:
             conf = p.get("model_prob")
