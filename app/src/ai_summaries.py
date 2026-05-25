@@ -576,11 +576,14 @@ def get_prop_summary(pick: dict) -> str | None:
 # now regenerate only when an entry is missing).  Used after a model re-run so
 # only picks that actually changed get a fresh Groq summary.
 
-def ensure_game_summary(sport: str, g: dict) -> str:
+def ensure_game_summary(sport: str, g: dict, *, force: bool = False) -> str:
     """Generate the game-pick summary for one game if it isn't already
     cached.  Returns 'cached' / 'generated' / 'failed' / 'skipped'.  Does NOT
     sleep -- the caller paces calls (150 ms).  Used by the on-demand admin
-    'Run AI Analysis' job for live progress + skip counts."""
+    'Run AI Analysis' job for live progress + skip counts.
+
+    force=True bypasses the cached-skip and regenerates + overwrites (the
+    'Force AI Refresh' admin button)."""
     if not _have_supabase():
         return "skipped"
     gid = _game_id(g)
@@ -590,7 +593,7 @@ def ensure_game_summary(sport: str, g: dict) -> str:
     key = f"{sport}:{gid}"
     store = _load("game")
     old = store.get(key)
-    if isinstance(old, dict) and old.get("summary"):
+    if not force and isinstance(old, dict) and old.get("summary"):
         return "cached"
     from .groq_client import generate_summary
     text = generate_summary(_game_prompt(sport, g), max_tokens=230)
@@ -601,9 +604,12 @@ def ensure_game_summary(sport: str, g: dict) -> str:
     return "generated"
 
 
-def ensure_prop_summary(r: dict) -> str:
+def ensure_prop_summary(r: dict, *, force: bool = False) -> str:
     """Generate the prop summary for one pick if it isn't already cached.
-    Returns 'cached' / 'generated' / 'failed' / 'skipped'.  No internal sleep."""
+    Returns 'cached' / 'generated' / 'failed' / 'skipped'.  No internal sleep.
+
+    force=True bypasses the cached-skip and regenerates + overwrites (the
+    'Force AI Refresh' admin button)."""
     if not _have_supabase():
         return "skipped"
     player, market = r.get("player"), r.get("market")
@@ -612,7 +618,7 @@ def ensure_prop_summary(r: dict) -> str:
     key = _prop_key(r)
     store = _load("prop")
     old = store.get(key)
-    if isinstance(old, dict) and old.get("summary"):
+    if not force and isinstance(old, dict) and old.get("summary"):
         return "cached"
     from .groq_client import generate_summary
     text = generate_summary(_prop_prompt(r), max_tokens=230)

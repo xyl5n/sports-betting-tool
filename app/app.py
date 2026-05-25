@@ -11438,6 +11438,52 @@ def admin_props_refresh_now():
                         "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+@app.route("/api/admin/props/repull", methods=["POST"])
+def admin_props_repull():
+    """Full FRESH props re-pull for the 'MLB Props' admin button.
+
+    Re-hits the Odds API for the full ALL_MODEL_MARKETS set (all 11
+    model-backed markets) and re-scores every prop from scratch, OVERWRITING
+    whatever is cached rather than merging -- so a stale pre-PR#207 cache
+    (old/partial market set) is fully replaced.  Uses the existing
+    props_model scoring pipeline; builds no new model.  Synchronous (the
+    admin button wraps it in asyncio.to_thread)."""
+    import time as _time
+    started = _time.monotonic()
+    print("[ADMIN-ROUTE] /api/admin/props/repull invoked",
+          flush=True, file=sys.stderr)
+    try:
+        from src.props_client import run_full_props_repull
+        from src.props_scored_cache import load_scored_props
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"REPULL import failed: {type(exc).__name__}: {exc}")
+        return jsonify({"success": False, "error": f"import failed: {exc}"}), 500
+    try:
+        run_full_props_repull()
+        payload    = load_scored_props() or {}
+        picks      = payload.get("picks") or []
+        summary    = payload.get("summary") or {}
+        elapsed_ms = int((_time.monotonic() - started) * 1000)
+        result = {
+            "success":      True,
+            "kept":         len(picks),
+            "scored":       int(summary.get("scored") or 0),
+            "deduped":      int(summary.get("deduped") or 0),
+            "predict_err":  int(summary.get("predict_err") or 0),
+            "generated_at": payload.get("generated_at"),
+            "elapsed_ms":   elapsed_ms,
+        }
+        _eprint(
+            f"REPULL complete  kept={result['kept']}  scored={result['scored']}  "
+            f"deduped={result['deduped']}  elapsed={elapsed_ms}ms"
+        )
+        return jsonify(result)
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"REPULL FAILED: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+        return jsonify({"success": False,
+                        "error": f"{type(exc).__name__}: {exc}"}), 500
+
+
 # ── On-demand "Run AI Analysis" (admin) ───────────────────────────────────────
 # Generates the Groq game summaries, prop summaries, and player breakdowns
 # that aren't already cached -- the same logic the post-analysis queue runs,
@@ -11452,11 +11498,15 @@ _ai_run_state: dict = {
 _AI_RUN_DELAY = 0.15   # 150 ms between Groq calls (free-tier friendly)
 
 
-def _run_ai_analysis_job() -> None:
+def _run_ai_analysis_job(force: bool = False) -> None:
     """Background worker for the admin 'Run AI Analysis' button.  Generates
     every missing Groq summary/breakdown sequentially, updating
     _ai_run_state for the live progress poll.  Releases _ai_run_lock when
-    done."""
+    done.
+
+    force=True ('Force AI Refresh') bypasses change-detection: every game
+    verdict, prop summary, and player breakdown is regenerated + overwritten
+    regardless of whether it was already cached."""
     import time as _t
     started = _t.monotonic()
     try:
@@ -11502,18 +11552,21 @@ def _run_ai_analysis_job() -> None:
         # Phase 1 — game summaries
         _ai_run_state["phase"] = "game summaries"
         for sport, g in game_results:
-            _bump(ai_summaries.ensure_game_summary(sport, g), "games_generated")
+            _bump(ai_summaries.ensure_game_summary(sport, g, force=force),
+                  "games_generated")
 
         # Phase 2 — prop summaries (desc confidence)
         _ai_run_state["phase"] = "prop summaries"
         for r in props:
-            _bump(ai_summaries.ensure_prop_summary(r), "props_generated")
+            _bump(ai_summaries.ensure_prop_summary(r, force=force),
+                  "props_generated")
 
         # Phase 3 — player breakdowns
         _ai_run_state["phase"] = "player breakdowns"
         for p in player_items:
             from src import player_ai_breakdown
-            _bump(player_ai_breakdown.generate_for_pick(p), "breakdowns_generated")
+            _bump(player_ai_breakdown.generate_for_pick(p, force=force),
+                  "breakdowns_generated")
 
         elapsed = round(_t.monotonic() - started, 1)
         summary = {
@@ -11549,19 +11602,25 @@ def _run_ai_analysis_job() -> None:
 def admin_ai_analysis_run():
     """Kick off the on-demand AI summary/breakdown generation on a daemon
     thread.  Returns immediately; the admin page polls /status for progress.
-    Guarded so it can't be double-started."""
+    Guarded so it can't be double-started.
+
+    POST body {"force": true} ('Force AI Refresh') regenerates everything,
+    bypassing the cached-skip; otherwise only missing items are generated."""
+    force = bool((request.get_json(silent=True) or {}).get("force"))
     if not _ai_run_lock.acquire(blocking=False):
         return jsonify({"success": True, "already_running": True})
     _ai_run_state.update({
         "running": True, "phase": "starting", "done": 0, "total": 0,
         "games_generated": 0, "props_generated": 0, "breakdowns_generated": 0,
         "skipped": 0, "failed": 0, "summary": None, "elapsed": None,
-        "finished_at": None,
+        "finished_at": None, "forced": force,
         "started_at": datetime.now(timezone.utc).isoformat(),
     })
-    _eprint("[ADMIN-ROUTE] /api/admin/ai_analysis/run invoked — starting AI analysis")
+    _eprint(f"[ADMIN-ROUTE] /api/admin/ai_analysis/run invoked (force={force}) — "
+            f"starting AI analysis")
     try:
-        threading.Thread(target=_run_ai_analysis_job, daemon=True).start()
+        threading.Thread(target=_run_ai_analysis_job,
+                         kwargs={"force": force}, daemon=True).start()
     except Exception as exc:                                              # noqa: BLE001
         _ai_run_state["running"] = False
         try:

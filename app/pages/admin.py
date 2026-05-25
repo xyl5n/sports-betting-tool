@@ -479,21 +479,28 @@ def _cache_aware_run_button(
 
 
 def _run_both_button(backend, refresh, post_refresh=None) -> None:
-    """Run Both: combined cache check + single confirmation, then run
-    MLB and WNBA analyses synchronously back-to-back and reload the
-    page.  Same architecture as _cache_aware_run_button -- no
-    background workers, no polling timer."""
+    """Run All Models: combined cache check + single confirmation, then run
+    the MLB game model, the WNBA game model, and the MLB props fresh re-pull
+    synchronously back-to-back.  Same architecture as _cache_aware_run_button
+    -- no background workers, no polling timer.
+
+    Calls, in sequence:
+      MLB game model    -> POST /api/analyze
+      WNBA game model   -> POST /api/wnba/analyze
+      MLB props re-pull -> POST /api/admin/props/repull (run_full_props_repull)
+    """
     with ui.column().classes("w-full").style(
         "gap: 2px; min-width: 0; flex: 1 1 auto;"
     ):
-        btn = ui.button("Run Both").props("no-caps unelevated").style(
+        btn = ui.button("Run All Models").props("no-caps unelevated").style(
             f"background: {t.PRIMARY}; color: {t.BG}; "
             f"font-weight: 700; padding: 8px 16px; border-radius: {t.RADIUS_SM};"
         )
         status = _make_status_holder()
 
     async def _click():
-        print("[ADMIN-BTN] _run_both_button click", flush=True, file=sys.stderr)
+        print("[ADMIN-BTN] _run_both_button (Run All Models) click",
+              flush=True, file=sys.stderr)
         btn.props("loading"); btn.disable()
         try:
             # Combined cache check.
@@ -520,13 +527,15 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
                 )
                 if not proceed:
                     _show_inline_status(
-                        status, "Run Both cancelled.  No API requests made.", "info",
+                        status, "Run All Models cancelled.  No API requests made.",
+                        "info",
                     )
                     return
 
-            _show_inline_status(status, "Running MLB + WNBA analysis...", "info")
+            _show_inline_status(
+                status, "Running MLB + WNBA models + MLB props re-pull...", "info")
 
-            # Run both synchronously back-to-back.
+            # Run all three synchronously back-to-back.
             msgs: list[str] = []
             had_err = False
             for sport_key, sport_path, sport_body in (
@@ -546,6 +555,19 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
                         f"{data_a.get('error') or f'HTTP {status_a}'}"
                     )
 
+            # Third: MLB props fresh re-pull (full ALL_MODEL_MARKETS pull + rescore).
+            _show_inline_status(
+                status, " | ".join(msgs) + " | Re-pulling MLB props...", "info")
+            ok_p, data_p, status_p = await asyncio.to_thread(
+                _call, backend, "POST", "/api/admin/props/repull", {},
+            )
+            if ok_p:
+                msgs.append(f"Props: {data_p.get('kept', 0)} picks")
+            else:
+                had_err = True
+                msgs.append(
+                    f"Props failed: {data_p.get('error') or f'HTTP {status_p}'}")
+
             # Re-hydrate + refresh admin widgets in place.
             try:
                 backend.hydrate_state()
@@ -562,7 +584,7 @@ def _run_both_button(backend, refresh, post_refresh=None) -> None:
             )
         except Exception as exc:                                          # noqa: BLE001
             import traceback as _tb
-            print(f"[ADMIN-BTN] CRASH: Run Both  {type(exc).__name__}: {exc}\n"
+            print(f"[ADMIN-BTN] CRASH: Run All Models  {type(exc).__name__}: {exc}\n"
                   f"{_tb.format_exc()}", flush=True, file=sys.stderr)
             _show_inline_status(
                 status, f"Click handler error: {type(exc).__name__}: {exc}", "error",
@@ -596,22 +618,39 @@ def _section_props(backend, refresh) -> None:
     """
     with _card(
         "PROPS",
-        "Force-run the same refresh + scoring pass that auto_props_refresh "
-        "fires every 15 minutes.  Use after a redeploy so /props doesn't "
-        "wait on the next scheduled tick.",
+        "Refresh Props Now force-runs the same merge refresh + scoring pass "
+        "auto_props_refresh fires every 15 minutes.  MLB Props does a full "
+        "FRESH re-pull of all 11 model-backed markets, overwriting the cache "
+        "from scratch — use it if the slate is missing markets (e.g. an old "
+        "cache from before the all-markets fix).",
     ):
-        _async_button(
-            backend, "Refresh Props Now",
-            "POST", "/api/admin/props/refresh_now",
-            spinner_msg="Refreshing… fetching Tier-1 lines and scoring all props.",
-            done_msg=lambda d: (
-                f"Done — {d.get('kept', 0)} picks above threshold "
-                f"({d.get('scored', 0)} scored, "
-                f"{d.get('deduped', 0)} after dedup, "
-                f"{d.get('elapsed_ms', 0)} ms)."
-            ),
-            refresh_status=refresh,
-        )
+        with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
+            _async_button(
+                backend, "Refresh Props Now",
+                "POST", "/api/admin/props/refresh_now",
+                spinner_msg="Refreshing… fetching lines and scoring all props.",
+                done_msg=lambda d: (
+                    f"Done — {d.get('kept', 0)} picks above threshold "
+                    f"({d.get('scored', 0)} scored, "
+                    f"{d.get('deduped', 0)} after dedup, "
+                    f"{d.get('elapsed_ms', 0)} ms)."
+                ),
+                refresh_status=refresh,
+            )
+            _async_button(
+                backend, "MLB Props",
+                "POST", "/api/admin/props/repull",
+                spinner_msg="Fresh re-pull… re-hitting the Odds API for all 11 "
+                            "markets and re-scoring from scratch.",
+                done_msg=lambda d: (
+                    f"Fresh re-pull done — {d.get('kept', 0)} picks above "
+                    f"threshold ({d.get('scored', 0)} scored, "
+                    f"{d.get('deduped', 0)} after dedup, "
+                    f"{d.get('elapsed_ms', 0)} ms)."
+                ),
+                refresh_status=refresh,
+                style="primary",
+            )
 
 
 def _section_ai_analysis(backend) -> None:
@@ -621,12 +660,25 @@ def _section_ai_analysis(backend) -> None:
     run is in progress (can't double-click)."""
     with _card(
         "AI ANALYSIS",
-        "Generate Groq summaries for every game pick, prop pick, and player "
-        "breakdown that isn't cached yet (highest-confidence props first). "
-        "Sequential with a 150 ms gap between calls.",
+        "Run AI Analysis generates Groq summaries for every game pick, prop "
+        "pick, and player breakdown that isn't cached yet (highest-confidence "
+        "props first).  Force AI Refresh re-runs every one regardless of "
+        "cache.  Sequential with a 150 ms gap between calls.",
     ):
-        btn = ui.button("Run AI Analysis").props("no-caps unelevated").style(_btn_style("primary"))
+        with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
+            btn = ui.button("Run AI Analysis").props(
+                "no-caps unelevated").style(_btn_style("primary"))
+            btn_force = ui.button("Force AI Refresh").props(
+                "no-caps unelevated").style(_btn_style("warn"))
         prog = ui.column().classes("w-full").style("gap: 4px;")
+
+        def _set_busy(busy: bool) -> None:
+            for b in (btn, btn_force):
+                if busy:
+                    b.disable()
+                else:
+                    b.props(remove="loading")
+                    b.enable()
 
         def _render(data: dict) -> None:
             prog.clear()
@@ -661,24 +713,37 @@ def _section_ai_analysis(backend) -> None:
             _render(data)
             if not data.get("running"):
                 _timer.active = False
-                btn.props(remove="loading")
-                btn.enable()
+                _set_busy(False)
 
         _timer = ui.timer(2.0, _poll, active=False)
 
-        async def _click() -> None:
-            btn.props("loading")
-            btn.disable()
+        async def _start(force: bool, spinner_btn) -> None:
+            spinner_btn.props("loading")
+            _set_busy(True)
             ok, data, _ = await asyncio.to_thread(
-                _call, backend, "POST", "/api/admin/ai_analysis/run")
+                _call, backend, "POST", "/api/admin/ai_analysis/run",
+                {"force": force})
             if not ok:
                 _show_inline_status(prog, f"Failed to start: {data.get('error')}", "error")
-                btn.props(remove="loading")
-                btn.enable()
+                _set_busy(False)
                 return
             _timer.active = True
             await _poll()
+
+        async def _click() -> None:
+            await _start(False, btn)
+
+        async def _click_force() -> None:
+            proceed = await _confirm_dialog(
+                "This re-runs AI analysis on all games and props and uses API "
+                "quota. Continue?"
+            )
+            if not proceed:
+                return
+            await _start(True, btn_force)
+
         btn.on("click", _click)
+        btn_force.on("click", _click_force)
 
         # On (re)load, reflect an already-running run or the last result.
         async def _init() -> None:
@@ -687,8 +752,8 @@ def _section_ai_analysis(backend) -> None:
             if not ok:
                 return
             if data.get("running"):
-                btn.props("loading")
-                btn.disable()
+                (btn_force if data.get("forced") else btn).props("loading")
+                _set_busy(True)
                 _render(data)
                 _timer.active = True
             elif data.get("summary"):
