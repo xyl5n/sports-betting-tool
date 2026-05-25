@@ -487,6 +487,44 @@ def model_picks_list(sport: Optional[str] = None,
         return []
 
 
+def delete_model_picks(
+    sport: Optional[str] = None,
+    model: Optional[str] = None,
+    status: Optional[str] = None,
+) -> int:
+    """Delete rows from the model_picks table (PostgREST only), optionally
+    filtered by sport / model / status.  model_picks is the single
+    canonical store the home + props record / win-percentage cards read
+    from, so the admin reset buttons delete from here rather than
+    truncating the old per-classifier picks-history JSON files.
+
+    A no-filter call wipes the model's entire tracked history; it
+    satisfies Supabase's required where-clause via the same tautology
+    guard used by delete_records / delete_model_history.
+
+    Returns rows deleted (0 on Supabase off / error)."""
+    if not is_supabase():
+        return 0
+    try:
+        q = _client.table("model_picks").delete()
+        if sport is not None:
+            q = q.eq("sport", sport.lower())
+        if model is not None:
+            q = q.eq("model", model.lower())
+        if status is not None:
+            q = q.eq("status", status.lower())
+        if sport is None and model is None and status is None:
+            q = q.neq("pick_id", "__never__")
+        resp = q.execute()
+        return len(resp.data or [])
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning(
+            "supabase delete_model_picks(sport=%s, model=%s, status=%s) failed: %s",
+            sport, model, status, exc,
+        )
+        return 0
+
+
 # ── personal_bets (the My Bets ledger -- one JSON blob per sport) ─────────────
 # Dedicated, durable home for the personal-bet ledger so it survives Railway
 # redeploys / PR merges (the local JSON files get reset on every deploy).
