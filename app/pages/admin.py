@@ -817,7 +817,9 @@ def _section_model_bets(backend, refresh) -> None:
 
             _confirm_button(
                 backend, "Reset MLB",
-                "Wipe today's MLB model picks and refund their stakes?",
+                "Are you sure? This permanently deletes today's pending MLB "
+                "model picks from the Supabase model_picks table and refunds "
+                "their stakes. This cannot be undone.",
                 "POST", "/api/admin/model/reset", body={"sport": "mlb"},
                 done_msg=_reset_done_msg,
                 refresh_status=refresh,
@@ -825,7 +827,9 @@ def _section_model_bets(backend, refresh) -> None:
             )
             _confirm_button(
                 backend, "Reset WNBA",
-                "Wipe today's WNBA model picks and refund their stakes?",
+                "Are you sure? This permanently deletes today's pending WNBA "
+                "model picks from the Supabase model_picks table and refunds "
+                "their stakes. This cannot be undone.",
                 "POST", "/api/admin/model/reset", body={"sport": "wnba"},
                 done_msg=_reset_done_msg,
                 refresh_status=refresh,
@@ -833,7 +837,9 @@ def _section_model_bets(backend, refresh) -> None:
             )
             _confirm_button(
                 backend, "Reset Both",
-                "Wipe today's MLB + WNBA model picks and refund all stakes?",
+                "Are you sure? This permanently deletes today's pending MLB + "
+                "WNBA model picks from the Supabase model_picks table and "
+                "refunds all stakes. This cannot be undone.",
                 "POST", "/api/admin/model/reset", body={"sport": "both"},
                 done_msg=_reset_done_msg,
                 refresh_status=refresh,
@@ -969,12 +975,13 @@ def _section_data_reset(backend, refresh) -> None:
             _confirm_button(
                 backend, "Reset Model Record",
                 (
-                    "Permanently delete ALL settled model pick history "
-                    "across MLB + WNBA.  The model W/L record and units "
-                    "will reset to 0-0 and 0U.  The model bankroll dollar "
-                    "amount, open bets, and your personal records are NOT "
-                    "affected.\n\n"
-                    "This cannot be undone."
+                    "Are you sure? This permanently deletes ALL model pick "
+                    "history across MLB + WNBA from the Supabase model_picks "
+                    "table.  The model W/L record and units will reset to "
+                    "0-0 and 0U.  The model bankroll dollar amount, open "
+                    "bets, and your personal records are NOT affected.\n\n"
+                    "This acts on live persistent Supabase data and cannot "
+                    "be undone."
                 ),
                 "POST", "/api/admin/reset/model_record",
                 done_msg=lambda d: (
