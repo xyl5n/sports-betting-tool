@@ -10146,6 +10146,33 @@ def _run_job3_games_prefetch() -> None:
                 f"{type(_se).__name__}: {_se}")
 
 
+def _run_overnight_ai_gen() -> None:
+    """3:30 AM ET -- two-pass overnight AI pre-generation so every pick has a
+    breakdown before the user wakes.  Runs right after JOB 3 (3 AM prefetch).
+
+    Pass 1: game breakdowns on 70B (V3) + ALL props on 8B (V2).
+    Pass 2: top agreeing, high-confidence props re-run on 70B (V3).
+    Budget-aware cascading + spacing live in src/groq_models.  Daytime only
+    re-runs on line movement after this."""
+    _eprint("OVERNIGHT AI: starting two-pass pre-generation (V3 games + V2 props, "
+            "then V3 top props)")
+    try:
+        hydrate_state()
+    except Exception as _he:                                              # noqa: BLE001
+        _eprint(f"OVERNIGHT AI: hydrate failed: {_he}")
+    try:
+        from src import ai_summaries
+        game_results = (
+            [("mlb",  r) for r in (_analysis_state.get("results") or [])]
+            + [("wnba", r) for r in (_wnba_analysis_state.get("results") or [])]
+        )
+        summary = ai_summaries.run_overnight_generation(game_results)
+        _eprint(f"OVERNIGHT AI: done -- {summary}")
+    except Exception as _exc:                                             # noqa: BLE001
+        _eprint(f"OVERNIGHT AI: FAILED: {type(_exc).__name__}: {_exc}\n"
+                f"{traceback.format_exc()}")
+
+
 def get_todays_schedule(sport: str) -> list[dict]:
     """Public accessor for the home/sports pages: today's prefetched
     schedule (matchup + start time) for *sport*.  Reads the schedule
@@ -11739,6 +11766,16 @@ if not _in_debug_mode or _werkzeug_main:
                     _run_job3_games_prefetch,
                     _CronTrigger(hour=3, minute=0, timezone=_ET),
                     id="nightly_prefetch",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
+                )
+                # 3:30 AM ET: two-pass overnight AI pre-generation (after the
+                # 3 AM prefetch) so breakdowns are ready before the user wakes.
+                _sched.add_job(
+                    _run_overnight_ai_gen,
+                    _CronTrigger(hour=3, minute=30, timezone=_ET),
+                    id="overnight_ai_gen",
                     replace_existing=True,
                     misfire_grace_time=3600,
                     max_instances=1,

@@ -337,17 +337,17 @@ def _system_prompt(is_pitcher: bool, pick_side: str = "Over",
     )
 
 
-def _call_groq(system: str, user: str, max_tokens: int = 900) -> str | None:
-    """Generate the breakdown via the shared Groq client (llama-3.1-8b-instant).
-    Groq's helper takes a single prompt, so we fold the system instructions
-    and the data payload into one message.  Returns None on any failure."""
+def _call_groq(system: str, user: str, max_tokens: int = 900,
+               prefer: str = "V2") -> tuple:
+    """Generate the breakdown via the budget-aware multi-model client.
+    Returns (text, version_label) -- the version is the model that actually
+    produced it (after any cascade).  None text on any failure."""
     try:
-        from .groq_client import generate_summary
-        prompt = f"{system}\n\n{user}"
-        return generate_summary(prompt, max_tokens=max_tokens)
+        from .groq_models import generate
+        return generate(f"{system}\n\n{user}", prefer=prefer, max_tokens=max_tokens)
     except Exception as exc:                                                # noqa: BLE001
         _log(f"groq call failed: {type(exc).__name__}: {exc}")
-        return None
+        return None, None
 
 
 def _parse_sections(text: str | None) -> dict | None:
@@ -439,6 +439,7 @@ def _cache_read(player_id, market: str) -> dict | None:
             data = row.get("data") if isinstance(row.get("data"), dict) else row
             if isinstance(data, dict) and any(data.get(k) for k in _SECTION_KEYS):
                 sections = {k: data.get(k, "") for k in _SECTION_KEYS}
+                sections["model_version"] = data.get("model_version") or ""
                 _MEM_CACHE[key] = sections
                 return sections
     except Exception:                                                       # noqa: BLE001
@@ -544,13 +545,15 @@ def launch_breakdown_queue(picks: list[dict]) -> None:
 # ── Public entry point ───────────────────────────────────────────────────────
 
 def get_breakdown(info, games, is_pitcher, prop, market, line_f,
-                  summary, opp_abbrev, *, force: bool = False) -> dict | None:
-    """Return {matchup, trends, approach, game_script} for this player+market,
-    from cache if present (once per player/market/day) else freshly generated.
-    Returns None on any failure so the UI can render nothing.
+                  summary, opp_abbrev, *, force: bool = False,
+                  prefer: str = "V2") -> dict | None:
+    """Return {matchup, trends, approach, game_script, model_version} for this
+    player+market, from cache if present else freshly generated on *prefer*
+    (V2/8B for Pass-1 volume, V3/70B for Pass-2 top props).  Returns None on
+    failure so the UI can render nothing.
 
-    force=True bypasses the cache read and regenerates + overwrites (the
-    'Force AI Refresh' admin button)."""
+    force=True bypasses the cache read and regenerates + overwrites (Pass 2
+    re-run on 70B, or the 'Force AI Refresh' admin button)."""
     try:
         player_id = info.get("id")
         if not player_id or not market:
@@ -568,14 +571,15 @@ def get_breakdown(info, games, is_pitcher, prop, market, line_f,
             mlabel = (market or "").replace("_", " ")
         user = ("Generate the breakdown for this prop. Data JSON:\n"
                 + json.dumps(ctx, default=str))
-        text = _call_groq(
+        text, version = _call_groq(
             _system_prompt(is_pitcher, pick_side=(prop.get("side") or "Over"),
                            line=line_f, market_label=mlabel),
-            user,
+            user, prefer=prefer,
         )
         sections = _parse_sections(text)
         if sections is None:
             return None
+        sections["model_version"] = version or ""   # which model produced it
         _cache_write(player_id, market, sections)
         return sections
     except Exception as exc:                                                # noqa: BLE001
@@ -592,14 +596,16 @@ def has_breakdown(player_id, market: str) -> bool:
     return _cache_read(player_id, market) is not None
 
 
-def generate_for_pick(pick: dict, *, force: bool = False) -> str:
+def generate_for_pick(pick: dict, *, force: bool = False,
+                      prefer: str = "V2") -> str:
     """On-demand: ensure a player breakdown exists for a scored prop pick.
     Assembles the same context the player page feeds get_breakdown() (player
     info + gamelog + summary + opponent) and generates if not already cached.
     Returns 'cached' / 'generated' / 'failed'.  Best-effort -- never raises.
 
-    force=True bypasses the cache and regenerates + overwrites (the 'Force AI
-    Refresh' admin button)."""
+    prefer selects the model (V2/8B volume, V3/70B for Pass-2 top props).
+    force=True bypasses the cache and regenerates + overwrites (Pass 2 / the
+    'Force AI Refresh' admin button)."""
     try:
         player = pick.get("player")
         market = pick.get("market")
@@ -637,7 +643,7 @@ def generate_for_pick(pick: dict, *, force: bool = False) -> str:
             )
 
         bd = get_breakdown(info, games, is_pitcher, pick, market, line_f,
-                           summary, opp, force=force)
+                           summary, opp, force=force, prefer=prefer)
         return "generated" if bd else "failed"
     except Exception as exc:                                              # noqa: BLE001
         _log(f"generate_for_pick failed: {type(exc).__name__}: {exc}")
