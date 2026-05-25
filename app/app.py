@@ -10770,6 +10770,23 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     except Exception as _lx:                                               # noqa: BLE001
         _eprint(f"LEDGER-SETTLE failed: {type(_lx).__name__}: {_lx}")
 
+    # ── Settle the standalone Top Plays scorecard (12 PM–1 AM ET) ─────────────
+    # Its own store, separate from model_picks + the ledgers.  Same final
+    # scores / stat lookup; on a win it adds profit in units off the frozen
+    # odds, on a loss it subtracts the staked units (no balance is moved).
+    if et_hour >= 12 or et_hour <= 1:
+        try:
+            from src import top_plays_tracker as _tpt
+            _tps = _tpt.settle(
+                final_scores=_final_scores_from(scores_by_sport),
+                stat_lookup=_model_pick_stat_lookup,
+            )
+            if _tps.get("settled"):
+                _eprint(f"TOP-PLAYS settled {_tps['settled']} "
+                        f"({_tps['wins']}W/{_tps['losses']}L/{_tps['pushes']}P)")
+        except Exception as _tx:                                           # noqa: BLE001
+            _eprint(f"TOP-PLAYS settle failed: {type(_tx).__name__}: {_tx}")
+
     # ── Recalculate the daily budget off the post-settlement bankroll ─────────
     # A win adds profit / a loss removes the stake from the personal bankroll,
     # so the budget (20% of bankroll), floor (1%) and ceiling (5%) must track

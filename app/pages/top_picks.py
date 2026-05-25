@@ -62,6 +62,17 @@ def _layout(backend) -> None:
              "confidence (40%). Everything is shown — you decide where to cut off.").style(
         f"font-size: 12.5px; color: {t.TEXT_DIM};")
 
+    # ── Scorecard (standalone Top Plays tracker) ─────────────────────────────
+    @ui.refreshable
+    def _scorecard() -> None:                                             # noqa: WPS430
+        try:
+            from src import top_plays_tracker
+            sc = top_plays_tracker.scorecard()
+        except Exception:                                                 # noqa: BLE001
+            sc = {"win_pct": 0.0, "wins": 0, "losses": 0, "units": 0.0}
+        ui.html(_scorecard_html(sc))
+    _scorecard()
+
     # ── Filter pills ─────────────────────────────────────────────────────────
     _PILLS = (("all", "All"), ("game", "Game Picks"), ("props", "Props"))
     with ui.row().classes("items-center w-full").style("gap: 6px; flex-wrap: wrap;"):
@@ -110,7 +121,46 @@ def _layout(backend) -> None:
     def _refresh_data() -> None:
         _rebuild()
         _list.refresh()
+        _scorecard.refresh()
     ui.timer(20.0, _refresh_data)
+
+
+def _scorecard_html(sc: dict) -> str:
+    """Two boxes (single ui.html string): Box 1 = win % + W/L record;
+    Box 2 = cumulative units won/lost.  Sized off a fixed $1000 reference;
+    units are the only running total (1 unit = $10)."""
+    wins   = int(sc.get("wins") or 0)
+    losses = int(sc.get("losses") or 0)
+    pct    = float(sc.get("win_pct") or 0.0)
+    units  = float(sc.get("units") or 0.0)
+    decided = wins + losses
+
+    pct_str    = f"{pct:.1f}%" if decided else "—"
+    pct_color  = t.POS if pct >= 50.0 and decided else (t.NEG if decided else t.TEXT_DIM)
+    rec_str    = f"{wins}-{losses}"
+    units_str  = f"{units:+.2f}u" if decided else "0.00u"
+    units_color = t.POS if units > 0 else (t.NEG if units < 0 else t.TEXT_DIM)
+
+    def _box(label: str, value: str, value_color: str, sub: str) -> str:
+        return (
+            f'<div style="flex:1 1 0;min-width:0;background:{t.CARD};'
+            f'border:1px solid {t.BORDER};border-radius:{t.RADIUS_MD};'
+            f'padding:14px 16px;display:flex;flex-direction:column;gap:4px;">'
+            f'<div style="font-size:10px;font-weight:800;letter-spacing:.7px;'
+            f'color:{t.TEXT_DIM2};">{label}</div>'
+            f'<div style="display:flex;align-items:baseline;gap:8px;">'
+            f'<span style="font-size:26px;font-weight:800;font-family:monospace;'
+            f'letter-spacing:-.5px;color:{value_color};">{value}</span>'
+            f'<span style="font-size:13px;font-weight:700;font-family:monospace;'
+            f'color:{t.TEXT_DIM};">{sub}</span></div></div>'
+        )
+
+    return (
+        f'<div style="display:flex;gap:10px;width:100%;flex-wrap:wrap;">'
+        + _box("WIN %", pct_str, pct_color, rec_str)
+        + _box("UNITS WON / LOST", units_str, units_color, "1u = $10")
+        + '</div>'
+    )
 
 
 def _card(r: dict, display_rank: int) -> None:
