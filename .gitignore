@@ -48,3 +48,11 @@ env/
 # (recompute_clusters) and mirrored to Supabase as similarity_{market}_{date}.
 # It's a derived artifact, not source, so keep it out of the repo.
 **/.cache/player_similarity_clusters.json
+
+# Bet ledgers — bankroll + bets are now stored ONLY in Supabase (the
+# rebuilt model_/personal_ ledger tables).  These local JSON files were
+# git-tracked, so Railway re-cloned the committed copy on every redeploy
+# and the model bankroll kept reverting to the stale $739.  Keep them out
+# of the repo so a committed balance can never repopulate again.
+**/data/ledger.json
+**/data/wnba_ledger.json

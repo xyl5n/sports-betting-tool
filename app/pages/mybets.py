@@ -43,20 +43,37 @@ def register(backend) -> None:
 # ── Bankroll summary ─────────────────────────────────────────────────────────
 
 def _personal_bankroll(backend) -> None:
+    # Source of truth: the rebuilt Supabase personal ledger (bankroll lives
+    # only in Supabase so it survives redeploys).  Falls back to the legacy
+    # local ledger when Supabase is off.
+    _supa = None
     try:
-        mlb  = backend.Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
-        wnba = backend.Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
-        s = mlb.get_summary()
-        start   = float(s.get("personal_starting_bankroll", 1000))
-        current = float(s.get("personal_bankroll", start))
-        pnl     = current - start
-        open_confirmed = (
-            [b for b in (mlb.data.get("open_bets")  or []) if b.get("confirmed")]
-            + [b for b in (wnba.data.get("open_bets") or []) if b.get("confirmed")]
-        )
-        at_risk = sum(float(b.get("confirmed_amount") or 0) for b in open_confirmed)
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            _supa = _sl.personal()
     except Exception:                                                      # noqa: BLE001
-        start, current, pnl, at_risk = 1000.0, 1000.0, 0.0, 0.0
+        _supa = None
+
+    if _supa is not None:
+        start   = _supa.starting()
+        current = _supa.bankroll()
+        pnl     = current - start
+        at_risk = sum(float(b.get("stake") or 0) for b in _supa.active_bets())
+    else:
+        try:
+            mlb  = backend.Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
+            wnba = backend.Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
+            s = mlb.get_summary()
+            start   = float(s.get("personal_starting_bankroll", 1000))
+            current = float(s.get("personal_bankroll", start))
+            pnl     = current - start
+            open_confirmed = (
+                [b for b in (mlb.data.get("open_bets")  or []) if b.get("confirmed")]
+                + [b for b in (wnba.data.get("open_bets") or []) if b.get("confirmed")]
+            )
+            at_risk = sum(float(b.get("confirmed_amount") or 0) for b in open_confirmed)
+        except Exception:                                                  # noqa: BLE001
+            start, current, pnl, at_risk = 1000.0, 1000.0, 0.0, 0.0
 
     pnl_color = t.POS if pnl >= 0 else t.NEG
     pnl_sign  = "+" if pnl >= 0 else "−"
@@ -71,16 +88,20 @@ def _personal_bankroll(backend) -> None:
         _stat("P / L",   f"{pnl_sign}${abs(pnl):,.2f}", pnl_color)
         _stat("AT RISK", f"${at_risk:,.2f}",           t.WARN)
 
-    # Today's bet budget — 20% of the current personal bankroll, with the
-    # amount already staked today and what's left (FIX 2/3).
-    budget = _todays_budget(current)
-    try:
-        today_et = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
-        spent_today = (mlb._daily_exposure(today_et, confirmed_only=True)
-                       + wnba._daily_exposure(today_et, confirmed_only=True))
-    except Exception:                                                      # noqa: BLE001
-        spent_today = 0.0
-    remaining = max(0.0, float(budget.get("total", 0.0)) - spent_today)
+    # Today's bet budget — a fresh 4 AM ET snapshot of 20% of the personal
+    # bankroll that morning, with the amount staked today and what's left.
+    if _supa is not None:
+        budget    = _supa.daily_limit()
+        remaining = float(budget.get("remaining", 0.0))
+    else:
+        budget = _todays_budget(current)
+        try:
+            today_et = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+            spent_today = (mlb._daily_exposure(today_et, confirmed_only=True)
+                           + wnba._daily_exposure(today_et, confirmed_only=True))
+        except Exception:                                                  # noqa: BLE001
+            spent_today = 0.0
+        remaining = max(0.0, float(budget.get("total", 0.0)) - spent_today)
     rem_color = t.POS if remaining > 0 else t.NEG
     with ui.row().classes("items-center w-full").style(
         f"gap: 8px; background: {t.CARD}; border: 1px solid {t.BORDER}; "
