@@ -34,24 +34,6 @@ def _bet_type_label(raw: str | None) -> str:
 
 # ── History loader ─────────────────────────────────────────────────────────
 
-def _all_history(backend) -> list[dict]:
-    """Concatenate settled bet history from both ledger files.
-
-    Reads via backend.Ledger(...).data['history'] so the source of
-    truth is the same as the Model page + Sidebar Confidence Performance
-    section -- everything stays in sync.
-    """
-    out: list[dict] = []
-    for path in ("data/ledger.json", "data/wnba_ledger.json"):
-        try:
-            led = backend.Ledger(path=path, starting_bankroll=1000.0)
-            for h in (led.data.get("history") or []):
-                out.append(h)
-        except Exception:                                                 # noqa: BLE001
-            continue
-    return out
-
-
 # ── Chip #1 -- overall win rate ────────────────────────────────────────────
 
 def overall_record(backend) -> dict:
@@ -78,67 +60,19 @@ def props_record(backend) -> dict:
 # ── Model Performance section (bottom of home page) ───────────────────────
 
 def model_performance(backend) -> dict:
-    """Return aggregate settled-history performance for the model.
-
-    Shape:
-        {wins: N, losses: N, pct: float | None, units: float}
-
-    W/L counts come from tracker_records() (the same source the home
-    OVERALL chip + Model tab MODEL BANKROLL Record + RECORDS BY BET
-    TYPE all use).  `units` still comes from the ledger -- it's the
-    flat 1U-per-bet P/L of bets the daily-picks selector actually
-    placed, which is a betting-record metric that the tracker files
-    don't have the stake/odds data to compute.
-
-    `units` rule (unchanged):
-        win at +N        ->  +N/100  units
-        win at -N        ->  +100/N  units
-        loss             ->  -1      units
-        push / void      ->   0      units (no W/L change either)
-    """
-    # W/L for the model record comes from the MLB combined store in
-    # model_picks (the single source of truth); `units` stays a ledger-derived
-    # flat-unit P&L metric for the bets the daily-picks selector placed.
+    """Model-only settled record (W/L/pct) from the MLB combined store in
+    model_picks -- the single source of truth.  Reads only model_picks: never
+    the ledger and never JSON, so model performance is never mixed with the
+    personal-bet ledger.  Shape: {wins, losses, pct}."""
     try:
         from src import model_picks as _mp
-        _rec = _mp.store_record("mlb", "combined")
-        wins, losses, pct = _rec["wins"], _rec["losses"], _rec["pct"]
+        rec = _mp.store_record("mlb", "combined")
+        return {"wins": rec["wins"], "losses": rec["losses"], "pct": rec["pct"]}
     except Exception:                                                      # noqa: BLE001
-        wins = losses = 0
-        pct = None
-    history = _all_history(backend)
-    units = 0.0
-    for h in history:
-        result = (h.get("result") or "").lower()
-        if result == "win":
-            odds = h.get("american_odds")
-            if not isinstance(odds, (int, float)):
-                odds = -110                                               # default
-            if odds > 0:
-                units += odds / 100.0
-            elif odds < 0:
-                units += 100.0 / abs(odds)
-        elif result == "loss":
-            units -= 1.0
-        # push / void: no change to either counter
-    return {
-        "wins":   wins,
-        "losses": losses,
-        "pct":    pct,
-        "units":  round(units, 2),
-    }
+        return {"wins": 0, "losses": 0, "pct": None}
 
 
 # ── Per-classifier picks tracker loader ─────────────────────────────────────
-
-import json as _json
-from pathlib import Path as _Path
-
-_TRACKER_PATHS = {
-    "xgb": _Path(".cache/xgb_picks_history.json"),
-    "lr":  _Path(".cache/lr_picks_history.json"),
-    "nn":  _Path("data/nn_picks_history.json"),
-}
 
 # Bet-type categories shared across helpers in this module.
 _TRACKER_CATS = {
@@ -147,77 +81,58 @@ _TRACKER_CATS = {
     "totals":          ("totals",),
 }
 
+# model_picks bet_type -> the category keys above.
+_BT_TO_CAT = {"ml": "moneyline", "rl": "run_line_spread", "total": "totals"}
+
 
 def tracker_records() -> dict:
-    """Aggregate the union of settled picks across all three model
-    history files (xgb_picks_history.json, lr_picks_history.json,
-    nn_picks_history.json).
+    """Aggregate finished MLB model picks from the Supabase model_picks table
+    (PostgREST only) -- the single source of truth.  The JSON history files
+    are retired (they don't survive Railway redeploys).
 
-    Single source of truth for every W/L display in the app:
-      - Home OVERALL chip
-      - Home BEST BET TYPE chip
-      - Home bottom Model Performance section
-      - Model tab MODEL BANKROLL Record line
-      - Model tab RECORDS BY BET TYPE
-      - Model tab CLASSIFIER ACCURACY (per-model breakdown)
-
-    Settled = entry's `correct` field is True or False (None means the
-    game hasn't finished yet -- skipped).  Each (model, game, bet_type)
-    entry counts independently: if all 3 classifiers picked a winning
-    moneyline that's 3 wins toward the aggregate; if XGB + LR were right
-    and NN was wrong on the same game, that's 2 wins + 1 loss.
+    Game side only: ``overall`` + ``by_bet_type`` come from the 'combined'
+    store; ``by_model`` from the per-classifier xgb/lr/nn stores.  Same shape
+    the Model tab consumers expect.
 
     Returns:
       {
-        "overall":     {"wins": N, "losses": N, "pct": float | None},
-        "by_bet_type": {
-          "moneyline":       {"wins": N, "losses": N, "pct": float | None},
-          "run_line_spread": {...},
-          "totals":          {...},
-        },
-        "by_model": {
-          "xgb": {"overall": [c, t], "moneyline": [c, t], ...},
-          "lr":  {...},
-          "nn":  {...},
-        },
+        "overall":     {"wins", "losses", "pct"},
+        "by_bet_type": {cat: {"wins", "losses", "pct"}},
+        "by_model":    {"xgb": {"overall":[c,t], <cat>:[c,t], ...}, "lr":..., "nn":...},
       }
     """
-    overall_w = overall_l = 0
+    try:
+        from src import db as _db
+        rows = _db.model_picks_list(sport="mlb")
+    except Exception:                                                      # noqa: BLE001
+        rows = []
+
     by_cat: dict[str, list[int]] = {k: [0, 0] for k in _TRACKER_CATS}
     by_model: dict[str, dict[str, list[int]]] = {
         m: {"overall": [0, 0], **{k: [0, 0] for k in _TRACKER_CATS}}
-        for m in _TRACKER_PATHS
+        for m in ("xgb", "lr", "nn")
     }
+    for r in rows:
+        if (r.get("status") or "").lower() != "finished":
+            continue
+        cat = _BT_TO_CAT.get((r.get("bet_type") or "").lower())
+        if cat is None:
+            continue
+        res = (r.get("result") or "").lower()
+        if res not in ("win", "loss"):
+            continue
+        won = int(res == "win")
+        model = r.get("model")
+        if model == "combined":
+            by_cat[cat][0 if won else 1] += 1
+        elif model in by_model:
+            by_model[model]["overall"][1] += 1
+            by_model[model]["overall"][0] += won
+            by_model[model][cat][1] += 1
+            by_model[model][cat][0] += won
 
-    for model_key, path in _TRACKER_PATHS.items():
-        if not path.exists():
-            continue
-        try:
-            payload = _json.loads(path.read_text(encoding="utf-8"))
-        except Exception:                                                 # noqa: BLE001
-            continue
-        for entry in (payload.get("picks") or []):
-            correct = entry.get("correct")
-            if correct is None:
-                continue
-            bt = (entry.get("bet_type") or "moneyline").lower()
-            cat = next(
-                (k for k, aliases in _TRACKER_CATS.items() if bt in aliases),
-                None,
-            )
-            if cat is None:
-                continue
-            won = bool(correct)
-            if won:
-                overall_w += 1
-                by_cat[cat][0] += 1
-            else:
-                overall_l += 1
-                by_cat[cat][1] += 1
-            by_model[model_key]["overall"][1] += 1
-            by_model[model_key]["overall"][0] += int(won)
-            by_model[model_key][cat][1] += 1
-            by_model[model_key][cat][0] += int(won)
+    overall_w = sum(c[0] for c in by_cat.values())
+    overall_l = sum(c[1] for c in by_cat.values())
 
     def _pct(w: int, l: int) -> float | None:
         return (w / (w + l)) if (w + l) else None
@@ -234,10 +149,8 @@ def tracker_records() -> dict:
 
 
 def classifier_accuracy_from_trackers() -> dict:
-    """Per-classifier accuracy breakdown from the three picks-history
-    files.  Thin wrapper over tracker_records()["by_model"] kept for
-    backward compatibility with existing call sites (pages/model and
-    home best_classifier).  See tracker_records() for the counting rule."""
+    """Per-classifier (xgb/lr/nn) accuracy from model_picks.  Thin wrapper
+    over tracker_records()["by_model"] kept for existing call sites."""
     return tracker_records()["by_model"]
 
 

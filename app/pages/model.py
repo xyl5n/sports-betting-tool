@@ -102,11 +102,10 @@ def _bankroll_card(backend, history: list[dict]) -> None:
         start, current, at_risk = 1000.0, 1000.0, 0.0
 
     pnl = current - start
-    # W/L comes from the tracker-files aggregate so this number matches
-    # the home OVERALL chip + the RECORDS BY BET TYPE totals by
-    # construction.  The `history` ledger view was top-5-only and
-    # disagreed with the per-classifier accuracy card -- the user's
-    # data-consistency complaint.
+    # W/L is the MLB combined store from model_picks (Supabase) via
+    # tracker_records(), matching the home GAME MODELS box + RECORD BY BET
+    # TYPE by construction.  The bankroll start/current/P&L stay from the
+    # model ledger (that IS the bankroll); only the Record reads model_picks.
     from pages import home_stats as hs
     _trk = hs.tracker_records()["overall"]
     w = _trk["wins"]
@@ -156,12 +155,10 @@ def _stat(label: str, value: str, color: str) -> None:
 # ── Section: Records by bet type ────────────────────────────────────────────
 
 def _type_records_card(history: list[dict]) -> None:
-    """Render per-bet-type W/L from the per-classifier tracker files.
-
-    `history` arg is preserved for back-compat with the call site but
-    no longer consulted -- the data comes from
-    home_stats.tracker_records(), the same source the home OVERALL +
-    BEST BET TYPE chips read so the numbers always agree.
+    """Render per-bet-type W/L for the MLB combined store from model_picks
+    (Supabase) via home_stats.tracker_records() -- the same source the home
+    GAME MODELS box reads, so the numbers always agree.  `history` arg is
+    preserved for back-compat with the call site but no longer consulted.
     """
     from pages import home_stats as hs
     by_cat = hs.tracker_records()["by_bet_type"]
@@ -458,19 +455,11 @@ def _prop_pick_row(p: dict) -> None:
 # ── Section: Per-classifier accuracy ────────────────────────────────────────
 
 def _classifier_card(history: list[dict]) -> None:
-    """Render per-classifier accuracy from the tracker files (NOT from
-    ledger history).
-
-    Previously this read xgb_prob / lr_prob / nn_prob off `history` rows,
-    which only exist for top-5 picks the daily-picks selector actually
-    placed.  The tracker files (.cache/xgb_picks_history.json,
-    .cache/lr_picks_history.json, data/nn_picks_history.json) carry one
-    entry per ANALYZED GAME per bet_type so the tallies here now reflect
-    the model's full prediction surface, matching what the user expects
-    from the spec.
-
-    `history` argument is kept for backward compat with the call site but
-    no longer consulted -- the data comes from home_stats.classifier_accuracy_from_trackers().
+    """Render per-classifier (xgb/lr/nn) accuracy from the model_picks
+    Supabase table via home_stats.classifier_accuracy_from_trackers() --
+    finished picks only, one row per analyzed game per bet type, never the
+    ledger and never JSON.  `history` arg is kept for back-compat with the
+    call site but no longer consulted.
     """
     from pages import home_stats as hs
     tallies = hs.classifier_accuracy_from_trackers()

@@ -420,7 +420,7 @@ def _chip_overall(overall: dict) -> None:
     color = hs.winrate_color(pct, t)
     main  = f"{w}-{l}"
     pct_s = f"{pct * 100:.0f}%" if pct is not None else "—"
-    _chip(label="OVERALL", main=main, suffix=pct_s, color=color)
+    _chip(label="GAME MODELS", main=main, suffix=pct_s, color=color)
 
 
 def _chip_props(props: dict) -> None:
@@ -429,7 +429,7 @@ def _chip_props(props: dict) -> None:
     w, l, pct = props.get("wins", 0), props.get("losses", 0), props.get("pct")
     color = hs.winrate_color(pct, t)
     pct_s = f"{pct * 100:.0f}%" if pct is not None else "—"
-    _chip(label="MODEL", main=f"{w}-{l}", suffix=pct_s, color=color)
+    _chip(label="PROPS MODELS", main=f"{w}-{l}", suffix=pct_s, color=color)
 
 
 def _chip_best_model(best: dict | None) -> None:
@@ -881,14 +881,10 @@ def _section_model_performance(backend) -> None:
     """
     perf = hs.model_performance(backend)
     wins, losses = perf["wins"], perf["losses"]
-    pct, units  = perf["pct"], perf["units"]
+    pct = perf["pct"]
 
     pct_s   = f"{pct * 100:.1f}%" if pct is not None else "—"
     pct_col = hs.winrate_color(pct, t)
-
-    units_sign  = "+" if units >= 0 else "−"
-    units_s     = f"{units_sign}{abs(units):.1f}U"
-    units_col   = t.POS if units >= 0 else t.NEG
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
@@ -896,7 +892,7 @@ def _section_model_performance(backend) -> None:
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                 f"color: {t.TEXT};"
             )
-            ui.label("settled history · 1U flat").style(
+            ui.label("MLB combined · finished picks").style(
                 f"font-size: 11px; color: {t.TEXT_DIM2};"
             )
         with ui.row().classes("w-full").style(
@@ -904,7 +900,6 @@ def _section_model_performance(backend) -> None:
         ):
             _perf_stat("WIN %",  pct_s,                 pct_col)
             _perf_stat("RECORD", f"{wins}-{losses}",    t.TEXT)
-            _perf_stat("UNITS",  units_s,               units_col)
 
 
 def _perf_stat(label: str, value: str, color: str) -> None:
