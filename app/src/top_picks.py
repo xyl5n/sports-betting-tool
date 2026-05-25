@@ -41,7 +41,7 @@ def _verdict(confidence) -> tuple[str, str]:
         return ("Neutral", "warn")
 
 
-def _entry(kind, name, pick_type, side, confidence, reasoning) -> dict:
+def _entry(kind, name, pick_type, side, confidence, reasoning, track=None) -> dict:
     label, color = _verdict(confidence)
     vscore = _VERDICT_SCORE.get(label, 0.50)
     conf = float(confidence) if isinstance(confidence, (int, float)) else 0.5
@@ -60,6 +60,9 @@ def _entry(kind, name, pick_type, side, confidence, reasoning) -> dict:
         "combined_score": round(combined, 4),
         "agree":          hi_conf and label in ("Lean", "Strong Lean"),
         "fade":           hi_conf and label in ("Fade", "Strong Fade"),
+        # Frozen-at-appearance payload the Top Plays tracker records (odds +
+        # grading keys).  Display fields above are unchanged.
+        "_track":         track,
     }
 
 
@@ -83,13 +86,31 @@ def _game_entries(backend) -> list[dict]:
                 except Exception:                                         # noqa: BLE001
                     reasoning = None
 
+            gid = str(g.get("id") or g.get("game_id") or r.get("game_id") or "")
+            commence = g.get("commence_time") or r.get("commence_time")
+
+            def _track(kind, bet_type, pick_side, line, odds, prob, side_disp):
+                return {
+                    "kind": kind, "sport": sport, "bet_type": bet_type,
+                    "pick_side": pick_side, "line": line, "odds": odds,
+                    "prob": prob, "game_id": gid, "name": name,
+                    "pick_type": None, "side_display": side_disp,
+                    "home_team": home, "away_team": away,
+                    "commence_time": commence,
+                }
+
             # Moneyline (always present when the model produced a pick).
             pred = r.get("prediction") or {}
             hw = pred.get("home_win_prob")
             if isinstance(hw, (int, float)):
                 side = home if hw >= 0.5 else away
+                ml_prob = hw if hw >= 0.5 else 1.0 - hw
+                ml_odds = (g.get("pick_odds")
+                           or (g.get("home_odds") if side == home else g.get("away_odds")))
                 out.append(_entry("game", name, f"{sport.upper()} ML",
-                                  side, hw if hw >= 0.5 else 1.0 - hw, reasoning))
+                                  side, ml_prob, reasoning,
+                                  track=_track("game", "ml", side, None,
+                                               ml_odds, ml_prob, side)))
 
             rl = r.get("rl_pred") or r.get("spread_pred") or {}
             if rl.get("value_bet") and isinstance(rl.get("pick_prob"), (int, float)):
@@ -97,14 +118,23 @@ def _game_entries(backend) -> list[dict]:
                 side = f"{rl.get('pick_team', '')} {pt:+g}" if isinstance(pt, (int, float)) else rl.get("pick_team", "")
                 out.append(_entry("game", name,
                                   f"{sport.upper()} {'RL' if sport == 'mlb' else 'Spread'}",
-                                  side.strip(), rl.get("pick_prob"), reasoning))
+                                  side.strip(), rl.get("pick_prob"), reasoning,
+                                  track=_track("game", "rl", rl.get("pick_team"),
+                                               pt if isinstance(pt, (int, float)) else None,
+                                               rl.get("pick_odds"), rl.get("pick_prob"),
+                                               side.strip())))
 
             tot = r.get("totals_pred") or {}
             if tot.get("value_bet") and isinstance(tot.get("pick_prob"), (int, float)):
                 ln = tot.get("total_line")
                 side = f"{(tot.get('direction') or '').title()} {ln}".strip()
                 out.append(_entry("game", name, f"{sport.upper()} Total",
-                                  side, tot.get("pick_prob"), reasoning))
+                                  side, tot.get("pick_prob"), reasoning,
+                                  track=_track("game", "total",
+                                               (tot.get("direction") or "").upper(),
+                                               ln if isinstance(ln, (int, float)) else None,
+                                               tot.get("pick_odds"), tot.get("pick_prob"),
+                                               side)))
     return out
 
 
@@ -143,8 +173,25 @@ def _prop_entries(backend) -> list[dict]:
         except Exception:                                                 # noqa: BLE001
             reasoning = None
         side = f"{(p.get('side') or 'Over').title()} {p.get('line')}"
+        try:
+            line_f = float(p.get("line"))
+        except (TypeError, ValueError):
+            line_f = None
+        track = {
+            "kind": "prop", "sport": "mlb",
+            "bet_type": p.get("market"),                       # market KEY (grading)
+            "pick_side": (p.get("side") or "Over").upper(),    # OVER / UNDER
+            "line": line_f, "odds": p.get("best_odds"),
+            "prob": conf if isinstance(conf, (int, float)) else None,
+            "game_id": None, "event_id": p.get("event_id"),
+            "player": p.get("player"), "name": p.get("player") or "—",
+            "pick_type": None, "side_display": side,
+            "home_team": p.get("home_team"), "away_team": p.get("away_team"),
+            "commence_time": p.get("commence_time"),
+        }
         out.append(_entry("prop", p.get("player") or "—",
-                          market_label(p.get("market")), side, conf, reasoning))
+                          market_label(p.get("market")), side, conf, reasoning,
+                          track=track))
     return out
 
 
@@ -163,4 +210,16 @@ def build_rankings(backend) -> dict:
     rows.sort(key=lambda r: r["combined_score"], reverse=True)
     for i, r in enumerate(rows, 1):
         r["rank"] = i
+    # Record each appearing play into the standalone Top Plays scorecard
+    # (frozen odds + Kelly unit stake).  Idempotent -- dedup by id, so
+    # re-renders never re-stake.  Best-effort; never blocks the page.
+    try:
+        from . import top_plays_tracker
+        top_plays_tracker.record_plays(rows)
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"top-plays record failed: {exc}")
+    # The _track payload is internal to recording -- drop it before handing
+    # rows to the UI so the display layer is unchanged.
+    for r in rows:
+        r.pop("_track", None)
     return {"rows": rows, "count": len(rows)}
