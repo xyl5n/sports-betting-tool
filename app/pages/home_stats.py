@@ -37,12 +37,12 @@ def _bet_type_label(raw: str | None) -> str:
 # ── Chip #1 -- overall win rate ────────────────────────────────────────────
 
 def overall_record(backend) -> dict:
-    """OVERALL = the MLB combined store: every finished ml+rl+total 'combined'
-    (ensemble) pick aggregated.  Reads model_picks (Supabase) -- never the
-    ledger and never JSON, so it survives Railway redeploys."""
+    """GAME MODELS (collective) -- finished W/L across the xgb/lr/nn
+    per-classifier trackers, the SAME store TRACKER-GRADE settles into.
+    Reads the trackers (Supabase-mirrored) so graded results show up; never
+    the ledger and never model_picks (which the grading does not write)."""
     try:
-        from src import model_picks as _mp
-        return _mp.store_record("mlb", "combined")
+        return tracker_records()["overall"]
     except Exception:                                                      # noqa: BLE001
         return {"wins": 0, "losses": 0, "pct": None}
 
@@ -60,14 +60,12 @@ def props_record(backend) -> dict:
 # ── Model Performance section (bottom of home page) ───────────────────────
 
 def model_performance(backend) -> dict:
-    """Model-only settled record (W/L/pct) from the MLB combined store in
-    model_picks -- the single source of truth.  Reads only model_picks: never
-    the ledger and never JSON, so model performance is never mixed with the
-    personal-bet ledger.  Shape: {wins, losses, pct}."""
+    """Model-only settled record (W/L/pct) -- the collective finished record
+    from the xgb/lr/nn per-classifier trackers (the store TRACKER-GRADE
+    settles into).  Never the ledger, so model performance is never mixed
+    with the personal-bet ledger.  Shape: {wins, losses, pct}."""
     try:
-        from src import model_picks as _mp
-        rec = _mp.store_record("mlb", "combined")
-        return {"wins": rec["wins"], "losses": rec["losses"], "pct": rec["pct"]}
+        return tracker_records("mlb")["overall"]
     except Exception:                                                      # noqa: BLE001
         return {"wins": 0, "losses": 0, "pct": None}
 
@@ -85,14 +83,56 @@ _TRACKER_CATS = {
 _BT_TO_CAT = {"ml": "moneyline", "rl": "run_line_spread", "total": "totals"}
 
 
-def tracker_records() -> dict:
-    """Aggregate finished MLB model picks from the Supabase model_picks table
-    (PostgREST only) -- the single source of truth.  The JSON history files
-    are retired (they don't survive Railway redeploys).
+# Tracker bet_type label -> the category keys above.
+_TRACKER_BT_TO_CAT = {
+    "moneyline": "moneyline", "single": "moneyline", "ml": "moneyline",
+    "run_line": "run_line_spread", "runline": "run_line_spread",
+    "spread": "run_line_spread", "rl": "run_line_spread",
+    "totals": "totals", "total": "totals",
+}
 
-    Game side only: ``overall`` + ``by_bet_type`` come from the 'combined'
-    store; ``by_model`` from the per-classifier xgb/lr/nn stores.  Same shape
-    the Model tab consumers expect.
+
+def _tracker_picks(module_name: str, loader: str) -> list[dict]:
+    """Finished+pending picks list from one per-classifier tracker.  Each
+    tracker stores {'picks': [...]} (Supabase-mirrored).  Empty on any error."""
+    try:
+        import importlib
+        mod = importlib.import_module(f"src.{module_name}")
+        data = getattr(mod, loader)() or {}
+        picks = data.get("picks")
+        return picks if isinstance(picks, list) else []
+    except Exception:                                                      # noqa: BLE001
+        return []
+
+
+def _pick_won(p: dict):
+    """Normalise a tracker pick to True (win) / False (loss) / None (pending,
+    push, void).  xgb stores result win/loss; lr/nn store a 'correct' bool."""
+    res = (p.get("result") or "").lower()
+    if res == "win":
+        return True
+    if res == "loss":
+        return False
+    if res in ("push", "void"):
+        return None
+    c = p.get("correct")
+    if c is True:
+        return True
+    if c is False:
+        return False
+    return None
+
+
+def tracker_records(sport: str = "mlb") -> dict:
+    """Aggregate finished GAME picks from the per-classifier trackers
+    (xgb/lr/nn) -- the SAME store TRACKER-GRADE settles into (Supabase-
+    mirrored, survives redeploys).  The model_picks table is NOT used here
+    because the grading path does not write it.
+
+    ``by_model`` is each classifier's finished record; ``overall`` +
+    ``by_bet_type`` are the collective across the three classifiers (there is
+    no separate 'combined' tracker).  Same shape the Model tab consumers
+    expect.
 
     Returns:
       {
@@ -101,36 +141,37 @@ def tracker_records() -> dict:
         "by_model":    {"xgb": {"overall":[c,t], <cat>:[c,t], ...}, "lr":..., "nn":...},
       }
     """
-    try:
-        from src import db as _db
-        rows = _db.model_picks_list(sport="mlb")
-    except Exception:                                                      # noqa: BLE001
-        rows = []
-
-    by_cat: dict[str, list[int]] = {k: [0, 0] for k in _TRACKER_CATS}
+    sport = (sport or "mlb").lower()
     by_model: dict[str, dict[str, list[int]]] = {
         m: {"overall": [0, 0], **{k: [0, 0] for k in _TRACKER_CATS}}
         for m in ("xgb", "lr", "nn")
     }
-    for r in rows:
-        if (r.get("status") or "").lower() != "finished":
-            continue
-        cat = _BT_TO_CAT.get((r.get("bet_type") or "").lower())
-        if cat is None:
-            continue
-        res = (r.get("result") or "").lower()
-        if res not in ("win", "loss"):
-            continue
-        won = int(res == "win")
-        model = r.get("model")
-        if model == "combined":
-            by_cat[cat][0 if won else 1] += 1
-        elif model in by_model:
-            by_model[model]["overall"][1] += 1
-            by_model[model]["overall"][0] += won
-            by_model[model][cat][1] += 1
-            by_model[model][cat][0] += won
+    sources = (
+        ("xgb", "xgb_picks_tracker", "_load_history"),
+        ("lr",  "lr_picks_tracker",  "_load"),
+        ("nn",  "nn_picks",          "_load"),
+    )
+    for model, module_name, loader in sources:
+        for p in _tracker_picks(module_name, loader):
+            if (p.get("sport") or "mlb").lower() != sport:
+                continue
+            cat = _TRACKER_BT_TO_CAT.get((p.get("bet_type") or "").lower())
+            if cat is None:
+                continue
+            won = _pick_won(p)
+            if won is None:
+                continue
+            idx = 0 if won else 1
+            by_model[model]["overall"][idx] += 1
+            by_model[model][cat][idx] += 1
 
+    # Collective (across the three classifiers) for the overall + by-bet-type
+    # numbers the home GAME MODELS chip + Model-tab RECORD BY BET TYPE show.
+    by_cat: dict[str, list[int]] = {k: [0, 0] for k in _TRACKER_CATS}
+    for m in by_model:
+        for k in _TRACKER_CATS:
+            by_cat[k][0] += by_model[m][k][0]
+            by_cat[k][1] += by_model[m][k][1]
     overall_w = sum(c[0] for c in by_cat.values())
     overall_l = sum(c[1] for c in by_cat.values())
 
@@ -156,14 +197,29 @@ def classifier_accuracy_from_trackers() -> dict:
 
 # ── Chip #2 -- best classifier (XGB / LR / NN) ─────────────────────────────
 
+_PRETTY_GAME_MODEL = {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}
+
+
 def best_classifier(backend) -> dict | None:
     """BEST GAME MODEL -- whichever of MLB xgb/lr/nn has the highest finished
-    win% in model_picks.  Returns {'model','correct','total','pct'} or None."""
+    win% in the per-classifier trackers (same graded store as the GAME MODELS
+    chip).  Returns {'model','correct','total','pct'} or None."""
     try:
-        from src import model_picks as _mp
-        return _mp.best_game_model("mlb")
+        by_model = tracker_records("mlb")["by_model"]
     except Exception:                                                      # noqa: BLE001
         return None
+    best = None
+    for m, d in by_model.items():
+        w, l = d["overall"]
+        total = w + l
+        if total < 1:
+            continue
+        pct = w / total
+        cand = {"model": _PRETTY_GAME_MODEL.get(m, m), "wins": w, "losses": l,
+                "total": total, "correct": w, "pct": pct}
+        if best is None or pct > best["pct"]:
+            best = cand
+    return best
 
 
 def best_bet_type(backend) -> dict | None:
