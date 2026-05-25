@@ -9800,9 +9800,15 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
         except Exception as _se:                                          # noqa: BLE001
             _eprint(f"AUTO-ANALYSIS [{label}]: summary launch failed: {_se}")
 
-    # Log every model's picks for this run (PART 1/2).
+    # Model-pick tracking.  The 8 AM wave logs each model's picks as pending.
+    # The noon wave re-checks: for games that haven't started it replaces an
+    # 8 AM pending pick only when the noon pick is strictly better; started
+    # games are locked.  Any other wave (retry) just logs.
     try:
-        _log_model_picks()
+        if (label or "").lower() == "noon":
+            _noon_reconcile_model_picks()
+        else:
+            _log_model_picks()
     except Exception as _mpe:                                             # noqa: BLE001
         _eprint(f"AUTO-ANALYSIS [{label}]: model-pick log failed: {_mpe}")
 
@@ -10337,6 +10343,38 @@ def _log_model_picks() -> None:
         _mp.log_props((load_scored_props() or {}).get("picks") or [])
     except Exception as exc:                                               # noqa: BLE001
         _eprint(f"MODEL-PICKS: log failed: {type(exc).__name__}: {exc}")
+
+
+def _noon_reconcile_model_picks() -> None:
+    """Noon re-check (PART 2/2).  Re-runs every model's analysis and, for
+    games that have NOT started, replaces an 8 AM pending pick only when the
+    noon pick is strictly better.  Started games (live_score's detector,
+    incl. warmup/pre-game) are locked: never replaced or removed.  Logs a
+    per-(sport, model) summary of kept / replaced / locked."""
+    try:
+        import sys as _sys
+        from src import model_picks as _mp
+        from components import live_score as _ls
+        backend_mod = _sys.modules[__name__]
+
+        def _started(sport, d):
+            try:
+                return _ls.game_has_started(
+                    backend_mod,
+                    commence_time=d.get("commence_time"),
+                    home_team=d.get("home_team"),
+                    away_team=d.get("away_team"),
+                    sport=sport,
+                )
+            except Exception:                                              # noqa: BLE001
+                return False
+
+        summary = _mp.reconcile_noon(backend_mod, _started)
+        for (sp, m), v in sorted(summary.items()):
+            _eprint(f"NOON-RECHECK {sp}/{m}: kept={v['kept']} "
+                    f"replaced={v['replaced']} locked={v['locked']}")
+    except Exception as exc:                                               # noqa: BLE001
+        _eprint(f"NOON-RECHECK failed: {type(exc).__name__}: {exc}")
 
 
 _MODEL_PICK_STAT = {
