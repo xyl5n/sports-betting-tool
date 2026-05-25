@@ -173,7 +173,7 @@ def _section_unified_props_list(backend) -> None:
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                 f"color: {t.TEXT};"
             )
-            ui.label(f"{len(rows)} picks").style(
+            count_chip = ui.label(f"{len(rows)} picks").style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                 f"font-size: 11px; font-weight: 700; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
@@ -195,23 +195,129 @@ def _section_unified_props_list(backend) -> None:
                 _empty_state_message()
             return
 
-        # ── Sort pills ───────────────────────────────────────────────────
-        # Single row of 6 pills (L5 / L10 / L20 / H2H / Proj / Edge).
-        # Only the sort order changes -- every pick stays visible -- so
-        # the count chip above is static.  Default sort is Proj (biggest
-        # model-vs-book gap first).
         state = {"sort": "proj"}
+        filters = _default_filters()
 
-        # ── Card list (refreshable so the sort re-renders in place) ──────
+        # ── Card list (refreshable so sort + filters re-render in place) ──
         @ui.refreshable
         def cards_refresh() -> None:                                      # noqa: WPS430
-            shown = _sorted_picks(rows, state)
+            shown = [r for r in rows if _passes_filters(r, filters)]
+            shown = _sorted_picks(shown, state)
+            # Keep the header count in sync with what's actually shown.
+            if _active_filter_count(filters):
+                count_chip.set_text(f"{len(shown)} of {len(rows)} picks")
+            else:
+                count_chip.set_text(f"{len(rows)} picks")
+            if not shown:
+                _no_match_message()
+                return
             with ui.element("div").classes("game-grid w-full"):
                 for r in shown:
                     _prop_card(r, backend)
 
+        # ── Filter button + collapsible panel ─────────────────────────────
+        _filter_bar(rows, filters, cards_refresh.refresh)
+
+        # ── Sort pills ─────────────────────────────────────────────────────
+        # Single row of 6 pills (L5 / L10 / L20 / H2H / Proj / Edge); only the
+        # order changes.  Default sort is Proj (biggest model-vs-book gap).
         _sort_pills(state, cards_refresh.refresh)
         cards_refresh()
+
+
+def _no_match_message() -> None:
+    """Shown when the active filters exclude every prop (never a blank list)."""
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_XL} {t.SPACE_LG}; "
+        f"gap: 6px; align-items: center;"
+    ):
+        ui.label("No props match these filters").style(
+            f"font-size: 15px; font-weight: 800; color: {t.TEXT};"
+        )
+        ui.label("Loosen or reset the filters to see more props.").style(
+            f"font-size: 12px; color: {t.TEXT_DIM}; text-align: center;"
+        )
+
+
+def _filter_bar(rows: list[dict], filters: dict, on_change) -> None:
+    """Filter button + collapsible panel.  All controls read their option
+    sets from the loaded props and mutate the shared *filters* dict, then call
+    *on_change* (the card-list refresh) so the list re-renders without a page
+    reload.  AND-stacked via _passes_filters."""
+    market_opts, game_opts = _filter_options(rows)
+    open_state = {"v": False}
+
+    @ui.refreshable
+    def bar() -> None:                                                    # noqa: WPS430
+        n_active = _active_filter_count(filters)
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            label = "Filters" + (f" ({n_active})" if n_active else "")
+            ui.button(label, icon="filter_list",
+                      on_click=_toggle).props("no-caps unelevated dense").style(
+                f"background: {(t.POS if n_active else 'transparent')} !important; "
+                f"color: {(t.BG if n_active else t.TEXT_DIM)} !important; "
+                f"border: 1px solid {(t.POS if n_active else t.BORDER)}; "
+                f"min-height: 32px; padding: 4px 12px; font-size: 11.5px; "
+                f"font-weight: 800; border-radius: {t.RADIUS_PILL};"
+            )
+            if n_active:
+                ui.button("Reset filters",
+                          on_click=_reset).props("no-caps flat dense").style(
+                    f"color: {t.TEXT_DIM}; font-size: 11px; font-weight: 700; "
+                    f"min-height: 32px; padding: 4px 8px;"
+                )
+        if open_state["v"]:
+            _panel()
+
+    def _toggle() -> None:
+        open_state["v"] = not open_state["v"]
+        bar.refresh()
+
+    def _reset() -> None:
+        filters.update(_default_filters())
+        on_change()
+        bar.refresh()
+
+    def _set(key, value) -> None:
+        filters[key] = value
+        on_change()
+        bar.refresh()
+
+    def _panel() -> None:
+        with ui.column().classes("w-full").style(
+            f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 12px;"
+        ):
+            sel_style = (f"min-width: 180px; flex: 1 1 200px;")
+            with ui.row().classes("w-full").style("gap: 12px; flex-wrap: wrap;"):
+                ui.select(_L10_OPTIONS, value=filters["min_l10"],
+                          label="Min last-10 hit rate",
+                          on_change=lambda e: _set("min_l10", e.value)) \
+                    .props("outlined dense").style(sel_style)
+                ui.select(_CONF_OPTIONS, value=filters["min_conf"],
+                          label="Min model confidence",
+                          on_change=lambda e: _set("min_conf", e.value)) \
+                    .props("outlined dense").style(sel_style)
+                ui.select(_GRADE_OPTIONS, value=filters["min_grade"],
+                          label="Min matchup grade",
+                          on_change=lambda e: _set("min_grade", e.value)) \
+                    .props("outlined dense").style(sel_style)
+            with ui.row().classes("w-full").style("gap: 12px; flex-wrap: wrap;"):
+                ui.select(market_opts, value=sorted(filters["markets"]),
+                          multiple=True, label="Prop type",
+                          on_change=lambda e: _set("markets", set(e.value or []))) \
+                    .props("outlined dense use-chips").style(sel_style)
+                ui.select(game_opts, value=sorted(filters["games"]),
+                          multiple=True, label="Game",
+                          on_change=lambda e: _set("games", set(e.value or []))) \
+                    .props("outlined dense use-chips").style(sel_style)
+            with ui.row().classes("items-center").style("gap: 8px;"):
+                ui.switch("Show alternative lines", value=filters["show_alt"],
+                          on_change=lambda e: _set("show_alt", bool(e.value))) \
+                    .props("dense")
+
+    bar()
 
 
 def _empty_state_message() -> None:
@@ -365,6 +471,114 @@ def _sorted_picks(rows: list[dict], state: dict) -> list[dict]:
     elif sort == "edge": key = _edge_ev
     else:                key = _proj_gap            # "proj" default
     return sorted(rows, key=key, reverse=True)
+
+
+# ── Filtering ──────────────────────────────────────────────────────────────────
+# Every value below is read straight off the prop the page already loaded
+# (the scored cache row + its summary) -- no new data source, no recompute.
+
+# Min last-10 hit-rate options (raw count out of the player's last 10 games
+# in which they cleared the current line) -> required hit count.
+_L10_OPTIONS = {0: "Any", 5: "5+/10", 6: "6+/10", 7: "7+/10", 8: "8+/10", 9: "9+/10"}
+# Min model confidence options -> fraction.
+_CONF_OPTIONS = {0.0: "Any", 0.55: "55%+", 0.60: "60%+", 0.65: "65%+",
+                 0.70: "70%+", 0.75: "75%+"}
+# Min matchup-grade options -> composite floor (matches the bands used by
+# pages.player._letter_grade_for_prop).
+_GRADE_OPTIONS = {0.0: "Any", 0.52: "B- or better", 0.60: "B or better",
+                  0.68: "B+ or better", 0.76: "A- or better", 0.84: "A or better"}
+
+
+def _default_filters() -> dict:
+    return {"min_l10": 0, "show_alt": True, "markets": set(), "games": set(),
+            "min_conf": 0.0, "min_grade": 0.0}
+
+
+def _active_filter_count(f: dict) -> int:
+    """How many filters are currently narrowing the list (drives the badge)."""
+    n = 0
+    n += 1 if f.get("min_l10") else 0
+    n += 1 if not f.get("show_alt") else 0          # "hide alts" is an active filter
+    n += 1 if f.get("markets") else 0
+    n += 1 if f.get("games") else 0
+    n += 1 if f.get("min_conf") else 0
+    n += 1 if f.get("min_grade") else 0
+    return n
+
+
+def _prop_grade_composite(r: dict) -> float:
+    """0..1 matchup-grade composite from the prop's own confidence + opp rank
+    + EV%, mirroring pages.player._letter_grade_for_prop (no new data)."""
+    try:
+        conf = float(r.get("confidence") or 0.5)
+    except (TypeError, ValueError):
+        conf = 0.5
+    conf_score = max(0.0, min(1.0, (conf - 0.50) / 0.45))
+    try:
+        rank = int(r.get("opp_rank") or 15)
+    except (TypeError, ValueError):
+        rank = 15
+    rank_score = max(0.0, min(1.0, (31 - rank) / 30.0))
+    try:
+        ev = float(r.get("ev_pct") or 0.0)
+    except (TypeError, ValueError):
+        ev = 0.0
+    ev_score = max(0.0, min(1.0, ev / 30.0))
+    return 0.5 * conf_score + 0.3 * rank_score + 0.2 * ev_score
+
+
+def _game_key(r: dict) -> str:
+    return str(r.get("event_id")
+               or f"{r.get('away_team') or '?'}@{r.get('home_team') or '?'}")
+
+
+def _game_label(r: dict) -> str:
+    return f"{r.get('away_team') or '?'} @ {r.get('home_team') or '?'}"
+
+
+def _filter_options(rows: list[dict]) -> tuple[dict, dict]:
+    """Available prop-type + game options for the current slate, derived from
+    the loaded props.  Returns ({market: label}, {game_key: label})."""
+    markets: dict[str, str] = {}
+    games: dict[str, str] = {}
+    for r in rows:
+        m = r.get("market")
+        if m and m not in markets:
+            markets[m] = _short_market(m)
+        gk = _game_key(r)
+        if gk not in games:
+            games[gk] = _game_label(r)
+    return (dict(sorted(markets.items(), key=lambda kv: kv[1])),
+            dict(sorted(games.items(), key=lambda kv: kv[1])))
+
+
+def _passes_filters(r: dict, f: dict) -> bool:
+    """True iff *r* satisfies every active filter (AND-stacked)."""
+    # 1. Minimum last-10 hit rate (raw hits over the player's last 10 games).
+    if f.get("min_l10"):
+        s = r.get("summary") or {}
+        if int(s.get("last_10_hits") or 0) < int(f["min_l10"]):
+            return False
+    # 2. Alternative lines: when hidden, drop anything not on the main line.
+    if not f.get("show_alt") and (r.get("line_type") or "main").lower() != "main":
+        return False
+    # 3. Prop type (empty selection = all types).
+    if f.get("markets") and r.get("market") not in f["markets"]:
+        return False
+    # 4. Game (empty selection = all games).
+    if f.get("games") and _game_key(r) not in f["games"]:
+        return False
+    # 5. Minimum model confidence.
+    if f.get("min_conf"):
+        try:
+            if float(r.get("confidence") or 0.0) < float(f["min_conf"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+    # 6. Minimum matchup grade (independent of confidence).
+    if f.get("min_grade") and _prop_grade_composite(r) < float(f["min_grade"]):
+        return False
+    return True
 
 
 def _prop_card(r: dict, backend) -> None:
