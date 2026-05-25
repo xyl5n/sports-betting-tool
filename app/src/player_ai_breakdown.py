@@ -128,6 +128,29 @@ def _pitcher_hand_for_batter(prop: dict, player_name: str) -> str | None:
         return None
 
 
+def _prune(obj):
+    """Recursively drop missing values so the JSON we hand Groq contains only
+    real facts.  Removes None, empty strings/containers, and the 'None/None'
+    placeholder hit-rate strings -- otherwise the model narrates them back as
+    'not available', which is exactly the clutter we're trying to kill."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            pv = _prune(v)
+            if pv is None:
+                continue
+            if isinstance(pv, str) and pv.strip().lower() in (
+                    "", "none", "none/none", "n/a", "0/0", "nan"):
+                continue
+            if isinstance(pv, (dict, list)) and not pv:
+                continue
+            out[k] = pv
+        return out
+    if isinstance(obj, list):
+        return [p for p in (_prune(x) for x in obj) if p is not None]
+    return obj
+
+
 def _collect_context(info, games, is_pitcher, prop, market, line_f,
                      summary, opp_abbrev) -> dict:
     s = summary or {}
@@ -224,7 +247,10 @@ def _collect_context(info, games, is_pitcher, prop, market, line_f,
                     for r in bvp["rows"] if r.get("faced")]
     except Exception as exc:                                             # noqa: BLE001
         _log(f"breakdown enrichment failed: {type(exc).__name__}: {exc}")
-    return ctx
+    # Strip every missing/placeholder value so the model only ever sees real
+    # facts (no None, no 'None/None' hit rates) -- this is what stops it from
+    # narrating data as 'not available'.
+    return _prune(ctx)
 
 
 # ── Prompt + Anthropic call ─────────────────────────────────────────────────
@@ -244,14 +270,19 @@ def _system_prompt(is_pitcher: bool) -> str:
     return (
         "You are an experienced MLB betting analyst, not a data reader. Using ONLY "
         "the JSON data provided, reason ACROSS the signals to judge this specific "
-        "player prop — do not just restate numbers. Identify the strongest factors "
-        "for and against, and proactively flag conflicting signals that warrant "
-        "caution (e.g. high model confidence but poor recent form, or a favorable "
-        "park but a tough pitch-mix matchup). When the data supports it, cross-"
-        "reference the similar-player cluster. Do not invent numbers — use only what "
-        "is given, and omit a point when its data is missing. Plain conversational "
-        "sentences only: ABSOLUTELY NO markdown, asterisks, headers, bullets or "
-        "dashes — 2-4 sentences per section.\n\n"
+        "player prop — connect each number to what it means for THIS matchup (e.g. "
+        "'his 47% four-seam usage is exposed here because this lineup slugs .500 on "
+        "fastballs') rather than restating it. Identify the strongest factors for "
+        "and against, and proactively flag conflicting signals that warrant caution "
+        "(e.g. high model confidence but poor recent form, or a favorable park but a "
+        "tough pitch-mix matchup). When the data supports it, cross-reference the "
+        "similar-player cluster. HARD RULES: do not invent numbers — use only what "
+        "is given; if a fact is not in the JSON it is unknown, so simply omit it and "
+        "NEVER say anything is 'not available', 'unavailable', or 'unknown'. Never "
+        "write filler that just restates a verdict word (no 'this prop leans toward "
+        "a lean', no 'neutral neutral') — say something substantive. Plain "
+        "conversational sentences only: ABSOLUTELY NO markdown, asterisks, headers, "
+        "bullets or dashes — 2-4 sentences per section.\n\n"
         "Return ONLY a JSON object (no prose around it) with exactly these string "
         "keys:\n"
         '  "verdict": your overall independent take in 2-3 sentences — weigh every '
