@@ -2328,8 +2328,12 @@ def _section_similar_players(
                 data = {"similar": [], "recent": []}
             holder.clear()
             with holder:
+                # w-full so the ui.html element itself stretches to the
+                # holder's full width -- otherwise it shrinks to content and
+                # the inner 50/50 flex leaves a gap beside the boxes.
                 ui.html(_pitcher_dual_box_html(
-                    data["similar"], data["recent"], stat_key, opp_u, opp_full))
+                    data["similar"], data["recent"], stat_key, opp_u, opp_full
+                )).classes("w-full").style("width: 100%;")
 
         ui.timer(0.05, _load_pitcher, once=True)
         return
@@ -2562,6 +2566,7 @@ def _pitcher_game_rows(pid, name: str, market: str, stat_key: str,
         date10 = (g.get("date") or "")[:10]
         hist = hist_idx.get((player_l, market, date10)) or {}
         rows.append({
+            "name":    name,
             "date":    g.get("date"),
             "opp":     g.get("opp"),
             "is_home": bool(g.get("is_home")),
@@ -2627,6 +2632,7 @@ def _build_pitcher_sections(sims: list[dict], market: str,
                 hist = hist_idx.get(
                     ((rp.get("name") or "").strip().lower(), market, date10)) or {}
                 recent.append({
+                    "name":    rp.get("name") or "—",
                     "date":    date10,
                     "opp":     opp_u,
                     "is_home": bool(rp.get("is_home_pitcher")),
@@ -2699,6 +2705,7 @@ def _pg_header(stat_key: str) -> str:
     return (
         f'<thead><tr>'
         f'<th style="{th}text-align:left;">DATE / OPP</th>'
+        f'<th style="{th}text-align:left;">PITCHER</th>'
         f'<th style="{th}text-align:right;">{_html.escape(stat_key)}</th>'
         f'<th style="{th}text-align:right;">LINE</th>'
         f'<th style="{th}text-align:right;">ODDS</th>'
@@ -2707,14 +2714,21 @@ def _pg_header(stat_key: str) -> str:
 
 
 def _pg_game_tr(row: dict) -> str:
+    import html as _html
     date_cell = (
         f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
         f'font-family:monospace;color:{t.TEXT_DIM};'
         f'border-bottom:1px solid {t.BORDER_SOFT};white-space:nowrap;">'
         f'{_pg_date_opp(row)}</td>'
     )
+    name_cell = (
+        f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
+        f'font-weight:700;color:{t.TEXT};border-bottom:1px solid {t.BORDER_SOFT};'
+        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;">'
+        f'{_html.escape(row.get("name") or "—")}</td>'
+    )
     return (
-        f'<tr>{date_cell}{_pg_stat_cell(row)}'
+        f'<tr>{date_cell}{name_cell}{_pg_stat_cell(row)}'
         f'{_pg_plain_cell(_pg_line_str(row))}{_pg_plain_cell(_pg_odds_str(row), dim=True)}</tr>'
     )
 
