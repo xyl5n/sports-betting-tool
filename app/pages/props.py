@@ -382,6 +382,7 @@ _SORT_PILLS: tuple[tuple[str, str], ...] = (
     ("h2h",  "H2H"),
     ("proj", "Proj"),
     ("edge", "Edge"),
+    ("conf", "Conf"),
 )
 
 
@@ -469,6 +470,7 @@ def _sorted_picks(rows: list[dict], state: dict) -> list[dict]:
     elif sort == "l20":  key = lambda r: _window_hit_rate(r, "last_20")
     elif sort == "h2h":  key = lambda r: _window_hit_rate(r, "h2h")
     elif sort == "edge": key = _edge_ev
+    elif sort == "conf": key = lambda r: float(r.get("confidence") or 0.0)
     else:                key = _proj_gap            # "proj" default
     return sorted(rows, key=key, reverse=True)
 
@@ -490,15 +492,16 @@ _GRADE_OPTIONS = {0.0: "Any", 0.52: "B- or better", 0.60: "B or better",
 
 
 def _default_filters() -> dict:
-    return {"min_l10": 0, "show_alt": True, "markets": set(), "games": set(),
+    # Alt-line props are hidden by default; the user opts into them.
+    return {"min_l10": 0, "show_alt": False, "markets": set(), "games": set(),
             "min_conf": 0.0, "min_grade": 0.0}
 
 
 def _active_filter_count(f: dict) -> int:
-    """How many filters are currently narrowing the list (drives the badge)."""
+    """How many filters deviate from their default (drives the badge)."""
     n = 0
     n += 1 if f.get("min_l10") else 0
-    n += 1 if not f.get("show_alt") else 0          # "hide alts" is an active filter
+    n += 1 if f.get("show_alt") else 0              # default is hidden; showing alts is the deviation
     n += 1 if f.get("markets") else 0
     n += 1 if f.get("games") else 0
     n += 1 if f.get("min_conf") else 0
