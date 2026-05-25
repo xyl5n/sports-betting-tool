@@ -110,16 +110,21 @@ def _read_supabase(date_str: str) -> Optional[dict]:
         return None
 
 
-def _write_supabase(date_str: str, payload: dict) -> None:
+def _write_supabase(date_str: str, payload: dict) -> bool:
     """Fire-and-forget Supabase write.  Failures are logged but never
-    raise -- a slow Supabase never blocks the scoring pass."""
+    raise -- a slow Supabase never blocks the scoring pass.  Returns True on
+    success so the scorer can log whether the durable copy is fresh (the page
+    reads the LOCAL file first, so a Supabase failure does not make the page
+    stale within the same container)."""
     try:
         from . import db
         if not db.is_supabase():
-            return
+            return False
         db.cache_set(_supabase_key(date_str), None, date_str, payload)
+        return True
     except Exception as exc:                                              # noqa: BLE001
         _log(f"supabase write failed for {date_str}: {exc}")
+        return False
 
 
 # ── Public: page-side reader ────────────────────────────────────────────────
@@ -257,17 +262,26 @@ def score_today_props() -> dict:
     # _collect_props does, just without the top-N truncation.
     by_pick: dict[tuple, dict] = {}
     n_scored = n_pred_err = 0
+    # Per-market funnel diagnostics (audit #1): raw -> scored -> err so we can
+    # see exactly where each market narrows.  Logged per market after filtering.
+    from collections import defaultdict as _dd
+    _diag_raw:    dict[str, int] = _dd(int)
+    _diag_scored: dict[str, int] = _dd(int)
+    _diag_err:    dict[str, int] = _dd(int)
     for market, props in all_markets.items():
         if market not in all_bucket_markets:
             continue
         bucket = "pitcher" if market.startswith("pitcher_") else "batter"
         market_class = classifications.get(market, {})
+        _diag_raw[market] += len(props or [])
         for p in (props or []):
             try:
                 pred = predict(p)
                 n_scored += 1
+                _diag_scored[market] += 1
             except Exception:                                             # noqa: BLE001
                 n_pred_err += 1
+                _diag_err[market] += 1
                 continue
             try:
                 line_f = float(p.get("line"))
@@ -371,11 +385,55 @@ def score_today_props() -> dict:
         except (TypeError, ValueError):
             return True
 
-    rows = [
-        r for r in primaries
-        if r["confidence"] >= _CONF_THRESHOLD and _has_reg_edge(r)
-    ]
+    # Per-market filter funnel (audit #1): count primaries and how many pass
+    # the confidence gate, the regression-edge gate, and BOTH (= kept).  This
+    # is what reveals whether a whole market (e.g. batters) is dying on
+    # confidence vs reg-edge, so thresholds can be tuned from real numbers
+    # rather than guessed at.
+    _diag_pm:   dict[str, int] = _dd(int)   # primaries per market
+    _diag_conf: dict[str, int] = _dd(int)   # pass confidence
+    _diag_edge: dict[str, int] = _dd(int)   # pass reg-edge
+    _diag_kept: dict[str, int] = _dd(int)   # pass both
+    rows = []
+    for r in primaries:
+        m = r["market"]
+        _diag_pm[m] += 1
+        c_ok = r["confidence"] >= _CONF_THRESHOLD
+        e_ok = _has_reg_edge(r)
+        if c_ok:
+            _diag_conf[m] += 1
+        if e_ok:
+            _diag_edge[m] += 1
+        if c_ok and e_ok:
+            _diag_kept[m] += 1
+            rows.append(r)
     rows.sort(key=lambda r: -r["confidence"])
+
+    # Emit the per-market funnel + per-bucket rollup so the real pass rates
+    # are visible in Railway logs (grep "PROPS-SCORE market-diag").
+    _bucket_tot: dict[str, dict[str, int]] = {
+        "pitcher": _dd(int), "batter": _dd(int)}
+    for m in sorted(set(_diag_raw) | set(_diag_pm)):
+        bkt = "pitcher" if m.startswith("pitcher_") else "batter"
+        raw, sc, er = _diag_raw.get(m, 0), _diag_scored.get(m, 0), _diag_err.get(m, 0)
+        pm, pc, pe, kp = (_diag_pm.get(m, 0), _diag_conf.get(m, 0),
+                          _diag_edge.get(m, 0), _diag_kept.get(m, 0))
+        _log(
+            f"market-diag {m}: raw={raw} scored={sc} err={er} "
+            f"primaries={pm} pass_conf={pc} pass_edge={pe} kept={kp}"
+        )
+        bt = _bucket_tot[bkt]
+        for k, v in (("raw", raw), ("scored", sc), ("err", er),
+                     ("primaries", pm), ("pass_conf", pc),
+                     ("pass_edge", pe), ("kept", kp)):
+            bt[k] += v
+    for bkt in ("pitcher", "batter"):
+        bt = _bucket_tot[bkt]
+        _log(
+            f"market-diag BUCKET {bkt}: raw={bt['raw']} primaries={bt['primaries']} "
+            f"pass_conf={bt['pass_conf']} pass_edge={bt['pass_edge']} kept={bt['kept']} "
+            f"(conf_threshold={_CONF_THRESHOLD}, reg_edge_margin=0.5)"
+        )
 
     # ── Enrich each survivor with summary + opp rank ────────────────────
     # Each enrichment is backed by the per-player gamelog cache (Supabase
@@ -431,8 +489,8 @@ def score_today_props() -> dict:
             "alts_attached": n_alts_attached,
         },
     }
-    _write_local(date_str, payload)
-    _write_supabase(date_str, payload)
+    _local_ok = _write_local(date_str, payload)
+    _supa_ok  = _write_supabase(date_str, payload)
     elapsed_ms = int((time.monotonic() - started) * 1000)
     _log(
         f"done date={date_str} scored={n_scored} err={n_pred_err} "
@@ -440,6 +498,12 @@ def score_today_props() -> dict:
         f"main={n_main_kept} alt={n_alt_kept} "
         f"alts_attached={n_alts_attached} elapsed={elapsed_ms}ms"
     )
+    # Persistence outcome (audit #2): the page reads the LOCAL file first, so
+    # as long as local_write=ok the page reflects THIS freshly-scored set even
+    # if the Supabase write failed (Server disconnected, etc.).
+    _log(f"persist local_write={'ok' if _local_ok else 'FAILED'} "
+         f"supabase_write={'ok' if _supa_ok else 'FAILED'} "
+         f"(page reads local first; key=props_scored_mlb_{date_str})")
     # Confidence distribution summary -- the easy "is the calibration
     # working?" check.  After the formula change, a healthy slate
     # should show a spread (e.g. min=0.55, median=0.62, max=0.85,
