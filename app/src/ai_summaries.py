@@ -189,8 +189,15 @@ _ANALYST_RULES = (
     "say anything is 'not available', 'unavailable', 'unknown', or 'not provided' "
     "-- just leave it out. Never write filler that merely restates the verdict "
     "label (e.g. 'this prop leans toward a lean', 'this is a neutral neutral'); "
-    "say something substantive instead. Plain text only: no markdown, asterisks, "
-    "headers, bullets, or dashes."
+    "say something substantive instead. "
+    "DIRECTION: the facts state the model's pick (its side). Your directional "
+    "read must MATCH that pick's side -- explain why the pick is right (or, if "
+    "you genuinely disagree, say so plainly and once); never argue for the "
+    "opposite side while implying you agree. NEVER use self-contradictory "
+    "phrasing that mixes opposite verdict tiers, e.g. 'lean toward a fade', "
+    "'fade the lean', or 'neutral lean' -- a lean means take the pick, a fade "
+    "means take the other side; they are opposites, never combine them. "
+    "Plain text only: no markdown, asterisks, headers, bullets, or dashes."
 )
 
 

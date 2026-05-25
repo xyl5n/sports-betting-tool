@@ -1108,10 +1108,18 @@ def _section_ai_breakdown(
         if not bd:
             return  # API failed / no data -> show nothing (page still loads)
 
-        from src.player_ai_breakdown import approach_label, verdict_label
+        from src.player_ai_breakdown import approach_label, verdict_label, tier_color
         with holder:
             # ── AI Verdict box (full width, above the grid) ──────────────
-            label, color_tok = verdict_label(prop.get("confidence"), prop.get("edge"))
+            # Badge comes from the AI's OWN verdict_tier (same determination
+            # that wrote the text) so the badge and the written verdict can
+            # never point in opposite directions.  Fall back to the
+            # confidence-derived label only when the AI gave no tier.
+            ai_tier = (bd.get("verdict_tier") or "").strip()
+            if ai_tier:
+                label, color_tok = ai_tier, tier_color(ai_tier)
+            else:
+                label, color_tok = verdict_label(prop.get("confidence"), prop.get("edge"))
             vcolor = {"pos": t.POS, "warn": t.WARN, "neg": t.NEG}.get(color_tok, t.TEXT_DIM)
             verdict_text = (bd.get("verdict") or "").strip()
             with ui.column().classes("w-full").style(
