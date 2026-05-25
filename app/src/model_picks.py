@@ -243,6 +243,108 @@ def log_all(backend) -> dict:
     return out
 
 
+# ── Noon re-check: replace beaten pending picks for unstarted games ──────────
+
+def _better(new_conf, old_conf) -> bool:
+    """True only when the noon pick is genuinely better (strictly higher
+    confidence).  A new pick with no confidence is never 'better'; an old
+    pick with no confidence is always beaten by one that has confidence."""
+    if not isinstance(new_conf, (int, float)):
+        return False
+    if not isinstance(old_conf, (int, float)):
+        return True
+    return float(new_conf) > float(old_conf)
+
+
+def reconcile_noon(backend, started_fn) -> dict:
+    """Noon re-check.  For each pick the noon analysis produces:
+
+      - game already STARTED (started_fn -> True): locked.  Never replaced or
+        removed, so win/loss tracking stays honest.
+      - game NOT started, no prior pending row: add it (new pick).
+      - game NOT started, a pending row exists: replace it ONLY when the noon
+        pick is strictly better (higher confidence) -- delete the old pending
+        row and insert the new one; otherwise keep the 8 AM pick.
+
+    A pending pick is never dropped without a replacement.  *started_fn* is
+    ``started_fn(sport, dict) -> bool`` (dict carries commence_time + teams);
+    pass live_score's detector so 'started' matches everywhere.  Returns a
+    per-(sport, model) summary {kept, replaced, locked}.
+    """
+    try:
+        from . import db
+        existing = {r.get("pick_id"): r for r in db.model_picks_list()}
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"reconcile: list failed: {exc}")
+        existing = {}
+
+    summary: dict[tuple, dict] = {}
+    to_delete: list[str] = []
+    to_insert: list[dict] = []
+
+    def _acct(sport, model, key):
+        summary.setdefault((sport, model),
+                           {"kept": 0, "replaced": 0, "locked": 0})[key] += 1
+
+    def _one(new: dict, started: bool) -> None:
+        sport, model, pid = new["sport"], new["model"], new["pick_id"]
+        if started:
+            _acct(sport, model, "locked")
+            return
+        old = existing.get(pid)
+        if old is None:
+            to_insert.append(new)
+            _acct(sport, model, "kept")
+            return
+        if (old.get("status") or "pending").lower() != "pending":
+            _acct(sport, model, "locked")        # already settled -> leave it
+            return
+        if _better(new.get("confidence"), old.get("confidence")):
+            to_delete.append(pid)
+            to_insert.append(new)
+            _acct(sport, model, "replaced")
+        else:
+            _acct(sport, model, "kept")
+
+    for sport, attr in (("mlb", "_analysis_state"), ("wnba", "_wnba_analysis_state")):
+        state = getattr(backend, attr, {}) or {}
+        for r in (state.get("results") or []):
+            g = r.get("game") or {}
+            try:
+                started = bool(started_fn(sport, g))
+            except Exception:                                            # noqa: BLE001
+                started = False
+            for new in game_rows(r, sport):
+                _one(new, started)
+
+    try:
+        from .props_scored_cache import load_scored_props
+        for p in ((load_scored_props() or {}).get("picks") or []):
+            try:
+                started = bool(started_fn("mlb", p))
+            except Exception:                                            # noqa: BLE001
+                started = False
+            for new in prop_rows(p):
+                _one(new, started)
+    except Exception as exc:                                             # noqa: BLE001
+        _log(f"reconcile props failed: {exc}")
+
+    if to_delete:
+        try:
+            from . import db
+            db.model_picks_delete(to_delete)
+        except Exception as exc:                                         # noqa: BLE001
+            _log(f"reconcile delete failed: {exc}")
+    if to_insert:
+        _insert(to_insert)
+
+    _log("noon reconcile -> " + "; ".join(
+        f"{sp}/{m}: kept={v['kept']} replaced={v['replaced']} locked={v['locked']}"
+        for (sp, m), v in sorted(summary.items())
+    ))
+    return summary
+
+
 # ── Settlement (pending -> finished) ─────────────────────────────────────────
 
 def _grade_game(pick: dict, sc: dict) -> Optional[str]:

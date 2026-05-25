@@ -525,6 +525,19 @@ def delete_model_picks(
         return 0
 
 
+def model_picks_delete(pick_ids: list[str]) -> int:
+    """Delete model_picks rows by pick_id (used by the noon re-check to
+    replace a beaten pending pick).  Returns the number requested."""
+    if _mode != "supabase" or _client is None or not pick_ids:
+        return 0
+    try:
+        _client.table("model_picks").delete().in_("pick_id", list(pick_ids)).execute()
+        return len(pick_ids)
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("model_picks_delete(%d) failed: %s", len(pick_ids), exc)
+        return 0
+
+
 # ── personal_bets (the My Bets ledger -- one JSON blob per sport) ─────────────
 # Dedicated, durable home for the personal-bet ledger so it survives Railway
 # redeploys / PR merges (the local JSON files get reset on every deploy).
