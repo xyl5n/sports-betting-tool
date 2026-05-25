@@ -750,17 +750,47 @@ def ledger_pool_get(system: str) -> Optional[dict]:
 
 
 def ledger_pool_upsert(system: str, fields: dict) -> bool:
-    """Upsert the singleton bankroll pool row (id=system).  `fields` is a
-    partial set of columns (current_balance / starting_balance /
-    daily_limit / daily_limit_date) merged onto the existing row."""
+    """Persist a partial set of columns (current_balance / starting_balance /
+    daily_limit / daily_limit_date) onto the singleton pool row (id=system).
+
+    IMPORTANT: this must NOT use PostgREST upsert (INSERT ... ON CONFLICT).
+    Postgres evaluates the INSERT tuple's NOT NULL constraints *before*
+    resolving the conflict, so a partial write that omits current_balance
+    (e.g. the daily-limit recalc, which sends only daily_limit) throws
+    `null value in column "current_balance" violates not-null constraint`
+    even when the row already exists.  So:
+      * row exists -> UPDATE only (a patch can never trip NOT NULL),
+      * row absent -> a complete INSERT, filling the NOT NULL balance
+        columns from whatever was supplied so a partial first-write still
+        creates a valid row.
+    """
     table = _LEDGER_POOL_TABLE.get(system)
     if not is_supabase() or table is None:
         return False
     try:
         from datetime import datetime as _dt, timezone as _tz
-        row = {"id": system, "updated_at": _dt.now(_tz.utc).isoformat()}
-        row.update(fields or {})
-        _client.table(table).upsert(row, on_conflict="id").execute()
+        patch = dict(fields or {})
+        patch["updated_at"] = _dt.now(_tz.utc).isoformat()
+
+        if ledger_pool_get(system) is not None:
+            _client.table(table).update(patch).eq("id", system).execute()
+            return True
+
+        # No row yet -> build a complete INSERT.  current_balance and
+        # starting_balance are NOT NULL; fill each from the other (and as a
+        # last resort from daily-limit-only writes we skip, below).
+        row = {"id": system, **patch}
+        cb, sb = row.get("current_balance"), row.get("starting_balance")
+        if cb is None and sb is None:
+            _logger.warning(
+                "ledger_pool_upsert(%s): no existing row and no balance "
+                "supplied; skipping insert to avoid NOT NULL violation "
+                "(callers that recalc only the daily limit seed the pool "
+                "first)", system)
+            return False
+        row["current_balance"]  = cb if cb is not None else sb
+        row["starting_balance"] = sb if sb is not None else row["current_balance"]
+        _client.table(table).insert(row).execute()
         return True
     except Exception as exc:                                              # noqa: BLE001
         _logger.warning("ledger_pool_upsert(%s) failed: %s", system, exc)
