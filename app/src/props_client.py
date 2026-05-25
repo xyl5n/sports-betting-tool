@@ -378,6 +378,13 @@ class PropsClient:
         wrote.  Merges into today's cache like every other fetch pass."""
         return self._fetch_markets(ALL_MODEL_MARKETS, label="CYCLE")
 
+    def fetch_scored_markets_fresh(self) -> dict:
+        """Full FRESH re-pull of every model-backed market (ALL_MODEL_MARKETS),
+        overwriting the cache wholesale rather than merging.  Backs the
+        on-demand 'MLB Props' admin button -- the recurring cycle keeps props
+        updated, so this is occasional-use and always does the full pull."""
+        return self._fetch_markets(ALL_MODEL_MARKETS, label="REPULL", fresh=True)
+
     def fetch_tier_3(self, markets: Optional[tuple[str, ...]] = None) -> dict:
         """On-demand fetch -- caller picks which Tier-3 markets to hit
         (or pass None for all)."""
@@ -398,24 +405,34 @@ class PropsClient:
 
     # ── Internals ─────────────────────────────────────────────────────────
 
-    def _fetch_markets(self, markets: tuple[str, ...], *, label: str) -> dict:
-        """Run a fetch pass over *markets*.  Merges into today's cache
-        in place: existing markets are overwritten, untouched markets
-        keep their last-known props (so a Tier 1 refresh doesn't wipe
-        the Tier 2 batter_home_runs lines)."""
+    def _fetch_markets(self, markets: tuple[str, ...], *, label: str,
+                       fresh: bool = False) -> dict:
+        """Run a fetch pass over *markets*.
+
+        Default (fresh=False): merges into today's cache in place -- existing
+        markets are overwritten, untouched markets keep their last-known props
+        (so a Tier 1 refresh doesn't wipe the Tier 2 batter_home_runs lines).
+
+        fresh=True: a true fresh pull -- the written payload contains ONLY the
+        markets fetched in this pass; whatever was cached before is discarded
+        rather than merged.  Used by the on-demand full re-pull so a stale
+        pre-PR#207 cache (old market set) can't linger."""
         if not self.api_key:
             _log(f"{label}: no ODDS_API_KEY -- aborting fetch")
             return self.get_today_props()
         date_str = _today_et()
-        _log(f"{label} start  date={date_str}  markets={list(markets)}")
+        _log(f"{label} start  date={date_str}  fresh={fresh}  markets={list(markets)}")
 
         events = _fetch_events_for_today(self.api_key)
         if not events:
             _log(f"{label}: 0 events for {date_str} -- nothing to fetch")
             return self.get_today_props()
 
-        payload = self.get_today_props()
-        all_markets: dict[str, list[dict]] = payload.get("markets") or {}
+        if fresh:
+            all_markets: dict[str, list[dict]] = {}
+        else:
+            payload = self.get_today_props()
+            all_markets = payload.get("markets") or {}
 
         n_props_total = 0
         for market in markets:
@@ -501,6 +518,33 @@ def run_tier_1_refresh() -> None:
         ai_summaries.launch_summary_queue(do_games=False, do_props=True)
     except Exception:                                                     # noqa: BLE001
         pass
+
+
+def run_full_props_repull() -> None:
+    """On-demand full FRESH re-pull: re-hit the Odds API for every
+    model-backed market (ALL_MODEL_MARKETS), overwrite the cache (no merge),
+    then re-score every prop from scratch via the existing scoring pipeline.
+
+    Backs the 'MLB Props' admin button.  Re-scoring failures are swallowed so
+    a model glitch doesn't mask a successful line pull."""
+    try:
+        get_client().fetch_scored_markets_fresh()
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback
+        _log(
+            f"REPULL FAILED (admin swallow): {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
+        return
+    try:
+        from .props_scored_cache import score_today_props
+        score_today_props()
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback
+        _log(
+            f"REPULL SCORING FAILED (swallow): {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
 
 
 def run_tier_2_refresh() -> None:

@@ -370,15 +370,18 @@ def _cache_write(player_id, market: str, sections: dict) -> None:
 # ── Public entry point ───────────────────────────────────────────────────────
 
 def get_breakdown(info, games, is_pitcher, prop, market, line_f,
-                  summary, opp_abbrev) -> dict | None:
+                  summary, opp_abbrev, *, force: bool = False) -> dict | None:
     """Return {matchup, trends, approach, game_script} for this player+market,
     from cache if present (once per player/market/day) else freshly generated.
-    Returns None on any failure so the UI can render nothing."""
+    Returns None on any failure so the UI can render nothing.
+
+    force=True bypasses the cache read and regenerates + overwrites (the
+    'Force AI Refresh' admin button)."""
     try:
         player_id = info.get("id")
         if not player_id or not market:
             return None
-        cached = _cache_read(player_id, market)
+        cached = _cache_read(player_id, market) if not force else None
         if cached is not None:
             return cached
 
@@ -406,11 +409,14 @@ def has_breakdown(player_id, market: str) -> bool:
     return _cache_read(player_id, market) is not None
 
 
-def generate_for_pick(pick: dict) -> str:
+def generate_for_pick(pick: dict, *, force: bool = False) -> str:
     """On-demand: ensure a player breakdown exists for a scored prop pick.
     Assembles the same context the player page feeds get_breakdown() (player
     info + gamelog + summary + opponent) and generates if not already cached.
-    Returns 'cached' / 'generated' / 'failed'.  Best-effort -- never raises."""
+    Returns 'cached' / 'generated' / 'failed'.  Best-effort -- never raises.
+
+    force=True bypasses the cache and regenerates + overwrites (the 'Force AI
+    Refresh' admin button)."""
     try:
         player = pick.get("player")
         market = pick.get("market")
@@ -423,7 +429,7 @@ def generate_for_pick(pick: dict) -> str:
         player_id = pick.get("player_id") or search_player_by_name(player)
         if not player_id:
             return "failed"
-        if _cache_read(player_id, market) is not None:
+        if not force and _cache_read(player_id, market) is not None:
             return "cached"
 
         info = get_player_info(int(player_id)) or {}
@@ -447,7 +453,8 @@ def generate_for_pick(pick: dict) -> str:
                 opp_abbrev=opp, is_pitcher=is_pitcher, games=games,
             )
 
-        bd = get_breakdown(info, games, is_pitcher, pick, market, line_f, summary, opp)
+        bd = get_breakdown(info, games, is_pitcher, pick, market, line_f,
+                           summary, opp, force=force)
         return "generated" if bd else "failed"
     except Exception as exc:                                              # noqa: BLE001
         _log(f"generate_for_pick failed: {type(exc).__name__}: {exc}")
