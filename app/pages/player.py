@@ -1195,7 +1195,7 @@ def _render_market_view(
         _section_chart_block(
             games, is_pitcher, prop, market, line_f, summary, opp_abbrev,
         )
-        _section_similar_players(info, prop, market, line_f, is_pitcher)
+        _section_similar_players(info, prop, market, line_f, is_pitcher, opp_abbrev)
 
 
 # ── Section: player header (per-market) ─────────────────────────────────────
@@ -2240,19 +2240,22 @@ def _section_similar_players(
     market: str,
     line_f: Optional[float],
     is_pitcher: bool,
+    opp_abbrev: Optional[str],
 ) -> None:
-    """Show 3-5 players in the same similarity cluster for THIS market.
+    """Show 3-5 players in the same similarity cluster for THIS market,
+    each with how they performed *against this prop's opponent team* using
+    the prop's own stat (Ks for a strikeouts prop, ER for an earned-runs
+    prop, etc.) over the last ~3 seasons -- not their general recent form.
 
-    Labelled "Similar by <market>" so it's clear the comparison is
-    prop-specific.  The cluster lookup is a cheap cache read; the
-    per-similar-player stat enrichment (gamelog -> season avg + L10
-    hit rate + last-5 mini chart) is lazy-loaded on a background
-    thread so it never blocks the initial page render.
+    The cluster lookup (KMeans) is unchanged; only the displayed stat is.
+    The per-player matchup enrichment (last-3-season gamelogs filtered to
+    the opponent) is lazy-loaded on a background thread so it never blocks
+    the initial render.  Built as a single ui.html() table.
     """
     from pages.props import _short_market
     player_name  = info.get("name") or ""
-    side         = (prop.get("side") or "Over").strip().title()
     market_label = _short_market(market)
+    opp_u        = (opp_abbrev or "").strip().upper()
 
     try:
         from src.player_similarity import get_similar_players
@@ -2262,22 +2265,31 @@ def _section_similar_players(
         sims = []
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
-        ui.label(f"SIMILAR BY {market_label.upper()}").style(
+        header = (f"SIMILAR BY {market_label.upper()} — VS {opp_u}"
+                  if opp_u else f"SIMILAR BY {market_label.upper()}")
+        ui.label(header).style(
             f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
-        if not sims:
-            ui.label("Not enough data to compare players for this market yet.").style(
+
+        def _note(msg: str):
+            return ui.label(msg).style(
                 f"font-size: 11.5px; color: {t.TEXT_DIM2}; font-style: italic; "
                 f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
                 f"border-radius: {t.RADIUS_MD}; padding: 14px; "
                 f"text-align: center; width: 100%;"
             )
+
+        if not sims:
+            _note("Not enough data to compare players for this market yet.")
+            return
+        if not opp_u:
+            _note("Opponent unknown for this game — no head-to-head matchup data.")
             return
 
         body = ui.column().classes("w-full").style("gap: 8px;")
         with body:
-            ui.label("Loading similar players…").style(
+            ui.label("Loading matchup history…").style(
                 f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
                 f"font-style: italic; padding: 8px 4px;"
             )
@@ -2285,8 +2297,7 @@ def _section_similar_players(
         async def _load() -> None:                                        # noqa: WPS430
             try:
                 enriched = await asyncio.to_thread(
-                    _enrich_similar, sims, market, prop.get("line"), side,
-                    is_pitcher, player_name, prop,
+                    _enrich_similar_vs_opp, sims, market, is_pitcher, opp_u,
                 )
             except Exception as exc:                                      # noqa: BLE001
                 _log(f"similar enrich failed: {exc}")
@@ -2294,181 +2305,147 @@ def _section_similar_players(
             body.clear()
             with body:
                 if not enriched:
-                    ui.label("Similar player data unavailable right now.").style(
-                        f"font-size: 11.5px; color: {t.TEXT_DIM2}; "
-                        f"font-style: italic; padding: 8px 4px;"
-                    )
+                    _note("Similar player data unavailable right now.")
                     return
-                for s in enriched:
-                    _similar_player_row(s, line_f)
+                ui.html(_similar_vs_opp_table_html(enriched, opp_u, is_pitcher))
 
         ui.timer(0.05, _load, once=True)
 
 
-def _enrich_similar(
-    sims: list[dict], market: str, line, side: str, is_pitcher: bool,
-    player_name: str = "", prop: Optional[dict] = None,
+# Number of seasons (including the current one) of game logs to scan for
+# head-to-head matchups against the opponent team.
+_SIMILAR_H2H_SEASONS = 3
+
+
+def _enrich_similar_vs_opp(
+    sims: list[dict], market: str, is_pitcher: bool, opp_u: str,
 ) -> list[dict]:
-    """Background-thread enrichment.  For each similar player attach their
-    season average for the market stat, their L10 hit rate vs today's line,
-    and their last-5 games (for the mini bar chart).  Cached gamelog reads
-    only."""
+    """Background-thread enrichment.  For each similar player, compute their
+    prop-matching stat against the opponent team (opp_u) across the last
+    ~3 seasons of game logs.  Returns per-player {name, team, score,
+    vs_avg, vs_games}.  Cached gamelog reads only -- no new data source."""
     from src.player_profile_client import (
-        get_player_gamelog, get_player_prop_summary, _CURRENT_SEASON,
+        get_player_gamelog, gamelog_stat_value, _CURRENT_SEASON,
     )
     stat_key = _MARKET_TO_STAT.get(market) or ("K" if is_pitcher else "H")
+    seasons  = [_CURRENT_SEASON - i for i in range(_SIMILAR_H2H_SEASONS)]
 
     out: list[dict] = []
     for s in sims:
         pid = s.get("id")
-        games: list[dict] = []
+        vs_values: list[float] = []
         if pid:
-            try:
-                games = get_player_gamelog(int(pid), _CURRENT_SEASON, is_pitcher=is_pitcher) or []
-                if is_pitcher:
-                    games = [g for g in games if g.get("games_started", 0) > 0]
-            except Exception:                                             # noqa: BLE001
-                games = []
-        summ: dict = {}
-        try:
-            summ = get_player_prop_summary(
-                s.get("name") or "", market, line, side,
-                is_pitcher=is_pitcher, games=games,
-            ) or {}
-        except Exception:                                                 # noqa: BLE001
-            summ = {}
+            games: list[dict] = []
+            for yr in seasons:
+                try:
+                    games.extend(
+                        get_player_gamelog(int(pid), yr, is_pitcher=is_pitcher) or []
+                    )
+                except Exception:                                         # noqa: BLE001
+                    continue
+            if is_pitcher:
+                games = [g for g in games if g.get("games_started", 0) > 0]
+            vs_games = [g for g in games
+                        if (g.get("opp") or "").strip().upper() == opp_u]
+            vs_values = [gamelog_stat_value(g, stat_key) for g in vs_games]
 
         out.append({
-            "name":       s.get("name") or "—",
-            "team":       s.get("team") or "",
-            "score":      s.get("score"),
-            "season_avg": summ.get("season_avg"),
-            "l10_hits":   summ.get("last_10_hits"),
-            "l10_games":  summ.get("last_10_games"),
-            "last5":      games[-5:],
-            "stat_key":   stat_key,
+            "name":     s.get("name") or "—",
+            "team":     s.get("team") or "",
+            "score":    s.get("score"),
+            "vs_avg":   (sum(vs_values) / len(vs_values)) if vs_values else None,
+            "vs_games": len(vs_values),
+            "stat_key": stat_key,
         })
     return out
 
 
-def _mini_last5_options(last5: list[dict], stat_key: str,
-                        line_f: Optional[float]) -> dict:
-    """Compact ECharts bar config for a similar player's last 5 games:
-    bars coloured over/under the line, a dashed markline at the line, no
-    axes/labels (it's a sparkline-style mini chart)."""
-    from src.player_profile_client import gamelog_stat_value
-    vals: list[float] = []
-    for g in last5:
-        v = gamelog_stat_value(g, stat_key)
-        vals.append(float(v) if isinstance(v, (int, float)) else 0.0)
-    has_line = isinstance(line_f, (int, float))
-    items = [{
-        "value": v,
-        "itemStyle": {"color": (t.POS if (has_line and v > line_f)
-                                 else t.NEG if has_line else t.PRIMARY),
-                      "borderRadius": [2, 2, 0, 0]},
-    } for v in vals]
-    mark = ({"silent": True, "symbol": ["none", "none"],
-             "lineStyle": {"color": t.WARN, "type": "dashed", "width": 1},
-             "label": {"show": False},
-             "data": [{"yAxis": line_f}]} if has_line else None)
-    return {
-        "grid": {"left": 2, "right": 2, "top": 6, "bottom": 2, "containLabel": False},
-        "xAxis": {"type": "category", "show": False,
-                  "data": list(range(len(vals) or 1))},
-        "yAxis": {"type": "value", "show": False, "min": 0},
-        "series": [{
-            "type": "bar", "data": items, "barMaxWidth": 12,
-            "markLine": mark,
-        }],
-    }
+def _similar_vs_opp_table_html(
+    rows: list[dict], opp_u: str, is_pitcher: bool,
+) -> str:
+    """Render the similar-players-vs-opponent table as a single HTML string.
 
+    Each row: player name (+ team) | prop stat per game vs the opponent over
+    the last ~3 seasons | sample size ('3 GS vs NYM').  Thin/empty samples
+    are labelled explicitly -- a missing matchup shows 'No starts vs TEAM'
+    (never a blank/zero), and a single-game sample is rendered muted with a
+    '1 GS' count so it never reads as a trend.
+    """
+    import html as _html
 
-def _similar_player_row(s: dict, line_f: Optional[float]) -> None:
-    """One similar-player card: name + team + similarity score, the
-    player's season average for the market stat, their L10 hit rate vs
-    today's line, and a mini bar chart of their last 5 games."""
-    from src.utils import strip_formatting
-    name = strip_formatting(s.get("name") or "—")
-    team = strip_formatting(s.get("team") or "")
-    slug = (s.get("name") or "").lower().replace(" ", "-")
-    stat_key = s.get("stat_key") or "H"
+    game_word  = "GS" if is_pitcher else "G"
+    none_label = (f"No starts vs {opp_u}" if is_pitcher
+                  else f"No games vs {opp_u}")
+    stat_key   = (rows[0].get("stat_key") if rows else "") or ""
 
-    score = s.get("score")
-    try:
-        score_pct = f"{float(score) * 100:.0f}%"
-    except (TypeError, ValueError):
-        score_pct = "—"
+    head = (
+        f'<thead><tr>'
+        f'<th style="text-align:left;padding:7px 10px;font-size:8.5px;'
+        f'font-weight:800;letter-spacing:.5px;color:{t.TEXT_DIM2};">PLAYER</th>'
+        f'<th style="text-align:right;padding:7px 10px;font-size:8.5px;'
+        f'font-weight:800;letter-spacing:.5px;color:{t.TEXT_DIM2};">'
+        f'{_html.escape(stat_key)}/G VS {_html.escape(opp_u)}</th>'
+        f'<th style="text-align:right;padding:7px 10px;font-size:8.5px;'
+        f'font-weight:800;letter-spacing:.5px;color:{t.TEXT_DIM2};">SAMPLE</th>'
+        f'</tr></thead>'
+    )
 
-    season_avg = s.get("season_avg")
-    avg_str = f"{season_avg:.1f}" if isinstance(season_avg, (int, float)) else "—"
-    line_str = f"{line_f:g}" if isinstance(line_f, (int, float)) else "—"
+    body_rows: list[str] = []
+    for s in rows:
+        name = _html.escape(s.get("name") or "—")
+        team = _html.escape(s.get("team") or "")
+        n    = int(s.get("vs_games") or 0)
+        avg  = s.get("vs_avg")
 
-    h = s.get("l10_hits")
-    g = s.get("l10_games")
-    if isinstance(h, int) and isinstance(g, int) and g > 0:
-        rate = h / g
-        l10_str = f"{h}/{g}"
-        l10_pct = f"{rate * 100:.0f}%"
-        l10_color = t.POS if rate >= 0.5 else t.NEG
-    else:
-        l10_str = "—"
-        l10_pct = ""
-        l10_color = t.TEXT_DIM
+        team_html = (
+            f'<span style="font-size:10px;color:{t.TEXT_DIM2};'
+            f'font-family:monospace;margin-left:6px;">{team}</span>'
+            if team else ""
+        )
+        name_cell = (
+            f'<td style="text-align:left;padding:9px 10px;font-size:13px;'
+            f'font-weight:800;color:{t.TEXT};white-space:nowrap;overflow:hidden;'
+            f'text-overflow:ellipsis;max-width:160px;">{name}{team_html}</td>'
+        )
 
-    last5 = s.get("last5") or []
-
-    with ui.column().classes("w-full").style(
-        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 8px; "
-        f"min-width: 0;"
-    ):
-        # Header: name (link) + team + similarity chip
-        with ui.row().classes("items-center w-full").style("gap: 8px;"):
-            ui.link(name, f"/player/mlb/{slug}").style(
-                f"font-size: 13.5px; font-weight: 800; color: {t.TEXT}; "
-                f"text-decoration: none; white-space: nowrap; overflow: hidden; "
-                f"text-overflow: ellipsis; flex: 1; min-width: 0;"
+        if n == 0 or not isinstance(avg, (int, float)):
+            # Empty sample -> explicit label, never a blank or zero.
+            stat_cell = (
+                f'<td colspan="2" style="text-align:right;padding:9px 10px;'
+                f'font-size:11.5px;font-style:italic;color:{t.TEXT_DIM2};">'
+                f'{_html.escape(none_label)}</td>'
             )
-            if team:
-                ui.label(team).style(
-                    f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                    f"font-family: monospace;"
-                )
-            ui.label(f"sim {score_pct}").style(
-                f"background: {t.CARD_HI}; color: {t.PRIMARY_HI}; "
-                f"font-size: 9.5px; font-weight: 800; letter-spacing: .3px; "
-                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL}; "
-                f"font-family: monospace;"
-            )
+            body_rows.append(f'<tr>{name_cell}{stat_cell}</tr>')
+            continue
 
-        # Stats row: season avg + L10 hit rate vs the line.
-        with ui.row().classes("items-center w-full").style(
-            "gap: 16px; flex-wrap: nowrap;"
-        ):
-            with ui.column().style("gap: 1px; flex-shrink: 0;"):
-                ui.label("SEASON AVG").style(
-                    f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
-                    f"color: {t.TEXT_DIM2};")
-                ui.label(f"{avg_str} {stat_key}").style(
-                    f"font-size: 12px; font-weight: 800; color: {t.TEXT}; "
-                    f"font-family: monospace;")
-            with ui.column().style("gap: 1px; flex-shrink: 0;"):
-                ui.label(f"L10 vs {line_str}").style(
-                    f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
-                    f"color: {t.TEXT_DIM2};")
-                ui.label(f"{l10_str}" + (f"  {l10_pct}" if l10_pct else "")).style(
-                    f"font-size: 12px; font-weight: 800; color: {l10_color}; "
-                    f"font-family: monospace;")
-            ui.element("div").style("flex: 1;")
-            # Mini bar chart of the last 5 games.
-            if last5:
-                with ui.column().style("gap: 1px; align-items: flex-end;"):
-                    ui.label("LAST 5").style(
-                        f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
-                        f"color: {t.TEXT_DIM2};")
-                    ui.echart(_mini_last5_options(last5, stat_key, line_f)).style(
-                        "width: 96px; height: 40px;")
+        # 1-game samples are muted so a single outing never reads as a trend
+        # (the SAMPLE count makes the one-game basis explicit either way).
+        thin       = n == 1
+        stat_color = t.TEXT_DIM if thin else t.TEXT
+        smpl_color = t.WARN if thin else t.TEXT_DIM
+        stat_cell = (
+            f'<td style="text-align:right;padding:9px 10px;font-size:13px;'
+            f'font-weight:800;font-family:monospace;color:{stat_color};">'
+            f'{avg:.1f}</td>'
+        )
+        smpl_cell = (
+            f'<td style="text-align:right;padding:9px 10px;font-size:11px;'
+            f'font-weight:700;font-family:monospace;color:{smpl_color};'
+            f'white-space:nowrap;">{n} {game_word} vs {_html.escape(opp_u)}</td>'
+        )
+        body_rows.append(f'<tr>{name_cell}{stat_cell}{smpl_cell}</tr>')
+
+    rows_html = "".join(
+        # zebra striping via inline style on each <tr>'s cells is awkward;
+        # keep a flat look matching the existing card aesthetic.
+        r for r in body_rows
+    )
+    return (
+        f'<table style="width:100%;border-collapse:collapse;'
+        f'background:{t.CARD};border:1px solid {t.BORDER};'
+        f'border-radius:{t.RADIUS_MD};overflow:hidden;">'
+        f'{head}<tbody>{rows_html}</tbody></table>'
+    )
 
 
 def _fmt_short_date(iso: Optional[str]) -> str:
