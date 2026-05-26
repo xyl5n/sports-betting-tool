@@ -158,6 +158,38 @@ _BATTER_MARKETS = [
     "batter_strikeouts", "batter_stolen_bases",
 ]
 
+# Fixed prop-category skeleton per player type: (display label, market key).
+# The props tab lists EVERY one of these; categories without a line today
+# render a muted "No line today" state.  Keys match the props pipeline's
+# market keys where lines exist; the extra categories (batters faced, total
+# bases allowed, singles/doubles/triples, HRR, etc.) simply have no line and
+# show "No line today" until the book posts one.  ("Pitching Outs" is omitted
+# -- it is not distinct from Outs Recorded / pitcher_outs.)
+_PITCHER_PROP_CATEGORIES = [
+    ("Outs Recorded",       "pitcher_outs"),
+    ("Strikeouts",          "pitcher_strikeouts"),
+    ("Hits Allowed",        "pitcher_hits_allowed"),
+    ("Walks Allowed",       "pitcher_walks"),
+    ("Earned Runs Allowed", "pitcher_earned_runs"),
+    ("Batters Faced",       "pitcher_batters_faced"),
+    ("Home Runs Allowed",   "pitcher_home_runs"),
+    ("Total Bases Allowed", "pitcher_total_bases_allowed"),
+]
+_BATTER_PROP_CATEGORIES = [
+    ("Hits",               "batter_hits"),
+    ("Total Bases",        "batter_total_bases"),
+    ("Home Runs",          "batter_home_runs"),
+    ("RBIs",               "batter_rbis"),
+    ("Runs Scored",        "batter_runs_scored"),
+    ("Walks",              "batter_walks"),
+    ("Strikeouts",         "batter_strikeouts"),
+    ("Singles",            "batter_singles"),
+    ("Doubles",            "batter_doubles"),
+    ("Triples",            "batter_triples"),
+    ("Stolen Bases",       "batter_stolen_bases"),
+    ("Hits + Runs + RBIs", "batter_hits_runs_rbis"),
+]
+
 
 # ── Page registration ──────────────────────────────────────────────────────
 
@@ -394,6 +426,9 @@ def _tab_pick(
                 f"text-align: center; width: 100%;"
             )
         _render_gamelog_market_tabs(games, raw_games, is_pitcher)
+        # Full category skeleton -- every market for the player type, all
+        # "No line today" in this no-props state.
+        _render_prop_category_skeleton(today_props_all, is_pitcher)
         return
 
     # ── Per-market sub-tabs (green indicator, unchanged) ─────────────────
@@ -413,7 +448,12 @@ def _tab_pick(
     ):
         for tab_obj, prop in tab_refs:
             with ui.tab_panel(tab_obj).style(f"padding: {t.SPACE_MD} 0 0 0;"):
-                _render_market_view(info, games, is_pitcher, prop, opp_abbrev)
+                _render_market_view(info, games, is_pitcher, prop, opp_abbrev,
+                                    backend=backend)
+
+    # Full category skeleton: EVERY prop market for the player type, with the
+    # current line + confidence where a line exists, else "No line today".
+    _render_prop_category_skeleton(today_props_all, is_pitcher)
 
 
 # ── No-props gamelog market tabs (chart-only, no prop line) ─────────────────
@@ -487,6 +527,87 @@ def _empty_state_message_noinfo(raw_games: list[dict], is_pitcher: bool) -> None
         f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
         f"text-align: center; width: 100%;"
     )
+
+
+def _render_prop_category_skeleton(
+    today_props_all: list[dict], is_pitcher: bool,
+) -> None:
+    """Fixed skeleton of EVERY prop category for the player type.  Categories
+    with an active line today show the current line + model confidence;
+    categories without one show a muted 'No line today'."""
+    cats = _PITCHER_PROP_CATEGORIES if is_pitcher else _BATTER_PROP_CATEGORIES
+    by_market: dict = {}
+    for p in (today_props_all or []):
+        m = p.get("market")
+        if m and m not in by_market:
+            by_market[m] = p
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 2px; "
+        f"margin-top: {t.SPACE_MD};"
+    ):
+        ui.label("ALL PROP MARKETS").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.PRIMARY_HI}; margin-bottom: 6px;"
+        )
+        for label, market in cats:
+            p = by_market.get(market)
+            with ui.row().classes("items-center w-full").style(
+                f"gap: 10px; padding: 7px 0; "
+                f"border-bottom: 1px solid {t.BORDER_SOFT};"
+            ):
+                ui.label(label).style(
+                    f"flex: 1; min-width: 0; font-size: 12.5px; font-weight: 700; "
+                    f"color: {t.TEXT}; white-space: nowrap; overflow: hidden; "
+                    f"text-overflow: ellipsis;"
+                )
+                if p is not None:
+                    side = (p.get("side") or "Over").strip().upper()
+                    line = p.get("line")
+                    try:
+                        conf_s = f"{int(round(float(p.get('confidence') or 0.0) * 100))}%"
+                    except (TypeError, ValueError):
+                        conf_s = "—"
+                    ui.label(f"{side} {line}").style(
+                        f"font-size: 12.5px; font-weight: 800; color: {t.TEXT}; "
+                        f"font-family: monospace; flex-shrink: 0;"
+                    )
+                    ui.label(conf_s).style(
+                        f"font-size: 11.5px; font-weight: 700; color: {t.POS}; "
+                        f"font-family: monospace; flex-shrink: 0; min-width: 42px; "
+                        f"text-align: right;"
+                    )
+                else:
+                    ui.label("No line today").style(
+                        f"font-size: 11.5px; font-weight: 600; color: {t.TEXT_DIM2}; "
+                        f"font-style: italic; flex-shrink: 0;"
+                    )
+
+
+def _render_header_track(backend, info: dict, prop: dict) -> None:
+    """Track button for the player's primary/headline prop, shown in the
+    header card.  components/track_button.py only handles game bets, so a
+    PROP is tracked through the Props page's own prop-track control (POSTs
+    /api/props/track) -- the same button used on the Props tab."""
+    try:
+        from pages.props import _track_btn
+    except Exception:                                                     # noqa: BLE001
+        return
+    payload = {
+        "player":          info.get("name") or prop.get("player"),
+        "market":          prop.get("market"),
+        "line":            prop.get("line"),
+        "side":            (prop.get("side") or "Over").title(),
+        "best_odds":       prop.get("best_odds") or prop.get("odds"),
+        "confidence":      prop.get("confidence"),
+        "predicted_value": prop.get("predicted_value"),
+        "team":            prop.get("team", ""),
+        "event_id":        prop.get("event_id"),
+        "commence_time":   prop.get("commence_time"),
+    }
+    with ui.element("div").style("flex-shrink: 0;"):
+        _track_btn(payload, backend)
 
 
 # ── TAB 4: GAME LOG (always expanded) ───────────────────────────────────────
@@ -1312,6 +1433,7 @@ def _render_market_view(
     is_pitcher: bool,
     prop: dict,
     opp_abbrev: Optional[str],
+    backend=None,
 ) -> None:
     """Renders one complete per-market view: player header, info row,
     AI breakdown, chart block, similar players."""
@@ -1333,7 +1455,7 @@ def _render_market_view(
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_MD};"):
         _section_player_header(info, prop, opp_abbrev, prop=prop, grade=grade,
-                               props_today=True)
+                               props_today=True, backend=backend)
         _section_info_row(opp_abbrev, prop)
         # AI-powered breakdown (replaces the old matchup-insights / matchup-tabs
         # / recent-trends sections).  Sits between the stat data and the chart.
@@ -1356,12 +1478,14 @@ def _section_player_header(
     prop: Optional[dict],
     grade: Optional[tuple[str, str]],
     props_today: bool = False,
+    backend=None,
 ) -> None:
     """Card with headshot left, name+pos+team+line center, grade right.
 
     *props_today* drives the small status chip below the name: a green
     "Props available" when the player has props today, else a gray
-    "No props today"."""
+    "No props today".  When *backend* and an active *prop* are supplied, a
+    Track button is shown to the left of the grade (tracks that prop)."""
     player_id = info["id"]
     headshot_url = (
         f"https://img.mlbstatic.com/mlb-photos/image/upload/"
@@ -1430,6 +1554,12 @@ def _section_player_header(
                         f"font-size: 11.5px; font-weight: 700; "
                         f"color: {t.TEXT_DIM}; font-family: monospace;"
                     )
+
+        # Track button (Task 2): right of the player info block, left of the
+        # grade.  Only when an active prop exists; tracks the headline prop.
+        if (backend is not None and prop is not None
+                and prop.get("recommendation") != "Pass"):
+            _render_header_track(backend, info, prop)
 
         if grade is not None:
             grade_letter, grade_color = grade
