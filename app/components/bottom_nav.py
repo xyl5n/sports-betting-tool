@@ -27,10 +27,11 @@ from . import theme as t
 
 
 _TABS = (
-    ("Today", t.TAB_HOME,  "/",       "home"),
-    ("Picks", t.TAB_PICKS, "/picks",  "leaderboard"),
-    ("AI",    t.TAB_AI,    "/ai",     "auto_awesome"),
-    ("Bets",  t.TAB_BETS,  "/bets",   "receipt_long"),
+    ("Today",   t.TAB_HOME,  "/",         "home"),
+    ("Picks",   t.TAB_PICKS, "/picks",    "leaderboard"),
+    ("Players", "players",   "/players",  "groups"),
+    ("AI",      t.TAB_AI,    "/ai",       "auto_awesome"),
+    ("Bets",    t.TAB_BETS,  "/bets",     "receipt_long"),
 )
 
 # Maps child tabs to their parent primary tab so sub-pages highlight
