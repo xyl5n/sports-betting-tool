@@ -74,7 +74,7 @@ def _layout(backend) -> None:
         try:
             if tab == "sports":
                 from pages import sport as _sport
-                _sport._render_sport(backend, "mlb")
+                _sport._render_sport(backend, "mlb", embedded=True)
             elif tab == "props":
                 from pages import props as _props
                 _props._layout(backend)

@@ -51,7 +51,7 @@ def register(backend) -> None:
         ui.navigate.to("/sports/mlb")
 
 
-def _render_sport(backend, sport: str) -> None:
+def _render_sport(backend, sport: str, embedded: bool = False) -> None:
     _dbg(f"_render_sport ENTER sport={sport!r}")
     # Re-read today's analysis cache into the in-memory state dict so
     # this render sees the newest picks on disk.  Without this, a Run
@@ -80,8 +80,9 @@ def _render_sport(backend, sport: str) -> None:
     except Exception as exc:                                               # noqa: BLE001
         _dbg(f"_render_sport STATE_CHECK FAILED: {type(exc).__name__}: {exc}")
 
-    ui.add_head_html(t.page_head_css())
-    navbar.render(active=t.TAB_SPORTS)
+    if not embedded:
+        ui.add_head_html(t.page_head_css())
+        navbar.render(active=t.TAB_SPORTS)
 
     # Kick off the live-score poller for this page.  Fetches the linescore
     # feed immediately + every 60 seconds thereafter, populating the cache
@@ -127,7 +128,8 @@ def _render_sport(backend, sport: str) -> None:
         # polling even if no analyze ever completes.
         _completion_watcher(backend)
 
-    bottom_nav.render(active=t.TAB_SPORTS)
+    if not embedded:
+        bottom_nav.render(active=t.TAB_SPORTS)
 
 
 def _odds_quota_banner(backend) -> None:
