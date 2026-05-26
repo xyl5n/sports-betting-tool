@@ -303,7 +303,15 @@ def settle_pending() -> dict:
         player    = pick.get("player", "")
         line      = float(pick.get("line") or 0)
         side      = (pick.get("side") or "Over").strip().title()
+        # Convert UTC commence_time to ET date to match MLB Stats API game log dates
         game_date = (commence or "")[:10]
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            _ct_dt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+            game_date = _ct_dt.astimezone(_ZI("America/New_York")).date().isoformat()
+        except Exception:
+            game_date = (commence or "")[:10]
+
 
         if player not in _player_id_cache:
             try:
@@ -314,6 +322,7 @@ def settle_pending() -> dict:
                 _player_id_cache[player] = None
         player_id = _player_id_cache[player]
         if player_id is None:
+            _log(f"settle: player id lookup returned None for {player!r} -- skipping")
             continue
 
         try:
@@ -325,7 +334,11 @@ def settle_pending() -> dict:
 
         matching = [g for g in games if g.get("date", "")[:10] == game_date]
         if not matching:
-            continue   # box score not reported yet -- retry next pass
+            _log(f"settle: no gamelog match for {player!r} on {game_date!r} "
+                 f"(gamelog has {len(games)} entries, "
+                 f"dates={sorted({g.get('date','')[:10] for g in games[-5:]})}) -- retry next pass")
+            continue
+
         game = matching[-1]
 
         try:
