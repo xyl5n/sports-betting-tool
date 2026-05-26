@@ -784,6 +784,7 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
        fabricating one with an independent predict() call.
     """
     name_lower = player_name.strip().lower()
+    today = _today_str()
     out: list[dict] = []
     markets_seen: set[str] = set()
 
@@ -793,6 +794,9 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
         cached = load_scored_props() or {}
         for pick in (cached.get("picks") or []):
             if (pick.get("player") or "").strip().lower() != name_lower:
+                continue
+            commence = (pick.get("commence_time") or "")[:10]
+            if commence and commence != today:
                 continue
             entry = _scored_cache_to_entry(pick)
             out.append(entry)
