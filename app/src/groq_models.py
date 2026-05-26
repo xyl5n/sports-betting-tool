@@ -49,24 +49,30 @@ def _today_et() -> str:
 # caps to leave headroom).  rpm/tpm drive the rolling-minute limiter; min_gap is
 # the floor between consecutive calls to that model.
 MODELS: dict[str, dict] = {
-    "V3": {  # 70B premium
+    "V1": {  # 70B deep analysis (games + top props)
         "name": "llama-3.3-70b-versatile",
         "rpm": 30, "tpm": 12_000, "rpd": 1_000, "tpd": 100_000,
-        "min_gap": 0.45,            # >= ~400ms between 70B calls (per spec)
+        "min_gap": 0.45,
     },
-    "V2": {  # 8B volume (existing higher limits)
+    "V2": {  # compound final validation (250/day hard cap)
+        "name": "compound-beta",
+        "rpm": 10, "tpm": 10_000, "rpd": 250, "tpd": 50_000,
+        "min_gap": 1.0,
+    },
+    "V3": {  # qwen3 mid-tier reasoning
+        "name": "qwen/qwen3-32b",
+        "rpm": 30, "tpm": 10_000, "rpd": 1_000, "tpd": 100_000,
+        "min_gap": 0.5,
+    },
+    "V4": {  # 8B bulk screening
         "name": "llama-3.1-8b-instant",
         "rpm": 30, "tpm": 6_000, "rpd": 14_400, "tpd": 500_000,
-        "min_gap": 0.15,            # existing safe 8B spacing
-    },
-    "V1": {  # Scout fallback
-        "name": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "rpm": 30, "tpm": 30_000, "rpd": 1_000, "tpd": 500_000,
-        "min_gap": 0.35,
+        "min_gap": 0.15,
     },
 }
-# Both premium and volume cascade DOWN to Scout when day-exhausted.
-_FALLBACK = {"V3": "V1", "V2": "V1", "V1": None}
+
+# Cascade chain: everything falls back to V4 (8b) when exhausted
+_FALLBACK = {"V1": "V4", "V2": "V4", "V3": "V4", "V4": None}
 
 _VALID_VERSIONS = tuple(MODELS.keys())
 
