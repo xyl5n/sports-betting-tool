@@ -194,6 +194,10 @@ def _section_unified_props_list(backend) -> None:
                     f"margin-left: auto; font-family: monospace;"
                 )
 
+        # Player quick-search -- sits above the filter bar; lets the user jump
+        # to ANY player in today's cache whether or not they have a prop today.
+        _player_search_bar(all_rows, rows)
+
         if not rows:
             if all_rows:
                 # Had picks today, but every game has already started.
@@ -233,6 +237,96 @@ def _section_unified_props_list(backend) -> None:
         # order changes.  Default sort is Proj (biggest model-vs-book gap).
         _sort_pills(state, cards_refresh.refresh)
         cards_refresh()
+
+
+def _player_search_bar(all_rows: list[dict], rows: list[dict]) -> None:
+    """Player quick-search shown above the filter bar.
+
+    *all_rows* = every player in today's scored cache (incl. games already
+    started); *rows* = today's still-upcoming props.  Lets the user find any
+    player and open their profile, with a chip showing whether they have an
+    upcoming prop today.
+    """
+    # player_name -> list of upcoming prop rows (the reverse lookup)
+    upcoming_by_player: dict[str, list[dict]] = {}
+    for r in rows:
+        nm = (r.get("player") or "").strip()
+        if nm:
+            upcoming_by_player.setdefault(nm, []).append(r)
+
+    # player_name -> True if they also have an upcoming prop today, else False
+    players: dict[str, bool] = {}
+    for r in all_rows:
+        nm = (r.get("player") or "").strip()
+        if nm:
+            players.setdefault(nm, nm in upcoming_by_player)
+    for nm in upcoming_by_player:           # ensure upcoming players are True
+        players[nm] = True
+
+    state = {"query": ""}
+
+    with ui.column().classes("w-full").style("margin-bottom: 8px;"):
+        search = ui.input(placeholder="Search players…").props(
+            "outlined dense clearable"
+        ).classes("w-full").style(
+            f"max-width: 360px; background: {t.CARD}; "
+            f"border: 1px solid {t.BORDER}; border-radius: {t.RADIUS_MD}; "
+            f"color: {t.TEXT}; font-size: 13px;"
+        )
+
+        @ui.refreshable
+        def results_panel() -> None:                                      # noqa: WPS430
+            q = (state["query"] or "").strip().lower()
+            if not q:
+                return
+            matches = [nm for nm in sorted(players, key=str.lower)
+                       if q in nm.lower()]
+            for nm in matches[:10]:
+                _player_search_row(nm, players[nm],
+                                   upcoming_by_player.get(nm, []))
+            if len(matches) > 10:
+                ui.label(f"Showing 10 of {len(matches)} results").style(
+                    f"font-size: 11px; color: {t.TEXT_DIM}; padding: 4px 2px;"
+                )
+
+        with ui.column().classes("w-full").style("gap: 6px; margin-top: 6px;"):
+            results_panel()
+
+        def _on_change(e) -> None:                                        # noqa: WPS430
+            state["query"] = e.value or ""
+            results_panel.refresh()
+        search.on_value_change(_on_change)
+
+
+def _player_search_row(name: str, has_props: bool, prop_rows: list[dict]) -> None:
+    """One result row: player-profile link + a 'N props today' (green) or
+    'No props today' (gray) chip.  Chip mirrors the count_chip style."""
+    slug = name.lower().replace(" ", "-")
+    _chip_base = (
+        f"font-size: 11px; font-weight: 700; "
+        f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+    )
+    with ui.row().classes("items-center w-full").style(
+        f"background: {t.CARD_HI}; border-radius: {t.RADIUS_SM}; "
+        f"padding: 8px 12px; gap: 10px;"
+    ):
+        ui.link(name, f"/player/mlb/{slug}").style(
+            f"font-weight: 700; font-size: 13px; color: {t.TEXT}; "
+            f"text-decoration: none;"
+        )
+        if has_props:
+            n = len(prop_rows)
+            ui.label(f"{n} prop{'s' if n != 1 else ''} today").style(
+                f"{_chip_base} background: rgba(16, 185, 129, .15); "
+                f"color: {t.POS};"
+            )
+            ui.label("→").style(
+                f"color: {t.TEXT_DIM}; font-size: 13px; margin-left: auto;"
+            )
+        else:
+            ui.label("No props today").style(
+                f"{_chip_base} background: {t.CARD}; color: {t.TEXT_DIM};"
+            )
 
 
 def _no_match_message() -> None:
