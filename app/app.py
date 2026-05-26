@@ -10525,11 +10525,32 @@ _MODEL_PICK_STAT = {
 }
 
 
+# Per-pass gamelog memo for settlement: (player_id, is_pitcher) -> (ts, games).
+# Settlement force-refreshes gamelogs (see below); a pitcher with three pending
+# prop markets would otherwise fire three identical statsapi calls in one pass.
+# Short TTL so a later cycle (15 min on) still picks up newly-finished games.
+_SETTLE_GAMELOG_MEMO: dict = {}
+_SETTLE_GAMELOG_TTL = 120.0
+
+
 def _model_pick_stat_lookup(player: str, market: str):
-    """Actual stat for a player's game TODAY (for settling prop picks).  Only
-    returns a value once the player has a game logged for today's ET date, so
-    a prop never settles against an older game."""
+    """Actual stat for a player's just-completed game, for settling prop picks.
+
+    Two failure modes the old strict ``== today`` lookup hit, fixed here:
+
+      1. Stale cache -- get_player_gamelog caches per UTC day, so a log
+         fetched in the morning (before the game) was reused at settlement
+         and never contained the finished game.  We pass force_refresh=True
+         (memoized per pass) so the completed game is always present.
+      2. Post-midnight boundary -- settlement runs through ~1 AM ET, by which
+         point _today_et() has rolled to the next day while a late west-coast
+         game still carries the PRIOR ET date.  During that 12 AM-2 AM ET tail
+         we also accept yesterday's date; in daytime only today matches, so a
+         prop never settles early against the prior day's game.
+    """
     try:
+        import time as _time
+        from datetime import timedelta as _td
         from src.player_profile_client import (
             search_player_by_name, get_player_gamelog, gamelog_stat_value,
             _CURRENT_SEASON,
@@ -10538,11 +10559,27 @@ def _model_pick_stat_lookup(player: str, market: str):
         if not pid:
             return None
         is_pitcher = (market or "").startswith("pitcher_")
-        games = get_player_gamelog(int(pid), _CURRENT_SEASON, is_pitcher=is_pitcher) or []
-        today = _today_et()
-        g = next((x for x in reversed(games) if (x.get("date") or "")[:10] == today), None)
-        if not g:
+
+        memo_key = (int(pid), is_pitcher)
+        cached = _SETTLE_GAMELOG_MEMO.get(memo_key)
+        now = _time.monotonic()
+        if cached is not None and (now - cached[0]) < _SETTLE_GAMELOG_TTL:
+            games = cached[1]
+        else:
+            games = get_player_gamelog(
+                int(pid), _CURRENT_SEASON,
+                is_pitcher=is_pitcher, force_refresh=True,
+            ) or []
+            _SETTLE_GAMELOG_MEMO[memo_key] = (now, games)
+
+        now_et = datetime.now(timezone(timedelta(hours=-4)))
+        acceptable = {now_et.date().isoformat()}
+        if now_et.hour <= 2:        # post-midnight settlement tail
+            acceptable.add((now_et.date() - _td(days=1)).isoformat())
+        cand = [x for x in games if (x.get("date") or "")[:10] in acceptable]
+        if not cand:
             return None
+        g = max(cand, key=lambda x: (x.get("date") or ""))
         return gamelog_stat_value(g, _MODEL_PICK_STAT.get(market, market))
     except Exception:                                                      # noqa: BLE001
         return None
@@ -10591,8 +10628,10 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         _et = _dtz(timedelta(hours=-5))
     now_et   = datetime.now(_et)
     et_hour  = now_et.hour
-    # Allow 11:00–23:59 and 00:00–02:59
-    in_window = (et_hour >= 11) or (et_hour <= 2)
+    # Settlement window 12 PM-1 AM ET (noon-11:59 PM, plus 00:00-01:59 for late
+    # west-coast finishers).  Matches the cycle's in_settlement_window + the
+    # Top Plays gate so all stores settle on the same hours.
+    in_window = (et_hour >= 12) or (et_hour <= 1)
     if not in_window and not force:
         return {"settled": 0, "wins": 0, "losses": 0,
                 "voided": 0, "skipped": "out of game-hours window"}
@@ -10761,6 +10800,12 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         f"personal bankroll ${mlb_pers_before:.2f} -> ${mlb_pers_after:.2f}"
     )
 
+    # Per-store settled tallies + error tags, surfaced in the cycle summary
+    # line below so all four systems can be verified at a glance in the logs.
+    _settle_errors: list[str] = []
+    model_picks_settled = 0
+    top_plays_settled = 0
+
     # ── Per-model pick logging + settlement (PART 1-3) ────────────────────────
     # Log the current picks (deduped) then settle today's pending ones against
     # the final scores fetched above + each player's actual stat line.
@@ -10771,6 +10816,7 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
             final_scores=_final_scores_from(scores_by_sport),
             stat_lookup=_model_pick_stat_lookup,
         )
+        model_picks_settled = sum(int(n) for n in (_summary or {}).values())
         if _summary:
             _eprint("MODEL-PICKS settled: "
                     + ", ".join(f"{m}={n}" for m, n in sorted(_summary.items())))
@@ -10778,6 +10824,7 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         for _line in _mp.store_summary_counts():
             _eprint(f"SETTLE-SUMMARY store {_line}")
     except Exception as _mpx:                                              # noqa: BLE001
+        _settle_errors.append(f"model_picks:{type(_mpx).__name__}")
         _eprint(f"MODEL-PICKS: settle pass failed: {type(_mpx).__name__}: {_mpx}")
 
     # ── Settle the rebuilt Supabase ledgers (Model + My Bets) ─────────────────
@@ -10795,7 +10842,25 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
                 _eprint(f"LEDGER-SETTLE [{_sys}]: settled {_s['settled']} "
                         f"({_s['wins']}W/{_s['losses']}L/{_s['pushes']}P)")
     except Exception as _lx:                                               # noqa: BLE001
+        _settle_errors.append(f"ledger_integration:{type(_lx).__name__}")
         _eprint(f"LEDGER-SETTLE failed: {type(_lx).__name__}: {_lx}")
+
+    # ── FIX 3: Supabase supa_ledger is the single authoritative model bankroll.
+    # ledger_integration above just moved it; mirror that value back into the
+    # ledger.json cache so the file's own settle math (run earlier this pass)
+    # can't leave the fallback display out of sync with Supabase.
+    try:
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            _supa_model_bal = float(_sl.model().bankroll())
+            for _ldr in (_mlb_ldr, _wnba_ldr):
+                if _ldr is not None:
+                    _ldr.sync_model_bankroll(_supa_model_bal)
+            _eprint("MODEL-BANKROLL: synced ledger.json cache to Supabase "
+                    f"authoritative ${_supa_model_bal:.2f}")
+    except Exception as _bx:                                               # noqa: BLE001
+        _settle_errors.append(f"bankroll_sync:{type(_bx).__name__}")
+        _eprint(f"MODEL-BANKROLL sync failed: {type(_bx).__name__}: {_bx}")
 
     # ── Settle the standalone Top Plays scorecard (12 PM–1 AM ET) ─────────────
     # Its own store, separate from model_picks + the ledgers.  Same final
@@ -10808,10 +10873,12 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
                 final_scores=_final_scores_from(scores_by_sport),
                 stat_lookup=_model_pick_stat_lookup,
             )
+            top_plays_settled = int(_tps.get("settled") or 0)
             if _tps.get("settled"):
                 _eprint(f"TOP-PLAYS settled {_tps['settled']} "
                         f"({_tps['wins']}W/{_tps['losses']}L/{_tps['pushes']}P)")
         except Exception as _tx:                                           # noqa: BLE001
+            _settle_errors.append(f"top_plays:{type(_tx).__name__}")
             _eprint(f"TOP-PLAYS settle failed: {type(_tx).__name__}: {_tx}")
 
     # ── Recalculate the daily budget off the post-settlement bankroll ─────────
@@ -10823,6 +10890,19 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
             _persist_daily_budget(mlb_pers_after)
         except Exception as _be:                                           # noqa: BLE001
             _eprint(f"AUTO-SETTLE: budget recalc failed: {_be}")
+
+    # ── Consolidated settlement summary -- one line covering all four systems
+    # so a Railway log grep confirms each is firing (or shows which errored).
+    _err_txt = ("none" if not _settle_errors
+                else f"{len(_settle_errors)} ({', '.join(_settle_errors)})")
+    _eprint(
+        "SETTLE-CYCLE-SUMMARY: "
+        f"game_bets={len(settled)} ({wins}W/{losses}L) | "
+        f"model_picks={model_picks_settled} | "
+        f"props={int(props_summary.get('settled') or 0)} | "
+        f"top_plays={top_plays_settled} | voided={len(voided)} | "
+        f"errors={_err_txt}"
+    )
 
     # ── Update state ──────────────────────────────────────────────────────────
     with _auto_settlement_lock:
@@ -10839,10 +10919,13 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         "wins":          wins,
         "losses":        losses,
         "voided":        len(voided),
+        "model_picks_settled": model_picks_settled,
         "props_settled": int(props_summary.get("settled") or 0),
         "props_won":     int(props_summary.get("won") or 0),
         "props_lost":    int(props_summary.get("lost") or 0),
         "props_bankroll": float(props_summary.get("bankroll") or 0.0),
+        "top_plays_settled": top_plays_settled,
+        "settle_errors": list(_settle_errors),
         "game_pnl":      round(game_pnl, 2),
         "props_pnl":     round(props_pnl, 2),
         "total_pnl":     round(total_pnl, 2),
@@ -11365,19 +11448,34 @@ def _run_consolidated_refresh_cycle() -> dict:
             _eprint(f"CYCLE groq invalidate/queue error: {type(exc).__name__}: {exc}")
         summary["groq_queued"] = groq_queued
 
+        # 4c) FIX 4: record Top Plays server-side, BEFORE settlement, so the
+        #     scorecard + Top Plays settlement have picks to grade even when
+        #     nobody opened /top-picks today.  build_rankings() applies the
+        #     same AI-agreement gate the page uses and calls record_plays
+        #     internally (idempotent -- dedup by play_id); the page-render
+        #     call stays as a fallback but the cycle call is authoritative.
+        try:
+            from src import top_picks as _tp
+            _ranked = _tp.build_rankings(sys.modules[__name__])
+            summary["top_plays_recorded"] = int((_ranked or {}).get("count") or 0)
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"CYCLE top-plays record error: {type(exc).__name__}: {exc}")
+
         # 5) Settlement (replaces the standalone 30-min auto_settlement job).
         #    Gated to 12 PM-1 AM ET: games rarely finish before noon, so
         #    running settlement earlier just burns an Odds API scores call
         #    with nothing to grade.  et_hour was computed at the top of this
-        #    cycle.  Window = hour >= 12 (noon-11:59 PM) OR hour == 0
-        #    (midnight-12:59 AM, i.e. up through 1 AM).
-        in_settlement_window = (et_hour >= 12) or (et_hour == 0)
+        #    cycle.  Window = hour >= 12 (noon-11:59 PM) OR hour <= 1
+        #    (00:00-01:59 ET) so late west-coast finishers settle the same
+        #    night -- the auto_props_refresh cron now also fires at hour 0/1.
+        in_settlement_window = (et_hour >= 12) or (et_hour <= 1)
         if in_settlement_window:
             try:
                 st = _run_auto_settlement_job(force=True) or {}
                 summary["settled"]       = int(st.get("settled") or 0)
                 summary["props_settled"] = int(st.get("props_settled") or 0)
                 summary["voided"]        = int(st.get("voided") or 0)
+                summary["top_plays_settled"] = int(st.get("top_plays_settled") or 0)
             except Exception as exc:                                      # noqa: BLE001
                 _eprint(f"CYCLE settlement error: {type(exc).__name__}: {exc}")
         else:
@@ -11803,15 +11901,15 @@ if not _in_debug_mode or _werkzeug_main:
 
                 # Consolidated 15-min refresh cycle (keeps the historic
                 # auto_props_refresh job id).  One coordinated pass during game
-                # hours (11 AM-11 PM ET): schedule + live scores → game odds
-                # (line-move flagging) → prop lines → re-score → settlement →
-                # Groq summary queue.  This single cycle now also performs the
-                # intraday settlement that used to live in the standalone
-                # 30-min auto_settlement job.
+                # hours (11 AM-1 AM ET, i.e. hours 11-23 plus 0,1): schedule +
+                # live scores → game odds (line-move flagging) → prop lines →
+                # re-score → top-plays record → settlement → Groq summary queue.
+                # This single cycle now also performs the intraday settlement
+                # that used to live in the standalone 30-min auto_settlement job.
                 try:
                     _sched.add_job(
                         _run_consolidated_refresh_cycle,
-                        _CronTrigger(hour="11-23", minute="0,15,30,45",
+                        _CronTrigger(hour="11-23,0,1", minute="0,15,30,45",
                                      timezone=_ET),
                         id="auto_props_refresh",
                         replace_existing=True,
@@ -11820,9 +11918,9 @@ if not _in_debug_mode or _werkzeug_main:
                     )
                     print(
                         "STARTUP: auto_props_refresh job scheduled — CONSOLIDATED "
-                        "15-min cycle, every :00/:15/:30/:45 during 11 AM–11 PM ET "
-                        "(schedule+scores → odds → props → re-score → settlement → "
-                        "AI summaries)",
+                        "15-min cycle, every :00/:15/:30/:45 during 11 AM–1 AM ET "
+                        "(schedule+scores → odds → props → re-score → top-plays → "
+                        "settlement → AI summaries); settlement gated 12 PM–1 AM ET",
                         flush=True, file=sys.stderr,
                     )
                 except Exception as _pe:
