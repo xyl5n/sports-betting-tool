@@ -8016,7 +8016,10 @@ def track_prop_pick():
         )
         if pick_id is None:
             return jsonify({"error": "This pick is already tracked"}), 409
-        return jsonify({"success": True, "id": pick_id})
+        # Return the recommended dollar stake so the track toast can show it
+        # (e.g. "Tracked: ... ($10.00)") like the game-pick toasts do.
+        return jsonify({"success": True, "id": pick_id,
+                        "amount": float(_ppt.flat_stake())})
     except Exception as exc:                                                # noqa: BLE001
         import traceback as _tb
         _eprint(f"PROPS-TRACK: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
