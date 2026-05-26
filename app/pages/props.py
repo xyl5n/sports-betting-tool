@@ -1114,7 +1114,25 @@ def _track_btn(r: dict, backend) -> None:
 
     Uses the same in-process Flask test-client pattern as track_button.py
     so no HTTP hop is needed and Railway deploy constraints are respected.
+
+    Persistence: if this prop is already tracked (open in My Bets), render a
+    static "Tracked ✓" chip instead of a live button so the tracked state
+    survives page reloads -- parity with the game-pick Track buttons.
     """
+    try:
+        from src import props_picks_tracker as _ppt
+        if _ppt.is_tracked(r.get("player"), r.get("market"),
+                           r.get("line"), r.get("side"), r.get("event_id")):
+            ui.label("Tracked ✓").style(
+                f"background: {t.CARD_HI}; color: {t.POS}; "
+                f"border: 1px solid {t.POS}; font-weight: 800; "
+                f"font-size: 10.5px; letter-spacing: .4px; "
+                f"padding: 4px 10px; border-radius: {t.RADIUS_SM};"
+            )
+            return
+    except Exception:                                                     # noqa: BLE001
+        pass
+
     btn = ui.button("Track").props("no-caps unelevated dense").style(
         f"background: {t.PRIMARY}; color: {t.BG}; "
         f"font-weight: 800; font-size: 10.5px; letter-spacing: .4px; "
@@ -1141,8 +1159,12 @@ def _track_btn(r: dict, backend) -> None:
                 _post_api, backend, "/api/props/track", payload
             )
             if ok:
+                _amt = data.get("amount")
+                _amt_s = (f" (${float(_amt):.2f})"
+                          if isinstance(_amt, (int, float)) else "")
                 ui.notify(
-                    f"Tracked: {r.get('player')} {r.get('side')} {r.get('line')}",
+                    f"Tracked: {r.get('player')} {r.get('side')} "
+                    f"{r.get('line')}{_amt_s}",
                     type="positive",
                 )
                 btn.text = "Tracked ✓"

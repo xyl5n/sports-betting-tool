@@ -193,6 +193,24 @@ def _is_dup(player: str, market: str, line: float, side: str,
     return False
 
 
+def is_tracked(player: str, market: str, line, side: str,
+               event_id: Optional[str] = None) -> bool:
+    """True when an OPEN (pending) pick already exists for this prop.  Used by
+    the Track button to render a persistent 'Tracked ✓' state that survives
+    page reloads -- parity with the game-pick Track buttons."""
+    try:
+        _ensure_loaded()
+        return _is_dup(player, market, float(line), side, event_id)
+    except Exception:                                                     # noqa: BLE001
+        return False
+
+
+def flat_stake() -> float:
+    """The flat dollar stake every tracked prop uses -- the 'rec $' shown in
+    the track toast, analogous to the game-pick recommended amount."""
+    return _FLAT_STAKE
+
+
 def record_prop_pick(
     *,
     player:          str,
