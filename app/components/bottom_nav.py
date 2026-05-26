@@ -26,16 +26,22 @@ from nicegui import ui
 from . import theme as t
 
 
-# Order matches the desktop navbar: Home, Sports, AI, Model, My Bets.
 _TABS = (
-    ("Home",     t.TAB_HOME,   "/",            "home"),
-    ("Sports",   t.TAB_SPORTS, "/sports/mlb",  "sports_baseball"),
-    ("Props",    t.TAB_PROPS,  "/props",       "person"),
-    ("Top",      t.TAB_TOP,    "/top-picks",   "leaderboard"),
-    ("AI",       t.TAB_AI,     "/ai",          "auto_awesome"),
-    ("Model",    t.TAB_MODEL,  "/model",       "insights"),
-    ("My Bets",  t.TAB_MYBETS, "/mybets",      "receipt_long"),
+    ("Today", t.TAB_HOME,  "/",       "home"),
+    ("Picks", t.TAB_PICKS, "/picks",  "leaderboard"),
+    ("AI",    t.TAB_AI,    "/ai",     "auto_awesome"),
+    ("Bets",  t.TAB_BETS,  "/bets",   "receipt_long"),
 )
+
+# Maps child tabs to their parent primary tab so sub-pages highlight
+# the correct bottom tab without requiring a separate active value.
+_TAB_PARENT = {
+    t.TAB_SPORTS: t.TAB_HOME,
+    t.TAB_PROPS:  t.TAB_PICKS,
+    t.TAB_TOP:    t.TAB_PICKS,
+    t.TAB_MODEL:  t.TAB_BETS,
+    t.TAB_MYBETS: t.TAB_BETS,
+}
 
 
 def render(active: str = t.TAB_HOME) -> None:
@@ -45,6 +51,7 @@ def render(active: str = t.TAB_HOME) -> None:
     # the QLayout).  We strip the default elevation/border and use the
     # footer purely as a transparent positioning host -- all visual
     # styling lives on the inner floating bar.
+    resolved = _TAB_PARENT.get(active, active)
     with ui.footer(elevated=False, bordered=False).classes("mobile-only").style(
         f"background: transparent !important; "
         f"box-shadow: none !important; "
@@ -65,7 +72,7 @@ def render(active: str = t.TAB_HOME) -> None:
             f"display: flex; justify-content: space-around; align-items: stretch;"
         ):
             for label, tab_key, href, icon in _TABS:
-                _tab(label, href, icon, active == tab_key)
+                _tab(label, href, icon, resolved == tab_key)
 
 
 def _tab(label: str, href: str, icon: str, is_active: bool) -> None:

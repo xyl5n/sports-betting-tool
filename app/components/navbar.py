@@ -27,18 +27,26 @@ from . import theme as t
 
 # Order matters: this list IS the display order, left to right.
 _NAV_LINKS = (
-    ("Home",         t.TAB_HOME,    "/"),
-    ("Sports",       t.TAB_SPORTS,  "/sports/mlb"),
-    ("Props",        t.TAB_PROPS,   "/props"),
-    ("Top Picks",    t.TAB_TOP,     "/top-picks"),
-    ("AI Breakdown", t.TAB_AI,      "/ai"),
-    ("Model",        t.TAB_MODEL,   "/model"),
-    ("My Bets",      t.TAB_MYBETS,  "/mybets"),
+    ("Today", t.TAB_HOME,  "/"),
+    ("Picks", t.TAB_PICKS, "/picks"),
+    ("AI",    t.TAB_AI,    "/ai"),
+    ("Bets",  t.TAB_BETS,  "/bets"),
 )
+
+# Maps child tabs to their parent primary tab so sub-pages highlight
+# the correct top-level tab without requiring a separate active value.
+_TAB_PARENT = {
+    t.TAB_SPORTS: t.TAB_HOME,
+    t.TAB_PROPS:  t.TAB_PICKS,
+    t.TAB_TOP:    t.TAB_PICKS,
+    t.TAB_MODEL:  t.TAB_BETS,
+    t.TAB_MYBETS: t.TAB_BETS,
+}
 
 
 def render(active: str = t.TAB_HOME) -> None:
     """Render the persistent top nav, marking *active* with the accent color."""
+    resolved = _TAB_PARENT.get(active, active)
     with ui.header(elevated=False).style(
         f"background: {t.BG}; "
         f"border-bottom: 1px solid {t.BORDER}; "
@@ -61,7 +69,7 @@ def render(active: str = t.TAB_HOME) -> None:
             "flex-shrink: 0;"
         ):
             for label, tab_key, href in _NAV_LINKS:
-                _nav_link(label, href, active == tab_key)
+                _nav_link(label, href, resolved == tab_key)
 
         # Admin gear -- always visible (desktop + mobile).  Sits at the
         # far right.  Not part of the 5 primary tabs and intentionally
