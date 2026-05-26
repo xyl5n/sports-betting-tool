@@ -63,9 +63,9 @@ def register(backend) -> None:
         _dbg("players_page ENTER")
         try:
             ui.add_head_html(t.page_head_css())
-            navbar.render(active=t.TAB_PROPS)
+            navbar.render(active="players")
             _layout()
-            bottom_nav.render(active=t.TAB_PROPS)
+            bottom_nav.render(active="players")
         except Exception as exc:                                          # noqa: BLE001
             import traceback as _tb
             print(f"[PLAYERS PAGE FATAL] {type(exc).__name__}: {exc}\n"

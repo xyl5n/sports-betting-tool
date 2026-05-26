@@ -27,10 +27,11 @@ from . import theme as t
 
 # Order matters: this list IS the display order, left to right.
 _NAV_LINKS = (
-    ("Today", t.TAB_HOME,  "/"),
-    ("Picks", t.TAB_PICKS, "/picks"),
-    ("AI",    t.TAB_AI,    "/ai"),
-    ("Bets",  t.TAB_BETS,  "/bets"),
+    ("Today",   t.TAB_HOME,  "/"),
+    ("Picks",   t.TAB_PICKS, "/picks"),
+    ("Players", "players",   "/players"),
+    ("AI",      t.TAB_AI,    "/ai"),
+    ("Bets",    t.TAB_BETS,  "/bets"),
 )
 
 # Maps child tabs to their parent primary tab so sub-pages highlight
