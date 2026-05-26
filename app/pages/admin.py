@@ -2240,7 +2240,7 @@ def _xr_row():
 
 
 def _xr_mini_btn(label: str, color: str, on_click):
-    return ui.button(label, on_click=on_click).props("no-caps unelevated dense").style(
+    return ui.button(label, on_click=on_click).props("no-caps unelevated dense").classes("touch-44h").style(
         f"background: {color}; color: {t.BG}; font-size: 10px; font-weight: 800; "
         f"padding: 3px 9px; border-radius: {t.RADIUS_SM}; min-height: 0;"
     )

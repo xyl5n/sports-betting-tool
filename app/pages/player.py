@@ -1751,7 +1751,7 @@ def _ctx_radio_row(
         on_change()
         refresh_caption()
 
-    with ui.row().classes("items-center w-full").style(
+    with ui.row().classes("items-center w-full touch-44h").style(
         f"gap: 10px; padding: 8px 4px; cursor: pointer; "
         f"border-radius: {t.RADIUS_SM}; "
         f"background: {(t.CARD_HI if is_active else 'transparent')};"
