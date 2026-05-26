@@ -474,29 +474,38 @@ def get_player_gamelog(
     season: int,
     *,
     is_pitcher: bool,
+    force_refresh: bool = False,
 ) -> list[dict]:
     """Return per-game log for *player_id* for *season*, cached aggressively.
 
     Pitchers: up to 30 most-recent games.
     Batters:  up to 50 most-recent games.
+
+    The caches are keyed by UTC calendar day, so a gamelog fetched in the
+    morning (before that day's game) is reused all day -- which means a
+    settlement pass would read a stale log that doesn't yet contain the
+    just-completed game.  *force_refresh* skips both cache reads and pulls
+    live from statsapi so settlement always sees the finished game; the
+    fresh result is still written back to both caches.
     """
     limit = 30 if is_pitcher else 50
     cache_key = f"player_gamelog_{player_id}_{season}"
 
-    # 1. Local file cache
-    local = _load_local_cache(player_id, season)
-    if local is not None:
-        return local[:limit]
+    if not force_refresh:
+        # 1. Local file cache
+        local = _load_local_cache(player_id, season)
+        if local is not None:
+            return local[:limit]
 
-    # 2. Supabase cache
-    try:
-        row = _db.cache_get(cache_key)
-        if row and row.get("date") == _today_str():
-            games = (row.get("data") or {}).get("games") or []
-            _write_local_cache(player_id, season, games)
-            return games[:limit]
-    except Exception as exc:
-        _log(f"Supabase cache_get({cache_key}) error: {exc}")
+        # 2. Supabase cache
+        try:
+            row = _db.cache_get(cache_key)
+            if row and row.get("date") == _today_str():
+                games = (row.get("data") or {}).get("games") or []
+                _write_local_cache(player_id, season, games)
+                return games[:limit]
+        except Exception as exc:
+            _log(f"Supabase cache_get({cache_key}) error: {exc}")
 
     # 3. Fetch from MLB Stats API
     group = "pitching" if is_pitcher else "hitting"

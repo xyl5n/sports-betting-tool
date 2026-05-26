@@ -299,6 +299,21 @@ class Ledger:
         except Exception as exc:                                          # noqa: BLE001
             _logger.warning("Ledger Supabase sync failed (JSON ok): %s", exc)
 
+    def sync_model_bankroll(self, value: float) -> None:
+        """Overwrite the cached model bankroll with the authoritative Supabase
+        (supa_ledger) value and persist.
+
+        supa_ledger is the single source of truth for the model bankroll the
+        app displays; this ledger.json copy is only a cache.  Calling this
+        after settlement keeps the file mirror in lock-step with Supabase so
+        the file's own per-bet settlement math can never diverge from what the
+        Model page shows.  Best-effort -- never raises."""
+        try:
+            self.data["model_bankroll"] = round(float(value), 2)
+            self.save()
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("sync_model_bankroll(%s) failed: %s", value, exc)
+
     def _sync_to_supabase(self) -> None:
         """Push the current ledger state to Supabase if connected.
 
