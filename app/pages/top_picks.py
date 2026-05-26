@@ -19,7 +19,7 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav
+from components import navbar, bottom_nav, track_button
 
 
 def register(backend) -> None:
@@ -27,6 +27,19 @@ def register(backend) -> None:
     def top_picks_page():
         try:
             ui.add_head_html(t.page_head_css())
+            # Clicks inside a .track-stop wrapper (the Track button area) must
+            # NOT bubble up to the card-level navigate handler.  Capture phase
+            # so it runs before NiceGUI's own click delegation.  Mirrors the
+            # pattern home.py uses for its EV / Confidence cards.
+            ui.add_body_html("""
+            <script>
+            document.addEventListener('click', function(e) {
+              if (e.target && e.target.closest && e.target.closest('.track-stop')) {
+                e.stopPropagation();
+              }
+            }, true);
+            </script>
+            """)
             navbar.render(active=t.TAB_TOP)
             with ui.column().classes("page-content w-full").style(
                 f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; "
@@ -122,7 +135,7 @@ def _layout(backend) -> None:
                 f"text-align: center; width: 100%;")
             return
         for i, r in enumerate(rows, 1):
-            _card(r, i)
+            _card(backend, r, i)
 
     _list()
 
@@ -153,6 +166,10 @@ def _scorecard_html(sc: dict) -> str:
     units_color = t.POS if units > 0 else (t.NEG if units < 0 else t.TEXT_DIM)
 
     def _box(label: str, value: str, value_color: str, sub: str) -> str:
+        sub_html = (
+            f'<span style="font-size:13px;font-weight:700;font-family:monospace;'
+            f'color:{t.TEXT_DIM};">{sub}</span>'
+        ) if sub else ''
         return (
             f'<div style="flex:1 1 0;min-width:0;background:{t.CARD};'
             f'border:1px solid {t.BORDER};border-radius:{t.RADIUS_MD};'
@@ -162,19 +179,18 @@ def _scorecard_html(sc: dict) -> str:
             f'<div style="display:flex;align-items:baseline;gap:8px;">'
             f'<span style="font-size:26px;font-weight:800;font-family:monospace;'
             f'letter-spacing:-.5px;color:{value_color};">{value}</span>'
-            f'<span style="font-size:13px;font-weight:700;font-family:monospace;'
-            f'color:{t.TEXT_DIM};">{sub}</span></div></div>'
+            f'{sub_html}</div></div>'
         )
 
     return (
         f'<div style="display:flex;gap:10px;width:100%;flex-wrap:wrap;">'
         + _box("WIN %", pct_str, pct_color, rec_str)
-        + _box("UNITS WON / LOST", units_str, units_color, "1u = $10")
+        + _box("UNITS WON / LOST", units_str, units_color, "")
         + '</div>'
     )
 
 
-def _card(r: dict, display_rank: int) -> None:
+def _card(backend, r: dict, display_rank: int) -> None:
     vcolor = _clr(r.get("verdict_color"))
     # Outline reflects AI-vs-model AGREEMENT (green = AI backs the model's
     # side, red = AI fades it, neutral border otherwise), keyed off the same
@@ -187,11 +203,35 @@ def _card(r: dict, display_rank: int) -> None:
         ocolor = t.BORDER
     combined_pct = f"{r.get('combined_score', 0) * 100:.0f}%"
     conf_pct = f"{r.get('confidence', 0) * 100:.0f}%"
-    with ui.column().classes("w-full").style(
+
+    # Model version that produced this pick's AI report (Task 2: replaces the
+    # old "score" sublabel).  "—" when no report has been generated yet.
+    mv = r.get("model_version")
+    mv_label = f"Model {mv}" if mv else "—"
+
+    # Whole-card click target (Task 3): prop -> player page, game -> game
+    # detail.  Same routing patterns the rest of the app uses.
+    tr = r.get("_track") or {}
+    kind = r.get("kind")
+    href = None
+    if kind == "prop":
+        player = (tr.get("player") or r.get("name") or "").strip()
+        if player and player != "—":
+            href = f"/player/mlb/{player.lower().replace(' ', '-')}"
+    else:
+        gid = tr.get("game_id")
+        if gid:
+            href = f"/matchup/{tr.get('sport') or 'mlb'}/{gid}"
+
+    card = ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 2px solid {ocolor}; "
         f"border-radius: {t.RADIUS_MD}; "
         f"padding: 10px 14px; gap: 6px; min-width: 0;"
-    ):
+        + (" cursor: pointer;" if href else "")
+    )
+    if href:
+        card.on("click", lambda h=href: ui.navigate.to(h))
+    with card:
         # Top row: rank · name · combined score
         with ui.row().classes("items-center w-full").style("gap: 10px;"):
             ui.label(f"#{display_rank}").style(
@@ -207,7 +247,7 @@ def _card(r: dict, display_rank: int) -> None:
                 ui.label(combined_pct).style(
                     f"font-size: 18px; font-weight: 800; color: {vcolor}; "
                     f"font-family: monospace;")
-                ui.label("score").style(
+                ui.label(mv_label).style(
                     f"font-size: 8.5px; font-weight: 800; letter-spacing: .5px; "
                     f"color: {t.TEXT_DIM2};")
 
@@ -243,3 +283,38 @@ def _card(r: dict, display_rank: int) -> None:
             ui.label(r.get("reasoning", "")).style(
                 f"font-size: 12px; color: {t.TEXT_DIM}; line-height: 1.5; "
                 f"white-space: normal;")
+
+        # Bottom row: Track button (Task 4).  Wrapped in .track-stop so a
+        # click here doesn't also fire the card-level navigation.
+        with ui.row().classes("w-full track-stop justify-end").style(
+            "gap: 8px; margin-top: 2px;"
+        ):
+            if kind == "prop":
+                # The shared TrackButton component only handles game bets, so
+                # prop picks reuse the Props page's own prop-track button
+                # (POSTs to /api/props/track) -- the same control used there.
+                try:
+                    from pages.props import _track_btn
+                    _track_btn({
+                        "player":          tr.get("player") or r.get("name"),
+                        "market":          tr.get("bet_type"),
+                        "line":            tr.get("line"),
+                        "side":            (tr.get("pick_side") or "Over").title(),
+                        "best_odds":       tr.get("odds"),
+                        "confidence":      tr.get("prob"),
+                        "predicted_value": None,
+                        "team":            "",
+                        "event_id":        tr.get("event_id"),
+                        "commence_time":   tr.get("commence_time"),
+                    }, backend)
+                except Exception as exc:                                  # noqa: BLE001
+                    print(f"[TOP-PICKS] prop track button failed: {exc}",
+                          flush=True, file=sys.stderr)
+            else:
+                gid = tr.get("game_id")
+                if gid:
+                    track_button.render(
+                        backend, game_id=gid, sport=(tr.get("sport") or "mlb"),
+                        bet_type=(tr.get("bet_type") or "ml"),
+                        size="sm", label="Track",
+                    )
