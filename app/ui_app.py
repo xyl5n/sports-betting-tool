@@ -66,7 +66,7 @@ print("UI_APP: backend imported -- Flask app registered, schedulers booting.",
 from nicegui import ui                                                    # noqa: E402
 
 from components import theme as t                                         # noqa: E402
-from pages import home, sport, mybets, model, ai_breakdown, admin, game_detail, props, player, top_picks, model_history  # noqa: E402
+from pages import home, sport, mybets, model, ai_breakdown, admin, game_detail, props, player, top_picks, model_history, picks, bets  # noqa: E402
 
 
 # ── Quasar palette override -- ties Quasar primitives (buttons, menus,
@@ -94,6 +94,8 @@ props.register(backend)
 player.register(backend)
 top_picks.register(backend)
 model_history.register(backend)
+picks.register(backend)
+bets.register(backend)
 
 
 # ── Boot-time analysis-state hydration ──────────────────────────────────────
