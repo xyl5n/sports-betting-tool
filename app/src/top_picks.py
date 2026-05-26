@@ -42,7 +42,7 @@ def _verdict(confidence) -> tuple[str, str]:
 
 
 def _entry(kind, name, pick_type, side, confidence, reasoning, track=None,
-           verdict_tier=None) -> dict:
+           verdict_tier=None, model_version=None) -> dict:
     # When the AI supplied its own verdict tier (prop breakdown / game
     # verdict), the badge follows THAT single determination so the badge and
     # the written reasoning always agree -- reusing the prop fix's tier
@@ -75,6 +75,9 @@ def _entry(kind, name, pick_type, side, confidence, reasoning, track=None,
         # agreement outline + the Top Plays eligibility gate -- same source as
         # the badge, so they can't diverge.
         "ai_tier":        ai_tier,
+        # V1/V2/V3 label of the AI model that produced this pick's report
+        # (None when no report has been generated yet).
+        "model_version":  model_version or None,
         "reasoning":      reasoning or "",
         "pending":        not bool(reasoning),  # reasoning still generating
         "combined_score": round(combined, 4),
@@ -101,10 +104,12 @@ def _game_entries(backend) -> list[dict]:
             name = f"{away} @ {home}"
             reasoning = None
             game_tier = None
+            game_mv = None
             if _ais is not None:
                 try:
                     reasoning = _ais.get_game_summary(sport, g)
                     game_tier = _ais.get_game_verdict_tier(sport, g)
+                    game_mv = _ais.get_game_model_version(sport, g)
                 except Exception:                                         # noqa: BLE001
                     reasoning = None
 
@@ -133,7 +138,7 @@ def _game_entries(backend) -> list[dict]:
                                   side, ml_prob, reasoning,
                                   track=_track("game", "ml", side, None,
                                                ml_odds, ml_prob, side),
-                                  verdict_tier=game_tier))
+                                  verdict_tier=game_tier, model_version=game_mv))
 
             # RL / Total inherit the game-level AI verdict (the model's pick
             # the AI judged is the moneyline; the game read carries the whole
@@ -149,7 +154,7 @@ def _game_entries(backend) -> list[dict]:
                                                pt if isinstance(pt, (int, float)) else None,
                                                rl.get("pick_odds"), rl.get("pick_prob"),
                                                side.strip()),
-                                  verdict_tier=game_tier))
+                                  verdict_tier=game_tier, model_version=game_mv))
 
             tot = r.get("totals_pred") or {}
             if tot.get("value_bet") and isinstance(tot.get("pick_prob"), (int, float)):
@@ -162,7 +167,7 @@ def _game_entries(backend) -> list[dict]:
                                                ln if isinstance(ln, (int, float)) else None,
                                                tot.get("pick_odds"), tot.get("pick_prob"),
                                                side),
-                                  verdict_tier=game_tier))
+                                  verdict_tier=game_tier, model_version=game_mv))
     return out
 
 
@@ -204,10 +209,12 @@ def _prop_entries(backend) -> list[dict]:
         # same source the player page uses -- so the agreement outline + the
         # Top Plays gate key off the identical determination.
         prop_tier = None
+        prop_mv = None
         try:
             from . import player_ai_breakdown as _pab
             bd = _pab.peek_breakdown(p) or {}
             prop_tier = (bd.get("verdict_tier") or "").strip() or None
+            prop_mv = (bd.get("model_version") or "").strip() or None
         except Exception:                                                 # noqa: BLE001
             prop_tier = None
         side = f"{(p.get('side') or 'Over').title()} {p.get('line')}"
@@ -229,18 +236,25 @@ def _prop_entries(backend) -> list[dict]:
         }
         out.append(_entry("prop", p.get("player") or "—",
                           market_label(p.get("market")), side, conf, reasoning,
-                          track=track, verdict_tier=prop_tier))
+                          track=track, verdict_tier=prop_tier, model_version=prop_mv))
     return out
 
 
 def build_rankings(backend) -> dict:
-    """Ranked Top Plays list (game + prop), sorted by combined_score desc.
+    """Ranked Top Picks list (game + prop), sorted by combined_score desc.
 
-    ELIGIBILITY GATE: a pick only appears if the AI clearly AGREES with the
-    model -- verdict tier Lean / Strong Lean.  Fade / Strong Fade / Neutral
-    (and picks with no AI verdict yet) are excluded.  Keys off the SAME
-    ai_tier the agreement outline uses.  The existing combined-score ranking
-    is unchanged for the picks that survive the gate."""
+    The page shows EVERY ranked pick -- both game picks and prop picks --
+    matching the tab's "everything is shown, you decide where to cut off"
+    design.  (Previously the list was filtered to AI-agreed picks only, which
+    left the Game Picks tab empty whenever game verdicts hadn't reached
+    Lean / Strong Lean.)
+
+    The standalone Top Plays SCORECARD still tracks only the AI-AGREED subset
+    (verdict tier Lean / Strong Lean) -- that recorded set is unchanged; the
+    gate is now applied only to what gets recorded, not to what is displayed.
+
+    The per-row ``_track`` payload is kept on the returned rows so the page
+    can build profile/game links and render Track buttons."""
     rows: list[dict] = []
     try:
         rows.extend(_game_entries(backend))
@@ -251,26 +265,24 @@ def build_rankings(backend) -> dict:
     except Exception as exc:                                              # noqa: BLE001
         _log(f"prop entries failed: {exc}")
 
-    # Top Plays = AI-agreed picks only.
-    try:
-        from .player_ai_breakdown import agrees_with_model
-        rows = [r for r in rows if agrees_with_model(r.get("ai_tier"))]
-    except Exception as exc:                                              # noqa: BLE001
-        _log(f"agreement gate failed: {exc}")
-
     rows.sort(key=lambda r: r["combined_score"], reverse=True)
     for i, r in enumerate(rows, 1):
         r["rank"] = i
-    # Record each appearing (now AI-agreed) play into the standalone Top
-    # Plays scorecard (frozen odds + Kelly unit stake).  Idempotent -- dedup
-    # by id, so re-renders never re-stake.  Best-effort; never blocks the page.
+
+    # Record only the AI-agreed subset into the standalone Top Plays scorecard
+    # (frozen odds + Kelly unit stake).  Idempotent -- dedup by id, so
+    # re-renders never re-stake.  This preserves the prior recorded set even
+    # though the displayed list is no longer gated.  Best-effort.
+    try:
+        from .player_ai_breakdown import agrees_with_model
+        agreed = [r for r in rows if agrees_with_model(r.get("ai_tier"))]
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"agreement gate failed: {exc}")
+        agreed = rows
     try:
         from . import top_plays_tracker
-        top_plays_tracker.record_plays(rows)
+        top_plays_tracker.record_plays(agreed)
     except Exception as exc:                                              # noqa: BLE001
         _log(f"top-plays record failed: {exc}")
-    # The _track payload is internal to recording -- drop it before handing
-    # rows to the UI so the display layer is unchanged.
-    for r in rows:
-        r.pop("_track", None)
+
     return {"rows": rows, "count": len(rows)}
