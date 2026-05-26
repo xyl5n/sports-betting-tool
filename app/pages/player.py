@@ -237,6 +237,17 @@ def _local_css() -> str:
         .grid-2col {{ grid-template-columns: 1fr !important; }}
         .h2h-grid  {{ grid-template-columns: repeat(3, 1fr) !important; }}
       }}
+
+      /* Desktop only (>768px): cap the history charts' width and centre them
+         so they don't stretch awkwardly wide across the 1180px content area
+         with only a handful of bars.  Mobile keeps the full-width charts. */
+      @media (min-width: 769px) {{
+        .player-chart {{
+          max-width: 720px !important;
+          margin-left: auto !important;
+          margin-right: auto !important;
+        }}
+      }}
     </style>
     """
 
@@ -465,7 +476,7 @@ def _render_gamelog_market_view(
         _section_avg_badge(avg, None, stat_key, window_tag="SZN")
         ui.echart(_per_prop_chart_options(
             games, stat_key=stat_key, prop_line=None, side="Over",
-        )).style("width: 100%; height: 250px;")
+        )).classes("player-chart").style("width: 100%; height: 250px;")
 
 
 def _empty_state_message_noinfo(raw_games: list[dict], is_pitcher: bool) -> None:
@@ -1539,7 +1550,7 @@ def _section_chart_block(
                 return
             ui.echart(_per_prop_chart_options(
                 filtered, stat_key=stat_key, prop_line=line_f, side=side,
-            )).style("width: 100%; height: 250px;")
+            )).classes("player-chart").style("width: 100%; height: 250px;")
 
         with ui.column().classes("w-full").style("gap: 6px;"):
             render_chart()
@@ -2321,7 +2332,7 @@ def _section_recent_trends(
             if window_games:
                 ui.echart(_mini_bar_chart_options(
                     window_games, stat_key, line_f,
-                )).style("width: 100%; height: 96px; min-width: 0;")
+                )).classes("player-chart").style("width: 100%; height: 96px; min-width: 0;")
             else:
                 ui.label("No games yet in this window.").style(
                     f"font-size: 11px; color: {t.TEXT_DIM2}; "
