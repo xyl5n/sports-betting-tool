@@ -128,36 +128,6 @@ _MARKET_TAB_LABEL: dict[str, str] = {
     "batter_stolen_bases":  "SB",
 }
 
-# Full human-readable market labels, used for the no-props gamelog tabs
-# (the props path keeps the compact _MARKET_TAB_LABEL above).
-_MARKET_HUMAN_LABEL: dict[str, str] = {
-    "pitcher_strikeouts":   "Strikeouts",
-    "pitcher_outs":         "Outs",
-    "pitcher_earned_runs":  "Earned Runs",
-    "pitcher_hits_allowed": "Hits Allowed",
-    "pitcher_walks":        "Walks",
-    "batter_hits":          "Hits",
-    "batter_total_bases":   "Total Bases",
-    "batter_home_runs":     "Home Runs",
-    "batter_rbis":          "RBIs",
-    "batter_runs_scored":   "Runs",
-    "batter_walks":         "Walks",
-    "batter_strikeouts":    "Strikeouts",
-    "batter_stolen_bases":  "Stolen Bases",
-}
-
-# Role-ordered market lists used to source the no-props gamelog tabs (a
-# market only becomes a tab when the gamelog actually carries that column).
-_PITCHER_MARKETS = [
-    "pitcher_strikeouts", "pitcher_outs", "pitcher_earned_runs",
-    "pitcher_hits_allowed", "pitcher_walks",
-]
-_BATTER_MARKETS = [
-    "batter_hits", "batter_total_bases", "batter_home_runs",
-    "batter_rbis", "batter_runs_scored", "batter_walks",
-    "batter_strikeouts", "batter_stolen_bases",
-]
-
 
 # ── Page registration ──────────────────────────────────────────────────────
 
@@ -366,23 +336,21 @@ def _tab_pick(
     """All the existing player-profile content: per-market sub-tabs with
     header, AI breakdown, chart, time pills, and similar players.  The
     game-log table now lives in its own tab (TAB 4)."""
-    # No-props fallback: header ALWAYS renders, then gamelog-sourced market
-    # tabs + charts (no dashed line) so the page is useful even with zero
-    # props today.
+    # No-props fallback: header + message only.
     if not today_props_all:
-        _section_player_header(info, today_prop, opp_abbrev,
-                               prop=None, grade=None, props_today=False)
+        _section_player_header(info, today_prop, opp_abbrev, prop=None, grade=None)
         if started_filtered:
             ui.label(
                 "No upcoming props — this player's game has already started. "
-                "Showing season game-log history below."
+                "Check back tomorrow."
             ).style(
-                f"font-size: 12.5px; font-weight: 600; color: {t.TEXT_DIM}; "
+                f"font-size: 13px; font-weight: 700; color: {t.TEXT_DIM}; "
                 f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
-                f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_SM} {t.SPACE_MD}; "
+                f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
                 f"text-align: center; width: 100%;"
             )
-        _render_gamelog_market_tabs(games, raw_games, is_pitcher)
+        else:
+            _empty_state_message(info, raw_games, is_pitcher)
         return
 
     # ── Per-market sub-tabs (green indicator, unchanged) ─────────────────
@@ -403,79 +371,6 @@ def _tab_pick(
         for tab_obj, prop in tab_refs:
             with ui.tab_panel(tab_obj).style(f"padding: {t.SPACE_MD} 0 0 0;"):
                 _render_market_view(info, games, is_pitcher, prop, opp_abbrev)
-
-
-# ── No-props gamelog market tabs (chart-only, no prop line) ─────────────────
-
-def _gamelog_has_stat(games: list[dict], market: str) -> bool:
-    """True when at least one game carries the column this market charts
-    (pitcher 'outs' is derived from the IP column)."""
-    stat_key = _MARKET_TO_STAT.get(market)
-    if not stat_key:
-        return False
-    key = "IP" if stat_key == "outs" else stat_key
-    return any(isinstance(g.get(key), (int, float)) for g in games)
-
-
-def _render_gamelog_market_tabs(
-    games: list[dict], raw_games: list[dict], is_pitcher: bool,
-) -> None:
-    """Market sub-tabs sourced from the gamelog columns (used when there are
-    no props today).  Each tab renders the same history chart as the props
-    path but with no dashed prop line and no line label."""
-    if not games:
-        _empty_state_message_noinfo(raw_games, is_pitcher)
-        return
-    candidate = _PITCHER_MARKETS if is_pitcher else _BATTER_MARKETS
-    markets = [m for m in candidate if _gamelog_has_stat(games, m)]
-    if not markets:
-        _empty_state_message_noinfo(raw_games, is_pitcher)
-        return
-
-    tab_refs: list[tuple] = []
-    with ui.tabs().props("dense align=left inline-label").classes(
-        "player-market-tabs w-full"
-    ).style(
-        f"border-bottom: 1px solid {t.BORDER}; min-height: 40px;"
-    ) as tabs:
-        for market in markets:
-            label = _MARKET_HUMAN_LABEL.get(market, market.replace("_", " ").title())
-            tab_refs.append((ui.tab(label), market))
-
-    with ui.tab_panels(tabs, value=tab_refs[0][0]).classes("w-full").style(
-        "background: transparent; padding: 0;"
-    ):
-        for tab_obj, market in tab_refs:
-            with ui.tab_panel(tab_obj).style(f"padding: {t.SPACE_MD} 0 0 0;"):
-                _render_gamelog_market_view(games, is_pitcher, market)
-
-
-def _render_gamelog_market_view(
-    games: list[dict], is_pitcher: bool, market: str,
-) -> None:
-    """One market's history chart with no prop line (no-props state)."""
-    stat_key = _MARKET_TO_STAT.get(market) or ("K" if is_pitcher else "H")
-    vals = [_stat_value(g, stat_key) for g in games]
-    avg = (sum(vals) / len(vals)) if vals else None
-    with ui.column().classes("w-full").style(
-        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
-        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 10px;"
-    ):
-        # prop_line=None -> the badge renders neutral, no over/under colour.
-        _section_avg_badge(avg, None, stat_key, window_tag="SZN")
-        ui.echart(_per_prop_chart_options(
-            games, stat_key=stat_key, prop_line=None, side="Over",
-        )).style("width: 100%; height: 250px;")
-
-
-def _empty_state_message_noinfo(raw_games: list[dict], is_pitcher: bool) -> None:
-    """No-games fallback for the gamelog tabs path (no prop + no gamelog)."""
-    ui.label("No game-log history available for this player yet.").style(
-        f"font-size: 13px; font-weight: 700; color: {t.TEXT_DIM}; "
-        f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
-        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
-        f"text-align: center; width: 100%;"
-    )
 
 
 # ── TAB 4: GAME LOG (always expanded) ───────────────────────────────────────
@@ -1321,8 +1216,7 @@ def _render_market_view(
     )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_MD};"):
-        _section_player_header(info, prop, opp_abbrev, prop=prop, grade=grade,
-                               props_today=True)
+        _section_player_header(info, prop, opp_abbrev, prop=prop, grade=grade)
         _section_info_row(opp_abbrev, prop)
         # AI-powered breakdown (replaces the old matchup-insights / matchup-tabs
         # / recent-trends sections).  Sits between the stat data and the chart.
@@ -1344,13 +1238,8 @@ def _section_player_header(
     *,
     prop: Optional[dict],
     grade: Optional[tuple[str, str]],
-    props_today: bool = False,
 ) -> None:
-    """Card with headshot left, name+pos+team+line center, grade right.
-
-    *props_today* drives the small status chip below the name: a green
-    "Props available" when the player has props today, else a gray
-    "No props today"."""
+    """Card with headshot left, name+pos+team+line center, grade right."""
     player_id = info["id"]
     headshot_url = (
         f"https://img.mlbstatic.com/mlb-photos/image/upload/"
@@ -1383,19 +1272,6 @@ def _section_player_header(
             ui.label(f"{position}  •  {team_abbrev}").style(
                 f"font-size: 11.5px; font-weight: 600; color: {t.TEXT_DIM}; "
                 f"letter-spacing: .2px;"
-            )
-
-            # Status chip: green "Props available" / gray "No props today".
-            _chip_text  = "Props available" if props_today else "No props today"
-            _chip_color = t.POS if props_today else t.TEXT_DIM
-            _chip_bg    = ("rgba(16, 185, 129, .12)" if props_today
-                           else t.CARD_HI)
-            ui.label(_chip_text).style(
-                f"align-self: flex-start; margin-top: 2px; "
-                f"font-size: 10px; font-weight: 800; letter-spacing: .5px; "
-                f"text-transform: uppercase; color: {_chip_color}; "
-                f"background: {_chip_bg}; border: 1px solid {_chip_color}; "
-                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
             )
 
             # Prop line chip: green dot + SIDE LINE pill.
