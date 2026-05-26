@@ -10010,8 +10010,28 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
                 [("mlb", r) for r in mlb_results]
                 + [("wnba", r) for r in wnba_results]
             )
-            ai_summaries.launch_summary_queue(
-                game_results=game_results, do_games=True, do_props=True)
+            # Run the queue on our own daemon thread (same as launch_summary_queue,
+            # still non-blocking) so we can rebuild Top Plays the moment the queue
+            # finishes and the AI verdict tiers exist.  Without this the morning
+            # slate's picks all fail the Top Plays ai_tier gate (no verdict yet)
+            # and /top-picks shows "No picks available yet" until a later cycle.
+            # The ai_tier gate + build_rankings logic are unchanged -- we only add
+            # this post-summary trigger.
+            def _summaries_then_top_plays(_results=game_results, _label=label):
+                try:
+                    ai_summaries.run_summary_queue(
+                        game_results=_results, do_games=True, do_props=True)
+                except Exception as _qe:                                   # noqa: BLE001
+                    _eprint(f"AUTO-ANALYSIS [{_label}]: summary queue error: {_qe}")
+                try:
+                    from src.top_picks import build_rankings
+                    _res = build_rankings(sys.modules[__name__]) or {}
+                    _eprint(f"AUTO-ANALYSIS [{_label}]: Top Plays rebuilt after "
+                            f"AI summaries -- {_res.get('count', 0)} play(s)")
+                except Exception as _be:                                   # noqa: BLE001
+                    _eprint(f"AUTO-ANALYSIS [{_label}]: Top Plays rebuild failed: "
+                            f"{type(_be).__name__}: {_be}")
+            threading.Thread(target=_summaries_then_top_plays, daemon=True).start()
         except Exception as _se:                                          # noqa: BLE001
             _eprint(f"AUTO-ANALYSIS [{label}]: summary launch failed: {_se}")
 
