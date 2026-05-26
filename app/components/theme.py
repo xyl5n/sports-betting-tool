@@ -392,6 +392,29 @@ def page_head_css() -> str:
         .q-field__control {{
           min-height: 44px !important;
         }}
+
+        /* Touch-target utilities for CUSTOM clickables (ui.link, clickable
+           ui.row, fixed-size icon buttons) that the .q-btn rule above does
+           not size -- mobile-only so desktop layout stays exactly as-is.
+           .touch-44  = 44px floor on both axes (icon / pill buttons)
+           .touch-44h = 44px height floor only (full-width rows / compact
+                        action buttons that should stay narrow on desktop)
+           .touch-link = same as .touch-44 but also makes an inline <a>
+                        a centered flex box so the height actually applies. */
+        .touch-44 {{
+          min-height: 44px !important;
+          min-width: 44px !important;
+        }}
+        .touch-44h {{
+          min-height: 44px !important;
+        }}
+        .touch-link {{
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          min-height: 44px !important;
+          min-width: 44px !important;
+        }}
       }}
 
       /* EV scan carousel -- equal-width cards so exactly 3 are visible on

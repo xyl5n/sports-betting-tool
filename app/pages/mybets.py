@@ -554,7 +554,7 @@ async def _confirm_dialog(prompt: str) -> bool:
 
 
 def _icon_btn(icon: str, color: str, tip: str, on_click) -> None:
-    ui.button(icon, on_click=on_click).props("flat dense round no-caps").style(
+    ui.button(icon, on_click=on_click).props("flat dense round no-caps").classes("touch-44").style(
         f"color: {color}; font-size: 13px; min-height: 0; "
         f"width: 26px; height: 26px; padding: 0;"
     ).tooltip(tip)
@@ -1209,6 +1209,7 @@ def _ab_header(title: str, dialog, step: int) -> None:
             f"font-weight: 700; padding: 2px 8px; border-radius: {t.RADIUS_PILL};")
         ui.element("div").style("flex: 1;")
         ui.button("✕", on_click=dialog.close).props("flat dense round no-caps") \
+            .classes("touch-44") \
             .style(f"color: {t.TEXT_DIM}; min-height: 0; width: 26px; height: 26px;")
 
 

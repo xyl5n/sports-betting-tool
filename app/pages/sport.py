@@ -377,7 +377,7 @@ def _pill(label: str, href: str, active: bool) -> None:
     bg     = t.PRIMARY if active else t.CARD_HI
     color  = t.BG      if active else t.TEXT_DIM
     weight = "800"     if active else "600"
-    with ui.link(target=href).style("text-decoration: none;"):
+    with ui.link(target=href).classes("touch-link").style("text-decoration: none;"):
         ui.label(label).style(
             f"background: {bg}; color: {color}; font-weight: {weight}; "
             f"font-size: 12px; letter-spacing: .5px; "
