@@ -662,9 +662,13 @@ def page_head_css() -> str:
           overflow-wrap: anywhere;
           word-break:    break-word;
         }}
-        /* Outer page never scrolls horizontally on a phone.  Per-card
-           ellipsis still handles long strings inside; this is just the
-           safety belt. */
+      }}
+
+      /* Outer page never scrolls horizontally on mobile/tablet.  Extended
+         from the 480px label-swap query up to the 768px mobile breakpoint
+         so the 481-768px range also gets the no-horizontal-scroll safety
+         belt.  Per-card ellipsis still handles long strings inside. */
+      @media (max-width: {MOBILE_BREAKPOINT}) {{
         body, html {{
           overflow-x: hidden !important;
         }}

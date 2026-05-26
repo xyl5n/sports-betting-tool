@@ -33,12 +33,24 @@ def _dbg(msg: str) -> None:
     print(f"[RENDER] {msg}", flush=True, file=sys.stderr)
 
 
+# Page-scoped CSS: let the 7-pill sort row wrap on very narrow phones so the
+# pills don't get squeezed to illegible widths.  Layout-only.
+_PROPS_LOCAL_CSS = """
+<style>
+  @media (max-width: 480px) {
+    .props-sort-pills { flex-wrap: wrap !important; }
+  }
+</style>
+"""
+
+
 def register(backend) -> None:
     @ui.page("/props")
     def props_page():
         _dbg("props_page ENTER")
         try:
             ui.add_head_html(t.page_head_css())
+            ui.add_head_html(_PROPS_LOCAL_CSS)
             navbar.render(active=t.TAB_PROPS)
             _layout(backend)
             bottom_nav.render(active=t.TAB_PROPS)
@@ -402,7 +414,7 @@ def _sort_pills(state: dict, on_change) -> None:
     refreshes the card list."""
     @ui.refreshable
     def render() -> None:                                                 # noqa: WPS430
-        with ui.row().classes("items-stretch w-full").style(
+        with ui.row().classes("items-stretch w-full props-sort-pills").style(
             "gap: 6px; flex-wrap: nowrap;"
         ):
             for key, label in _SORT_PILLS:
@@ -887,7 +899,7 @@ def _card_summary_chips(r: dict) -> None:
                 f"color: {t.TEXT_DIM2};"
             )
         with ui.element("div").style(
-            "display: grid; grid-template-columns: repeat(5, 1fr); "
+            "display: grid; grid-template-columns: repeat(auto-fit, minmax(60px, 1fr)); "
             "gap: 4px; width: 100%;"
         ):
             for label, value, color, sub in cells:

@@ -229,6 +229,14 @@ def _local_css() -> str:
         overflow-x: auto !important;
         -webkit-overflow-scrolling: touch;
       }}
+
+      /* Collapse the multi-column stat grids on phones so the cells stay
+         legible: the 2-up rows stack to a single column, and the 6-up H2H
+         grid drops to 3 columns.  Desktop (>768px) layout is unchanged. */
+      @media (max-width: {t.MOBILE_BREAKPOINT}) {{
+        .grid-2col {{ grid-template-columns: 1fr !important; }}
+        .h2h-grid  {{ grid-template-columns: repeat(3, 1fr) !important; }}
+      }}
     </style>
     """
 
@@ -1267,7 +1275,7 @@ def _section_ai_breakdown(
                 ("approach",    approach_label(is_pitcher)),
                 ("game_script", "GAME SCRIPT"),
             ]
-            with ui.element("div").classes("w-full").style(
+            with ui.element("div").classes("w-full grid-2col").style(
                 "display: grid; grid-template-columns: 1fr 1fr; gap: 8px;"
             ):
                 for key, lbl in sections:
@@ -2224,7 +2232,7 @@ def _render_vs_pitcher(data: Optional[dict], line_f: Optional[float]) -> None:
             ("AVG", strip_formatting(str(data.get("avg") or "—"))),
             ("OPS", strip_formatting(str(data.get("ops") or "—"))),
         ]
-        with ui.element("div").classes("w-full").style(
+        with ui.element("div").classes("w-full h2h-grid").style(
             "display: grid; grid-template-columns: repeat(6, 1fr); "
             "gap: 6px;"
         ):
@@ -2325,7 +2333,7 @@ def _section_recent_trends(
             f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
             f"color: {t.TEXT_DIM2};"
         )
-        with ui.element("div").classes("w-full").style(
+        with ui.element("div").classes("w-full grid-2col").style(
             "display: grid; grid-template-columns: 1fr 1fr; "
             f"gap: {t.SPACE_SM};"
         ):
