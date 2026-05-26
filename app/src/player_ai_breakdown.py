@@ -338,7 +338,7 @@ def _system_prompt(is_pitcher: bool, pick_side: str = "Over",
 
 
 def _call_groq(system: str, user: str, max_tokens: int = 900,
-               prefer: str = "V2") -> tuple:
+               prefer: str = "V4") -> tuple:
     """Generate the breakdown via the budget-aware multi-model client.
     Returns (text, version_label) -- the version is the model that actually
     produced it (after any cascade).  None text on any failure."""
@@ -546,10 +546,10 @@ def launch_breakdown_queue(picks: list[dict]) -> None:
 
 def get_breakdown(info, games, is_pitcher, prop, market, line_f,
                   summary, opp_abbrev, *, force: bool = False,
-                  prefer: str = "V2") -> dict | None:
+                  prefer: str = "V4") -> dict | None:
     """Return {matchup, trends, approach, game_script, model_version} for this
     player+market, from cache if present else freshly generated on *prefer*
-    (V2/8B for Pass-1 volume, V3/70B for Pass-2 top props).  Returns None on
+    (V4/8B for Pass-1 volume, V1/70B for Pass-2 top props).  Returns None on
     failure so the UI can render nothing.
 
     force=True bypasses the cache read and regenerates + overwrites (Pass 2
@@ -597,13 +597,13 @@ def has_breakdown(player_id, market: str) -> bool:
 
 
 def generate_for_pick(pick: dict, *, force: bool = False,
-                      prefer: str = "V2") -> str:
+                      prefer: str = "V4") -> str:
     """On-demand: ensure a player breakdown exists for a scored prop pick.
     Assembles the same context the player page feeds get_breakdown() (player
     info + gamelog + summary + opponent) and generates if not already cached.
     Returns 'cached' / 'generated' / 'failed'.  Best-effort -- never raises.
 
-    prefer selects the model (V2/8B volume, V3/70B for Pass-2 top props).
+    prefer selects the model (V4/8B volume, V1/70B for Pass-2 top props).
     force=True bypasses the cache and regenerates + overwrites (Pass 2 / the
     'Force AI Refresh' admin button)."""
     try:

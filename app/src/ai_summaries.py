@@ -586,7 +586,7 @@ def _generate_games(game_results: list[tuple]) -> dict:
         if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
-        _gtext, _gver = _gen(_game_prompt(sport, g), prefer="V3", max_tokens=340)
+        _gtext, _gver = _gen(_game_prompt(sport, g), prefer="V1", max_tokens=340)
         parsed = _parse_game_summary(_gtext)
         if parsed:
             store[key] = {"summary": parsed["summary"],
@@ -627,7 +627,7 @@ def _generate_props() -> dict:
         if isinstance(old, dict) and old.get("summary"):
             cached += 1
             continue
-        text, _pver = _gen(_prop_prompt(r), prefer="V2", max_tokens=230)
+        text, _pver = _gen(_prop_prompt(r), prefer="V4", max_tokens=230)
         if text:
             store[key] = {"summary": text, "model_version": _pver or "",
                           "fp": fp, "updated_at": _now_iso()}
@@ -713,12 +713,12 @@ def run_overnight_generation(game_results: list[tuple] | None = None) -> dict:
     n_props = 0
     for p in props:
         try:
-            if _pab.generate_for_pick(p, prefer="V2") == "generated":     # 8B / V2
+            if _pab.generate_for_pick(p, prefer="V4") == "generated":     # 8B / V4
                 n_props += 1
         except Exception:                                                 # noqa: BLE001
             pass
-    _log(f"overnight PASS 1 done: {n_games} game breakdowns (V3), "
-         f"{n_props} prop breakdowns (V2)")
+    _log(f"overnight PASS 1 done: {n_games} game breakdowns (V1), "
+         f"{n_props} prop breakdowns (V4)")
 
     # ── Pass 2: top agreeing, high-confidence props -> 70B (V3) ──────────────
     eligible: list[tuple] = []
@@ -740,17 +740,17 @@ def run_overnight_generation(game_results: list[tuple] | None = None) -> dict:
 
     n_upgraded = 0
     for _, p in eligible[:_PASS2_MAX_PROPS]:
-        if remaining("V3")["tokens"] < _PASS2_RESERVE_TOKENS:
+        if remaining("V1")["tokens"] < _PASS2_RESERVE_TOKENS:
             _log("overnight PASS 2: 70B token reserve reached -- stopping")
             break
         try:
-            if _pab.generate_for_pick(p, force=True, prefer="V3") == "generated":
+            if _pab.generate_for_pick(p, force=True, prefer="V1") == "generated":
                 n_upgraded += 1
         except Exception:                                                 # noqa: BLE001
             pass
-    _log(f"overnight PASS 2 done: {n_upgraded} top props upgraded to V3 "
+    _log(f"overnight PASS 2 done: {n_upgraded} top props upgraded to V1 "
          f"(eligible={len(eligible)}, cap={_PASS2_MAX_PROPS}); "
-         f"70B remaining tokens={remaining('V3')['tokens']}")
+         f"70B remaining tokens={remaining('V1')['tokens']}")
     return {"games": n_games, "props_pass1": n_props, "props_pass2_v3": n_upgraded}
 
 
@@ -834,7 +834,7 @@ def ensure_game_summary(sport: str, g: dict, *, force: bool = False) -> str:
     old = store.get(key)
     if not force and isinstance(old, dict) and old.get("summary"):
         return "cached"
-    _gtext, _gver = _gen(_game_prompt(sport, g), prefer="V3", max_tokens=340)
+    _gtext, _gver = _gen(_game_prompt(sport, g), prefer="V1", max_tokens=340)
     parsed = _parse_game_summary(_gtext)
     if not parsed:
         return "failed"
@@ -862,7 +862,7 @@ def ensure_prop_summary(r: dict, *, force: bool = False) -> str:
     old = store.get(key)
     if not force and isinstance(old, dict) and old.get("summary"):
         return "cached"
-    text, _pver = _gen(_prop_prompt(r), prefer="V2", max_tokens=230)
+    text, _pver = _gen(_prop_prompt(r), prefer="V4", max_tokens=230)
     if not text:
         return "failed"
     store[key] = {"summary": text, "model_version": _pver or "",
@@ -994,7 +994,7 @@ def get_game_bet_analysis(sport: str, g: dict) -> dict:
                         return d["analysis"]
         except Exception:                                                 # noqa: BLE001
             pass
-    text, _ver = _gen(_game_bets_prompt(sport, g), prefer="V3", max_tokens=400)
+    text, _ver = _gen(_game_bets_prompt(sport, g), prefer="V1", max_tokens=400)
     if not text:
         return {}
     out = _parse_bet_analysis(text)
