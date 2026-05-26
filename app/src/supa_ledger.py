@@ -187,6 +187,28 @@ class Ledger:
         db.ledger_bet_update(self.system, bet["bet_id"], patch)
         return {**bet, **patch}
 
+    # ── admin reset helpers ───────────────────────────────────────────────────
+    def clear_bets(self, sport: Optional[str] = None) -> int:
+        """Delete this pool's frozen bets (all, or scoped to one *sport*).
+        Returns the number of rows removed.  Does NOT touch the bankroll."""
+        if not db.is_supabase():
+            return 0
+        return db.ledger_bets_wipe(self.system, sport=sport)
+
+    def reset(self) -> None:
+        """Admin clean-slate reset for this pool: rebase the balance to the
+        pool's starting value and delete every frozen bet.  Used by the admin
+        wipe / reset endpoints so the authoritative Supabase pool matches the
+        'reset to starting' semantics the local + legacy layers already apply.
+        Best-effort; never raises."""
+        if not db.is_supabase():
+            return
+        try:
+            self.set_bankroll(self.starting(), reset_starting=True)
+            self.clear_bets()
+        except Exception as exc:                                          # noqa: BLE001
+            _logger.warning("Ledger.reset(%s) failed: %s", self.system, exc)
+
     # ── reads ─────────────────────────────────────────────────────────────────
     def active_bets(self) -> list[dict]:
         return db.ledger_bets_list(self.system, status="active")

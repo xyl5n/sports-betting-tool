@@ -923,15 +923,24 @@ def ledger_bet_update(system: str, bet_id: str, fields: dict) -> bool:
         return False
 
 
-def ledger_bets_wipe(system: str) -> int:
-    """Delete every bet row for a system (fresh-start wipe).  Returns the
-    number of rows the call reports deleting."""
+def ledger_bets_wipe(system: str, sport: Optional[str] = None) -> int:
+    """Delete bet rows for a system (fresh-start wipe).  When *sport* is
+    given, only that sport's rows are removed (the bankroll pool is combined
+    across sports, so a single-sport wipe can only scope the bets); otherwise
+    every row for the system is deleted.  Returns rows the call reports
+    deleting."""
     table = _LEDGER_BET_TABLE.get(system)
     if not is_supabase() or table is None:
         return 0
     try:
-        resp = _client.table(table).delete().neq("bet_id", "__never__").execute()
+        q = _client.table(table).delete()
+        if sport:
+            q = q.eq("sport", sport.lower())
+        else:
+            q = q.neq("bet_id", "__never__")
+        resp = q.execute()
         return len(resp.data or [])
     except Exception as exc:                                              # noqa: BLE001
-        _logger.warning("ledger_bets_wipe(%s) failed: %s", system, exc)
+        _logger.warning("ledger_bets_wipe(%s, sport=%s) failed: %s", system, sport, exc)
         return 0
+
