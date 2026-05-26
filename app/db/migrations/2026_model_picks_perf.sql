@@ -1,4 +1,25 @@
 -- ============================================================
+-- ⚠️ DEPRECATED — DO NOT RUN.  Kept for history only.
+--
+-- The LIVE model_picks schema is defined by
+--   db/migrations/2026_model_picks_restructure.sql
+-- which the application code actually reads/writes
+-- (pick_id text, model, bet_type, status, result, confidence,
+--  player_name).  src/db.py:ensure_model_picks_schema probes for
+-- exactly those columns.
+--
+-- The column vocabulary BELOW (model_name, pick_type, prop_id,
+-- odds, projected_value, date, uuid pick_id) is NOT referenced
+-- anywhere in app/src/ or app/pages/ — it is dead weight from an
+-- earlier repair attempt.  Running it against a live restructured
+-- table only adds unused nullable columns (its CREATE TABLE is a
+-- no-op once the table exists, and its uuid pick_id default never
+-- applies because the table already uses a text pick_id).  Nothing
+-- in the app auto-runs this file; it is retained purely as a record
+-- of the legacy repair.
+--
+-- The original (now-superseded) header follows:
+--
 -- Migration: model_picks -> per-model performance schema.
 --
 -- Fixes the "Could not find the 'confidence' column" /

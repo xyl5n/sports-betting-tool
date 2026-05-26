@@ -1235,7 +1235,20 @@ _MODEL_SETTINGS_DEFAULT = {
 
 
 def _load_model_settings() -> dict:
-    """Return current model-bets settings.  Always returns a complete dict."""
+    """Return current model-bets settings.  Always returns a complete dict.
+
+    Supabase app_cache ('model_settings') is the source of truth (survives
+    Railway redeploys); the local file is only a fallback for when Supabase
+    is off or hasn't been written yet."""
+    try:
+        from src import db as _db
+        if _db.is_supabase():
+            row = _db.cache_get("model_settings")
+            data = row.get("data") if isinstance(row, dict) else None
+            if isinstance(data, dict) and data:
+                return {**_MODEL_SETTINGS_DEFAULT, **data}
+    except Exception as exc:                                              # noqa: BLE001
+        _logger.warning("model_settings Supabase load failed: %s", exc)
     try:
         if _MODEL_SETTINGS_FILE.exists():
             raw = json.loads(_MODEL_SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -1269,6 +1282,15 @@ def _save_model_settings(settings: dict) -> dict:
             coerced[k] = v
     _MODEL_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     _MODEL_SETTINGS_FILE.write_text(json.dumps(coerced, indent=2), encoding="utf-8")
+    # Mirror to Supabase app_cache so the toggles survive Railway redeploys
+    # (the local file is just a cache).  Best-effort.
+    try:
+        from src import db as _db
+        if _db.is_supabase():
+            _db.cache_set("model_settings", None,
+                          datetime.now(timezone.utc).strftime("%Y-%m-%d"), coerced)
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"_save_model_settings: Supabase cache_set failed: {exc}")
     return coerced
 
 # ── Auto-settlement scheduler state ───────────────────────────────────────────
@@ -5708,6 +5730,41 @@ def admin_wipe_ledger():
                 f"{type(sb_exc).__name__}: {sb_exc}"
             )
 
+        # ── Layer 2b: authoritative supa_ledger pools (model + personal) ─
+        # These (*_bankroll_pool + *_ledger_bets) are what My Bets + the
+        # Model bankroll card actually read; the old `bets`/`bankroll`
+        # tables above are legacy.  The pools are combined across sports, so
+        # a single-sport wipe can only scope the bets — the combined balance
+        # is left intact unless this is a full ("both") wipe, which rebases
+        # each pool to its starting value (matching the local-file reset).
+        try:
+            from src import supa_ledger as _sl
+            if _sl.db.is_supabase():
+                if sport == "both":
+                    _sl.model().reset()
+                    _sl.personal().reset()
+                    audit.append("supabase pools: model + personal reset to "
+                                 "starting, all ledger_bets cleared")
+                    _eprint("WIPE-LEDGER supabase pools: model + personal "
+                            "reset to starting, all ledger_bets cleared")
+                else:
+                    n_m = _sl.model().clear_bets(sport=sport)
+                    n_p = _sl.personal().clear_bets(sport=sport)
+                    audit.append(
+                        f"supabase ledger_bets ({sport}): cleared {n_m} model "
+                        f"+ {n_p} personal row(s); combined bankroll pools left "
+                        f"intact (single-sport wipe can't partially rebase)"
+                    )
+                    _eprint(f"WIPE-LEDGER supabase ledger_bets [{sport}]: "
+                            f"cleared {n_m} model + {n_p} personal row(s)")
+            else:
+                audit.append("supabase pools: OFF -- skipped")
+        except Exception as pool_exc:                                     # noqa: BLE001
+            audit.append(f"supabase pools: error "
+                         f"{type(pool_exc).__name__}: {pool_exc}")
+            _eprint(f"WIPE-LEDGER supabase pools FAILED: "
+                    f"{type(pool_exc).__name__}: {pool_exc}")
+
         # ── Layer 3: in-memory state -- parlays only.  Results stay so
         # the slate / matchup pages still render today's analyzed games;
         # the wipe is about BETS, not picks. ─────────────────────────────
@@ -6093,6 +6150,24 @@ def admin_reset_model_bankroll():
         except Exception as exc:                                          # noqa: BLE001
             audit.append(f"supabase bets/bankroll: error {type(exc).__name__}: {exc}")
 
+        # Authoritative supa_ledger MODEL pool -- rebase to starting + clear
+        # its frozen bets so the Model bankroll card actually resets (the
+        # `bankroll`/`bets` writes above are legacy tables the card no longer
+        # reads).  Personal pool untouched.
+        try:
+            from src import supa_ledger as _sl
+            if _sl.db.is_supabase():
+                _sl.model().reset()
+                audit.append("supabase model pool: reset to starting + "
+                             "model_ledger_bets cleared")
+                _eprint("RESET[model_bankroll] supabase model pool: "
+                        "reset to starting + bets cleared")
+            else:
+                audit.append("supabase model pool: (Supabase off, skipped)")
+        except Exception as pexc:                                         # noqa: BLE001
+            audit.append(f"supabase model pool: error "
+                         f"{type(pexc).__name__}: {pexc}")
+
         _audit_log("model_bankroll", audit)
         return jsonify({
             "success":           True,
@@ -6138,8 +6213,26 @@ def admin_reset_confidence_record():
             )
         audit.append(
             "supabase: (confidence_tier propagates via the next ledger upsert; "
-            "no separate Supabase call needed -- the card reads from local history)"
+            "the card reads from local history)"
         )
+        # Persist a 'cleared' marker to Supabase app_cache so the reset
+        # survives a Railway redeploy (same app_cache pattern explorer
+        # cache_save uses).  Best-effort.
+        try:
+            from src import db as _db
+            if _db.is_supabase():
+                _db.cache_set(
+                    "confidence_record", None,
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d"), {},
+                )
+                audit.append("supabase app_cache 'confidence_record': cleared")
+                _eprint("RESET[confidence_record] supabase app_cache "
+                        "'confidence_record': cleared")
+            else:
+                audit.append("supabase app_cache: (Supabase off, skipped)")
+        except Exception as cexc:                                         # noqa: BLE001
+            audit.append(f"supabase app_cache 'confidence_record': error "
+                         f"{type(cexc).__name__}: {cexc}")
         _audit_log("confidence_record", audit)
         return jsonify({
             "success":   True,
@@ -6262,6 +6355,24 @@ def admin_reset_my_bets_record():
                 audit.append("supabase bets/bankroll: (Supabase off, skipped)")
         except Exception as exc:                                          # noqa: BLE001
             audit.append(f"supabase bets/bankroll: error {type(exc).__name__}: {exc}")
+
+        # Authoritative supa_ledger PERSONAL pool -- rebase to starting +
+        # clear its frozen bets so the My Bets bankroll card actually resets
+        # (the `bets`/`bankroll` writes above are legacy tables it no longer
+        # reads).  Model pool untouched.
+        try:
+            from src import supa_ledger as _sl
+            if _sl.db.is_supabase():
+                _sl.personal().reset()
+                audit.append("supabase personal pool: reset to starting + "
+                             "personal_ledger_bets cleared")
+                _eprint("RESET[my_bets_record] supabase personal pool: "
+                        "reset to starting + bets cleared")
+            else:
+                audit.append("supabase personal pool: (Supabase off, skipped)")
+        except Exception as pexc:                                         # noqa: BLE001
+            audit.append(f"supabase personal pool: error "
+                         f"{type(pexc).__name__}: {pexc}")
 
         _audit_log("my_bets_record", audit)
         return jsonify({
@@ -7097,6 +7208,25 @@ def admin_explorer_mark_bet():
         led   = Ledger(path=path, starting_bankroll=1000.0)
         g_result = {"won": "win", "lost": "loss", "void": "push"}.get(result, result)
         updated = led.set_result(bet_id, g_result)
+
+        # Mirror the manual grade into the authoritative supa_ledger pool so
+        # the My Bets / Model bankroll cards (which read supa_ledger, not the
+        # local file) reflect it.  Personal pool for a confirmed bet, else the
+        # model pool.  Best-effort + idempotent (settle() no-ops a bet that
+        # isn't still active, and silently does nothing if the id isn't in the
+        # pool because the two stores use different id schemes).
+        try:
+            from src import supa_ledger as _sl
+            if (_sl.db.is_supabase() and updated
+                    and g_result in ("win", "loss", "push", "void")):
+                _pool = _sl.personal() if (updated or {}).get("confirmed") else _sl.model()
+                _match = next((b for b in _pool.active_bets()
+                               if b.get("bet_id") == bet_id), None)
+                if _match is not None:
+                    _pool.settle(_match, g_result)
+        except Exception as _se:                                          # noqa: BLE001
+            _eprint(f"MARK-BET supa_ledger mirror failed: {_se}")
+
         return (jsonify({"success": True, "bet": _py(updated)}) if updated
                 else (jsonify({"success": False, "error": "bet not found"}), 404))
     except Exception as exc:                                                # noqa: BLE001
