@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -59,6 +60,8 @@ _UNIT_DOLLARS = 10.0       # 1 unit = 1% of the $1000 reference
 _plays: list[dict] = []
 _index: set[str] = set()
 _loaded = False
+_loaded_at: float = 0.0       # monotonic-ish wall-clock of the last load
+_LOAD_TTL = 300.0             # re-read Supabase if the cache is older than this
 
 
 def _log(msg: str) -> None:
@@ -103,8 +106,14 @@ def _load_from_file() -> Optional[list[dict]]:
 
 
 def _ensure_loaded() -> None:
-    global _loaded
-    if _loaded:
+    global _loaded, _loaded_at
+    # Re-read on the first call, then again whenever the cache is older than
+    # _LOAD_TTL.  The old permanent `_loaded` latch never re-read, so a process
+    # that first loaded an empty/absent row (cold boot before plays were
+    # written, or a transient Supabase miss) showed stale-empty data for its
+    # whole lifetime -- and a record_plays()+_save() off that stale list could
+    # overwrite stored history.  The TTL guarantees current state within 5 min.
+    if _loaded and (time.time() - _loaded_at) <= _LOAD_TTL:
         return
     plays = _load_from_supabase()
     if plays is None:
@@ -114,6 +123,7 @@ def _ensure_loaded() -> None:
     _index.clear()
     _index.update(p.get("id") for p in _plays if p.get("id"))
     _loaded = True
+    _loaded_at = time.time()
 
 
 def reload() -> None:
