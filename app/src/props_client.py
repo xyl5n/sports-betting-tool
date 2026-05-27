@@ -445,7 +445,7 @@ class PropsClient:
             payload = self.get_today_props()
             all_markets = payload.get("markets") or {}
 
-                n_props_total = 0
+        n_props_total = 0
         # BATCHED: one API call per game (all markets bundled) instead of
         # one call per market per game. 11 markets × 15 games = 165 calls
         # reduced to 15 calls per cycle.

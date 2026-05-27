@@ -126,6 +126,24 @@ def _teams_and_scores(game: dict) -> Optional[tuple[dict, dict, int, int]]:
         return None
 
 
+def _extract_date(game: dict) -> str:
+    """Best-effort 'YYYY-MM-DD' for a game across every source shape.
+
+    The WNBA fallbacks normalise ``date`` to the nested API-Sports form
+    ``{"start": iso}`` (ESPN scoreboard sets it directly; sportsdataverse /
+    stats.wnba.com strings are promoted in _load_wnba_fallback), while MLB /
+    API-Sports use ``{"game": {"date": {"date": "..."}}}`` or a bare string.
+    Slicing the dict form (the old ``game["date"][:10]``) blew up with a slice
+    error and took the whole WNBA load down -- normalise to a string first."""
+    nested = game.get("game", {}).get("date", {}).get("date")
+    if isinstance(nested, str) and nested:
+        return nested[:10]
+    raw = game.get("date", "")
+    if isinstance(raw, dict):
+        raw = raw.get("start") or raw.get("date") or ""
+    return str(raw)[:10] if raw else ""
+
+
 def _last_n_win_pct(results: list[dict], n: int = 10) -> float:
     recent = results[-n:] if len(results) >= n else results
     if not recent:
@@ -342,10 +360,7 @@ class GameStore:
             teams[home["id"]] = home
             teams[away["id"]] = away
 
-            date_str = (
-                game.get("game", {}).get("date", {}).get("date")
-                or game.get("date", "")[:10]
-            )
+            date_str = _extract_date(game)
 
             # Extra MLB fields
             home_hits = game.get("scores", {}).get("home", {}).get("hits", 0) or 0
