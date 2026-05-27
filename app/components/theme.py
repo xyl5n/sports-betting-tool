@@ -348,6 +348,15 @@ def page_head_css() -> str:
           gap: 12px !important;
         }}
 
+        /* Home screen gets 16px horizontal insets on mobile (overrides the
+           generic 12px above -- declared later, equal specificity, so it
+           wins) so no home section touches the screen edge.  Scoped to
+           .home-content, so other pages keep the 12px inset. */
+        .home-content {{
+          padding-left: 16px !important;
+          padding-right: 16px !important;
+        }}
+
         /* Page titles ("PLAYER PROPS", "ADMIN", etc.) shouldn't add
            extra vertical space on mobile -- the q-label default is
            already line-height 1, but Quasar can apply margins via the

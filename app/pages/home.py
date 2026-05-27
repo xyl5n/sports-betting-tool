@@ -175,7 +175,7 @@ def _layout(backend) -> None:
     carousels below already surface the same picks with richer
     per-card detail.  Content column now spans the full content width
     centered via margin: 0 auto."""
-    with ui.column().classes("page-content w-full").style(
+    with ui.column().classes("page-content home-content w-full").style(
         f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; "
         f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
     ):
@@ -1414,8 +1414,11 @@ def _upcoming_rows_html(games: list[dict]) -> str:
 
         rows.append(
             f'<div style="display:flex;align-items:center;gap:8px;'
-            f'padding:9px 14px;{border_css}min-width:420px;">'
+            f'padding:9px 16px;{border_css}width:100%;min-width:0;'
+            f'box-sizing:border-box;overflow:hidden;">'
             + ou
+            + '<div style="display:flex;align-items:center;gap:8px;'
+              'flex:1 1 auto;min-width:0;overflow:hidden;">'
             + _bold(away_abbr)
             + (_muted(away_ml) if away_ml else "")
             + (_muted(away_sp) if away_sp else "")
@@ -1423,8 +1426,9 @@ def _upcoming_rows_html(games: list[dict]) -> str:
             + _bold(home_abbr)
             + (_muted(home_ml) if home_ml else "")
             + (_muted(home_sp) if home_sp else "")
+            + "</div>"
             + (
-                f'<span style="margin-left:auto;font-size:10.5px;'
+                f'<span style="font-size:10.5px;'
                 f'color:{t.TEXT_DIM2};font-family:monospace;'
                 f'white-space:nowrap;flex-shrink:0;">{time_str}</span>'
                 if time_str else ""
@@ -1478,7 +1482,8 @@ def _final_rows_html(games: list[dict]) -> str:
 
         rows.append(
             f'<div style="display:flex;align-items:center;gap:10px;'
-            f'padding:9px 14px;{border_css}min-width:280px;">'
+            f'padding:9px 16px;{border_css}width:100%;min-width:0;'
+            f'box-sizing:border-box;overflow:hidden;">'
             + f'<span style="background:{t.CARD_HI};color:{t.TEXT_DIM2};'
               f'font-size:8.5px;font-weight:800;letter-spacing:.4px;'
               f'padding:2px 6px;border-radius:{t.RADIUS_PILL};'
@@ -1565,8 +1570,8 @@ def _section_games(backend) -> None:
             else:
                 ui.html(
                     f'<div style="background:{t.CARD};border:1px solid {t.BORDER};'
-                    f'border-radius:{t.RADIUS_MD};overflow:hidden;'
-                    f'overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;">'
+                    f'border-radius:{t.RADIUS_MD};overflow:hidden;overflow-x:hidden;'
+                    f'width:100%;">'
                     + _upcoming_rows_html(upcoming)
                     + "</div>"
                 )
@@ -1596,8 +1601,8 @@ def _section_games(backend) -> None:
             else:
                 ui.html(
                     f'<div style="background:{t.CARD};border:1px solid {t.BORDER};'
-                    f'border-radius:{t.RADIUS_MD};overflow:hidden;'
-                    f'overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;">'
+                    f'border-radius:{t.RADIUS_MD};overflow:hidden;overflow-x:hidden;'
+                    f'width:100%;">'
                     + _final_rows_html(final)
                     + "</div>"
                 )
