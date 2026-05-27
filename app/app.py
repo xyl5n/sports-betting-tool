@@ -1183,6 +1183,14 @@ def _load_archive_bets() -> list[dict]:
     except Exception:
         return []
 
+# ── EV / value-pick threshold ──────────────────────────────────────────────────
+# Minimum pick_edge for a game to receive value_pick=True in _serialize()
+# and to appear in the EV Scan section on the home page.  Exposed as a
+# module-level constant so the display label always stays in sync with the
+# actual gate, and the threshold can be tuned from one place without a
+# grep-and-replace across multiple files.
+EV_MIN_EDGE: float = 0.03
+
 _analysis_state: dict = {
     "sport":              None,
     "bankroll":           250.0,
@@ -1571,9 +1579,11 @@ def _serialize(r: dict, bankroll: float, sport: str = "mlb", starting_bankroll: 
     ml_conf = confidence_tier_from_prob(pick_prob_adj)
 
     # Edge is computed independently and gates value separately from tier.
+    # EV_MIN_EDGE (module-level) is the single source of truth -- changing
+    # it here also updates the EV Scan label on the home page.
     is_value = (
         ml_conf in ("strong", "moderate") and
-        pick_edge_adj >= 0.05 and
+        pick_edge_adj >= EV_MIN_EDGE and
         pick_odds > -300 and
         pick_prob_adj >= 0.52
     )

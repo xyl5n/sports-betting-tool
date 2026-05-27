@@ -511,9 +511,15 @@ def _section_ev_compact(backend) -> None:
     full slate (on /sports) still shows everything; the home page lists
     are forward-looking only.
     """
-    games = _filter_upcoming(_all_serialized_games(backend), label="ev_compact")
-    rows  = hs.enumerate_value_picks(games, min_edge=0.03)
+    _ev_min      = getattr(backend, "EV_MIN_EDGE", 0.03)
+    all_games    = _all_serialized_games(backend)
+    games        = _filter_upcoming(all_games, label="ev_compact")
+    rows         = hs.enumerate_value_picks(games, min_edge=_ev_min)
     rows.sort(key=lambda r: float(r.get("edge") or 0), reverse=True)
+    _dbg(
+        f"ev_compact: in_state={len(all_games)}  upcoming={len(games)}"
+        f"  value_picks={len(rows)}  min_edge={_ev_min:.0%}"
+    )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         # Header: title + edge threshold + count badge
@@ -522,7 +528,7 @@ def _section_ev_compact(backend) -> None:
                 f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
                 f"color: {t.TEXT};"
             )
-            ui.label("edge ≥ 3%").style(
+            ui.label(f"edge ≥ {_ev_min:.0%}").style(
                 f"font-size: 11px; color: {t.TEXT_DIM2};"
             )
             ui.label(f"{len(rows)}").style(
@@ -532,9 +538,16 @@ def _section_ev_compact(backend) -> None:
                 f"margin-left: auto;"
             )
 
-        # Empty state -- centered notice the spec asks for verbatim.
+        # Empty state: explain WHY so the cause is diagnosable.
         if not rows:
-            ui.label("No high value picks available right now").style(
+            if not all_games:
+                _empty_msg = "Analysis pipeline hasn't run yet today — visit Admin to trigger a run."
+            elif not games:
+                _empty_msg = "Today's games have already started — picks will refresh tonight."
+            else:
+                _empty_msg = f"No picks with edge ≥ {_ev_min:.0%} found in today's slate."
+            _dbg(f"ev_compact empty: {_empty_msg}")
+            ui.label(_empty_msg).style(
                 f"color: {t.TEXT_DIM}; font-size: 13px; "
                 f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
                 f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_LG}; "
@@ -732,10 +745,15 @@ def _section_confidence_carousel(backend) -> None:
     # Same pre-filter as the EV scan: home page lists are forward-
     # looking; started / completed games drop out so the user sees
     # actionable picks only.
-    games = _filter_upcoming(_all_serialized_games(backend), label="confidence_carousel")
-    rows  = hs.enumerate_value_picks(games, min_edge=0.0001)   # any positive edge
+    all_games = _all_serialized_games(backend)
+    games     = _filter_upcoming(all_games, label="confidence_carousel")
+    rows      = hs.enumerate_value_picks(games, min_edge=0.0001)   # any positive edge
     rows.sort(key=lambda r: float(r.get("prob") or 0), reverse=True)
     rows = rows[:10]
+    _dbg(
+        f"confidence_carousel: in_state={len(all_games)}  upcoming={len(games)}"
+        f"  value_picks={len(rows)}"
+    )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
         with ui.row().classes("items-center w-full").style("gap: 8px;"):
@@ -747,7 +765,14 @@ def _section_confidence_carousel(backend) -> None:
                 f"font-size: 11px; color: {t.TEXT_DIM2};"
             )
         if not rows:
-            ui.label("No positive-edge picks yet.").style(
+            if not all_games:
+                _empty_msg = "Analysis pipeline hasn't run yet today."
+            elif not games:
+                _empty_msg = "Today's games have already started."
+            else:
+                _empty_msg = "No positive-edge picks yet."
+            _dbg(f"confidence_carousel empty: {_empty_msg}")
+            ui.label(_empty_msg).style(
                 f"color: {t.TEXT_DIM}; font-size: 12px; "
                 f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
                 f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; text-align: center;"
