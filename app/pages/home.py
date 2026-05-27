@@ -28,6 +28,17 @@ from nicegui import ui
 
 _ET = ZoneInfo("America/New_York")
 
+# ── Home pick-list thresholds (named so they're greppable/tunable) ──────────
+# The EV Scan's edge cutoff is sourced from the backend's EV_MIN_EDGE (the
+# single source of truth in app.py -- it also gates value-pick flagging during
+# analysis).  This constant is only the FALLBACK used when the backend module
+# doesn't expose EV_MIN_EDGE (e.g. partial import); it is NOT a second source
+# of truth.  Expressed as a fraction (0.03 == 3% edge).
+_EV_MIN_EDGE_FALLBACK = 0.03
+# The Highest-Confidence carousel shows any pick with a positive model edge.
+# This is the floor for "positive" (a hair above 0 to exclude exact-zero edge).
+_CONFIDENCE_MIN_EDGE = 0.0001
+
 # Schedule status strings that mean "game has started or finished" --
 # anything matching these in g["_status"] / g["_detailed_status"] /
 # g["status"] disqualifies the game from the home page pick lists.
@@ -512,14 +523,19 @@ def _section_ev_compact(backend) -> None:
     full slate (on /sports) still shows everything; the home page lists
     are forward-looking only.
     """
-    _ev_min      = getattr(backend, "EV_MIN_EDGE", 0.03)
+    _ev_min      = getattr(backend, "EV_MIN_EDGE", _EV_MIN_EDGE_FALLBACK)
     all_games    = _all_serialized_games(backend)
     games        = _filter_upcoming(all_games, label="ev_compact")
-    rows         = hs.enumerate_value_picks(games, min_edge=_ev_min)
+    # Enumerate EVERY value pick first (any edge), then apply the threshold.
+    # Keeping both counts makes the empty state diagnosable: it distinguishes
+    # "no value picks at all" from "value picks exist but below the cutoff".
+    all_value    = hs.enumerate_value_picks(games, min_edge=0.0)
+    rows         = [r for r in all_value if float(r.get("edge") or 0) >= _ev_min]
     rows.sort(key=lambda r: float(r.get("edge") or 0), reverse=True)
     _dbg(
         f"ev_compact: in_state={len(all_games)}  upcoming={len(games)}"
-        f"  value_picks={len(rows)}  min_edge={_ev_min:.0%}"
+        f"  value_picks_any_edge={len(all_value)}  above_threshold={len(rows)}"
+        f"  min_edge={_ev_min:.0%}"
     )
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
@@ -545,6 +561,13 @@ def _section_ev_compact(backend) -> None:
                 _empty_msg = "Analysis pipeline hasn't run yet today — visit Admin to trigger a run."
             elif not games:
                 _empty_msg = "Today's games have already started — picks will refresh tonight."
+            elif all_value:
+                # Picks exist but every one is below the edge cutoff -- surface
+                # the threshold so the user knows it's a filter, not no data.
+                _empty_msg = (
+                    f"{len(all_value)} value pick(s) today, but none reach the "
+                    f"edge ≥ {_ev_min:.0%} cutoff."
+                )
             else:
                 _empty_msg = f"No picks with edge ≥ {_ev_min:.0%} found in today's slate."
             _dbg(f"ev_compact empty: {_empty_msg}")
@@ -748,7 +771,7 @@ def _section_confidence_carousel(backend) -> None:
     # actionable picks only.
     all_games = _all_serialized_games(backend)
     games     = _filter_upcoming(all_games, label="confidence_carousel")
-    rows      = hs.enumerate_value_picks(games, min_edge=0.0001)   # any positive edge
+    rows      = hs.enumerate_value_picks(games, min_edge=_CONFIDENCE_MIN_EDGE)  # any positive edge
     rows.sort(key=lambda r: float(r.get("prob") or 0), reverse=True)
     rows = rows[:10]
     _dbg(
