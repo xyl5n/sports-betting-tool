@@ -115,6 +115,43 @@ except Exception as exc:                                                  # noqa
           flush=True, file=sys.stderr)
 
 
+# ── model_picks store diagnostic ─────────────────────────────────────────────
+# The home GAME/PROPS MODELS cards read the Supabase `model_picks` table
+# (all-time, via model_picks.store_record / models_record).  A 0-0 there is
+# almost always one of two states, which this boot log makes obvious in the
+# Railway logs without a manual Supabase query:
+#   * Supabase NOT configured  -> the whole store is a no-op (every insert /
+#     settle / read short-circuits on `_mode != "supabase"`), so the table is
+#     effectively empty and the cards read 0-0.
+#   * Supabase ON but rows are all pending -> picks were logged but nothing has
+#     settled yet (settlement runs in the 12 PM-1 AM ET cycle; props settle via
+#     the gamelog stat lookup).
+# Settlement itself IS already scheduled (the 15-min auto_props_refresh cycle
+# calls _run_auto_settlement_job, plus the 1 AM JOB1) and logged
+# (SETTLE-SUMMARY / SETTLE-CYCLE-SUMMARY); this is purely a read-only summary
+# of the current store state.
+try:
+    from src import db as _db, model_picks as _mp
+    if _db.is_supabase():
+        _mp_lines = _mp.store_summary_counts()
+        print(
+            "UI_APP: model_picks store (Supabase=ON): "
+            + ("; ".join(_mp_lines) if _mp_lines else "EMPTY (0 rows)"),
+            flush=True, file=sys.stderr,
+        )
+    else:
+        print(
+            "UI_APP: model_picks store DISABLED -- Supabase not configured "
+            "(SUPABASE_URL / SUPABASE_KEY unset).  GAME/PROPS MODELS cards will "
+            "read 0-0 and no picks can be logged or settled until Supabase is "
+            "wired.",
+            flush=True, file=sys.stderr,
+        )
+except Exception as _mp_exc:                                              # noqa: BLE001
+    print(f"UI_APP: model_picks diagnostic failed: {_mp_exc}",
+          flush=True, file=sys.stderr)
+
+
 # ── Boot ────────────────────────────────────────────────────────────────────
 if __name__ in {"__main__", "__mp_main__"}:
     port = int(os.environ.get("PORT", 8080))
