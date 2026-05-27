@@ -173,6 +173,7 @@ def _layout(backend) -> None:
                          lambda: _section_todays_games_stub(backend))
         _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
         _guarded_section("news", lambda: _section_news(backend))
+        _guarded_section("games", lambda: _section_games(backend))
         _guarded_section("confidence_carousel",
                          lambda: _section_confidence_carousel(backend))
         _guarded_section("ai_banner", _ai_banner)
@@ -1109,6 +1110,446 @@ def _all_serialized_games(backend) -> list[dict]:
         f"wnba_failures={wnba_failures}/{wnba_total}"
     )
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Sections: Upcoming Games + Final Scores  (below News, above Confidence)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Team-name → abbreviation lookup tables.  Used by both sections so the
+# compact row format shows "NYY" instead of "New York Yankees".
+_MLB_ABBR: dict[str, str] = {
+    "Arizona Diamondbacks": "ARI",  "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL",     "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC",          "Chicago White Sox": "CWS",
+    "Cincinnati Reds": "CIN",       "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL",      "Detroit Tigers": "DET",
+    "Houston Astros": "HOU",        "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA",    "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA",         "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN",       "New York Mets": "NYM",
+    "New York Yankees": "NYY",      "Oakland Athletics": "OAK",
+    "Athletics": "ATH",             "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates": "PIT",    "San Diego Padres": "SD",
+    "San Francisco Giants": "SF",   "Seattle Mariners": "SEA",
+    "St. Louis Cardinals": "STL",   "Tampa Bay Rays": "TB",
+    "Texas Rangers": "TEX",         "Toronto Blue Jays": "TOR",
+    "Washington Nationals": "WSH",
+}
+_WNBA_ABBR: dict[str, str] = {
+    "Atlanta Dream": "ATL",         "Chicago Sky": "CHI",
+    "Connecticut Sun": "CONN",      "Dallas Wings": "DAL",
+    "Indiana Fever": "IND",         "Las Vegas Aces": "LV",
+    "Los Angeles Sparks": "LA",     "Minnesota Lynx": "MIN",
+    "New York Liberty": "NY",       "Phoenix Mercury": "PHX",
+    "Seattle Storm": "SEA",         "Washington Mystics": "WSH",
+    "Golden State Valkyries": "GSV",
+}
+
+# 5-minute in-process cache for today's game data (keyed sport_YYYY-MM-DD)
+# so the schedule/odds merge is only computed once per TTL even when the
+# page is hot-reloaded by multiple browser tabs.
+import time as _time_mod
+_GAMES_CACHE: dict[str, dict] = {}
+_GAMES_CACHE_TTL = 300
+
+
+def _g_abbr(name: str, sport: str) -> str:
+    """Return a short team abbreviation from the lookup tables.
+    Falls back to the last word's first 3-4 chars for unknown names."""
+    table = _MLB_ABBR if sport == "mlb" else _WNBA_ABBR
+    abbr  = table.get(name.strip())
+    if abbr:
+        return abbr
+    # Fallback: strip common suffixes, take last word first chars.
+    parts = name.strip().split()
+    return parts[-1][:4].upper() if parts else name[:4].upper()
+
+
+def _g_ml(odds) -> str:
+    """Format American moneyline odds as '+130' / '-145' / ''."""
+    if odds is None:
+        return ""
+    try:
+        n = int(odds)
+        return f"+{n}" if n > 0 else str(n)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _g_spread(spread, for_home: bool) -> str:
+    """Format spread as '+1.5' / '-1.5'.  spread is the home team's line."""
+    if spread is None:
+        return ""
+    try:
+        v = float(spread)
+        v = v if for_home else -v
+        return f"{v:+.1f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _g_time(commence_time: str) -> str:
+    """Format ISO UTC commence time as 'H:MM AM/PM ET' (no zero-padding)."""
+    if not commence_time:
+        return ""
+    try:
+        dt  = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        et  = dt.astimezone(ZoneInfo("America/New_York"))
+        h   = et.hour % 12 or 12
+        p   = "PM" if et.hour >= 12 else "AM"
+        return f"{h}:{et.minute:02d} {p}"
+    except Exception:                                                     # noqa: BLE001
+        return ""
+
+
+def _g_total(g: dict):
+    """Extract the O/U line from wherever it lives in a serialized game."""
+    for getter in (
+        lambda d: d.get("total_line"),
+        lambda d: (d.get("totals") or {}).get("total_line"),
+        lambda d: (d.get("totals") or {}).get("line"),
+    ):
+        try:
+            v = getter(g)
+            if v is not None:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _get_today_games(backend, sport: str) -> dict:
+    """Merge today's schedule (status + scores) with serialized odds data.
+
+    Returns {upcoming: list[dict], final: list[dict]}.
+
+    Upcoming dicts: home_team, away_team, home/away_abbr, commence_time,
+        home_ml, away_ml, spread, total_line.
+    Final dicts: same plus home_score, away_score.
+
+    5-minute in-process cache keyed sport+date so a hot page reload pays
+    only one merge per TTL window.
+    """
+    today     = datetime.now(_ET).date().isoformat()
+    cache_key = f"{sport}_{today}"
+    entry     = _GAMES_CACHE.get(cache_key)
+    if entry and (_time_mod.monotonic() - entry["ts"]) < _GAMES_CACHE_TTL:
+        return entry["data"]
+
+    # ── Schedule: all games for today, with status + live/final scores ──
+    try:
+        schedule: list[dict] = list(backend.get_todays_schedule(sport) or [])
+    except Exception:                                                     # noqa: BLE001
+        schedule = []
+
+    # ── Odds: from already-serialized (model-analyzed) games ────────────
+    # Keyed by (home_team, away_team) string pair.  Games not analyzed by
+    # the model will still show in the schedule but without odds data.
+    odds_map: dict[tuple, dict] = {}
+    try:
+        for g in _all_serialized_games(backend):
+            if (g.get("_sport") or "").lower() == sport.lower():
+                key = (
+                    (g.get("home_team") or "").strip(),
+                    (g.get("away_team") or "").strip(),
+                )
+                odds_map[key] = g
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    upcoming: list[dict] = []
+    final:    list[dict] = []
+
+    for game in schedule:
+        home   = (game.get("home_team") or "").strip()
+        away   = (game.get("away_team") or "").strip()
+        status = (game.get("status")      or "Preview").strip()
+        coded  = (game.get("coded_status") or "").upper()
+
+        odds = odds_map.get((home, away), {})
+
+        item: dict = {
+            "home_team":     home,
+            "away_team":     away,
+            "home_abbr":     _g_abbr(home, sport),
+            "away_abbr":     _g_abbr(away, sport),
+            "commence_time": game.get("commence_time", ""),
+            "home_ml":       odds.get("home_odds"),
+            "away_ml":       odds.get("away_odds"),
+            "spread":        odds.get("spread"),
+            "total_line":    _g_total(odds),
+            "home_score":    game.get("home_score"),
+            "away_score":    game.get("away_score"),
+        }
+
+        # coded "F" / "O" = Final / Game Over; also catch status strings.
+        is_final = (
+            coded in ("F", "O")
+            or status.lower() in ("final", "game over", "completed")
+        )
+        if is_final and item["home_score"] is not None:
+            final.append(item)
+        else:
+            upcoming.append(item)
+
+    upcoming.sort(key=lambda g: g.get("commence_time") or "")
+    final.sort(key=lambda g: g.get("commence_time") or "", reverse=True)
+
+    data = {"upcoming": upcoming, "final": final}
+    _GAMES_CACHE[cache_key] = {"ts": _time_mod.monotonic(), "data": data}
+    return data
+
+
+def _upcoming_rows_html(games: list[dict]) -> str:
+    """Build a concatenated HTML string for all upcoming-game rows.
+
+    Each row: [O/U badge] [Away abbr] [away ML] [away spread]  vs
+              [Home abbr] [home ML] [home spread]  [Time ET]
+
+    Using raw HTML (not NiceGUI helpers) so the <div> flex layout
+    renders correctly without NiceGUI's div wrappers around each child.
+    The outer container carries overflow-x: auto for mobile.
+    """
+    import html as _he
+    rows: list[str] = []
+
+    for i, g in enumerate(games):
+        is_last    = i == len(games) - 1
+        border_css = "" if is_last else f"border-bottom:1px solid {t.BORDER_SOFT};"
+
+        home_abbr = _he.escape(g["home_abbr"])
+        away_abbr = _he.escape(g["away_abbr"])
+        home_ml   = _g_ml(g.get("home_ml"))
+        away_ml   = _g_ml(g.get("away_ml"))
+        home_sp   = _g_spread(g.get("spread"), for_home=True)
+        away_sp   = _g_spread(g.get("spread"), for_home=False)
+        time_str  = _g_time(g.get("commence_time", ""))
+        total     = g.get("total_line")
+
+        # O/U badge — fixed-width slot so columns align even when absent
+        if total is not None:
+            ou = (
+                f'<span style="background:{t.CARD_HI};color:{t.TEXT_DIM2};'
+                f'font-size:9px;font-weight:800;letter-spacing:.4px;'
+                f'padding:2px 6px;border-radius:{t.RADIUS_PILL};'
+                f'white-space:nowrap;flex-shrink:0;">O/U {total:.1f}</span>'
+            )
+        else:
+            ou = (
+                f'<span style="display:inline-block;width:54px;flex-shrink:0;">'
+                f'</span>'
+            )
+
+        def _bold(s: str) -> str:
+            return (
+                f'<span style="color:{t.TEXT};font-size:12px;font-weight:700;'
+                f'white-space:nowrap;">{s}</span>'
+            )
+
+        def _muted(s: str) -> str:
+            return (
+                f'<span style="color:{t.TEXT_DIM2};font-size:11px;'
+                f'font-family:monospace;white-space:nowrap;">{s}</span>'
+            )
+
+        def _sep(s: str) -> str:
+            return (
+                f'<span style="color:{t.TEXT_DIM2};font-size:11px;'
+                f'padding:0 2px;">{s}</span>'
+            )
+
+        rows.append(
+            f'<div style="display:flex;align-items:center;gap:8px;'
+            f'padding:9px 14px;{border_css}min-width:420px;">'
+            + ou
+            + _bold(away_abbr)
+            + (_muted(away_ml) if away_ml else "")
+            + (_muted(away_sp) if away_sp else "")
+            + _sep("vs")
+            + _bold(home_abbr)
+            + (_muted(home_ml) if home_ml else "")
+            + (_muted(home_sp) if home_sp else "")
+            + (
+                f'<span style="margin-left:auto;font-size:10.5px;'
+                f'color:{t.TEXT_DIM2};font-family:monospace;'
+                f'white-space:nowrap;flex-shrink:0;">{time_str}</span>'
+                if time_str else ""
+            )
+            + "</div>"
+        )
+
+    return "".join(rows)
+
+
+def _final_rows_html(games: list[dict]) -> str:
+    """Build concatenated HTML for all final-game rows.
+
+    Each row: [FINAL badge] [Away abbr] [away score]  at
+              [Home abbr] [home score]
+
+    Winner's score is bright white + bold; loser's score is muted.
+    """
+    import html as _he
+    rows: list[str] = []
+
+    for i, g in enumerate(games):
+        is_last    = i == len(games) - 1
+        border_css = "" if is_last else f"border-bottom:1px solid {t.BORDER_SOFT};"
+
+        hs = g.get("home_score")
+        as_ = g.get("away_score")
+        home_abbr = _he.escape(g["home_abbr"])
+        away_abbr = _he.escape(g["away_abbr"])
+
+        home_wins = (hs is not None and as_ is not None and hs > as_)
+        away_wins = (hs is not None and as_ is not None and as_ > hs)
+
+        def _team(abbr: str, wins: bool) -> str:
+            col = t.TEXT if wins else t.TEXT_DIM
+            wt  = "700"  if wins else "400"
+            return (
+                f'<span style="color:{col};font-size:13px;font-weight:{wt};'
+                f'white-space:nowrap;">{abbr}</span>'
+            )
+
+        def _score(val, wins: bool) -> str:
+            col = t.TEXT if wins else t.TEXT_DIM2
+            wt  = "800"  if wins else "400"
+            s   = str(val) if val is not None else "—"
+            return (
+                f'<span style="color:{col};font-size:16px;font-weight:{wt};'
+                f'font-family:monospace;min-width:26px;text-align:right;'
+                f'display:inline-block;">{s}</span>'
+            )
+
+        rows.append(
+            f'<div style="display:flex;align-items:center;gap:10px;'
+            f'padding:9px 14px;{border_css}min-width:280px;">'
+            + f'<span style="background:{t.CARD_HI};color:{t.TEXT_DIM2};'
+              f'font-size:8.5px;font-weight:800;letter-spacing:.4px;'
+              f'padding:2px 6px;border-radius:{t.RADIUS_PILL};'
+              f'white-space:nowrap;flex-shrink:0;">FINAL</span>'
+            + _team(away_abbr, away_wins)
+            + _score(as_, away_wins)
+            + f'<span style="color:{t.TEXT_DIM2};font-size:11px;'
+              f'padding:0 2px;">at</span>'
+            + _team(home_abbr, home_wins)
+            + _score(hs, home_wins)
+            + "</div>"
+        )
+
+    return "".join(rows)
+
+
+def _section_games(backend) -> None:
+    """Upcoming Games + Final Scores — two sub-sections sharing a sport toggle.
+
+    A single @ui.refreshable wraps both so toggling [MLB | WNBA] re-renders
+    both sections atomically (one call to _render.refresh()).
+
+    Sport auto-selection mirrors the news section: defaults to MLB; switches
+    to WNBA only when WNBA has analysis results and MLB does not.
+    """
+    sport_state: dict = {"sport": "mlb"}
+    try:
+        wnba_ok = bool((backend._wnba_analysis_state or {}).get("results"))
+        mlb_ok  = bool((backend._analysis_state or {}).get("results"))
+        if wnba_ok and not mlb_ok:
+            sport_state["sport"] = "wnba"
+    except Exception:                                                     # noqa: BLE001
+        pass
+
+    @ui.refreshable
+    def _render() -> None:                                               # noqa: WPS430
+        sport    = sport_state["sport"]
+        data     = _get_today_games(backend, sport)
+        upcoming = data["upcoming"]
+        final    = data["final"]
+
+        with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+
+            # ── Upcoming header + sport toggle ─────────────────────────
+            with ui.row().classes("items-center w-full").style("gap: 8px;"):
+                ui.label("UPCOMING").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                ui.label(str(len(upcoming))).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 11px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+                ui.element("div").style("flex: 1; min-width: 4px;")
+                with ui.row().style("gap: 3px; flex-shrink: 0;"):
+                    for _sk, _sl in (("mlb", "MLB"), ("wnba", "WNBA")):
+                        _active = sport_state["sport"] == _sk
+
+                        def _mk_toggle(sk=_sk):
+                            def _toggle():
+                                sport_state["sport"] = sk
+                                _render.refresh()
+                            return _toggle
+
+                        ui.button(_sl, on_click=_mk_toggle()).props(
+                            "no-caps unelevated dense"
+                        ).style(
+                            f"background: {t.PRIMARY if _active else t.CARD_HI}; "
+                            f"color: {t.BG if _active else t.TEXT_DIM}; "
+                            f"font-size: 10.5px; font-weight: 700; "
+                            f"padding: 4px 10px; "
+                            f"border-radius: {t.RADIUS_PILL}; min-height: 0;"
+                        )
+
+            # ── Upcoming rows ───────────────────────────────────────────
+            if not upcoming:
+                ui.label("No upcoming games today.").style(
+                    f"color: {t.TEXT_DIM}; font-size: 12px; text-align: center; "
+                    f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+                    f"width: 100%;"
+                )
+            else:
+                ui.html(
+                    f'<div style="background:{t.CARD};border:1px solid {t.BORDER};'
+                    f'border-radius:{t.RADIUS_MD};overflow:hidden;'
+                    f'overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;">'
+                    + _upcoming_rows_html(upcoming)
+                    + "</div>"
+                )
+
+            # ── Final header ────────────────────────────────────────────
+            with ui.row().classes("items-center w-full").style(
+                f"gap: 8px; padding-top: {t.SPACE_SM};"
+            ):
+                ui.label("FINAL").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                ui.label(str(len(final))).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 11px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+
+            # ── Final rows ──────────────────────────────────────────────
+            if not final:
+                ui.label("No completed games yet.").style(
+                    f"color: {t.TEXT_DIM}; font-size: 12px; text-align: center; "
+                    f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+                    f"width: 100%;"
+                )
+            else:
+                ui.html(
+                    f'<div style="background:{t.CARD};border:1px solid {t.BORDER};'
+                    f'border-radius:{t.RADIUS_MD};overflow:hidden;'
+                    f'overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;">'
+                    + _final_rows_html(final)
+                    + "</div>"
+                )
+
+    _render()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
