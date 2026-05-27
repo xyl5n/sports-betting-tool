@@ -40,7 +40,101 @@ _PROPS_LOCAL_CSS = """
   @media (max-width: 480px) {
     .props-sort-pills { flex-wrap: wrap !important; }
   }
+  /* Swipe mode: suppress text selection while dragging */
+  .swipe-dragging, .swipe-dragging * {
+    user-select: none !important;
+    -webkit-user-select: none !important;
+  }
 </style>
+"""
+
+# ── Swipe gesture JS ─────────────────────────────────────────────────────────
+# Injected after each swipe-mode render via ui.run_javascript().
+# Uses a _swipeAttached flag on the wrapper element to avoid double-binding
+# when NiceGUI re-renders the refreshable (same DOM element, new render cycle).
+_SWIPE_JS = """
+(function initSwipeGesture() {
+  var wrapper = document.getElementById('swipe-card-wrapper');
+  if (!wrapper) { setTimeout(initSwipeGesture, 60); return; }
+  if (wrapper._swipeAttached) return;
+  wrapper._swipeAttached = true;
+
+  var startX = 0, dx = 0, dragging = false;
+  var THRESH = 80, MAX_ROT = 15;
+
+  wrapper.addEventListener('mousedown', onStart);
+  wrapper.addEventListener('touchstart', onStart, {passive: true});
+
+  function onStart(e) {
+    startX = e.touches ? e.touches[0].clientX : e.clientX;
+    dx = 0; dragging = true;
+    wrapper.style.transition = 'none';
+    document.body.classList.add('swipe-dragging');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onEnd);
+    document.addEventListener('touchmove', onMove, {passive: false});
+    document.addEventListener('touchend', onEnd);
+  }
+
+  function onMove(e) {
+    if (!dragging) return;
+    if (e.cancelable) e.preventDefault();
+    dx = (e.touches ? e.touches[0].clientX : e.clientX) - startX;
+    var rot  = Math.max(-MAX_ROT, Math.min(MAX_ROT, dx * 0.15));
+    var fade = Math.max(0.4, 1 - Math.abs(dx) / 250);
+    wrapper.style.transform = 'translateX(' + dx + 'px) rotate(' + rot + 'deg)';
+    wrapper.style.opacity   = fade;
+    var hint = document.getElementById('swipe-hint');
+    if (hint) {
+      if (dx > 40) {
+        hint.textContent  = '\\u2713';
+        hint.style.color   = '#22c55e';
+        hint.style.opacity = Math.min(0.85, (dx - 40) / 80);
+      } else if (dx < -40) {
+        hint.textContent  = '\\u2717';
+        hint.style.color   = '#ef4444';
+        hint.style.opacity = Math.min(0.85, (-dx - 40) / 80);
+      } else {
+        hint.style.opacity = '0';
+      }
+    }
+  }
+
+  function onEnd() {
+    if (!dragging) return;
+    dragging = false;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup',   onEnd);
+    document.removeEventListener('touchmove', onMove);
+    document.removeEventListener('touchend',  onEnd);
+    document.body.classList.remove('swipe-dragging');
+
+    wrapper.style.transition = 'transform 0.3s ease, opacity 0.3s ease';
+    var hint = document.getElementById('swipe-hint');
+    if (hint) hint.style.opacity = '0';
+
+    if (dx > THRESH) {
+      wrapper.style.transform = 'translateX(110vw) rotate(20deg)';
+      wrapper.style.opacity   = '0';
+      setTimeout(function() {
+        var btn = document.getElementById('swipe-right-trigger');
+        if (btn) btn.click();
+      }, 300);
+    } else if (dx < -THRESH) {
+      wrapper.style.transform = 'translateX(-110vw) rotate(-20deg)';
+      wrapper.style.opacity   = '0';
+      setTimeout(function() {
+        var btn = document.getElementById('swipe-left-trigger');
+        if (btn) btn.click();
+      }, 300);
+    } else {
+      /* Snap back */
+      wrapper.style.transform = '';
+      wrapper.style.opacity   = '1';
+    }
+    dx = 0;
+  }
+})();
 """
 
 
@@ -149,6 +243,10 @@ def _section_unified_props_list(backend) -> None:
     we render an empty-state message; we do NOT trigger a re-score
     from the page, which would block NiceGUI's event loop and drop
     the browser connection on slates with thousands of props.
+
+    Two view modes (toggled by the List | Swipe pill in the header row):
+      List  -- the existing game-grid layout (default).
+      Swipe -- one card at a time; drag right to Track, drag left to dismiss.
     """
     try:
         from src.props_scored_cache import load_scored_props
@@ -189,26 +287,19 @@ def _section_unified_props_list(backend) -> None:
         _dbg(f"breakdown queue launch failed: {exc}")
 
     with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
-        # Header row -- title + count + last refresh
-        with ui.row().classes("items-center w-full").style("gap: 8px;"):
-            ui.label("PICKS").style(
-                f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
-                f"color: {t.TEXT};"
-            )
-            count_chip = ui.label(f"{len(rows)} picks").style(
-                f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
-                f"font-size: 11px; font-weight: 700; "
-                f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
-            )
-            if cache.get("generated_at"):
-                ui.label(f"scored {_short_iso(cache['generated_at'])}").style(
-                    f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
-                    f"margin-left: auto; font-family: monospace;"
-                )
-
         if not rows:
+            # Static header (no mode toggle needed when there are no picks)
+            with ui.row().classes("items-center w-full").style("gap: 8px;"):
+                ui.label("PICKS").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                if cache.get("generated_at"):
+                    ui.label(f"scored {_short_iso(cache['generated_at'])}").style(
+                        f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                        f"margin-left: auto; font-family: monospace;"
+                    )
             if all_rows:
-                # Had picks today, but every game has already started.
                 _no_upcoming_message(
                     "No upcoming props",
                     "All of today's games have already started — check back tomorrow.",
@@ -217,25 +308,84 @@ def _section_unified_props_list(backend) -> None:
                 _empty_state_message()
             return
 
-        state = {"sort": "proj"}
-        filters = _default_filters()
+        state      = {"sort": "proj"}
+        filters    = _default_filters()
+        view_state = {"mode": "list"}
+        # dismissed: set of _prop_swipe_key() strings; survives filter / sort
+        # changes within the same page session (never serialised).
+        dismissed: set = set()
+        # X-Ray table sort state: persists across filter / sort changes.
+        xray_sort  = {"col": "conf", "asc": False}
 
-        # ── Card list (refreshable so sort + filters re-render in place) ──
+        # ── Card area (refreshable so sort, filters, and mode re-render) ──
         @ui.refreshable
         def cards_refresh() -> None:                                      # noqa: WPS430
             shown = [r for r in rows if _passes_filters(r, filters)]
             shown = _sorted_picks(shown, state)
-            # Keep the header count in sync with what's actually shown.
-            if _active_filter_count(filters):
-                count_chip.set_text(f"{len(shown)} of {len(rows)} picks")
-            else:
-                count_chip.set_text(f"{len(rows)} picks")
+
+            # Header row: title + count chip + timestamp + List|Swipe toggle
+            with ui.row().classes("items-center w-full").style(
+                "gap: 8px; flex-wrap: wrap;"
+            ):
+                ui.label("PICKS").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                n_str = (
+                    f"{len(shown)} of {len(rows)} picks"
+                    if _active_filter_count(filters)
+                    else f"{len(rows)} picks"
+                )
+                ui.label(n_str).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 11px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+                if cache.get("generated_at"):
+                    ui.label(f"scored {_short_iso(cache['generated_at'])}").style(
+                        f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                        f"font-family: monospace;"
+                    )
+                # Push the mode toggle to the far right
+                ui.element("div").style("flex: 1; min-width: 4px;")
+                # List | Swipe mode pills
+                with ui.row().style("gap: 3px; flex-shrink: 0;"):
+                    for _mkey, _mlabel in (("list", "≡ List"), ("swipe", "⇄ Swipe"), ("xray", "⊞ X-Ray")):
+                        _active = view_state["mode"] == _mkey
+                        def _mk_mode(mk=_mkey):
+                            def _set():
+                                view_state["mode"] = mk
+                                cards_refresh.refresh()
+                            return _set
+                        ui.button(_mlabel, on_click=_mk_mode()).props(
+                            "no-caps unelevated dense"
+                        ).style(
+                            f"background: {t.PRIMARY if _active else t.CARD_HI}; "
+                            f"color: {t.BG if _active else t.TEXT_DIM}; "
+                            f"font-size: 10.5px; font-weight: 700; letter-spacing: .2px; "
+                            f"padding: 4px 10px; border-radius: {t.RADIUS_PILL}; "
+                            f"min-height: 0;"
+                        )
+
             if not shown:
                 _no_match_message()
                 return
-            with ui.element("div").classes("game-grid w-full"):
-                for r in shown:
-                    _prop_card(r, backend)
+
+            if view_state["mode"] == "list":
+                with ui.element("div").classes("game-grid w-full"):
+                    for r_item in shown:
+                        _prop_card(r_item, backend)
+            elif view_state["mode"] == "swipe":
+                swipe_shown = [
+                    r_item for r_item in shown
+                    if _prop_swipe_key(r_item) not in dismissed
+                ]
+                _render_swipe_mode(
+                    swipe_shown, len(shown), backend, dismissed,
+                    cards_refresh.refresh,
+                )
+            else:
+                _render_xray_mode(shown, backend, xray_sort, cards_refresh.refresh)
 
         # ── Filter button + collapsible panel ─────────────────────────────
         _filter_bar(rows, filters, cards_refresh.refresh)
@@ -606,6 +756,424 @@ def _passes_filters(r: dict, f: dict) -> bool:
     return True
 
 
+def _prop_swipe_key(r: dict) -> str:
+    """Stable identity string used for the dismissed-set in swipe mode."""
+    return f"{r.get('player')}|{r.get('market')}|{r.get('line')}|{r.get('side')}"
+
+
+def _render_swipe_mode(
+    swipe_shown: list[dict],
+    total_shown: int,
+    backend,
+    dismissed: set,
+    on_refresh,
+) -> None:
+    """Swipe mode: one card at a time with drag-to-track / drag-to-dismiss.
+
+    Right swipe (or ✓ button) → Track via /api/props/track (same payload as
+    the list-mode Track button).
+    Left swipe  (or ✗ button) → Dismiss; adds prop key to session dismissed set.
+
+    Gesture threshold: 80 px in either direction.  While dragging the card
+    rotates ±15 ° and fades toward the swipe direction.  Releasing below the
+    threshold snaps the card back.
+
+    JS communication bridge: two hidden native <button> elements with IDs
+    'swipe-right-trigger' / 'swipe-left-trigger'.  The gesture JS calls
+    .click() on these after the fly-out animation (300 ms), which fires
+    NiceGUI's Python click handler.  Native <button> responds reliably to
+    programmatic .click() calls (Vue's @click listener is wired to the DOM
+    event, so dispatchEvent / .click() both work).
+    """
+    if not swipe_shown:
+        # ── Empty state ──────────────────────────────────────────────────
+        with ui.column().classes("w-full").style(
+            f"align-items: center; padding: {t.SPACE_XL} {t.SPACE_LG}; "
+            f"gap: {t.SPACE_MD};"
+        ):
+            ui.icon("done_all").style(f"font-size: 48px; color: {t.POS};")
+            ui.label("All caught up!").style(
+                f"font-size: 18px; font-weight: 800; color: {t.TEXT};"
+            )
+            ui.label("You've reviewed all props.").style(
+                f"font-size: 13px; color: {t.TEXT_DIM}; text-align: center;"
+            )
+        return
+
+    r         = swipe_shown[0]
+    reviewed  = total_shown - len(swipe_shown)
+    remaining = len(swipe_shown)
+
+    # ── Counter ──────────────────────────────────────────────────────────
+    ui.label(f"{reviewed} reviewed  ·  {remaining} remaining").style(
+        f"font-size: 11px; color: {t.TEXT_DIM2}; text-align: center; "
+        f"font-family: monospace; width: 100%; padding: 2px 0 4px;"
+    )
+
+    # ── Card + drag-direction hint ────────────────────────────────────────
+    # The outer div is `position: relative` so the absolute hint overlay
+    # is positioned relative to the card, not the viewport.
+    with ui.element("div").style(
+        "position: relative; width: 100%; max-width: 480px; margin: 0 auto;"
+    ):
+        # Translucent ✓ / ✗ label that fades in during drag (JS-controlled)
+        ui.element("div").props('id="swipe-hint"').style(
+            "position: absolute; top: 50%; left: 50%; z-index: 20; "
+            "transform: translate(-50%, -50%); pointer-events: none; "
+            "font-size: 72px; font-weight: 900; opacity: 0; "
+            "transition: opacity 0.08s linear;"
+        )
+        # Swipe target wrapper: the drag CSS transform is applied here
+        with ui.element("div").props('id="swipe-card-wrapper"').style(
+            "cursor: grab; touch-action: none; will-change: transform; "
+            "transform-origin: center 80%; "
+            "transition: transform 0.3s ease, opacity 0.3s ease;"
+        ):
+            _prop_card(r, backend)
+
+    # ── Track (right-swipe) action ────────────────────────────────────────
+    async def _track():
+        try:
+            payload = {
+                "player":          r.get("player", ""),
+                "market":          r.get("market", ""),
+                "line":            r.get("line"),
+                "side":            r.get("side", "Over"),
+                "odds":            r.get("best_odds"),
+                "confidence":      r.get("confidence"),
+                "predicted_value": r.get("predicted_value"),
+                "team":            r.get("team", ""),
+                "event_id":        r.get("event_id"),
+                "commence_time":   r.get("commence_time"),
+            }
+            ok, data, _ = await asyncio.to_thread(
+                _post_api, backend, "/api/props/track", payload
+            )
+            if ok:
+                _amt = data.get("amount")
+                _s   = (f" (${float(_amt):.2f})"
+                        if isinstance(_amt, (int, float)) else "")
+                ui.notify(
+                    f"Tracked: {r.get('player')} {r.get('side')} "
+                    f"{r.get('line')}{_s}",
+                    type="positive",
+                )
+            elif "already tracked" in (data.get("error") or "").lower():
+                ui.notify("Already tracked.", type="info")
+            else:
+                ui.notify(
+                    f"Track failed: {data.get('error') or 'unknown'}",
+                    type="negative",
+                )
+        except Exception as exc:                                          # noqa: BLE001
+            ui.notify(f"Track failed: {exc}", type="negative")
+        finally:
+            dismissed.add(_prop_swipe_key(r))
+            on_refresh()
+
+    # ── Dismiss (left-swipe) action ───────────────────────────────────────
+    def _dismiss():
+        dismissed.add(_prop_swipe_key(r))
+        on_refresh()
+
+    # Hidden native buttons — the gesture JS calls .click() on these after
+    # the card fly-out animation completes (300 ms delay in _SWIPE_JS).
+    ui.element("button").props('id="swipe-right-trigger"').style(
+        "position: absolute; width: 0; height: 0; opacity: 0; "
+        "overflow: hidden; border: none; padding: 0; pointer-events: none;"
+    ).on("click", _track)
+    ui.element("button").props('id="swipe-left-trigger"').style(
+        "position: absolute; width: 0; height: 0; opacity: 0; "
+        "overflow: hidden; border: none; padding: 0; pointer-events: none;"
+    ).on("click", _dismiss)
+
+    # ── Visible action buttons ────────────────────────────────────────────
+    with ui.row().classes("w-full").style(
+        f"justify-content: center; gap: {t.SPACE_XL}; "
+        f"padding: {t.SPACE_MD} 0 {t.SPACE_SM};"
+    ):
+        ui.button("✗", on_click=_dismiss).props("no-caps unelevated").style(
+            "background: rgba(239, 68, 68, 0.12); color: #ef4444; "
+            "border: 2px solid #ef4444; border-radius: 50%; "
+            "width: 60px; height: 60px; font-size: 24px; font-weight: 900; "
+            "min-height: 0; padding: 0;"
+        )
+        ui.button("✓", on_click=_track).props("no-caps unelevated").style(
+            "background: rgba(34, 197, 94, 0.12); color: #22c55e; "
+            "border: 2px solid #22c55e; border-radius: 50%; "
+            "width: 60px; height: 60px; font-size: 24px; font-weight: 900; "
+            "min-height: 0; padding: 0;"
+        )
+
+    # Attach the gesture listeners after NiceGUI has committed this render
+    # to the DOM.  The JS has a self-retry loop (setTimeout 60 ms) in case
+    # the element isn't in the DOM yet on the first tick.
+    ui.run_javascript(_SWIPE_JS)
+
+
+# ── X-Ray table ──────────────────────────────────────────────────────────────
+# Column spec tuples: (header_label, sort_key_or_None, right_align, flex_css)
+# flex_css is applied identically to both the sticky header cell and every
+# data cell so the columns stay pixel-perfect aligned.
+_XRAY_COLS: tuple = (
+    ("PLAYER", "player", False, "flex: 1 1 180px; min-width: 160px;"),
+    ("LINE",   "line",   True,  "flex: 0 0 80px;"),
+    ("ODDS",   "odds",   True,  "flex: 0 0 72px;"),
+    ("CONF",   "conf",   True,  "flex: 0 0 72px;"),
+    ("EV",     "ev",     True,  "flex: 0 0 90px;"),
+    ("L5",     "l5",     True,  "flex: 0 0 110px;"),
+    ("L10",    "l10",    True,  "flex: 0 0 110px;"),
+    ("SZN",    "szn",    True,  "flex: 0 0 72px;"),
+    ("TRACK",  None,     True,  "flex: 0 0 90px;"),
+)
+
+# Sum of fixed-column flex-basis values + PLAYER min-width + a bit of padding
+# headroom.  Drives min-width on every row so the table doesn't collapse
+# before the outer overflow-x: auto wrapper kicks in.
+_XRAY_MIN_W = "900px"
+
+
+def _xray_sort_rows(rows: list[dict], xs: dict) -> list[dict]:
+    """Sort *rows* for the X-Ray table.  xs = {col, asc}."""
+    col = xs.get("col") or "conf"
+    asc = xs.get("asc", False)
+
+    def _key(r):
+        s = r.get("summary") or {}
+        if col == "player":
+            return (r.get("player") or "").lower()
+        if col == "line":
+            try:
+                return float(r.get("line") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        if col == "odds":
+            try:
+                return int(r.get("best_odds") or -9999)
+            except (TypeError, ValueError):
+                return -9999
+        if col == "conf":
+            return float(r.get("confidence") or 0)
+        if col == "ev":
+            v = r.get("ev_pct")
+            try:
+                return float(v) if v is not None else float("-inf")
+            except (TypeError, ValueError):
+                return float("-inf")
+        if col == "l5":
+            return _window_hit_rate(r, "last_5")
+        if col == "l10":
+            return _window_hit_rate(r, "last_10")
+        if col == "szn":
+            v = s.get("season_avg")
+            try:
+                return float(v) if v is not None else -1.0
+            except (TypeError, ValueError):
+                return -1.0
+        return 0
+
+    return sorted(rows, key=_key, reverse=not asc)
+
+
+def _render_xray_mode(shown: list[dict], backend,
+                      xray_sort: dict, on_refresh) -> None:
+    """Condensed, sortable data table: one prop per row.
+
+    Uses a flexbox-based grid (not <table>) so NiceGUI's div wrappers
+    around child elements don't break table-cell alignment.  Column widths
+    are kept identical between the sticky header row and data rows via the
+    shared _XRAY_COLS flex specs.
+
+    Sort state is held in the caller's *xray_sort* dict (col, asc).
+    Clicking a header mutates the dict in-place and calls *on_refresh*
+    (= cards_refresh.refresh), which re-renders the whole cards area with
+    the new sort applied.  The dict survives re-renders because it lives in
+    the _section_unified_props_list closure.
+    """
+    sorted_rows = _xray_sort_rows(shown, xray_sort)
+    active_col  = xray_sort.get("col") or "conf"
+    is_asc      = xray_sort.get("asc", False)
+
+    # Shared vertical cell padding — identical for header and data rows.
+    _PAD = "0 12px"
+
+    def _mk_sort_fn(k: str):
+        def _do():
+            if xray_sort["col"] == k:
+                xray_sort["asc"] = not xray_sort["asc"]
+            else:
+                xray_sort["col"] = k
+                # player name → ascending; all numeric columns → descending
+                xray_sort["asc"] = (k == "player")
+            on_refresh()
+        return _do
+
+    with ui.element("div").style(
+        "overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; "
+        f"border-radius: {t.RADIUS_MD}; border: 1px solid {t.BORDER};"
+    ):
+        # ── Sticky header row ────────────────────────────────────────────
+        with ui.element("div").style(
+            f"display: flex; flex-direction: row; align-items: center; "
+            f"background: {t.CARD_HI}; border-bottom: 2px solid {t.BORDER}; "
+            f"position: sticky; top: 0; z-index: 10; "
+            f"min-width: {_XRAY_MIN_W};"
+        ):
+            for hdr, sort_key, right_align, flex in _XRAY_COLS:
+                is_active = bool(sort_key and active_col == sort_key)
+                arrow     = (" ▲" if is_asc else " ▼") if is_active else ""
+                justify   = "flex-end" if right_align else "flex-start"
+                hdr_cell  = ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: {justify}; padding: {_PAD}; height: 36px; "
+                    f"cursor: {'pointer' if sort_key else 'default'}; "
+                    f"user-select: none; white-space: nowrap; "
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .6px; "
+                    f"color: {t.TEXT if is_active else t.TEXT_DIM2};"
+                )
+                with hdr_cell:
+                    ui.label(hdr + arrow)
+                if sort_key:
+                    hdr_cell.on("click", _mk_sort_fn(sort_key))
+
+        # ── Data rows ────────────────────────────────────────────────────
+        for i, r in enumerate(sorted_rows):
+            row_bg  = t.CARD if i % 2 == 0 else "rgba(255,255,255,0.025)"
+            side    = (r.get("side") or "Over").strip().title()
+            is_over = side == "Over"
+            summary = r.get("summary") or {}
+
+            with ui.element("div").style(
+                f"display: flex; flex-direction: row; align-items: center; "
+                f"background: {row_bg}; min-width: {_XRAY_MIN_W}; height: 44px; "
+                f"border-bottom: 1px solid {t.BORDER_SOFT};"
+            ):
+                # PLAYER — avatar + linked name + market label
+                _, _, _, flex = _XRAY_COLS[0]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"padding: {_PAD}; gap: 8px; overflow: hidden;"
+                ):
+                    _card_avatar(r)
+                    with ui.column().style("gap: 0; min-width: 0; flex: 1 1 0;"):
+                        _slug = (r.get("player") or "").lower().replace(" ", "-")
+                        ui.link(
+                            r.get("player") or "—",
+                            f"/player/mlb/{_slug}",
+                        ).style(
+                            f"font-size: 12px; font-weight: 700; color: {t.TEXT}; "
+                            f"text-decoration: none; white-space: nowrap; "
+                            f"overflow: hidden; text-overflow: ellipsis; "
+                            f"display: block; max-width: 140px;"
+                        )
+                        ui.label(
+                            _short_market(r.get("market", "")).upper()
+                        ).style(
+                            f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
+                            f"color: {t.TEXT_DIM2};"
+                        )
+
+                # LINE — "O 5.5" / "U 2.5" coloured pill
+                _, _, _, flex = _XRAY_COLS[1]
+                chip_bg = t.POS if is_over else t.NEG
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label(
+                        f"{'O' if is_over else 'U'} {r.get('line', '—')}"
+                    ).style(
+                        f"background: {chip_bg}; color: {t.BG}; "
+                        f"font-size: 11px; font-weight: 800; letter-spacing: .3px; "
+                        f"padding: 2px 8px; border-radius: {t.RADIUS_SM}; "
+                        f"font-family: monospace; white-space: nowrap;"
+                    )
+
+                # ODDS
+                _, _, _, flex = _XRAY_COLS[2]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label(_odds_str(r.get("best_odds"))).style(
+                        f"font-size: 12px; font-weight: 700; "
+                        f"font-family: monospace; color: {t.TEXT_DIM};"
+                    )
+
+                # CONF — threshold-coloured percentage
+                _, _, _, flex = _XRAY_COLS[3]
+                conf     = float(r.get("confidence") or 0)
+                if conf >= 0.65:   conf_col = t.POS
+                elif conf >= 0.55: conf_col = t.WARN
+                else:              conf_col = t.TEXT_DIM
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label(f"{conf * 100:.0f}%").style(
+                        f"font-size: 13px; font-weight: 800; "
+                        f"font-family: monospace; color: {conf_col};"
+                    )
+
+                # EV — reuse _ev_badge(compact=True)
+                _, _, _, flex = _XRAY_COLS[4]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    _ev_badge(r.get("ev_pct"), compact=True)
+
+                # L5 + L10 — coloured pills via _hr_cell_bg
+                for w_idx, w_key in enumerate(("last_5", "last_10")):
+                    _, _, _, flex = _XRAY_COLS[5 + w_idx]
+                    hits  = int(summary.get(f"{w_key}_hits")  or 0)
+                    total = int(summary.get(f"{w_key}_games") or 0)
+                    with ui.element("div").style(
+                        f"{flex}; display: flex; align-items: center; "
+                        f"justify-content: center; padding: {_PAD};"
+                    ):
+                        if not total:
+                            ui.label("—").style(
+                                f"font-family: monospace; color: {t.TEXT_DIM2};"
+                            )
+                        else:
+                            pct              = hits / total
+                            cell_bg, colored = _hr_cell_bg(pct)
+                            lbl_txt          = f"{hits}/{total} · {int(round(pct * 100))}%"
+                            if colored:
+                                ui.label(lbl_txt).style(
+                                    f"background: {cell_bg}; color: #ffffff; "
+                                    f"font-size: 10.5px; font-weight: 800; "
+                                    f"padding: 2px 7px; border-radius: {t.RADIUS_PILL}; "
+                                    f"font-family: monospace; white-space: nowrap;"
+                                )
+                            else:
+                                ui.label(lbl_txt).style(
+                                    f"font-size: 10.5px; color: {t.TEXT}; "
+                                    f"font-family: monospace; white-space: nowrap;"
+                                )
+
+                # SZN — season average, neutral (no colour coding)
+                _, _, _, flex = _XRAY_COLS[7]
+                sa = summary.get("season_avg")
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label("—" if sa is None else f"{sa:.2f}").style(
+                        f"font-size: 12px; color: {t.TEXT_DIM}; "
+                        f"font-family: monospace;"
+                    )
+
+                # TRACK — reuse the existing Track button
+                _, _, _, flex = _XRAY_COLS[8]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: flex-end; padding: {_PAD};"
+                ):
+                    _track_btn(r, backend)
+
+
 def _prop_card(r: dict, backend) -> None:
     """One prop pick rendered as a card.
 
@@ -841,6 +1409,21 @@ def _card_line_type_chip(r: dict) -> None:
     )
 
 
+def _hr_cell_bg(pct: float) -> tuple[str, bool]:
+    """Return (cell_bg_color, is_colored) for a hit-rate fraction (0..1).
+
+    Used by _card_summary_chips (prop card) and _render_xray_mode (table)
+    so the colour thresholds live in exactly one place.
+    """
+    if pct >= 0.70:
+        return "#22c55e", True   # bright green
+    if pct >= 0.55:
+        return "#84cc16", True   # yellow-green
+    if pct >= 0.40:
+        return t.CARD_HI, False  # neutral — no colour block
+    return "#ef4444", True       # red
+
+
 def _card_summary_chips(r: dict) -> None:
     """5-cell grid below the pick row: SEASON avg + L5/L10/L20 + H2H hit
     rate vs the line.  Same shape as the player-page summary row so the
@@ -856,16 +1439,6 @@ def _card_summary_chips(r: dict) -> None:
     # cell_bg / is_colored control whether the cell gets a colored background
     # with white text (hit-rate cells) or stays neutral (SEASON avg).
     cells: list[tuple[str, str, str, str, bool]] = []
-
-    def _hr_cell_bg(pct: float) -> tuple[str, bool]:
-        """Return (cell_bg_color, is_colored) for a hit-rate percentage."""
-        if pct >= 0.70:
-            return "#22c55e", True   # bright green
-        if pct >= 0.55:
-            return "#84cc16", True   # yellow-green
-        if pct >= 0.40:
-            return t.CARD_HI, False  # neutral -- no color block
-        return "#ef4444", True       # red
 
     sa = summary.get("season_avg")
     cells.append((
