@@ -426,7 +426,7 @@ def _tab_pick(
         _render_gamelog_market_tabs(games, raw_games, is_pitcher)
         # Full category skeleton -- every market for the player type, all
         # "No line today" in this no-props state.
-        _render_prop_category_skeleton(today_props_all, is_pitcher)
+        _render_prop_category_skeleton(today_props_all, is_pitcher, info.get("name"))
         return
 
     # ── Per-market sub-tabs (green indicator, unchanged) ─────────────────
@@ -451,7 +451,7 @@ def _tab_pick(
 
     # Full category skeleton: EVERY prop market for the player type, with the
     # current line + confidence where a line exists, else "No line today".
-    _render_prop_category_skeleton(today_props_all, is_pitcher)
+    _render_prop_category_skeleton(today_props_all, is_pitcher, info.get("name"))
 
 
 # ── No-props gamelog market tabs (chart-only, no prop line) ─────────────────
@@ -527,18 +527,50 @@ def _empty_state_message_noinfo(raw_games: list[dict], is_pitcher: bool) -> None
     )
 
 
+_BOOK_LABELS = {
+    "fanduel": "FanDuel", "draftkings": "DraftKings", "betmgm": "BetMGM",
+    "caesars": "Caesars", "williamhill_us": "Caesars", "betrivers": "BetRivers",
+    "pointsbetus": "PointsBet", "espnbet": "ESPN BET", "fanatics": "Fanatics",
+    "betonlineag": "BetOnline", "bovada": "Bovada", "lowvig": "LowVig",
+    "mybookieag": "MyBookie", "ballybet": "Bally Bet",
+}
+
+
+def _book_label(book: Optional[str]) -> str:
+    if not book:
+        return ""
+    return _BOOK_LABELS.get(book.lower()) or book.replace("_", " ").title()
+
+
 def _render_prop_category_skeleton(
     today_props_all: list[dict], is_pitcher: bool,
+    player_name: Optional[str] = None,
 ) -> None:
-    """Fixed skeleton of EVERY prop category for the player type.  Categories
-    with an active line today show the current line + model confidence;
-    categories without one show a muted 'No line today'."""
+    """Fixed skeleton of EVERY prop category for the player type.
+
+    Source of truth is the RAW props cache (every book line, regardless of
+    scoring), so a market shows a line whenever any book posted one -- not
+    only when it cleared the confidence + edge threshold.  Where a SCORED
+    pick also exists, its model confidence % is overlaid (and its exact
+    side/line used).  Markets with no book line at all show 'No line today'.
+    """
     cats = _PITCHER_PROP_CATEGORIES if is_pitcher else _BATTER_PROP_CATEGORIES
-    by_market: dict = {}
+
+    # Scored picks (confidence + the model's recommended side/line).
+    scored_by_market: dict = {}
     for p in (today_props_all or []):
         m = p.get("market")
-        if m and m not in by_market:
-            by_market[m] = p
+        if m and m not in scored_by_market:
+            scored_by_market[m] = p
+
+    # Raw book lines (all markets, unfiltered by scoring).
+    raw_by_market: dict = {}
+    if player_name:
+        try:
+            from src.player_profile_client import get_today_raw_lines_for_player
+            raw_by_market = get_today_raw_lines_for_player(player_name) or {}
+        except Exception:                                                 # noqa: BLE001
+            raw_by_market = {}
 
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
@@ -550,7 +582,8 @@ def _render_prop_category_skeleton(
             f"color: {t.PRIMARY_HI}; margin-bottom: 6px;"
         )
         for label, market in cats:
-            p = by_market.get(market)
+            scored = scored_by_market.get(market)
+            raw    = raw_by_market.get(market)
             with ui.row().classes("items-center w-full").style(
                 f"gap: 10px; padding: 7px 0; "
                 f"border-bottom: 1px solid {t.BORDER_SOFT};"
@@ -560,27 +593,51 @@ def _render_prop_category_skeleton(
                     f"color: {t.TEXT}; white-space: nowrap; overflow: hidden; "
                     f"text-overflow: ellipsis;"
                 )
-                if p is not None:
-                    side = (p.get("side") or "Over").strip().upper()
-                    line = p.get("line")
+                if scored is not None:
+                    # Scored pick: show the model's recommended side + line,
+                    # the source book, and the confidence %.
+                    side = (scored.get("side") or "Over").strip().upper()
+                    line = scored.get("line")
+                    book = _book_label(scored.get("best_book")
+                                       or (raw or {}).get("best_book"))
                     try:
-                        conf_s = f"{int(round(float(p.get('confidence') or 0.0) * 100))}%"
+                        conf_s = f"{int(round(float(scored.get('confidence') or 0.0) * 100))}%"
                     except (TypeError, ValueError):
                         conf_s = "—"
-                    ui.label(f"{side} {line}").style(
-                        f"font-size: 12.5px; font-weight: 800; color: {t.TEXT}; "
-                        f"font-family: monospace; flex-shrink: 0;"
-                    )
+                    _line_cell(f"{side} {line}")
+                    _book_cell(book)
                     ui.label(conf_s).style(
                         f"font-size: 11.5px; font-weight: 700; color: {t.POS}; "
                         f"font-family: monospace; flex-shrink: 0; min-width: 42px; "
                         f"text-align: right;"
                     )
+                elif raw is not None:
+                    # Raw book line only (no scored pick): show the main line
+                    # side-neutral + the best book, no confidence.
+                    _line_cell(f"O/U {raw.get('line')}")
+                    _book_cell(_book_label(raw.get("best_book")))
+                    ui.label("").style("flex-shrink: 0; min-width: 42px;")
                 else:
                     ui.label("No line today").style(
                         f"font-size: 11.5px; font-weight: 600; color: {t.TEXT_DIM2}; "
                         f"font-style: italic; flex-shrink: 0;"
                     )
+
+
+def _line_cell(text: str) -> None:
+    ui.label(text).style(
+        f"font-size: 12.5px; font-weight: 800; color: {t.TEXT}; "
+        f"font-family: monospace; flex-shrink: 0;"
+    )
+
+
+def _book_cell(book: str) -> None:
+    if not book:
+        return
+    ui.label(book).style(
+        f"font-size: 11px; font-weight: 600; color: {t.TEXT_DIM2}; "
+        f"flex-shrink: 0; white-space: nowrap;"
+    )
 
 
 def _render_header_track(backend, info: dict, prop: dict) -> None:
