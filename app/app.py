@@ -10747,6 +10747,54 @@ def _model_pick_stat_lookup(player: str, market: str):
     except Exception:                                                      # noqa: BLE001
         return None
 
+def _fetch_mlb_statsapi_scores(game_ids: list[str]) -> dict:
+    """Fetch final scores for a list of MLB game PKs from the free
+    statsapi.mlb.com endpoint.  No API key required, no day-limit.
+    Returns {game_id: {home_team, away_team, home_score, away_score}}."""
+    import urllib.request as _ur
+    import json as _json
+    out: dict = {}
+    for gid in game_ids:
+        try:
+            url = f"https://statsapi.mlb.com/api/v1/game/{gid}/linescore"
+            with _ur.urlopen(url, timeout=5) as r:
+                data = _json.loads(r.read())
+            teams = data.get("teams") or {}
+            hs = (teams.get("home") or {}).get("runs")
+            as_ = (teams.get("away") or {}).get("runs")
+            if hs is None or as_ is None:
+                continue
+            url2 = f"https://statsapi.mlb.com/api/v1/game/{gid}/boxscore"
+            with _ur.urlopen(url2, timeout=5) as r2:
+                box = _json.loads(r2.read())
+            bt = box.get("teams") or {}
+            ht_name = ((bt.get("home") or {}).get("team") or {}).get("name") or ""
+            at_name = ((bt.get("away") or {}).get("team") or {}).get("name") or ""
+            url3 = (
+                f"https://statsapi.mlb.com/api/v1/game/{gid}/feed/live"
+                f"?fields=gameData,status,abstractGameState"
+            )
+            with _ur.urlopen(url3, timeout=5) as r3:
+                feed = _json.loads(r3.read())
+            state = (
+                ((feed.get("gameData") or {}).get("status") or {})
+                .get("abstractGameState") or ""
+            )
+            if state != "Final":
+                continue
+            out[str(gid)] = {
+                "home_team":  ht_name,
+                "away_team":  at_name,
+                "home_score": int(hs),
+                "away_score": int(as_),
+            }
+        except Exception as _sx:
+            _eprint(
+                f"STATSAPI: game {gid} fetch failed: "
+                f"{type(_sx).__name__}: {_sx}"
+            )
+    return out
+
 
 def _final_scores_from(scores_by_sport: dict) -> dict:
     """Build {game_id: {home_team, away_team, home_score, away_score}} from
@@ -10808,7 +10856,7 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
 
     settled: list = []
 
-    # ── Fetch scores ONCE per sport for this pass ──────────────────────────────
+       # ── Fetch scores ONCE per sport for this pass ──────────────────────────────
     # The same score rows feed ledger settlement AND the bulk tracker grader
     # below; fetching here (and passing the result down) guarantees a single
     # Odds API scores call per sport per cycle instead of one per consumer.
@@ -10823,6 +10871,60 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
             _eprint(f"AUTO-SETTLE: get_scores({_sk}) failed: "
                     f"{type(_sx).__name__}: {_sx}")
             scores_by_sport[_sk] = []
+
+    # -- Augment with free MLB Stats API for picks older than 3 days ----------
+    # The Odds API scores endpoint only returns 3 days back (hard cap on all
+    # plans).  Any pending model_picks with game_ids outside that window will
+    # never settle via Odds API alone.  statsapi.mlb.com has no day limit and
+    # requires no key -- use it to backfill any game_ids not already covered.
+    if force:
+        try:
+            from src import db as _db
+            _pending = _db.supabase_client().table("model_picks") \
+                .select("game_id") \
+                .eq("status", "pending") \
+                .eq("sport", "mlb") \
+                .execute()
+            _covered = {
+                str(r.get("id")) for r in
+                scores_by_sport.get("baseball_mlb", [])
+            }
+            _stale_ids = list({
+                str(r["game_id"]) for r in (_pending.data or [])
+                if r.get("game_id") and str(r["game_id"]) not in _covered
+            })
+            if _stale_ids:
+                _eprint(
+                    f"STATSAPI: fetching {len(_stale_ids)} stale game(s) "
+                    f"not in Odds API window"
+                )
+                _statsapi_scores = _fetch_mlb_statsapi_scores(_stale_ids)
+                _eprint(
+                    f"STATSAPI: resolved {len(_statsapi_scores)}"
+                    f"/{len(_stale_ids)} games"
+                )
+                _synthetic = []
+                for _gid, _sc in _statsapi_scores.items():
+                    _synthetic.append({
+                        "id":        _gid,
+                        "completed": True,
+                        "home_team": _sc["home_team"],
+                        "away_team": _sc["away_team"],
+                        "scores": [
+                            {"name": _sc["home_team"],
+                             "score": str(_sc["home_score"])},
+                            {"name": _sc["away_team"],
+                             "score": str(_sc["away_score"])},
+                        ],
+                    })
+                scores_by_sport["baseball_mlb"] = (
+                    scores_by_sport.get("baseball_mlb", []) + _synthetic
+                )
+        except Exception as _sax:
+            _eprint(
+                f"STATSAPI augment failed: {type(_sax).__name__}: {_sax}"
+            )
+
 
     # ── Open both ledgers up front so we can log bankroll before/after ─────────
     def _open_ledger(_path):
