@@ -136,10 +136,25 @@ if __name__ in {"__main__", "__mp_main__"}:
         # app._run_analysis_worker) so even longer drops are fine; this
         # is the safety-net mentioned in PR #49.
         reconnect_timeout=300,
-        # NOTE: ping_interval=30 was removed -- the installed NiceGUI
-        # version does not expose it as a ui.run() kwarg and the import
-        # crashed boot with TypeError: Config.__init__() got an
-        # unexpected keyword argument 'ping_interval'.
+        # WebSocket keep-alive through Railway's edge proxy.  `ping_interval`
+        # is NOT a ui.run() kwarg in this NiceGUI version (it raised TypeError
+        # at boot -- see history below), but ui.run forwards unknown kwargs
+        # straight to uvicorn, so we set uvicorn's own websocket ping knobs:
+        #   ws_ping_interval=20 -> a PING frame every 20s keeps the socket from
+        #                          looking idle, so Railway's proxy won't drop
+        #                          it during quiet periods.
+        #   ws_ping_timeout=60  -> tolerate up to 60s of proxy latency before
+        #                          declaring the socket dead.  uvicorn's 20s
+        #                          default closes too eagerly behind Railway's
+        #                          proxy, which surfaced as the persistent
+        #                          "Connection lost. Trying to reconnect..."
+        #                          banner.  Browsers auto-reply to WS PING with
+        #                          PONG, so this needs no client-side code.
+        # (Historic note: a bare `ping_interval=30` ui.run kwarg crashed boot
+        #  with "Config.__init__() got an unexpected keyword argument
+        #  'ping_interval'"; the ws_ping_* names below are the supported ones.)
+        ws_ping_interval=20,
+        ws_ping_timeout=60,
         # Disable uvicorn's default color formatter -- Railway's logger
         # wrapper trips its dictConfig() with "Unable to configure
         # formatter 'default'" because the formatter probes isatty().
