@@ -465,6 +465,30 @@ def score_today_props() -> dict:
             r["player_id"] = search_player_by_name(r["player"])
         except Exception:                                                 # noqa: BLE001
             r["player_id"] = None
+        # ── Per-window ROI: back-fill l5/l10/l20/szn_roi onto the summary ──
+        # Uses the same EV formula as calc_ev_pct but with the historical
+        # hit rate instead of the model confidence, giving a realistic
+        # "what would I have made per unit in this window?" answer.
+        # best_odds is already set on the pick before enrichment runs.
+        try:
+            from src.props_ev import calc_ev_pct as _cev
+            _s    = r.get("summary") or {}
+            _odds = r.get("best_odds")
+            for _hk, _gk, _rk in (
+                ("last_5_hits",  "last_5_games",  "l5_roi"),
+                ("last_10_hits", "last_10_games", "l10_roi"),
+                ("last_20_hits", "last_20_games", "l20_roi"),
+                ("season_hits",  "season_games",  "szn_roi"),
+            ):
+                _h = int(_s.get(_hk) or 0)
+                _g = int(_s.get(_gk) or 0)
+                if _g and _odds is not None:
+                    _roi = _cev(_h / _g, _odds)
+                    if _roi is not None:
+                        _s[_rk] = round(_roi, 1)
+        except Exception:                                                 # noqa: BLE001
+            pass
+
         # Drop the raw-prop reference so the persisted payload stays
         # small and JSON-clean (the raw dict can carry deeply nested
         # bookmaker arrays that bloat the cache row).

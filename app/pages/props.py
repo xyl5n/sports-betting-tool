@@ -1123,14 +1123,17 @@ def _render_xray_mode(shown: list[dict], backend,
                 ):
                     _ev_badge(r.get("ev_pct"), compact=True)
 
-                # L5 + L10 — coloured pills via _hr_cell_bg
+                # L5 + L10 — coloured pills + ROI sub-text via _hr_cell_bg
+                _XRAY_WIN_ROI = {"last_5": "l5_roi", "last_10": "l10_roi"}
                 for w_idx, w_key in enumerate(("last_5", "last_10")):
                     _, _, _, flex = _XRAY_COLS[5 + w_idx]
                     hits  = int(summary.get(f"{w_key}_hits")  or 0)
                     total = int(summary.get(f"{w_key}_games") or 0)
+                    roi_s = _roi_str(summary.get(_XRAY_WIN_ROI[w_key]))
                     with ui.element("div").style(
-                        f"{flex}; display: flex; align-items: center; "
-                        f"justify-content: center; padding: {_PAD};"
+                        f"{flex}; display: flex; flex-direction: column; "
+                        f"align-items: center; justify-content: center; "
+                        f"padding: {_PAD}; gap: 1px;"
                     ):
                         if not total:
                             ui.label("—").style(
@@ -1152,18 +1155,38 @@ def _render_xray_mode(shown: list[dict], backend,
                                     f"font-size: 10.5px; color: {t.TEXT}; "
                                     f"font-family: monospace; white-space: nowrap;"
                                 )
+                            if roi_s:
+                                try:
+                                    roi_col = t.POS if float(roi_s.rstrip("%")) > 0 else t.NEG
+                                except (ValueError, AttributeError):
+                                    roi_col = t.TEXT_DIM2
+                                ui.label(roi_s).style(
+                                    f"font-size: 8px; font-weight: 800; color: {roi_col}; "
+                                    f"font-family: monospace; letter-spacing: .2px;"
+                                )
 
-                # SZN — season average, neutral (no colour coding)
+                # SZN — season average, neutral background; ROI sub-text in green/red
                 _, _, _, flex = _XRAY_COLS[7]
-                sa = summary.get("season_avg")
+                sa    = summary.get("season_avg")
+                szn_r = _roi_str(summary.get("szn_roi"))
                 with ui.element("div").style(
-                    f"{flex}; display: flex; align-items: center; "
-                    f"justify-content: center; padding: {_PAD};"
+                    f"{flex}; display: flex; flex-direction: column; "
+                    f"align-items: center; justify-content: center; "
+                    f"padding: {_PAD}; gap: 1px;"
                 ):
                     ui.label("—" if sa is None else f"{sa:.2f}").style(
                         f"font-size: 12px; color: {t.TEXT_DIM}; "
                         f"font-family: monospace;"
                     )
+                    if szn_r:
+                        try:
+                            szn_roi_col = t.POS if float(szn_r.rstrip("%")) > 0 else t.NEG
+                        except (ValueError, AttributeError):
+                            szn_roi_col = t.TEXT_DIM2
+                        ui.label(szn_r).style(
+                            f"font-size: 8px; font-weight: 800; color: {szn_roi_col}; "
+                            f"font-family: monospace; letter-spacing: .2px;"
+                        )
 
                 # TRACK — reuse the existing Track button
                 _, _, _, flex = _XRAY_COLS[8]
@@ -1435,10 +1458,14 @@ def _card_summary_chips(r: dict) -> None:
     except (TypeError, ValueError):
         line_f = None
 
-    # (label, value, sub, cell_bg, is_colored)
+    # (label, value, sub, cell_bg, is_colored, roi_str)
     # cell_bg / is_colored control whether the cell gets a colored background
     # with white text (hit-rate cells) or stays neutral (SEASON avg).
-    cells: list[tuple[str, str, str, str, bool]] = []
+    # roi_str is a pre-formatted "+14.2%" / "-3.1%" or None when unavailable.
+    cells: list[tuple[str, str, str, str, bool, str | None]] = []
+
+    # Window key → ROI summary key
+    _WIN_ROI = {"last_5": "l5_roi", "last_10": "l10_roi", "last_20": "l20_roi"}
 
     sa = summary.get("season_avg")
     cells.append((
@@ -1446,6 +1473,7 @@ def _card_summary_chips(r: dict) -> None:
         "—" if sa is None else f"{sa:.2f}",
         f"avg/{summary.get('season_games') or 0}g",
         t.CARD_HI, False,            # SEASON is an avg, never color-coded
+        _roi_str(summary.get("szn_roi")),
     ))
     for w_key, w_label in (
         ("last_5",  "L5"),
@@ -1455,7 +1483,7 @@ def _card_summary_chips(r: dict) -> None:
         hits  = summary.get(f"{w_key}_hits") or 0
         total = summary.get(f"{w_key}_games") or 0
         if not total:
-            cells.append((w_label, "—", "n/a", t.CARD_HI, False))
+            cells.append((w_label, "—", "n/a", t.CARD_HI, False, None))
             continue
         pct = hits / total
         bg, colored = _hr_cell_bg(pct)
@@ -1463,18 +1491,19 @@ def _card_summary_chips(r: dict) -> None:
             w_label, f"{hits}/{total}",
             f"{int(round(pct * 100))}%",
             bg, colored,
+            _roi_str(summary.get(_WIN_ROI[w_key])),
         ))
     h2h_hits  = summary.get("h2h_hits") or 0
     h2h_total = summary.get("h2h_games") or 0
     if not h2h_total:
-        cells.append(("H2H", "—", "n/a", t.CARD_HI, False))
+        cells.append(("H2H", "—", "n/a", t.CARD_HI, False, None))
     else:
         pct = h2h_hits / h2h_total
         bg, colored = _hr_cell_bg(pct)
         cells.append((
             "H2H", f"{h2h_hits}/{h2h_total}",
             f"{int(round(pct * 100))}%",
-            bg, colored,
+            bg, colored, None,           # H2H ROI not in spec
         ))
 
     side_suffix = (
@@ -1490,7 +1519,7 @@ def _card_summary_chips(r: dict) -> None:
             "display: grid; grid-template-columns: repeat(auto-fit, minmax(60px, 1fr)); "
             "gap: 4px; width: 100%;"
         ):
-            for label, value, sub, cell_bg, is_colored in cells:
+            for label, value, sub, cell_bg, is_colored, roi_str in cells:
                 lbl_color = "rgba(255,255,255,0.75)" if is_colored else t.TEXT_DIM2
                 val_color = "#ffffff"                 if is_colored else t.TEXT
                 sub_color = "rgba(255,255,255,0.80)" if is_colored else t.TEXT_DIM2
@@ -1512,6 +1541,21 @@ def _card_summary_chips(r: dict) -> None:
                         ui.label(sub).style(
                             f"font-size: 8.5px; color: {sub_color}; "
                             f"font-family: monospace;"
+                        )
+                    if roi_str:
+                        # On a coloured cell bg (green/red) use translucent
+                        # white so the ROI is legible.  On neutral (SEASON)
+                        # use the standard green/red colour as the spec asks.
+                        if is_colored:
+                            roi_col = "rgba(255,255,255,0.85)"
+                        else:
+                            try:
+                                roi_col = t.POS if float(roi_str.rstrip("%")) > 0 else t.NEG
+                            except (ValueError, AttributeError):
+                                roi_col = t.TEXT_DIM2
+                        ui.label(roi_str).style(
+                            f"font-size: 8px; font-weight: 800; color: {roi_col}; "
+                            f"font-family: monospace; letter-spacing: .2px;"
                         )
 
 
@@ -1655,6 +1699,16 @@ def _short_market(market: str) -> str:
         "batter_stolen_bases":  "Stolen Bases",
     }
     return mapping.get(market, market.replace("_", " ").title())
+
+
+def _roi_str(roi) -> str | None:
+    """Format a ROI% value as '+14.2%' / '-3.1%', or None when absent."""
+    if roi is None:
+        return None
+    try:
+        return f"{float(roi):+.1f}%"
+    except (TypeError, ValueError):
+        return None
 
 
 def _odds_str(o) -> str:
