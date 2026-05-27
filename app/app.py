@@ -10747,52 +10747,156 @@ def _model_pick_stat_lookup(player: str, market: str):
     except Exception:                                                      # noqa: BLE001
         return None
 
-def _fetch_mlb_statsapi_scores(game_ids: list[str]) -> dict:
-    """Fetch final scores for a list of MLB game PKs from the free
-    statsapi.mlb.com endpoint.  No API key required, no day-limit.
-    Returns {game_id: {home_team, away_team, home_score, away_score}}."""
-    import urllib.request as _ur
-    import json as _json
+_STATSAPI_BRIDGE_CACHE: dict = {}     # et_date_iso -> (ts, {norm_team: game_info})
+_STATSAPI_BRIDGE_TTL = 3600.0         # 1 hour -- avoids re-fetching a date's
+                                      # schedule on repeated Force Settlement.
+
+
+def _statsapi_norm_team(name) -> str:
+    """Lowercase + strip non-alphanumerics so Odds API and statsapi team
+    names land on the same key ('LA Dodgers' == 'Los Angeles Dodgers')."""
+    if not name:
+        return ""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def _statsapi_pick_et_date(iso):
+    """ET calendar date (YYYY-MM-DD) for a model_picks created_at timestamp
+    (stored UTC) -- the game is the ET day the pick was logged.  None on
+    parse failure."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone(timedelta(hours=-4))).date().isoformat()
+    except Exception:                                                     # noqa: BLE001
+        return None
+
+
+def _statsapi_date_window(base_iso):
+    """[base-1, base, base+1] ET date strings, tolerating UTC/ET rollover and
+    games logged the morning before a late start."""
+    try:
+        from datetime import date as _date
+        b = _date.fromisoformat(base_iso)
+        return [(b + timedelta(days=o)).isoformat() for o in (0, -1, 1)]
+    except Exception:                                                     # noqa: BLE001
+        return [base_iso]
+
+
+def _statsapi_schedule_index(date_iso: str) -> dict:
+    """Final MLB games for one ET date from the free statsapi.mlb.com schedule
+    (hydrate=linescore), indexed by normalised team name ->
+    {home_team, away_team, home_score, away_score, gamePk}.  Cached 1h.
+    No API key, no day-window limit."""
+    now = time.time()
+    hit = _STATSAPI_BRIDGE_CACHE.get(date_iso)
+    if hit and (now - hit[0]) < _STATSAPI_BRIDGE_TTL:
+        return hit[1]
+    idx: dict = {}
+    url = (f"{_MLB_STATS_BASE}/schedule?sportId=1&date={date_iso}"
+           f"&hydrate=linescore")
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "sports-betting-ai/1.0"})
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"SETTLE-STATSAPI: schedule fetch failed for {date_iso}: "
+                f"{type(exc).__name__}: {exc}")
+        _STATSAPI_BRIDGE_CACHE[date_iso] = (now, {})
+        return {}
+    for d in (data.get("dates") or []):
+        for g in (d.get("games") or []):
+            if ((g.get("status") or {}).get("abstractGameState")) != "Final":
+                continue
+            teams = g.get("teams") or {}
+            home, away = teams.get("home") or {}, teams.get("away") or {}
+            ht = (home.get("team") or {}).get("name")
+            at = (away.get("team") or {}).get("name")
+            hs, as_ = home.get("score"), away.get("score")
+            if ht is None or at is None or hs is None or as_ is None:
+                continue
+            info = {"home_team": ht, "away_team": at,
+                    "home_score": int(hs), "away_score": int(as_),
+                    "gamePk": g.get("gamePk")}
+            idx[_statsapi_norm_team(ht)] = info
+            idx[_statsapi_norm_team(at)] = info
+    _STATSAPI_BRIDGE_CACHE[date_iso] = (now, idx)
+    return idx
+
+
+def _fetch_mlb_statsapi_scores(game_picks: list) -> dict:
+    """Resolve final scores for stale GAME model_picks rows from the free
+    statsapi.mlb.com schedule -- the fallback for picks whose game is older
+    than the Odds API /scores 3-day window.
+
+    model_picks stores ``game_id`` = the Odds API event id (32-char hex), which
+    statsapi does NOT understand (it keys games by a 6-digit gamePk), so a bare
+    id cannot be turned into a gamePk.  We bridge via the data the pick row DOES
+    carry: the picked TEAM (``pick_side``) plus the ET day it was logged
+    (``created_at``).  That date's statsapi schedule yields the gamePk, both
+    team names and the final score; we match the pick's team and return the
+    score keyed by the ORIGINAL Odds API ``game_id`` so settle()'s
+    ``final_scores.get(pick["game_id"])`` lookup hits.
+
+    *game_picks* must be GAME rows (no ``player_name``) -- props are graded via
+    the stat lookup, not scores, so the caller filters them out.  Returns
+    ``{odds_api_game_id: {home_team, away_team, home_score, away_score}}`` with
+    team names taken from the picks' own ``pick_side`` strings where they map,
+    so _grade_game's exact-name comparison succeeds.
+    """
+    # Group rows by Odds API game_id; gather the (Odds API) team names the
+    # picks used + a representative logged date.
+    by_gid: dict = {}
+    for pick in (game_picks or []):
+        gid = str(pick.get("game_id") or "").strip()
+        if not gid:
+            continue
+        grp = by_gid.setdefault(gid, {"teams": set(), "date": None})
+        side = (pick.get("pick_side") or "").strip()
+        if side and side.upper() not in ("OVER", "UNDER"):  # ml/rl carry a team
+            grp["teams"].add(side)
+        if grp["date"] is None:
+            grp["date"] = _statsapi_pick_et_date(pick.get("created_at"))
+
     out: dict = {}
-    for gid in game_ids:
-        try:
-            url = f"https://statsapi.mlb.com/api/v1/game/{gid}/linescore"
-            with _ur.urlopen(url, timeout=5) as r:
-                data = _json.loads(r.read())
-            teams = data.get("teams") or {}
-            hs = (teams.get("home") or {}).get("runs")
-            as_ = (teams.get("away") or {}).get("runs")
-            if hs is None or as_ is None:
-                continue
-            url2 = f"https://statsapi.mlb.com/api/v1/game/{gid}/boxscore"
-            with _ur.urlopen(url2, timeout=5) as r2:
-                box = _json.loads(r2.read())
-            bt = box.get("teams") or {}
-            ht_name = ((bt.get("home") or {}).get("team") or {}).get("name") or ""
-            at_name = ((bt.get("away") or {}).get("team") or {}).get("name") or ""
-            url3 = (
-                f"https://statsapi.mlb.com/api/v1/game/{gid}/feed/live"
-                f"?fields=gameData,status,abstractGameState"
-            )
-            with _ur.urlopen(url3, timeout=5) as r3:
-                feed = _json.loads(r3.read())
-            state = (
-                ((feed.get("gameData") or {}).get("status") or {})
-                .get("abstractGameState") or ""
-            )
-            if state != "Final":
-                continue
-            out[str(gid)] = {
-                "home_team":  ht_name,
-                "away_team":  at_name,
-                "home_score": int(hs),
-                "away_score": int(as_),
-            }
-        except Exception as _sx:
-            _eprint(
-                f"STATSAPI: game {gid} fetch failed: "
-                f"{type(_sx).__name__}: {_sx}"
-            )
+    for gid, grp in by_gid.items():
+        teams, base_date = grp["teams"], grp["date"]
+        if not teams or not base_date:
+            continue                          # totals-only group / no date -> skip
+        info = match_team = None
+        for date_iso in _statsapi_date_window(base_date):
+            idx = _statsapi_schedule_index(date_iso)
+            for tm in teams:
+                hit = idx.get(_statsapi_norm_team(tm))
+                if hit:
+                    info, match_team = hit, tm
+                    break
+            if info:
+                break
+        if not info:
+            continue
+        # Use the picks' own (Odds API) team strings where they map back to the
+        # statsapi game, so _grade_game's `side == ht/at` succeeds; fall back to
+        # the statsapi names for the side the picks never referenced.
+        norm_to_pick = {_statsapi_norm_team(tm): tm for tm in teams}
+        home_name = norm_to_pick.get(_statsapi_norm_team(info["home_team"]),
+                                     info["home_team"])
+        away_name = norm_to_pick.get(_statsapi_norm_team(info["away_team"]),
+                                     info["away_team"])
+        out[gid] = {
+            "home_team":  home_name,
+            "away_team":  away_name,
+            "home_score": info["home_score"],
+            "away_score": info["away_score"],
+        }
+        _eprint(
+            f"SETTLE-STATSAPI: resolved game_id={gid} via team={match_team!r} "
+            f"date={base_date} -> gamePk={info.get('gamePk')} "
+            f"{away_name} {info['away_score']} @ {home_name} {info['home_score']}"
+        )
     return out
 
 
@@ -10872,58 +10976,52 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
                     f"{type(_sx).__name__}: {_sx}")
             scores_by_sport[_sk] = []
 
-    # -- Augment with free MLB Stats API for picks older than 3 days ----------
-if force:
-    try:
-        from src import db as _db
-        _pending_rows = _db.model_picks_list(sport="mlb", status="pending")
-        _covered = {
-            str(r.get("game_id")) for r in
-            scores_by_sport.get("baseball_mlb", [])
-            if r.get("game_id")
-        }
-        _stale_ids = list({
-            str(r["game_id"]) for r in (_pending_rows or [])
-            if r.get("game_id") and str(r["game_id"]) not in _covered
-        })
-
-        if _stale_ids:
-            _eprint(
-                f"STATSAPI: fetching {len(_stale_ids)} stale game(s) "
-                f"not in Odds API window"
-            )
-            # ✅ FIX #1 — correct indentation
-            _statsapi_scores = _fetch_mlb_statsapi_scores(_stale_ids)
-
-            # ✅ FIX #3 — log AFTER fetch so len() is always safe
-            _eprint(
-                f"STATSAPI: resolved {len(_statsapi_scores)}/{len(_stale_ids)} games"
-            )
-
-            # ✅ FIX #4 — only one injection path; build synthetic rows correctly
-            if _statsapi_scores:
-                _synthetic = []
-                for _gid, _sc in _statsapi_scores.items():
-                    _synthetic.append({
-                        "id":        _gid,
-                        "completed": True,
-                        "home_team": _sc["home_team"],
-                        "away_team": _sc["away_team"],
-                        "scores": [
-                            {"name": _sc["home_team"],
-                             "score": str(_sc["home_score"])},
-                            {"name": _sc["away_team"],
-                             "score": str(_sc["away_score"])},
-                        ],
-                    })
-                scores_by_sport["baseball_mlb"] = (
-                    scores_by_sport.get("baseball_mlb", []) + _synthetic
+    # ── Augment with the free MLB Stats API for picks older than the Odds
+    # API /scores 3-day window (stale rows that would otherwise never settle).
+    # Forced passes only (cycle / JOB1 / admin) so routine ticks don't add
+    # statsapi calls.  Synthetic rows are keyed by the ORIGINAL Odds API id so
+    # _final_scores_from + settle() match them exactly like real score rows.
+    if force:
+        try:
+            from src import db as _db
+            _pending_rows = _db.model_picks_list(sport="mlb", status="pending")
+            # Odds API score rows are keyed by "id"; skip games already covered
+            # by the live (3-day) Odds API fetch above.
+            _covered = {
+                str(r.get("id")) for r in scores_by_sport.get("baseball_mlb", [])
+                if r.get("completed") and r.get("id")
+            }
+            # GAME rows only (props settle via the stat lookup, not scores), and
+            # only games the Odds API window didn't already cover.
+            _stale_games = [
+                r for r in (_pending_rows or [])
+                if not r.get("player_name")
+                and str(r.get("game_id") or "") not in _covered
+            ]
+            if _stale_games:
+                _eprint(
+                    f"SETTLE-STATSAPI: {len(_stale_games)} stale game pick(s) "
+                    f"outside the Odds API window -- resolving via statsapi"
                 )
-
-    except Exception as _sax:
-        _eprint(
-            f"STATSAPI augment failed: {type(_sax).__name__}: {_sax}"
-        )
+                _statsapi_scores = _fetch_mlb_statsapi_scores(_stale_games)
+                _eprint(f"SETTLE-STATSAPI: resolved {len(_statsapi_scores)} game(s)")
+                _synthetic = [
+                    {
+                        "id": _gid, "completed": True,
+                        "home_team": _sc["home_team"], "away_team": _sc["away_team"],
+                        "scores": [
+                            {"name": _sc["home_team"], "score": str(_sc["home_score"])},
+                            {"name": _sc["away_team"], "score": str(_sc["away_score"])},
+                        ],
+                    }
+                    for _gid, _sc in _statsapi_scores.items()
+                ]
+                if _synthetic:
+                    scores_by_sport["baseball_mlb"] = (
+                        scores_by_sport.get("baseball_mlb", []) + _synthetic
+                    )
+        except Exception as _sax:                                         # noqa: BLE001
+            _eprint(f"SETTLE-STATSAPI: augment failed: {type(_sax).__name__}: {_sax}")
 
     # ── Open both ledgers up front so we can log bankroll before/after ─────────
     def _open_ledger(_path):
