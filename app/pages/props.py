@@ -25,7 +25,10 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav, live_score
+from components import navbar, bottom_nav, live_score, team_logo
+
+# localStorage key for the persisted Props view mode ("game" | "sort").
+_VIEW_MODE_LS_KEY = "propsViewMode"
 
 
 def _dbg(msg: str) -> None:
@@ -310,7 +313,11 @@ def _section_unified_props_list(backend) -> None:
 
         state      = {"sort": "proj"}
         filters    = _default_filters()
-        view_state = {"mode": "list"}
+        # group: "game" (collapsible game groups, default) | "sort" (flat list).
+        # mode:  the By Sort sub-view (list | swipe | xray), unchanged.
+        view_state = {"mode": "list", "group": "game"}
+        # Game keys currently expanded in By Game view (default: all collapsed).
+        expanded: set = set()
         # dismissed: set of _prop_swipe_key() strings; survives filter / sort
         # changes within the same page session (never serialised).
         dismissed: set = set()
@@ -346,32 +353,56 @@ def _section_unified_props_list(backend) -> None:
                         f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
                         f"font-family: monospace;"
                     )
-                # Push the mode toggle to the far right
+                # Push the toggles to the far right
                 ui.element("div").style("flex: 1; min-width: 4px;")
-                # List | Swipe mode pills
+                # View toggle: By Game (grouped, default) | By Sort (flat list)
+                def _mk_group(g):
+                    def _set():
+                        view_state["group"] = g
+                        ui.run_javascript(
+                            f"localStorage.setItem('{_VIEW_MODE_LS_KEY}', '{g}')"
+                        )
+                        cards_refresh.refresh()
+                    return _set
                 with ui.row().style("gap: 3px; flex-shrink: 0;"):
-                    for _mkey, _mlabel in (("list", "≡ List"), ("swipe", "⇄ Swipe"), ("xray", "⊞ X-Ray")):
-                        _active = view_state["mode"] == _mkey
-                        def _mk_mode(mk=_mkey):
-                            def _set():
-                                view_state["mode"] = mk
-                                cards_refresh.refresh()
-                            return _set
-                        ui.button(_mlabel, on_click=_mk_mode()).props(
+                    for _gkey, _glabel in (("game", "By Game"), ("sort", "By Sort")):
+                        _ga = view_state["group"] == _gkey
+                        ui.button(_glabel, on_click=_mk_group(_gkey)).props(
                             "no-caps unelevated dense"
                         ).style(
-                            f"background: {t.PRIMARY if _active else t.CARD_HI}; "
-                            f"color: {t.BG if _active else t.TEXT_DIM}; "
+                            f"background: {t.PRIMARY if _ga else t.CARD_HI}; "
+                            f"color: {t.BG if _ga else t.TEXT_DIM}; "
                             f"font-size: 10.5px; font-weight: 700; letter-spacing: .2px; "
                             f"padding: 4px 10px; border-radius: {t.RADIUS_PILL}; "
                             f"min-height: 0;"
                         )
+                # List | Swipe | X-Ray sub-mode pills -- only in By Sort view
+                if view_state["group"] == "sort":
+                    with ui.row().style("gap: 3px; flex-shrink: 0;"):
+                        for _mkey, _mlabel in (("list", "≡ List"), ("swipe", "⇄ Swipe"), ("xray", "⊞ X-Ray")):
+                            _active = view_state["mode"] == _mkey
+                            def _mk_mode(mk=_mkey):
+                                def _set():
+                                    view_state["mode"] = mk
+                                    cards_refresh.refresh()
+                                return _set
+                            ui.button(_mlabel, on_click=_mk_mode()).props(
+                                "no-caps unelevated dense"
+                            ).style(
+                                f"background: {t.PRIMARY if _active else t.CARD_HI}; "
+                                f"color: {t.BG if _active else t.TEXT_DIM}; "
+                                f"font-size: 10.5px; font-weight: 700; letter-spacing: .2px; "
+                                f"padding: 4px 10px; border-radius: {t.RADIUS_PILL}; "
+                                f"min-height: 0;"
+                            )
 
             if not shown:
                 _no_match_message()
                 return
 
-            if view_state["mode"] == "list":
+            if view_state["group"] == "game":
+                _render_by_game(shown, backend, expanded)
+            elif view_state["mode"] == "list":
                 with ui.element("div").classes("game-grid w-full"):
                     for r_item in shown:
                         _prop_card(r_item, backend)
@@ -395,6 +426,106 @@ def _section_unified_props_list(backend) -> None:
         # order changes.  Default sort is Proj (biggest model-vs-book gap).
         _sort_pills(state, cards_refresh.refresh)
         cards_refresh()
+
+        # Hydrate the persisted view mode from localStorage (one-shot, after
+        # the socket connects); re-render only if it differs from the default.
+        async def _hydrate_view_mode() -> None:                           # noqa: WPS430
+            try:
+                val = await ui.run_javascript(
+                    f"localStorage.getItem('{_VIEW_MODE_LS_KEY}')"
+                )
+            except Exception:                                             # noqa: BLE001
+                return
+            if val in ("game", "sort") and val != view_state["group"]:
+                view_state["group"] = val
+                cards_refresh.refresh()
+        ui.timer(0.1, _hydrate_view_mode, once=True)
+
+
+def _render_by_game(shown: list[dict], backend, expanded: set) -> None:
+    """By Game view: group the already-filtered/sorted props by game and
+    render one collapsible card per game (earliest start first).  Games with
+    no props in the current filter are absent (we group from *shown*)."""
+    groups: dict[str, list[dict]] = {}
+    for r in shown:
+        groups.setdefault(_game_key(r), []).append(r)
+
+    def _start(gk: str) -> str:
+        return groups[gk][0].get("commence_time") or "9999"
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        for gk in sorted(groups, key=_start):
+            _render_game_group(gk, groups[gk], backend, expanded)
+
+
+def _render_game_group(
+    gk: str, group_rows: list[dict], backend, expanded: set,
+) -> None:
+    """One collapsible game group: a clickable header (logos + abbrevs + time +
+    prop count + chevron) over a hidden body of the standard prop cards."""
+    rep   = group_rows[0]
+    away  = rep.get("away_team") or "?"
+    home  = rep.get("home_team") or "?"
+    time_s = _game_time_et(rep.get("commence_time"))
+    n     = len(group_rows)
+    is_open = gk in expanded
+
+    header = ui.row().classes("items-center w-full cursor-pointer").style(
+        f"gap: 8px; background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; min-width: 0;"
+    )
+    with header:
+        team_logo.render(away, sport="mlb", size=22)
+        ui.label(team_logo.abbrev(away)).style(
+            f"font-size: 12.5px; font-weight: 800; color: {t.TEXT};")
+        ui.label("@").style(f"font-size: 11px; color: {t.TEXT_DIM2};")
+        team_logo.render(home, sport="mlb", size=22)
+        ui.label(team_logo.abbrev(home)).style(
+            f"font-size: 12.5px; font-weight: 800; color: {t.TEXT};")
+        ui.element("div").style("flex: 1; min-width: 4px;")
+        if time_s:
+            ui.label(time_s).style(
+                f"font-size: 11px; color: {t.TEXT_DIM2}; font-family: monospace; "
+                f"flex-shrink: 0;")
+        ui.label(f"{n} prop{'s' if n != 1 else ''}").style(
+            f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; font-size: 10.5px; "
+            f"font-weight: 700; padding: 2px 8px; border-radius: {t.RADIUS_PILL}; "
+            f"flex-shrink: 0;")
+        chevron = ui.icon("chevron_right").style(_chevron_style(is_open))
+
+    body = ui.element("div").classes("game-grid w-full").style(
+        f"margin: 4px 0 2px 0; padding-left: 10px; "
+        f"border-left: 2px solid {t.BORDER};")
+    with body:
+        for r in group_rows:
+            _prop_card(r, backend)
+    body.set_visibility(is_open)
+
+    def _toggle() -> None:
+        opened = gk not in expanded
+        if opened:
+            expanded.add(gk)
+        else:
+            expanded.discard(gk)
+        body.set_visibility(opened)
+        chevron.style(replace=_chevron_style(opened))
+    header.on("click", _toggle)
+
+
+def _chevron_style(is_open: bool) -> str:
+    return (f"color: {t.TEXT_DIM}; transition: transform .15s ease; "
+            f"transform: rotate({'90' if is_open else '0'}deg); flex-shrink: 0;")
+
+
+def _game_time_et(iso) -> str:
+    """ISO UTC timestamp -> compact local game time, e.g. '7:05 PM ET'."""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p ET")
+    except Exception:                                                     # noqa: BLE001
+        return ""
 
 
 def _no_match_message() -> None:
