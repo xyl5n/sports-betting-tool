@@ -161,23 +161,31 @@ def classifier_accuracy_from_trackers() -> dict:
 
 # ── Chip #2 -- best classifier (XGB / LR / NN) ─────────────────────────────
 
+# A "best model / best prop" winner is only meaningful with a real sample, so
+# the home BEST GAME/PROP MODEL chips require at least this many settled picks
+# before naming a leader (otherwise they show "Insufficient data").
+_BEST_MODEL_MIN_SETTLED = 10
+
+
 def best_classifier(backend) -> dict | None:
     """BEST GAME MODEL -- whichever of MLB xgb/lr/nn has the highest finished
     win% in model_picks (per-model by design, same model_picks basis as the
-    GAME MODELS chip).  Returns {'model','correct','total','pct'} or None."""
+    GAME MODELS chip).  Requires >= _BEST_MODEL_MIN_SETTLED settled picks.
+    Returns {'model','correct','total','pct'} or None."""
     try:
         from src import model_picks as _mp
-        return _mp.best_game_model("mlb")
+        return _mp.best_game_model("mlb", min_settled=_BEST_MODEL_MIN_SETTLED)
     except Exception:                                                      # noqa: BLE001
         return None
 
 
 def best_bet_type(backend) -> dict | None:
     """BEST PROP MODEL -- pitcher vs batter, whichever has the higher finished
-    win% in model_picks.  Returns {'label','wins','losses','pct'} or None."""
+    win% in model_picks.  Requires >= _BEST_MODEL_MIN_SETTLED settled picks.
+    Returns {'label','wins','losses','pct'} or None."""
     try:
         from src import model_picks as _mp
-        return _mp.best_prop_model("mlb")
+        return _mp.best_prop_model("mlb", min_settled=_BEST_MODEL_MIN_SETTLED)
     except Exception:                                                      # noqa: BLE001
         return None
 

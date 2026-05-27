@@ -246,13 +246,16 @@ def _section_chips(backend) -> None:
     best_t  = hs.best_bet_type(backend)
     props   = hs.props_record(backend)
 
-    # AUDIT/FIX debug: surface what the home page now reads (ledger-backed)
-    # so the W/L numbers are visible + verifiable in the Railway logs.
+    # Debug: surface what the home chips read (all-time model_picks store,
+    # NOT the personal-bet ledger) so the W/L numbers are visible + verifiable
+    # in the Railway logs.  0-0 here means model_picks has no FINISHED rows yet
+    # (settlement state), not a read/date-filter bug -- the reads are all-time.
     try:
         print(
-            f"[WL] home render: overall(ledger)={overall.get('wins')}-{overall.get('losses')} "
+            f"[WL] home chips (all-time model_picks): "
+            f"game={overall.get('wins')}-{overall.get('losses')} "
             f"props={props.get('wins')}-{props.get('losses')} "
-            f"best_model={best_m} best_bet_type={best_t}",
+            f"best_model={best_m} best_prop={best_t}",
             flush=True, file=sys.stderr,
         )
     except Exception:                                                      # noqa: BLE001
@@ -449,7 +452,7 @@ def _chip_props(props: dict) -> None:
 
 def _chip_best_model(best: dict | None) -> None:
     if not best:
-        _chip(label="BEST GAME MODEL", main="—", suffix="not enough data",
+        _chip(label="BEST GAME MODEL", main="—", suffix="Insufficient data",
               color=t.TEXT_DIM)
         return
     color = hs.winrate_color(best["pct"], t)
@@ -463,7 +466,7 @@ def _chip_best_model(best: dict | None) -> None:
 
 def _chip_best_bet_type(best: dict | None) -> None:
     if not best:
-        _chip(label="BEST PROP MODEL", main="—", suffix="not enough data",
+        _chip(label="BEST PROP MODEL", main="—", suffix="Insufficient data",
               color=t.TEXT_DIM)
         return
     color = hs.winrate_color(best["pct"], t)
