@@ -693,7 +693,7 @@ def run_overnight_generation(game_results: list[tuple] | None = None) -> dict:
     job.  Returns a counts summary."""
     if not _have_supabase():
         _log("overnight: Supabase off -- skipping")
-        return {"games": 0, "props_pass1": 0, "props_pass2_v3": 0}
+        return {"games": 0, "props_pass1": 0, "props_pass2_v1": 0}
     from . import player_ai_breakdown as _pab
     from .groq_models import remaining
     try:
@@ -751,7 +751,7 @@ def run_overnight_generation(game_results: list[tuple] | None = None) -> dict:
     _log(f"overnight PASS 2 done: {n_upgraded} top props upgraded to V1 "
          f"(eligible={len(eligible)}, cap={_PASS2_MAX_PROPS}); "
          f"70B remaining tokens={remaining('V1')['tokens']}")
-    return {"games": n_games, "props_pass1": n_props, "props_pass2_v3": n_upgraded}
+    return {"games": n_games, "props_pass1": n_props, "props_pass2_v1": n_upgraded}
 
 
 # ── UI read helpers (never generate) ────────────────────────────────────────

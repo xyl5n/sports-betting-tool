@@ -205,15 +205,15 @@ def _call_model(version: str, prompt: str, max_tokens: int) -> tuple:
         return None, 0, rate_limited
 
 
-def generate(prompt: str, *, prefer: str = "V2",
+def generate(prompt: str, *, prefer: str = "V4",
              max_tokens: int = 900) -> tuple:
-    """Generate text on the preferred model, cascading to the Scout fallback
+    """Generate text on the preferred model, cascading to the V4 fallback
     when the preferred model is day-exhausted or rate-limited.
 
     Returns (text, version_label) on success, or (None, None) when every
     candidate is exhausted/failing.  Never raises."""
     if prefer not in MODELS:
-        prefer = "V2"
+        prefer = "V4"
     est = len(prompt) // 4 + max_tokens
     # Candidate order: preferred, then its fallback (Scout), de-duped.
     order, seen = [], set()
