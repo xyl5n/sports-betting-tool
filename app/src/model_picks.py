@@ -401,22 +401,35 @@ def settle(final_scores: Optional[dict] = None, stat_lookup=None) -> dict:
     """Move pending picks whose game has finished to status='finished' with a
     graded result.  *final_scores*: {game_id: {home_team, away_team,
     home_score, away_score}}.  *stat_lookup*: callable(player, market) ->
-    actual stat or None.  Returns {model_name: settled_count}."""
+    actual stat or None.  Returns {model_name: settled_count}.
+
+    Selects unsettled rows by RESULT being empty (not by status) and across
+    ALL dates, so rows that somehow lost their 'pending' status -- or were
+    logged on a prior day -- are never stranded.  Always emits a SETTLE-RESULT
+    log line (even on 0 matches) so the cause is visible in Railway logs."""
     final_scores = final_scores or {}
     try:
         from . import db
-        pending = db.model_picks_list(status="pending")
+        all_rows = db.model_picks_list()
     except Exception as exc:                                              # noqa: BLE001
-        _log(f"settle: list pending failed: {exc}")
+        _log(f"settle: list failed: {exc}")
         return {}
+
+    pending = [r for r in (all_rows or [])
+               if not (r.get("result") or "").strip()]
     if not pending:
+        _log(f"SETTLE-RESULT: checked=0 unsettled (total rows={len(all_rows or [])}) "
+             f"-- nothing to settle")
         return {}
 
     updated: list[dict] = []
     summary: dict[str, int] = {}
+    g_checked = g_found = g_graded = p_checked = p_graded = 0
+    unmatched_gids: list[str] = []
     for pick in pending:
         result = None
         if pick.get("player_name"):                       # prop
+            p_checked += 1
             if stat_lookup is not None:
                 try:
                     actual = stat_lookup(pick.get("player_name"), pick.get("bet_type"))
@@ -424,10 +437,20 @@ def settle(final_scores: Optional[dict] = None, stat_lookup=None) -> dict:
                     actual = None
                 if actual is not None:
                     result = _grade_prop(pick, actual)
+            if result:
+                p_graded += 1
         else:                                             # game
-            sc = final_scores.get(pick.get("game_id"))
+            g_checked += 1
+            gid = str(pick.get("game_id") or "").strip()
+            # Normalised lookup first, then the raw stored key as a fallback.
+            sc = final_scores.get(gid) or final_scores.get(pick.get("game_id"))
             if sc:
+                g_found += 1
                 result = _grade_game(pick, sc)
+                if result:
+                    g_graded += 1
+            elif len(unmatched_gids) < 5:
+                unmatched_gids.append(gid)
         if result:
             pick["result"] = result
             pick["status"] = "finished"
@@ -442,6 +465,24 @@ def settle(final_scores: Optional[dict] = None, stat_lookup=None) -> dict:
         except Exception as exc:                                          # noqa: BLE001
             _log(f"settle: upsert failed: {exc}")
         _log("settled per model -> " + ", ".join(f"{m}:{n}" for m, n in sorted(summary.items())))
+
+    # ALWAYS-on result line so a 0-settle pass is diagnosable in Railway logs.
+    _log(
+        f"SETTLE-RESULT: checked={len(pending)} (games={g_checked} props={p_checked}) | "
+        f"final_scores={len(final_scores)} | "
+        f"game_id_matched={g_found} games_graded={g_graded} props_graded={p_graded} | "
+        f"settled={len(updated)}"
+    )
+    # Targeted hints when a whole class fails to match -- these pinpoint the
+    # root cause without flooding the log with one line per pick.
+    if g_checked and g_found == 0 and final_scores:
+        _log(f"SETTLE-DEBUG: NO game_id matched a score id -- "
+             f"sample pick game_ids={unmatched_gids} | "
+             f"sample score ids={list(final_scores)[:5]}")
+    if p_checked and p_graded == 0:
+        _log("SETTLE-DEBUG: NO prop graded -- stat_lookup returned None for every "
+             "prop (player game-log not found / game not yet played in the lookup's "
+             "season+date window; the gamelog-lookup fix is in PR #223).")
     return summary
 
 
