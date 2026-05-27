@@ -203,6 +203,7 @@ def record(scored_picks: list[dict]) -> int:
             "line":          line,
             "model_version": version or None,
             "model":         _model_name(version) or None,
+            "model_type":    "Player Props Model",
             "edge":          round(float(edge), 4) if isinstance(edge, (int, float)) else None,
             "odds":          int(p.get("best_odds")) if p.get("best_odds") is not None else None,
             "confidence":    round(float(conf), 4) if isinstance(conf, (int, float)) else None,
@@ -400,3 +401,230 @@ def aggregate(rows_in: Optional[list[dict]] = None, *,
 
     kpis = _stats(flt)
     return {"kpis": kpis, "table": table, "n_settled": len(flt)}
+
+
+# ── Dashboard KPIs (model_picks + research_store) ─────────────────────────────
+# Win Rate / Total Picks / W-L come from model_picks (the full settled history,
+# incl. game picks, already populated by the live app).  Units come from
+# research_store (the only store carrying odds).  This split is why the cards
+# can show real W/L now while Units stays "—" until research rows settle.
+
+_GAME_BTYPES = {"ml", "rl", "total"}
+_MP_MODEL_TYPE = {
+    "xgb":      "XGBoost",
+    "lr":       "Logistic Regression",
+    "nn":       "Neural Net",
+    "combined": "Combined",
+    "pitcher":  "Player Props Model",
+    "batter":   "Player Props Model",
+    "player":   "Player Props Model",
+}
+_PROPS_MODEL_TYPE = "Player Props Model"
+
+
+def _norm_result(res) -> str:
+    r = (res or "").lower()
+    return "void" if r == "push" else r
+
+
+def _period_match(settled_iso, period: str, now: datetime) -> bool:
+    if period in (None, "", "all"):
+        return True
+    dt = _settled_at_dt({"settled_at": settled_iso})
+    if dt is None:
+        return False
+    if period == "season":
+        return dt.astimezone(_ET).year == now.astimezone(_ET).year
+    days = _WINDOW_DAYS.get(period)
+    return True if days is None else dt >= now - timedelta(days=days)
+
+
+def _wl_stats(picks: list[dict]) -> dict:
+    wins   = sum(1 for p in picks if p["result"] == "win")
+    losses = sum(1 for p in picks if p["result"] == "loss")
+    voids  = sum(1 for p in picks if p["result"] == "void")
+    decided = wins + losses
+    return {
+        "wins": wins, "losses": losses, "voids": voids,
+        "total": len(picks),
+        "win_pct": round(wins / decided * 100.0, 1) if decided else 0.0,
+    }
+
+
+def dashboard(mp_rows: Optional[list[dict]] = None,
+              research_rows: Optional[list[dict]] = None, *,
+              ai_models: Optional[list[str]] = None,
+              sport_models: Optional[list[str]] = None,
+              sports: Optional[list[str]] = None,
+              markets: Optional[list[str]] = None,
+              period: str = "all",
+              now: Optional[datetime] = None) -> dict:
+    """KPI cards + filter facets.  None/empty filter == 'All'.  Pure when
+    *mp_rows* / *research_rows* are supplied (defaults read the live stores)."""
+    if mp_rows is None:
+        try:
+            from . import model_picks as _mp
+            mp_rows = _mp._all()
+        except Exception:                                                 # noqa: BLE001
+            mp_rows = []
+    if research_rows is None:
+        research_rows = rows()
+    now = now or datetime.now(timezone.utc)
+
+    ai_set = set(ai_models) if ai_models else None
+    sm_set = set(sport_models) if sport_models else None
+    sp_set = {s.lower() for s in sports} if sports else None
+    mk_set = set(markets) if markets else None
+
+    picks: list[dict] = []
+
+    # Game picks from model_picks.
+    for r in mp_rows or []:
+        if r.get("player_name"):
+            continue
+        res = _norm_result(r.get("result"))
+        bt = r.get("bet_type")
+        if res not in ("win", "loss", "void") or bt not in _GAME_BTYPES:
+            continue
+        picks.append({
+            "kind": "game", "model_raw": r.get("model"),
+            "model_type": _MP_MODEL_TYPE.get(r.get("model"), r.get("model") or "—"),
+            "sport": (r.get("sport") or "").lower(), "market": bt, "result": res,
+            "settled_at": r.get("settled_at") or r.get("created_at"),
+        })
+
+    # Prop picks: research_store when an AI model is chosen (Groq-aware);
+    # otherwise model_picks props (real settled data available now).
+    if ai_set is not None:
+        for r in research_rows or []:
+            if (r.get("result") or "") not in ("win", "loss", "void"):
+                continue
+            if (r.get("model") or "") not in ai_set:
+                continue
+            picks.append({
+                "kind": "prop", "model_raw": r.get("model_version"),
+                "model_type": _PROPS_MODEL_TYPE,
+                "sport": (r.get("sport") or "mlb").lower(),
+                "market": r.get("prop_type"), "result": r.get("result"),
+                "settled_at": r.get("settled_at"),
+            })
+    else:
+        for r in mp_rows or []:
+            if not r.get("player_name"):
+                continue
+            res = _norm_result(r.get("result"))
+            if res not in ("win", "loss", "void"):
+                continue
+            picks.append({
+                "kind": "prop", "model_raw": r.get("model"),
+                "model_type": _PROPS_MODEL_TYPE,
+                "sport": (r.get("sport") or "mlb").lower(),
+                "market": r.get("bet_type"), "result": res,
+                "settled_at": r.get("settled_at") or r.get("created_at"),
+            })
+
+    def _keep(p: dict) -> bool:
+        if p["kind"] == "game":
+            if sm_set is None:
+                if p["model_raw"] != "combined":   # main line == the shown pick
+                    return False
+            elif p["model_type"] not in sm_set:
+                return False
+        elif sm_set is not None and _PROPS_MODEL_TYPE not in sm_set:
+            return False
+        if sp_set is not None and p["sport"] not in sp_set:
+            return False
+        if mk_set is not None and p["market"] not in mk_set:
+            return False
+        return _period_match(p["settled_at"], period, now)
+
+    main = [p for p in picks if _keep(p)]
+    kpis = _wl_stats(main)
+
+    # Units: research_store only (odds).  "—" until any settled odds exist.
+    have_odds = any(r.get("odds") is not None and r.get("result") in ("win", "loss")
+                    for r in (research_rows or []))
+    props_allowed = sm_set is None or _PROPS_MODEL_TYPE in sm_set
+    net_units = 0.0
+    for r in (research_rows or []) if props_allowed else []:
+        if r.get("result") not in ("win", "loss"):
+            continue
+        if ai_set is not None and (r.get("model") or "") not in ai_set:
+            continue
+        if sp_set is not None and (r.get("sport") or "mlb").lower() not in sp_set:
+            continue
+        if mk_set is not None and r.get("prop_type") not in mk_set:
+            continue
+        if not _period_match(r.get("settled_at"), period, now):
+            continue
+        net_units += float(r.get("units_pnl") or 0.0)
+    kpis["units"] = round(net_units, 2) if have_odds else None
+
+    return {"kpis": kpis, "facets": facets(mp_rows, research_rows)}
+
+
+def facets(mp_rows: Optional[list[dict]] = None,
+           research_rows: Optional[list[dict]] = None) -> dict:
+    """Distinct SPORT MODEL + SPORT values present in the data sources, so the
+    dropdowns populate from reality rather than a hardcoded list."""
+    if mp_rows is None:
+        try:
+            from . import model_picks as _mp
+            mp_rows = _mp._all()
+        except Exception:                                                 # noqa: BLE001
+            mp_rows = []
+    if research_rows is None:
+        research_rows = rows()
+
+    sport_models: list[str] = []
+    seen = set()
+    for r in mp_rows or []:
+        mt = _MP_MODEL_TYPE.get(r.get("model"))
+        if mt and mt != "Combined" and mt not in seen:
+            seen.add(mt)
+            sport_models.append(mt)
+    if research_rows and _PROPS_MODEL_TYPE not in seen:
+        sport_models.append(_PROPS_MODEL_TYPE)
+
+    sports = sorted({(r.get("sport") or "").lower() for r in (mp_rows or [])
+                     if r.get("sport")} |
+                    {(r.get("sport") or "").lower() for r in (research_rows or [])
+                     if r.get("sport")})
+    return {"sport_models": sport_models, "sports": sports}
+
+
+def leaderboard(research_rows: Optional[list[dict]] = None, *,
+                ai_models: Optional[list[str]] = None,
+                sports: Optional[list[str]] = None,
+                markets: Optional[list[str]] = None,
+                period: str = "all",
+                now: Optional[datetime] = None) -> list[dict]:
+    """Per-(AI model, prop type) leaderboard rows from research_store, filtered
+    by the active AI-model / sport / market / period selections."""
+    if research_rows is None:
+        research_rows = rows()
+    now = now or datetime.now(timezone.utc)
+    ai_set = set(ai_models) if ai_models else None
+    sp_set = {s.lower() for s in sports} if sports else None
+    mk_set = set(markets) if markets else None
+
+    groups: dict[tuple, list[dict]] = {}
+    for r in research_rows or []:
+        if (r.get("result") or "pending") not in ("win", "loss", "void"):
+            continue
+        if ai_set is not None and (r.get("model") or "") not in ai_set:
+            continue
+        if sp_set is not None and (r.get("sport") or "").lower() not in sp_set:
+            continue
+        if mk_set is not None and r.get("prop_type") not in mk_set:
+            continue
+        if not _period_match(r.get("settled_at"), period, now):
+            continue
+        key = (r.get("model") or "—", r.get("prop_type") or "—")
+        groups.setdefault(key, []).append(r)
+
+    table = []
+    for (model, ptype), grp in groups.items():
+        table.append({"model": model, "prop_type": ptype,
+                      "streak": _hot_streak(grp), **_stats(grp)})
+    return table

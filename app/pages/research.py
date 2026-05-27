@@ -37,9 +37,34 @@ def _model_options() -> list[str]:
         return []
 
 
-_SPORTS = (("all", "All"), ("mlb", "MLB"), ("wnba", "WNBA"))
-_WINDOWS = (("7d", "Last 7 Days"), ("30d", "Last 30 Days"),
-            ("season", "This Season"), ("all", "All Time"))
+_SPORT_LABELS = {"mlb": "MLB", "wnba": "WNBA"}
+_PERIOD_OPTS = (("7d", "Last 7 Days"), ("30d", "Last 30 Days"),
+                ("season", "This Season"), ("all", "All Time"))
+
+# PROP TYPE dropdown -- two grouped sections.  Each label maps to the set of
+# underlying bet_type / market keys it filters on (games use ml/rl/total).
+_PROP_GROUPS = (
+    ("Games", (("Moneyline", ("ml",)), ("Runline", ("rl",)),
+               ("Total (O/U)", ("total",)))),
+    ("Props", (("Strikeouts", ("pitcher_strikeouts", "batter_strikeouts")),
+               ("Hits", ("batter_hits",)),
+               ("Home Runs", ("batter_home_runs",)),
+               ("RBI", ("batter_rbis",)),
+               ("Points", ("points",)),
+               ("Rebounds", ("rebounds",)),
+               ("Assists", ("assists",)))),
+)
+_PROP_LABEL_MARKETS = {lab: set(mks) for _g, opts in _PROP_GROUPS for lab, mks in opts}
+
+
+def _markets_for(labels: set) -> list | None:
+    """Expand selected PROP TYPE labels to the underlying market keys."""
+    if not labels:
+        return None
+    out: set = set()
+    for lab in labels:
+        out |= _PROP_LABEL_MARKETS.get(lab, set())
+    return sorted(out) or None
 
 _PROP_LABELS = {
     "pitcher_strikeouts":   "Strikeouts (K)",
@@ -88,6 +113,9 @@ def register(backend) -> None:
         _dbg("research_page ENTER")
         try:
             ui.add_head_html(t.page_head_css())
+            ui.add_head_html(
+                f"<style>.research-opt:hover{{background:{t.CARD_HI};}}</style>"
+            )
             navbar.render(active=t.TAB_RESEARCH)
             _layout()
             bottom_nav.render(active=t.TAB_RESEARCH)
@@ -103,12 +131,13 @@ def register(backend) -> None:
 
 def _layout() -> None:
     state = {
-        "models":   {"all"},          # set of model names, or {"all"}
-        "sport":    "all",
-        "prop":     "all",
-        "window":   "all",
-        "sort_key": "win_pct",
-        "sort_dir": "desc",
+        "ai_models":    set(),    # Groq model names; empty == All
+        "sport_models": set(),    # model_type labels;  empty == All
+        "sports":       set(),    # "mlb"/"wnba";        empty == All
+        "prop_types":   set(),    # PROP TYPE labels;    empty == All
+        "period":       "all",    # single-select
+        "sort_key":     "win_pct",
+        "sort_dir":     "desc",
     }
 
     with ui.column().classes("page-content w-full").style(
@@ -118,105 +147,171 @@ def _layout() -> None:
         ui.label("RESEARCH").classes("page-title").style(
             f"font-size: 22px; font-weight: 800; color: {t.TEXT};"
         )
-        ui.label("Model Analytics — settled-prop performance by AI model and prop type.").style(
+        ui.label("Model Analytics — pick performance by model, prop type and period.").style(
             f"font-size: 12.5px; color: {t.TEXT_DIM};"
         )
 
-        _filter_bar(state, lambda: _dashboard.refresh())
+        # Facets (Sport Model / Sport option lists) are derived from the data
+        # once; the filter bar is built once so its dropdowns stay open while
+        # multi-selecting.  Only the results area re-renders on each change.
+        facets = rs.facets(_model_pick_rows(), rs.rows())
 
         @ui.refreshable
-        def _dashboard() -> None:                                         # noqa: WPS430
-            models = None if "all" in state["models"] or not state["models"] \
-                else sorted(state["models"])
-            agg = rs.aggregate(
-                models=models, sport=state["sport"],
-                prop_type=state["prop"], window=state["window"],
-            )
-            _kpi_row(agg["kpis"])
-            _table(agg["table"], state, lambda: _dashboard.refresh())
+        def _results() -> None:                                           # noqa: WPS430
+            ai      = sorted(state["ai_models"]) or None
+            sm      = sorted(state["sport_models"]) or None
+            sp      = sorted(state["sports"]) or None
+            markets = _markets_for(state["prop_types"])
+            period  = state["period"]
 
-        _dashboard()
+            research = rs.rows()
+            res = rs.dashboard(_model_pick_rows(), research, ai_models=ai,
+                               sport_models=sm, sports=sp, markets=markets,
+                               period=period)
+            table = rs.leaderboard(research, ai_models=ai, sports=sp,
+                                   markets=markets, period=period)
+            _kpi_row(res["kpis"])
+            _table(table, state, _results.refresh)
+
+        _filter_bar(state, facets, _results.refresh)
+        _results()
 
 
-# ── Filter bar (sticky) ──────────────────────────────────────────────────────
+def _model_pick_rows() -> list:
+    try:
+        from src import model_picks as _mp
+        return _mp._all() or []
+    except Exception:                                                     # noqa: BLE001
+        return []
 
-def _filter_bar(state: dict, refresh) -> None:
-    # Sticky under the top nav; pill rows scroll horizontally on mobile.
-    with ui.column().style(
+
+# ── Filter bar (sticky dropdown buttons) ──────────────────────────────────────
+
+def _filter_bar(state: dict, facets: dict, refresh) -> None:
+    sport_model_opts = [(m, m) for m in facets.get("sport_models", [])]
+    sport_opts = [(s, _SPORT_LABELS.get(s, s.upper())) for s in facets.get("sports", [])]
+    ai_opts = [(n, _short_model(n)) for n in _model_options()]
+
+    with ui.row().classes("items-center no-wrap").style(
         f"position: sticky; top: {t.NAVBAR_HEIGHT}; z-index: 20; "
-        f"background: {t.BG}; gap: 6px; width: 100%; "
-        f"padding: 8px 0; border-bottom: 1px solid {t.BORDER};"
+        f"background: {t.BG}; gap: 8px; width: 100%; padding: 10px 0; "
+        f"border-bottom: 1px solid {t.BORDER}; overflow-x: auto; "
+        f"-webkit-overflow-scrolling: touch;"
     ):
-        # MODEL (multiselect)
-        def _toggle_model(name: str):
-            def _h():
-                sel = state["models"]
-                if name == "all":
-                    state["models"] = {"all"}
-                else:
-                    sel.discard("all")
-                    sel.symmetric_difference_update({name})
-                    if not sel:
-                        state["models"] = {"all"}
-                refresh()
-            return _h
-
-        model_opts = [("all", "All")] + [(n, _short_model(n)) for n in _model_options()]
-        with _pill_row("MODEL"):
-            for val, lab in model_opts:
-                active = (val == "all" and "all" in state["models"]) or val in state["models"]
-                _pill(lab, active, _toggle_model(val))
-
-        # SPORT (single)
-        with _pill_row("SPORT"):
-            for val, lab in _SPORTS:
-                _pill(lab, state["sport"] == val, _single_setter(state, "sport", val, refresh))
-
-        # PROP TYPE (single, populated from the store)
-        prop_opts = [("all", "All")] + [(p, _prop_label(p)) for p in rs.distinct_prop_types()]
-        with _pill_row("PROP TYPE"):
-            for val, lab in prop_opts:
-                _pill(lab, state["prop"] == val, _single_setter(state, "prop", val, refresh))
-
-        # TIME WINDOW (single)
-        with _pill_row("WINDOW"):
-            for val, lab in _WINDOWS:
-                _pill(lab, state["window"] == val, _single_setter(state, "window", val, refresh))
+        _dropdown("AI Model", ai_opts, state["ai_models"], refresh)
+        _dropdown("Sport Model", sport_model_opts, state["sport_models"], refresh)
+        _dropdown("Sport", sport_opts, state["sports"], refresh)
+        _dropdown("Prop Type", None, state["prop_types"], refresh, groups=_PROP_GROUPS)
+        _period_dropdown(state, refresh)
 
 
-def _single_setter(state, key, val, refresh):
-    def _h():
-        state[key] = val
-        refresh()
-    return _h
+def _btn_style(active: bool) -> str:
+    return (f"background: {t.CARD}; color: {t.PRIMARY_HI if active else t.TEXT}; "
+            f"border: 1px solid {t.PRIMARY if active else t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; font-size: 12px; font-weight: 700; "
+            f"padding: 6px 10px; min-height: 0; flex-shrink: 0; white-space: nowrap;")
 
 
-def _pill_row(label: str):
-    row = ui.row().classes("items-center no-wrap").style(
-        "gap: 6px; width: 100%; overflow-x: auto; "
-        "-webkit-overflow-scrolling: touch; padding-bottom: 2px;"
+def _menu_shell():
+    return ui.menu().props("auto-close=false").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; box-shadow: 0 8px 24px rgba(0,0,0,.55);"
     )
-    with row:
-        ui.label(label).style(
-            f"font-size: 9px; font-weight: 800; letter-spacing: .6px; "
-            f"color: {t.TEXT_DIM2}; flex-shrink: 0; min-width: 64px;"
+
+
+def _opt_item(text: str, checked: bool, on_click) -> None:
+    item = ui.element("div").classes("research-opt").style(
+        "display: flex; align-items: center; gap: 8px; padding: 7px 14px; "
+        "cursor: pointer; white-space: nowrap; font-size: 12.5px;"
+    )
+    item.on("click", on_click)
+    with item:
+        ui.icon("check").style(
+            f"font-size: 15px; color: {t.PRIMARY_HI if checked else 'transparent'};"
         )
-    return row
+        ui.label(text).style(f"color: {t.TEXT if checked else t.TEXT_DIM};")
 
 
-def _pill(label: str, active: bool, on_click) -> None:
-    bg  = t.PRIMARY if active else t.CARD_HI
-    fg  = "#ffffff" if active else t.TEXT_DIM
-    ui.button(label, on_click=on_click).props("no-caps unelevated dense").style(
-        f"background: {bg}; color: {fg}; "
-        f"font-size: 11px; font-weight: 700; padding: 4px 12px; "
-        f"border-radius: {t.RADIUS_PILL}; min-height: 0; flex-shrink: 0; "
-        f"white-space: nowrap;"
+def _dropdown(label: str, options, sel: set, refresh, *, groups=None) -> None:
+    """Multiselect dropdown button.  Empty *sel* == All.  Selecting a specific
+    option clears All; clearing every option reverts to All."""
+    def _lbl() -> str:
+        return f"{label} ({len(sel)})" if sel else label
+
+    btn = ui.button(_lbl()).props("no-caps unelevated").style(_btn_style(bool(sel)))
+
+    def _sync_btn() -> None:
+        btn.set_text(_lbl())
+        btn.style(replace=_btn_style(bool(sel)))
+
+    def _choose(val):
+        if val in sel:
+            sel.discard(val)
+        else:
+            sel.add(val)
+        body.refresh(); _sync_btn(); refresh()
+
+    def _choose_all():
+        sel.clear()
+        body.refresh(); _sync_btn(); refresh()
+
+    with btn:
+        ui.icon("arrow_drop_down").style(f"font-size: 18px; color: {t.TEXT_DIM};")
+        with _menu_shell():
+            @ui.refreshable
+            def body() -> None:                                           # noqa: WPS430
+                with ui.column().style("padding: 4px 0; min-width: 190px; gap: 0;"):
+                    _opt_item("All", not sel, _choose_all)
+                    if groups:
+                        for gname, gopts in groups:
+                            _group_header(gname)
+                            for lab, _mks in gopts:
+                                _opt_item(lab, lab in sel, lambda v=lab: _choose(v))
+                    else:
+                        for val, disp in options:
+                            _opt_item(disp, val in sel, lambda v=val: _choose(v))
+            body()
+
+
+def _period_dropdown(state: dict, refresh) -> None:
+    """Single-select TIME PERIOD dropdown."""
+    label_of = dict(_PERIOD_OPTS)
+
+    def _lbl() -> str:
+        return label_of.get(state["period"], "All Time")
+
+    active = state["period"] != "all"
+    btn = ui.button(_lbl()).props("no-caps unelevated").style(_btn_style(active))
+
+    with btn:
+        ui.icon("arrow_drop_down").style(f"font-size: 18px; color: {t.TEXT_DIM};")
+        menu = ui.menu().style(
+            f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+            f"border-radius: {t.RADIUS_MD}; box-shadow: 0 8px 24px rgba(0,0,0,.55);"
+        )
+
+        def _pick(val):
+            state["period"] = val
+            btn.set_text(label_of.get(val, "All Time"))
+            btn.style(replace=_btn_style(val != "all"))
+            menu.close()
+            refresh()
+
+        with menu:
+            with ui.column().style("padding: 4px 0; min-width: 170px; gap: 0;"):
+                for val, disp in _PERIOD_OPTS:
+                    _opt_item(disp, state["period"] == val, lambda v=val: _pick(v))
+
+
+def _group_header(name: str) -> None:
+    ui.label(name.upper()).style(
+        f"font-size: 9px; font-weight: 800; letter-spacing: .6px; "
+        f"color: {t.TEXT_DIM2}; padding: 8px 14px 3px;"
     )
 
 
 def _short_model(name: str) -> str:
-    """Compact pill label for a Groq model id."""
+    """Compact label for a Groq model id."""
     n = name.split("/")[-1]
     return (n.replace("-versatile", "").replace("-instant", "")
              .replace("llama-", "Llama-").replace("qwen", "Qwen")
@@ -228,15 +323,19 @@ def _short_model(name: str) -> str:
 def _kpi_row(kpis: dict) -> None:
     decided = kpis["wins"] + kpis["losses"]
     win_col = (t.POS if kpis["win_pct"] >= 50 else t.NEG) if decided else t.TEXT
-    edge_col = (t.POS if kpis["avg_edge"] > 0 else t.NEG) if kpis["picks"] else t.TEXT
-    roi_col  = (t.POS if kpis["roi"] > 0 else t.NEG) if decided else t.TEXT
+    units = kpis.get("units")
+    if units is None:
+        units_str, units_col = "—", t.TEXT
+    else:
+        units_str = f"{units:+.2f}u"
+        units_col = t.POS if units > 0 else t.NEG if units < 0 else t.TEXT
 
     # flex-wrap gives a 4-across row on desktop and a 2x2 grid on mobile.
     with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
-        _kpi_card("WIN RATE",    f"{kpis['win_pct']:.1f}%" if decided else "—", win_col)
-        _kpi_card("TOTAL PICKS", str(kpis["picks"]),                            t.TEXT)
-        _kpi_card("AVG EDGE",    f"{kpis['avg_edge']:+.1f}%" if kpis["picks"] else "—", edge_col)
-        _kpi_card("ROI",         f"{kpis['roi']:+.1f}%" if decided else "—",    roi_col)
+        _kpi_card("WIN RATE",   f"{kpis['win_pct']:.1f}%" if decided else "—", win_col)
+        _kpi_card("TOTAL PICKS", str(kpis["total"]),                           t.TEXT)
+        _kpi_card("W-L RECORD",  f"{kpis['wins']} - {kpis['losses']}",         t.TEXT)
+        _kpi_card("UNITS",       units_str,                                    units_col)
 
 
 def _kpi_card(label: str, value: str, color: str) -> None:
