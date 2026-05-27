@@ -129,7 +129,25 @@ def _fetch_with_log(url: str, label: str, timeout: int = 12) -> tuple[int, dict 
     """JSON GET with explicit failure logging.  Returns (status_code,
     parsed) -- (-1, {}) on network/parse failure.  Matches the
     pitcher_client pattern so the diagnostic shape is consistent.
+
+    Gated on the shared Odds API daily quota -- the same counter
+    OddsClient._get honours.  When today's effective limit is already
+    reached this returns (429, {}) WITHOUT making the upstream call, so a
+    props refresh can't push past the budget the rest of the app respects.
+    A successful (200) call increments that shared counter, so props
+    traffic is accounted for alongside every other Odds API request.
     """
+    # Quota gate -- read-only.  Fail OPEN on a counter-read error (e.g. a
+    # transient Supabase miss) so a flaky counter can never permanently
+    # block props fetching; the try/except keeps the read from propagating.
+    try:
+        from .odds_client import odds_usage
+        if odds_usage().get("limit_reached"):
+            _log(f"  {label}: SKIP -- Odds API daily quota reached; not fetching")
+            return 429, {}
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"  {label}: quota check failed ({type(exc).__name__}); proceeding")
+
     started = time.monotonic()
     try:
         req = urllib.request.Request(
@@ -140,6 +158,15 @@ def _fetch_with_log(url: str, label: str, timeout: int = 12) -> tuple[int, dict 
             data = json.loads(body)
         ms = int((time.monotonic() - started) * 1000)
         _log(f"  {label}: HTTP {resp.status} ({ms}ms, {len(body)} bytes)")
+        # Count this consumed call against the shared daily quota (the same
+        # counter OddsClient._get increments after a successful response) --
+        # best-effort, so a counter-write hiccup can't fail the fetch.
+        if resp.status == 200:
+            try:
+                from .odds_client import _odds_increment_count
+                _odds_increment_count()
+            except Exception as exc:                                      # noqa: BLE001
+                _log(f"  {label}: quota increment failed ({type(exc).__name__})")
         return resp.status, data
     except urllib.error.HTTPError as exc:
         ms = int((time.monotonic() - started) * 1000)
