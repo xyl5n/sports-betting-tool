@@ -105,12 +105,40 @@ def page_head_css() -> str:
       body, .nicegui-content, .q-page-container {{
         background: {BG} !important;
         color: {TEXT};
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+        -webkit-tap-highlight-color: transparent;
       }}
       .q-page {{ background: {BG} !important; }}
-      ::-webkit-scrollbar         {{ width: 8px; height: 8px; }}
-      ::-webkit-scrollbar-track   {{ background: {BG}; }}
-      ::-webkit-scrollbar-thumb   {{ background: {BORDER}; border-radius: 4px; }}
-      ::-webkit-scrollbar-thumb:hover {{ background: {TEXT_DIM2}; }}
+
+      /* ── Global interaction polish ──────────────────────────────────────
+         cursor: pointer on every interactive element so nothing looks
+         inert.  focus-visible ring replaces the browser's default blue
+         outline with a themed purple glow (only on keyboard nav -- mouse
+         clicks never show the ring).  q-focus-helper disabled globally;
+         each component carries its own styled hover/active cue.        */
+      button, .q-btn, [role="button"], a, label,
+      select, input[type="checkbox"], input[type="radio"] {{
+        cursor: pointer;
+      }}
+      *:focus {{ outline: none; }}
+      *:focus-visible {{
+        outline: 2px solid rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.5) !important;
+        outline-offset: 2px !important;
+      }}
+      .q-btn:focus-visible,
+      .q-toggle:focus-visible,
+      .q-tab:focus-visible {{ outline: none !important; }}
+      .q-focus-helper {{ opacity: 0 !important; pointer-events: none !important; }}
+
+      /* Icon baseline -- prevents the 1-2px float when an icon sits next
+         to a text label inside a flex row.                              */
+      .q-icon {{ vertical-align: middle; }}
+      ::-webkit-scrollbar         {{ width: 6px; height: 6px; }}
+      ::-webkit-scrollbar-track   {{ background: transparent; }}
+      ::-webkit-scrollbar-thumb   {{ background: rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.4); border-radius: 3px; }}
+      ::-webkit-scrollbar-thumb:hover {{ background: rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.7); }}
 
       /* Horizontal carousels (EV Scan + Highest Confidence on /).  Hide
          the native scrollbar entirely -- the < / > overlay arrows +
@@ -213,10 +241,23 @@ def page_head_css() -> str:
          button reads as "live" rather than flat.  Hover deepens the
          gradient.  Quasar's own ripple + flat/dense modifiers are
          preserved by the `:not()` guards. */
+      .q-btn {{
+        cursor: pointer !important;
+        transition: background 200ms ease-out, box-shadow 200ms ease-out,
+                    transform 120ms ease-out !important;
+      }}
+      .q-btn:active {{ transform: scale(0.97) !important; }}
+      /* Non-primary buttons: subtle highlight on hover so they don't
+         look inert.  The !important keeps this below primary-gradient
+         specificity since .bg-primary rules come next. */
+      .q-btn:not(.bg-primary):not([style*="background: {PRIMARY}"]):hover {{
+        background: rgba(255, 255, 255, 0.06) !important;
+      }}
       .q-btn.bg-primary,
       .q-btn[style*="background: {PRIMARY}"] {{
         background: linear-gradient(135deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
-        transition: background 200ms ease-out, box-shadow 200ms ease-out;
+        transition: background 200ms ease-out, box-shadow 200ms ease-out,
+                    transform 120ms ease-out !important;
       }}
       .q-btn.bg-primary:hover,
       .q-btn[style*="background: {PRIMARY}"]:hover {{
@@ -557,11 +598,33 @@ def page_head_css() -> str:
       }}
 
       /* Switch (q-toggle) ──────────────────────────────────────── */
+
+      /* Root cause of the "white square box" artifact: Quasar injects a
+         .q-focus-helper <div> that draws a square background on hover/focus.
+         The global `.q-focus-helper {{ opacity: 0 }}` rule above covers it,
+         but we also null out any specific override Quasar might add inline. */
+      .styled-switch .q-focus-helper {{ display: none !important; }}
+
+      /* Hide the native <input type="checkbox"> that Quasar keeps in the
+         DOM for accessibility.  It must be invisible but not removed so
+         screen readers and keyboard nav still work.                       */
+      .q-toggle input[type="checkbox"] {{
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        position: absolute !important;
+        width: 0 !important; height: 0 !important;
+        margin: 0 !important; padding: 0 !important;
+        opacity: 0 !important; pointer-events: none !important;
+        border: none !important; outline: none !important;
+        background: transparent !important;
+      }}
+
       .styled-switch .q-toggle__track {{
         background: {CARD_HI} !important;
         opacity: 1 !important;
         border: 1px solid {BORDER} !important;
         height: 14px !important;
+        transition: background 0.2s ease, border-color 0.2s ease !important;
       }}
       .styled-switch .q-toggle__inner--truthy .q-toggle__track {{
         background: linear-gradient(135deg, {PRIMARY} 0%, {PRIMARY_HI} 100%) !important;
@@ -570,6 +633,7 @@ def page_head_css() -> str:
       .styled-switch .q-toggle__thumb {{
         background: #ffffff !important;
         box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4) !important;
+        transition: transform 0.2s ease, box-shadow 0.2s ease !important;
       }}
       .styled-switch .q-toggle__inner--truthy .q-toggle__thumb {{
         box-shadow:
@@ -665,6 +729,33 @@ def page_head_css() -> str:
       }}
       select:not([multiple]):hover {{ border-color: {PRIMARY}; }}
       select:focus {{ outline: none; border-color: {PRIMARY}; }}
+
+      /* q-input / q-field global dark-theme focus ring.  Applies to every
+         Quasar input (chat box, bankroll modal, search bars) that doesn't
+         already carry the .styled-select marker class.  The .styled-select
+         rules above are more specific and win when both apply.            */
+      .q-field--outlined .q-field__control {{
+        background: {CARD_HI} !important;
+      }}
+      .q-field--outlined .q-field__control::before {{
+        border-color: {BORDER} !important;
+        transition: border-color 0.2s ease !important;
+      }}
+      .q-field--outlined:hover .q-field__control::before {{
+        border-color: rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.5) !important;
+      }}
+      .q-field--outlined.q-field--focused .q-field__control::before {{
+        border-color: {PRIMARY} !important;
+      }}
+      .q-field--outlined.q-field--focused .q-field__control {{
+        box-shadow: 0 0 0 2px rgba({PRIMARY_R}, {PRIMARY_G}, {PRIMARY_B}, 0.2) !important;
+      }}
+      .q-field .q-field__native,
+      .q-field .q-field__input {{
+        color: {TEXT} !important;
+        caret-color: {PRIMARY_HI} !important;
+      }}
+      .q-field .q-field__label {{ color: {TEXT_DIM2} !important; }}
 
       /* Bet-box labels: full version is visible by default; the abbreviated
          span (ML / RL / SPR / TOT) takes over below 480px so the labels +
