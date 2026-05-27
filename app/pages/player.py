@@ -55,6 +55,7 @@ Data sources
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from typing import Optional
 
@@ -424,7 +425,10 @@ def _tab_pick(
                 f"text-align: center; width: 100%;"
             )
         _render_gamelog_market_tabs(games, raw_games, is_pitcher)
-        # Full category skeleton -- every market for the player type, all
+        # AI RECOMMENDATIONS (empty state here -- no scored picks).
+        _render_ai_recommendations(today_props_all, info, games, is_pitcher,
+                                   opp_abbrev)
+        # Full reference table -- every market for the player type, all
         # "No line today" in this no-props state.
         _render_prop_category_skeleton(today_props_all, is_pitcher, info.get("name"))
         return
@@ -449,7 +453,12 @@ def _tab_pick(
                 _render_market_view(info, games, is_pitcher, prop, opp_abbrev,
                                     backend=backend)
 
-    # Full category skeleton: EVERY prop market for the player type, with the
+    # AI RECOMMENDATIONS: the scored picks as a list (sits between the per-
+    # market AI verdict tabs above and the ALL MARKETS reference table below).
+    _render_ai_recommendations(today_props_all, info, games, is_pitcher,
+                               opp_abbrev)
+
+    # Full reference table: EVERY prop market for the player type, with the
     # current line + confidence where a line exists, else "No line today".
     _render_prop_category_skeleton(today_props_all, is_pitcher, info.get("name"))
 
@@ -577,7 +586,7 @@ def _render_prop_category_skeleton(
         f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 2px; "
         f"margin-top: {t.SPACE_MD};"
     ):
-        ui.label("ALL PROP MARKETS").style(
+        ui.label("ALL MARKETS").style(
             f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
             f"color: {t.PRIMARY_HI}; margin-bottom: 6px;"
         )
@@ -638,6 +647,169 @@ def _book_cell(book: str) -> None:
         f"font-size: 11px; font-weight: 600; color: {t.TEXT_DIM2}; "
         f"flex-shrink: 0; white-space: nowrap;"
     )
+
+
+# ── AI RECOMMENDATIONS (scored picks only) ──────────────────────────────────
+
+def _short_reason(text: str, limit: int = 160) -> str:
+    """First sentence of the AI verdict, capped to *limit* chars."""
+    s = (text or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"(.+?[.!?])(\s|$)", s)
+    first = m.group(1) if m else s
+    if len(first) > limit:
+        first = first[:limit].rsplit(" ", 1)[0].rstrip() + "…"
+    return first
+
+
+def _render_ai_recommendations(
+    today_props_all: list[dict],
+    info: dict,
+    games: list[dict],
+    is_pitcher: bool,
+    opp_abbrev: Optional[str],
+) -> None:
+    """The player's SCORED picks (passed confidence + edge threshold) as a
+    picks list -- distinct from the ALL MARKETS reference table below.  Always
+    rendered (even with no picks) so the user knows the AI evaluated them.
+
+    For each pick the AI breakdown is generated EAGERLY at page load (not on
+    tab-tap) when the cache is empty, via the same get_breakdown() the
+    per-market tab uses -- so the model badge + reason are populated on first
+    load for the picks the user cares about most."""
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+        f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; gap: 8px; "
+        f"margin-top: {t.SPACE_MD};"
+    ):
+        ui.label("AI RECOMMENDATIONS").style(
+            f"font-size: 10px; font-weight: 800; letter-spacing: .8px; "
+            f"color: {t.PRIMARY_HI}; margin-bottom: 2px;"
+        )
+        if not today_props_all:
+            ui.label("No picks recommended for this player today.").style(
+                f"font-size: 12px; font-weight: 600; color: {t.TEXT_DIM2}; "
+                f"font-style: italic;"
+            )
+            return
+        for prop in today_props_all:
+            _ai_rec_card(prop, info, games, is_pitcher, opp_abbrev)
+
+
+def _ai_rec_card(
+    prop: dict,
+    info: dict,
+    games: list[dict],
+    is_pitcher: bool,
+    opp_abbrev: Optional[str],
+) -> None:
+    market = prop.get("market") or ""
+    label  = _MARKET_HUMAN_LABEL.get(market, market.replace("_", " ").title())
+    side   = (prop.get("side") or "Over").strip().upper()
+    line   = prop.get("line")
+    try:
+        conf = float(prop.get("confidence") or 0.0) * 100.0
+    except (TypeError, ValueError):
+        conf = 0.0
+
+    # ≥80 green, 60-79 yellow, <60 neutral (no accent).
+    if conf >= 80:
+        accent, conf_col = t.POS, t.POS
+    elif conf >= 60:
+        accent, conf_col = t.WARN, t.WARN
+    else:
+        accent, conf_col = t.BORDER, t.TEXT_DIM
+
+    with ui.column().classes("w-full").style(
+        f"background: {t.CARD_HI}; border: 1px solid {accent}; "
+        f"border-radius: {t.RADIUS_MD}; padding: 10px 12px; gap: 4px;"
+    ):
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label(label).style(
+                f"flex: 1; min-width: 0; font-size: 13px; font-weight: 800; "
+                f"color: {t.TEXT}; white-space: nowrap; overflow: hidden; "
+                f"text-overflow: ellipsis;"
+            )
+            # Filled by _populate() once the breakdown is available.
+            badge_slot = ui.row().style("gap: 0; flex-shrink: 0;")
+            ui.label(f"{int(round(conf))}%").style(
+                f"font-size: 15px; font-weight: 800; color: {conf_col}; "
+                f"font-family: monospace; flex-shrink: 0; min-width: 44px; "
+                f"text-align: right;"
+            )
+        ui.label(f"{side} {line}").style(
+            f"font-size: 12.5px; font-weight: 800; color: {t.TEXT}; "
+            f"font-family: monospace;"
+        )
+        reason_slot = ui.column().style("gap: 0; width: 100%;")
+
+    def _populate(bd: Optional[dict]) -> None:
+        """Fill the model badge + reason from a breakdown dict.  Omits both
+        gracefully when *bd* is missing/empty (same as the prior behavior)."""
+        if not bd:
+            return
+        mv     = (bd.get("model_version") or "").strip()
+        reason = _short_reason(bd.get("verdict") or "")
+        if mv:
+            badge_slot.clear()
+            with badge_slot:
+                ui.label(mv).style(
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .4px; "
+                    f"color: {t.TEXT_DIM2}; background: {t.CARD}; padding: 2px 7px; "
+                    f"border-radius: {t.RADIUS_PILL}; font-family: monospace;"
+                ).tooltip("AI model version that produced this pick")
+        if reason:
+            reason_slot.clear()
+            with reason_slot:
+                ui.label(reason).style(
+                    f"font-size: 11.5px; color: {t.TEXT_DIM}; line-height: 1.45; "
+                    f"white-space: normal;"
+                )
+
+    async def _load() -> None:                                            # noqa: WPS430
+        """Cache-first; eagerly GENERATE when empty using the same
+        get_breakdown() the per-market tab calls (off-thread so page render
+        isn't blocked).  Any failure/timeout leaves the badge + reason
+        omitted."""
+        try:
+            from src import player_ai_breakdown as _pab
+            bd = await asyncio.to_thread(_pab.peek_breakdown, prop)
+            if not bd:
+                bd = await asyncio.to_thread(
+                    _generate_rec_breakdown, info, games, is_pitcher, prop,
+                    market, opp_abbrev,
+                )
+        except Exception:                                                 # noqa: BLE001
+            bd = None
+        _populate(bd)
+
+    ui.timer(0.05, _load, once=True)
+
+
+def _generate_rec_breakdown(
+    info: dict, games: list[dict], is_pitcher: bool, prop: dict,
+    market: str, opp_abbrev: Optional[str],
+) -> Optional[dict]:
+    """Build get_breakdown()'s args the same way _render_market_view does, then
+    call it (generates + caches).  Runs in a worker thread; returns None on any
+    failure so the caller can omit the reason gracefully."""
+    try:
+        from src import player_ai_breakdown as _pab
+        try:
+            line_f: Optional[float] = float(prop.get("line"))
+        except (TypeError, ValueError):
+            line_f = None
+        summary = _player_prop_summary_safe(
+            info.get("name"), market, prop.get("line"),
+            prop.get("side") or "Over",
+            opp_abbrev=opp_abbrev, is_pitcher=is_pitcher, games=games,
+        )
+        return _pab.get_breakdown(
+            info, games, is_pitcher, prop, market, line_f, summary, opp_abbrev,
+        )
+    except Exception:                                                     # noqa: BLE001
+        return None
 
 
 def _render_header_track(backend, info: dict, prop: dict) -> None:
