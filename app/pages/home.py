@@ -174,6 +174,7 @@ def _layout(backend) -> None:
         _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
         _guarded_section("news", lambda: _section_news(backend))
         _guarded_section("games", lambda: _section_games(backend))
+        _guarded_section("rotation", lambda: _section_rotation(backend))
         _guarded_section("confidence_carousel",
                          lambda: _section_confidence_carousel(backend))
         _guarded_section("ai_banner", _ai_banner)
@@ -1694,6 +1695,341 @@ def _section_news(backend) -> None:
             + "".join(rows_html)
             + "</div>"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Section: Team Rotation Quadrant Chart
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rotation_chart_opts(points: list[dict], metric: str, sport: str) -> dict:
+    """Build ECharts scatter-plot options for the team rotation quadrant.
+
+    Axes are scaled to 0–100 so ECharts can render '%' labels natively.
+    Each data point carries its own tooltip HTML via the per-item
+    tooltip.formatter property — no JavaScript function needed.
+
+    Quadrant colour mapping (matches zone tint):
+      Top-right  (x≥50, y≥50) = Leading    → emerald
+      Top-left   (x<50,  y≥50) = Improving  → blue
+      Bottom-right(x≥50, y<50) = Weakening  → amber
+      Bottom-left (x<50,  y<50) = Lagging    → rose
+    """
+    _metric_axis = {
+        "ml":  "Win %",
+        "ats": "ATS Cover % (run-line proxy)",
+        "ou":  "Over %",
+    }
+    _metric_short = {"ml": "ML", "ats": "ATS", "ou": "O/U"}
+
+    # WNBA ATS / O/U fall back to ML — tell the user
+    wnba_proxy = (
+        sport == "wnba" and metric in ("ats", "ou") and
+        any(pt.get("ml_proxy") for pt in points)
+    )
+    x_name = (
+        f"Recent 14d — {_metric_axis['ml'] if wnba_proxy else _metric_axis[metric]}"
+        + (" (ML proxy)" if wnba_proxy else "")
+    )
+    y_name = (
+        f"Season — {_metric_axis['ml'] if wnba_proxy else _metric_axis[metric]}"
+        + (" (ML proxy)" if wnba_proxy else "")
+    )
+
+    # Build scatter data with per-item tooltip + quadrant colour
+    scatter_data: list[dict] = []
+    for pt in points:
+        x100 = round(pt["x"] * 100, 1)
+        y100 = round(pt["y"] * 100, 1)
+
+        if x100 >= 50 and y100 >= 50:
+            color = t.POS           # Leading — emerald
+        elif x100 < 50 and y100 >= 50:
+            color = "#3b82f6"       # Improving — blue
+        elif x100 >= 50 and y100 < 50:
+            color = t.WARN          # Weakening — amber
+        else:
+            color = t.NEG           # Lagging — rose
+
+        ml_lbl = _metric_short["ml" if wnba_proxy else metric]
+        szn_g  = pt["szn_w"] + pt["szn_l"]
+        rec_g  = pt["rec_w"] + pt["rec_l"]
+
+        # Pre-built HTML tooltip — no JS function required
+        tooltip_html = (
+            f"<b style='font-size:13px'>{pt['name']}</b><br/>"
+            f"Season {ml_lbl}: {pt['szn_w']}-{pt['szn_l']}"
+            + (f" ({round(y100)}%)" if szn_g else "")
+            + f"<br/>Recent L14: {pt['rec_w']}-{pt['rec_l']}"
+            + (f" ({round(x100)}%)" if rec_g else "")
+        )
+
+        scatter_data.append({
+            "value":     [x100, y100],
+            "name":      pt["abbr"],
+            "itemStyle": {
+                "color":       color,
+                "borderColor": "rgba(0,0,0,0.2)",
+                "borderWidth": 1,
+            },
+            "tooltip":   {"formatter": tooltip_html},
+        })
+
+    # Quadrant background zones + labels (via markArea)
+    _zones = [
+        # [start_point, end_point]  — (xAxis, yAxis) give the diagonal corners
+        [
+            {
+                "name": "Leading",
+                "xAxis": 50, "yAxis": 50,
+                "itemStyle": {"color": "rgba(16,185,129,0.09)"},
+                "label": {
+                    "position": "insideTopRight",
+                    "color": "rgba(16,185,129,0.45)",
+                    "fontSize": 11, "fontWeight": "700", "fontStyle": "italic",
+                },
+            },
+            {"xAxis": 100, "yAxis": 100},
+        ],
+        [
+            {
+                "name": "Improving",
+                "xAxis": 0, "yAxis": 50,
+                "itemStyle": {"color": "rgba(59,130,246,0.07)"},
+                "label": {
+                    "position": "insideTopLeft",
+                    "color": "rgba(59,130,246,0.45)",
+                    "fontSize": 11, "fontWeight": "700", "fontStyle": "italic",
+                },
+            },
+            {"xAxis": 50, "yAxis": 100},
+        ],
+        [
+            {
+                "name": "Weakening",
+                "xAxis": 50, "yAxis": 0,
+                "itemStyle": {"color": "rgba(245,158,11,0.08)"},
+                "label": {
+                    "position": "insideBottomRight",
+                    "color": "rgba(245,158,11,0.45)",
+                    "fontSize": 11, "fontWeight": "700", "fontStyle": "italic",
+                },
+            },
+            {"xAxis": 100, "yAxis": 50},
+        ],
+        [
+            {
+                "name": "Lagging",
+                "xAxis": 0, "yAxis": 0,
+                "itemStyle": {"color": "rgba(244,63,94,0.08)"},
+                "label": {
+                    "position": "insideBottomLeft",
+                    "color": "rgba(244,63,94,0.45)",
+                    "fontSize": 11, "fontWeight": "700", "fontStyle": "italic",
+                },
+            },
+            {"xAxis": 50, "yAxis": 50},
+        ],
+    ]
+
+    _axis_common = {
+        "type": "value",
+        "min": 0, "max": 100,
+        "splitLine": {"show": False},
+        "axisLine": {"lineStyle": {"color": t.BORDER}},
+        "axisTick": {"show": False},
+        "axisLabel": {
+            "color":     t.TEXT_DIM2,
+            "fontSize":  9,
+            "formatter": "{value}%",
+        },
+    }
+
+    return {
+        "backgroundColor": "transparent",
+        "grid": {"left": "54px", "right": "24px", "top": "20px", "bottom": "48px"},
+        "xAxis": {
+            **_axis_common,
+            "name":          x_name,
+            "nameLocation":  "middle",
+            "nameGap":       28,
+            "nameTextStyle": {"color": t.TEXT_DIM2, "fontSize": 10},
+        },
+        "yAxis": {
+            **_axis_common,
+            "name":          y_name,
+            "nameLocation":  "middle",
+            "nameGap":       42,
+            "nameTextStyle": {"color": t.TEXT_DIM2, "fontSize": 10},
+        },
+        "tooltip": {
+            "trigger":         "item",
+            "backgroundColor": t.CARD_HI,
+            "borderColor":     t.BORDER,
+            "textStyle":       {"color": t.TEXT, "fontSize": 12},
+            "padding":         [8, 12],
+        },
+        "series": [
+            # ── Background: quadrant tints + zone labels + dividers ─────────
+            {
+                "type":   "scatter",
+                "data":   [],
+                "silent": True,
+                "markArea": {
+                    "silent": True,
+                    "label":  {"show": True},
+                    "data":   _zones,
+                },
+                "markLine": {
+                    "silent":    True,
+                    "symbol":    "none",
+                    "lineStyle": {"color": t.BORDER, "width": 1, "type": "solid"},
+                    "label":     {"show": False},
+                    "data": [
+                        # Vertical   divider at x = 50
+                        [{"xAxis": 50, "yAxis": 0}, {"xAxis": 50, "yAxis": 100}],
+                        # Horizontal divider at y = 50
+                        [{"xAxis": 0, "yAxis": 50}, {"xAxis": 100, "yAxis": 50}],
+                    ],
+                },
+            },
+            # ── Team dots ────────────────────────────────────────────────────
+            {
+                "type":       "scatter",
+                "symbolSize": 28,
+                "data":       scatter_data,
+                "label": {
+                    "show":            True,
+                    "position":        "inside",
+                    "formatter":       "{b}",
+                    "color":           "#ffffff",
+                    "fontSize":        8,
+                    "fontWeight":      "700",
+                    "textShadowBlur":  3,
+                    "textShadowColor": "rgba(0,0,0,0.9)",
+                },
+                "emphasis": {
+                    "scale":     True,
+                    "itemStyle": {"shadowBlur": 10, "shadowColor": "rgba(0,0,0,0.4)"},
+                },
+            },
+        ],
+    }
+
+
+def _section_rotation(backend) -> None:
+    """Team Rotation quadrant chart.
+
+    X-axis = recent 14-day performance; Y-axis = full-season performance.
+    Toggle switches between ML (win%), ATS (run-line cover proxy), O/U.
+
+    Uses src.team_rotation_cache which fetches statsapi.mlb.com (MLB) or
+    ESPN standings (WNBA) and caches results for 1 hour.
+    """
+    # ── Initial state ────────────────────────────────────────────────────────
+    metric_state: dict = {"metric": "ml"}
+    sport_state:  dict = {"sport": "mlb"}
+    try:
+        wnba_ok = bool((backend._wnba_analysis_state or {}).get("results"))
+        mlb_ok  = bool((backend._analysis_state       or {}).get("results"))
+        if wnba_ok and not mlb_ok:
+            sport_state["sport"] = "wnba"
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    @ui.refreshable
+    def _render() -> None:                                                 # noqa: WPS430
+        try:
+            from src.team_rotation_cache import get_rotation_data as _grd
+        except ImportError:
+            return
+
+        sport  = sport_state["sport"]
+        metric = metric_state["metric"]
+        points = _grd(sport=sport, metric=metric)
+
+        with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+
+            # ── Header + toggles ──────────────────────────────────────────
+            with ui.row().classes("items-center w-full").style(
+                "gap: 8px; flex-wrap: wrap;"
+            ):
+                ui.label("TEAM ROTATION").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                ui.label(str(len(points))).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 11px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+                ui.element("div").style("flex: 1; min-width: 4px;")
+
+                # Sport toggle — subtle variant (outline style)
+                with ui.row().style("gap: 3px; flex-shrink: 0;"):
+                    for _sk, _sl in (("mlb", "MLB"), ("wnba", "WNBA")):
+                        _sp_active = sport_state["sport"] == _sk
+
+                        def _mk_sport(sk=_sk):
+                            def _cb():
+                                sport_state["sport"] = sk
+                                _render.refresh()
+                            return _cb
+
+                        ui.button(_sl, on_click=_mk_sport()).props(
+                            "no-caps unelevated dense"
+                        ).style(
+                            f"background: {'rgba(124,58,237,0.15)' if _sp_active else t.CARD_HI}; "
+                            f"color: {t.PRIMARY if _sp_active else t.TEXT_DIM2}; "
+                            f"font-size: 10.5px; font-weight: 700; "
+                            f"padding: 4px 10px; "
+                            f"border-radius: {t.RADIUS_PILL}; min-height: 0;"
+                        )
+
+                # Metric toggle — primary style for active
+                with ui.row().style("gap: 3px; flex-shrink: 0;"):
+                    for _mk, _ml in (
+                        ("ml",  "ML"),
+                        ("ats", "ATS"),
+                        ("ou",  "O/U"),
+                    ):
+                        _m_active = metric_state["metric"] == _mk
+
+                        def _mk_metric(mk=_mk):
+                            def _cb():
+                                metric_state["metric"] = mk
+                                _render.refresh()
+                            return _cb
+
+                        ui.button(_ml, on_click=_mk_metric()).props(
+                            "no-caps unelevated dense"
+                        ).style(
+                            f"background: {t.PRIMARY if _m_active else t.CARD_HI}; "
+                            f"color: {t.BG if _m_active else t.TEXT_DIM}; "
+                            f"font-size: 10.5px; font-weight: 700; "
+                            f"padding: 4px 10px; "
+                            f"border-radius: {t.RADIUS_PILL}; min-height: 0;"
+                        )
+
+            # ── Chart ─────────────────────────────────────────────────────
+            if not points:
+                with ui.row().classes("items-center justify-center w-full").style(
+                    f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: 48px 20px;"
+                ):
+                    ui.label("No team data available yet — check back later.").style(
+                        f"font-size: 13px; color: {t.TEXT_DIM};"
+                    )
+            else:
+                with ui.element("div").style(
+                    f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: 12px 8px 8px 8px; "
+                    f"width: 100%; box-sizing: border-box;"
+                ):
+                    ui.echart(
+                        _rotation_chart_opts(points, metric, sport)
+                    ).style("width: 100%; height: 400px;")
+
+    _render()
 
 
 def _ai_banner() -> None:
