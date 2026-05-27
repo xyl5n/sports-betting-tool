@@ -852,14 +852,27 @@ def _card_summary_chips(r: dict) -> None:
     except (TypeError, ValueError):
         line_f = None
 
-    cells: list[tuple[str, str, str, str]] = []  # (label, value, color, sub)
+    # (label, value, sub, cell_bg, is_colored)
+    # cell_bg / is_colored control whether the cell gets a colored background
+    # with white text (hit-rate cells) or stays neutral (SEASON avg).
+    cells: list[tuple[str, str, str, str, bool]] = []
+
+    def _hr_cell_bg(pct: float) -> tuple[str, bool]:
+        """Return (cell_bg_color, is_colored) for a hit-rate percentage."""
+        if pct >= 0.70:
+            return "#22c55e", True   # bright green
+        if pct >= 0.55:
+            return "#84cc16", True   # yellow-green
+        if pct >= 0.40:
+            return t.CARD_HI, False  # neutral -- no color block
+        return "#ef4444", True       # red
 
     sa = summary.get("season_avg")
     cells.append((
         "SEASON",
         "—" if sa is None else f"{sa:.2f}",
-        t.TEXT,
         f"avg/{summary.get('season_games') or 0}g",
+        t.CARD_HI, False,            # SEASON is an avg, never color-coded
     ))
     for w_key, w_label in (
         ("last_5",  "L5"),
@@ -869,24 +882,26 @@ def _card_summary_chips(r: dict) -> None:
         hits  = summary.get(f"{w_key}_hits") or 0
         total = summary.get(f"{w_key}_games") or 0
         if not total:
-            cells.append((w_label, "—", t.TEXT_DIM2, "n/a"))
+            cells.append((w_label, "—", "n/a", t.CARD_HI, False))
             continue
         pct = hits / total
-        col = t.POS if pct >= 0.6 else (t.NEG if pct < 0.4 else t.WARN)
+        bg, colored = _hr_cell_bg(pct)
         cells.append((
-            w_label, f"{hits}/{total}", col,
+            w_label, f"{hits}/{total}",
             f"{int(round(pct * 100))}%",
+            bg, colored,
         ))
     h2h_hits  = summary.get("h2h_hits") or 0
     h2h_total = summary.get("h2h_games") or 0
     if not h2h_total:
-        cells.append(("H2H", "—", t.TEXT_DIM2, "n/a"))
+        cells.append(("H2H", "—", "n/a", t.CARD_HI, False))
     else:
         pct = h2h_hits / h2h_total
-        col = t.POS if pct >= 0.6 else (t.NEG if pct < 0.4 else t.WARN)
+        bg, colored = _hr_cell_bg(pct)
         cells.append((
-            "H2H", f"{h2h_hits}/{h2h_total}", col,
+            "H2H", f"{h2h_hits}/{h2h_total}",
             f"{int(round(pct * 100))}%",
+            bg, colored,
         ))
 
     side_suffix = (
@@ -902,24 +917,27 @@ def _card_summary_chips(r: dict) -> None:
             "display: grid; grid-template-columns: repeat(auto-fit, minmax(60px, 1fr)); "
             "gap: 4px; width: 100%;"
         ):
-            for label, value, color, sub in cells:
+            for label, value, sub, cell_bg, is_colored in cells:
+                lbl_color = "rgba(255,255,255,0.75)" if is_colored else t.TEXT_DIM2
+                val_color = "#ffffff"                 if is_colored else t.TEXT
+                sub_color = "rgba(255,255,255,0.80)" if is_colored else t.TEXT_DIM2
                 with ui.column().style(
-                    f"background: {t.CARD_HI}; "
+                    f"background: {cell_bg}; "
                     f"border-radius: {t.RADIUS_SM}; "
                     f"padding: 6px 4px; align-items: center; "
                     f"gap: 1px; min-width: 0;"
                 ):
                     ui.label(label).style(
                         f"font-size: 8.5px; font-weight: 800; letter-spacing: .4px; "
-                        f"color: {t.TEXT_DIM2};"
+                        f"color: {lbl_color};"
                     )
                     ui.label(value).style(
                         f"font-size: 12px; font-weight: 800; "
-                        f"color: {color}; font-family: monospace;"
+                        f"color: {val_color}; font-family: monospace;"
                     )
                     if sub:
                         ui.label(sub).style(
-                            f"font-size: 8.5px; color: {t.TEXT_DIM2}; "
+                            f"font-size: 8.5px; color: {sub_color}; "
                             f"font-family: monospace;"
                         )
 
