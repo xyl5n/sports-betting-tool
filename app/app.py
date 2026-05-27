@@ -3137,6 +3137,7 @@ def _ensure_no_odds_predictor(sport: str):
             n_loaded = store.load(season)
         except Exception as exc:                                          # noqa: BLE001
             _eprint(f"NO-ODDS PREDICT [{sport.upper()}]: GameStore.load failed: {exc}")
+            _eprint(traceback.format_exc())
             _no_odds_predictor_failed[sport] = True
             return None
         # If every fallback returned [] we still continue (the cached
