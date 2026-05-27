@@ -29,7 +29,7 @@ from . import theme as t
 _TABS = (
     ("Home",    t.TAB_HOME,  "/",         "home"),
     ("Picks",   t.TAB_PICKS, "/picks",    "leaderboard"),
-    ("Players", "players",   "/players",  "groups"),
+    ("Research", t.TAB_RESEARCH, "/research", "bar_chart"),
     ("AI",      t.TAB_AI,    "/ai",       "auto_awesome"),
     ("Bets",    t.TAB_BETS,  "/bets",     "receipt_long"),
 )

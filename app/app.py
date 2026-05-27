@@ -10652,7 +10652,16 @@ def _log_model_picks() -> None:
         _mp.log_games(_analysis_state.get("results") or [], "mlb")
         _mp.log_games(_wnba_analysis_state.get("results") or [], "wnba")
         from src.props_scored_cache import load_scored_props
-        _mp.log_props((load_scored_props() or {}).get("picks") or [])
+        _scored = (load_scored_props() or {}).get("picks") or []
+        _mp.log_props(_scored)
+        # Forward-only research history: freeze each scored prop's AI model +
+        # edge + odds now (while the per-day caches are still warm) so the
+        # /research leaderboard can attribute settled results later.
+        try:
+            from src import research_store as _rst
+            _rst.record(_scored)
+        except Exception as _rx:                                            # noqa: BLE001
+            _eprint(f"RESEARCH-STORE: record failed: {type(_rx).__name__}: {_rx}")
     except Exception as exc:                                               # noqa: BLE001
         _eprint(f"MODEL-PICKS: log failed: {type(exc).__name__}: {exc}")
 
@@ -11239,6 +11248,19 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     except Exception as _mpx:                                              # noqa: BLE001
         _settle_errors.append(f"model_picks:{type(_mpx).__name__}")
         _eprint(f"MODEL-PICKS: settle pass failed: {type(_mpx).__name__}: {_mpx}")
+
+    # ── Settle the /research model-analytics history ──────────────────────────
+    # Same player-stat lookup as model_picks; grades each pending research row
+    # and freezes its units P/L so the leaderboard's ROI/Win% reflect reality.
+    try:
+        from src import research_store as _rst
+        _rsum = _rst.settle(stat_lookup=_model_pick_stat_lookup)
+        if _rsum.get("settled"):
+            _eprint(f"RESEARCH-STORE: settled {_rsum['settled']} "
+                    f"({_rsum['wins']}W/{_rsum['losses']}L/{_rsum['voids']}V)")
+    except Exception as _rx:                                               # noqa: BLE001
+        _settle_errors.append(f"research_store:{type(_rx).__name__}")
+        _eprint(f"RESEARCH-STORE: settle pass failed: {type(_rx).__name__}: {_rx}")
 
     # ── Settle the rebuilt Supabase ledgers (Model + My Bets) ─────────────────
     # Grades each active staked bet against the same final scores / player
