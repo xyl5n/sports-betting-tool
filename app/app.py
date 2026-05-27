@@ -10873,36 +10873,35 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
             scores_by_sport[_sk] = []
 
     # -- Augment with free MLB Stats API for picks older than 3 days ----------
-    # The Odds API scores endpoint only returns 3 days back (hard cap on all
-    # plans).  Any pending model_picks with game_ids outside that window will
-    # never settle via Odds API alone.  statsapi.mlb.com has no day limit and
-    # requires no key -- use it to backfill any game_ids not already covered.
-    if force:
-        try:
-            from src import db as _db
-            _pending = _db.supabase_client().table("model_picks") \
-                .select("game_id") \
-                .eq("status", "pending") \
-                .eq("sport", "mlb") \
-                .execute()
-            _covered = {
-                str(r.get("id")) for r in
-                scores_by_sport.get("baseball_mlb", [])
-            }
-            _stale_ids = list({
-                str(r["game_id"]) for r in (_pending.data or [])
-                if r.get("game_id") and str(r["game_id"]) not in _covered
-            })
-            if _stale_ids:
-                _eprint(
-                    f"STATSAPI: fetching {len(_stale_ids)} stale game(s) "
-                    f"not in Odds API window"
-                )
-                _statsapi_scores = _fetch_mlb_statsapi_scores(_stale_ids)
-                _eprint(
-                    f"STATSAPI: resolved {len(_statsapi_scores)}"
-                    f"/{len(_stale_ids)} games"
-                )
+if force:
+    try:
+        from src import db as _db
+        _pending_rows = _db.model_picks_list(sport="mlb", status="pending")
+        _covered = {
+            str(r.get("game_id")) for r in
+            scores_by_sport.get("baseball_mlb", [])
+            if r.get("game_id")
+        }
+        _stale_ids = list({
+            str(r["game_id"]) for r in (_pending_rows or [])
+            if r.get("game_id") and str(r["game_id"]) not in _covered
+        })
+
+        if _stale_ids:
+            _eprint(
+                f"STATSAPI: fetching {len(_stale_ids)} stale game(s) "
+                f"not in Odds API window"
+            )
+            # ✅ FIX #1 — correct indentation
+            _statsapi_scores = _fetch_mlb_statsapi_scores(_stale_ids)
+
+            # ✅ FIX #3 — log AFTER fetch so len() is always safe
+            _eprint(
+                f"STATSAPI: resolved {len(_statsapi_scores)}/{len(_stale_ids)} games"
+            )
+
+            # ✅ FIX #4 — only one injection path; build synthetic rows correctly
+            if _statsapi_scores:
                 _synthetic = []
                 for _gid, _sc in _statsapi_scores.items():
                     _synthetic.append({
@@ -10920,11 +10919,11 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
                 scores_by_sport["baseball_mlb"] = (
                     scores_by_sport.get("baseball_mlb", []) + _synthetic
                 )
-        except Exception as _sax:
-            _eprint(
-                f"STATSAPI augment failed: {type(_sax).__name__}: {_sax}"
-            )
 
+    except Exception as _sax:
+        _eprint(
+            f"STATSAPI augment failed: {type(_sax).__name__}: {_sax}"
+        )
 
     # ── Open both ledgers up front so we can log bankroll before/after ─────────
     def _open_ledger(_path):
