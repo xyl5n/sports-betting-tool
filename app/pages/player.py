@@ -149,8 +149,8 @@ _MARKET_HUMAN_LABEL: dict[str, str] = {
 # Role-ordered market lists used to source the no-props gamelog tabs (a
 # market only becomes a tab when the gamelog actually carries that column).
 _PITCHER_MARKETS = [
-    "pitcher_strikeouts", "pitcher_outs", "pitcher_earned_runs",
-    "pitcher_hits_allowed", "pitcher_walks",
+    "pitcher_strikeouts", "pitcher_outs", "pitcher_hits_allowed",
+    "pitcher_walks", "pitcher_earned_runs",
 ]
 _BATTER_MARKETS = [
     "batter_hits", "batter_total_bases", "batter_home_runs",
@@ -161,19 +161,17 @@ _BATTER_MARKETS = [
 # Fixed prop-category skeleton per player type: (display label, market key).
 # The props tab lists EVERY one of these; categories without a line today
 # render a muted "No line today" state.  Keys match the props pipeline's
-# market keys where lines exist; the extra categories (batters faced, total
-# bases allowed, singles/doubles/triples, HRR, etc.) simply have no line and
-# show "No line today" until the book posts one.  ("Pitching Outs" is omitted
-# -- it is not distinct from Outs Recorded / pitcher_outs.)
+# market keys (the documented Odds API MLB pitcher markets: pitcher_outs,
+# pitcher_hits_allowed, pitcher_walks, pitcher_earned_runs, pitcher_strikeouts).
+# Batters Faced / Home Runs Allowed / Total Bases Allowed were removed -- they
+# are not real Odds API markets (no key ever returns a line) and too rare to
+# be useful.
 _PITCHER_PROP_CATEGORIES = [
-    ("Outs Recorded",       "pitcher_outs"),
     ("Strikeouts",          "pitcher_strikeouts"),
+    ("Outs Recorded",       "pitcher_outs"),
     ("Hits Allowed",        "pitcher_hits_allowed"),
     ("Walks Allowed",       "pitcher_walks"),
     ("Earned Runs Allowed", "pitcher_earned_runs"),
-    ("Batters Faced",       "pitcher_batters_faced"),
-    ("Home Runs Allowed",   "pitcher_home_runs"),
-    ("Total Bases Allowed", "pitcher_total_bases_allowed"),
 ]
 _BATTER_PROP_CATEGORIES = [
     ("Hits",               "batter_hits"),
