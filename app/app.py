@@ -3899,6 +3899,18 @@ def get_snapshot():
     return jsonify({"exists": True, **snap})
 
 
+@app.route("/api/meta-consensus/run", methods=["POST"])
+def run_meta_consensus_endpoint():
+    """Manually trigger the Meta-Consensus job (compound-beta batched review)
+    without waiting for the 8:30 AM schedule.  Returns the consensus summary."""
+    try:
+        res = _run_meta_consensus_job()
+        status = 200 if "error" not in res else 500
+        return jsonify(res), status
+    except Exception as exc:                                              # noqa: BLE001
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+
+
 @app.route("/api/init", methods=["GET"])
 def init_analysis():
     """Return today's cached analysis for auto-load on startup. No API calls."""
@@ -9915,6 +9927,23 @@ def _write_auto_analysis_log(entry: dict) -> None:
         _eprint(f"AUTO-ANALYSIS: _write_auto_analysis_log error: {_exc}")
 
 
+def _run_meta_consensus_job() -> dict:
+    """APScheduler 8:30 AM ET job: one batched compound-beta review of today's
+    scored props -> meta_consensus_today cache.  Best-effort; never raises."""
+    try:
+        from services import meta_consensus
+        res = meta_consensus.run_meta_consensus()
+        _eprint(
+            f"META-CONSENSUS: done -- parsed={res.get('parsed', 0)}/"
+            f"{res.get('prop_count', 0)} (model={res.get('model')})"
+        )
+        return res
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"META-CONSENSUS: job failed: {type(exc).__name__}: {exc}\n"
+                f"{traceback.format_exc()}")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
     """Run MLB + WNBA analysis via the Flask test client. Called by APScheduler."""
     _eprint(f"AUTO-ANALYSIS [{label}]: starting (is_retry={is_retry})")
@@ -12262,6 +12291,16 @@ if not _in_debug_mode or _werkzeug_main:
                     misfire_grace_time=3600,
                     max_instances=1,
                     kwargs={"label": "noon"},
+                )
+                # 8:30 AM ET: Meta-Consensus -- ONE batched compound-beta review
+                # of all props the 8:00 morning pipeline scored.
+                _sched.add_job(
+                    _run_meta_consensus_job,
+                    _CronTrigger(hour=8, minute=30, timezone=_ET),
+                    id="meta_consensus_morning",
+                    replace_existing=True,
+                    misfire_grace_time=3600,
+                    max_instances=1,
                 )
                 # NOTE: the standalone 30-min auto_settlement job has been
                 # folded into the consolidated 15-min auto_props_refresh cycle

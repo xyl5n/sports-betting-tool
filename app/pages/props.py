@@ -1328,6 +1328,33 @@ def _render_xray_mode(shown: list[dict], backend,
                     _track_btn(r, backend)
 
 
+# Meta-Consensus badge: only UNANIMOUS / STRONG get a card badge.  Gold (amber)
+# for unanimous, green for strong.  Uses the existing palette only.
+_CONSENSUS_BADGE = {
+    "UNANIMOUS": ("★ UNANIMOUS", t.WARN),
+    "STRONG":    ("✓ STRONG",   t.POS),
+}
+
+
+def _consensus_badge(r: dict) -> None:
+    """Render the meta-consensus card badge for *r* when its tier is UNANIMOUS
+    or STRONG.  Silent no-op when consensus data is missing/stale/other tier."""
+    try:
+        from services import meta_consensus
+        entry = meta_consensus.consensus_for(r)
+    except Exception:                                                     # noqa: BLE001
+        return
+    spec = _CONSENSUS_BADGE.get((entry or {}).get("tier"))
+    if not spec:
+        return
+    label, color = spec
+    ui.label(label).style(
+        f"background: {color}; color: {t.BG}; font-size: 8.5px; "
+        f"font-weight: 800; letter-spacing: .4px; padding: 2px 7px; "
+        f"border-radius: {t.RADIUS_PILL}; flex-shrink: 0; white-space: nowrap;"
+    ).tooltip((entry or {}).get("compound_reason") or "")
+
+
 def _prop_card(r: dict, backend) -> None:
     """One prop pick rendered as a card.
 
@@ -1368,6 +1395,7 @@ def _prop_card(r: dict, backend) -> None:
                 f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
             )
+            _consensus_badge(r)
             ui.label(r.get("team") or "").style(
                 f"font-size: 11px; color: {t.TEXT_DIM2}; "
                 f"font-family: monospace; "
