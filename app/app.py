@@ -3227,11 +3227,14 @@ def _predict_no_odds_game(sport: str, g: dict) -> dict | None:
     Result is NOT recorded in any tracker file since there's nothing
     to settle (no odds means no bet was ever placed)."""
     sport = sport.lower()
+    _matchup = f"{g.get('away_team','?')} @ {g.get('home_team','?')}"
     pred = _ensure_no_odds_predictor(sport)
     if pred is None:
+        _eprint(f"NO-ODDS PREDICT [{sport.upper()}] {_matchup}: skip -- predictor unavailable")
         return None
     fb, ml_model, rl_model, totals_model = pred
     if not ml_model or not getattr(ml_model, "is_trained", False):
+        _eprint(f"NO-ODDS PREDICT [{sport.upper()}] {_matchup}: skip -- ML model not trained")
         return None
 
     # Inject a neutral implied prob + zero spread so build_for_game
@@ -3244,15 +3247,21 @@ def _predict_no_odds_game(sport: str, g: dict) -> dict | None:
     g_for_features.setdefault("spread", 0.0)
     try:
         built = fb.build_for_game(g_for_features)
-    except Exception:                                                     # noqa: BLE001
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"NO-ODDS PREDICT [{sport.upper()}] {_matchup}: skip -- "
+                f"build_for_game raised {type(exc).__name__}: {exc}")
         return None
     if built is None:
+        _eprint(f"NO-ODDS PREDICT [{sport.upper()}] {_matchup}: skip -- "
+                f"build_for_game returned None (team unresolved or no team stats)")
         return None
     feature_vec, meta = built
 
     try:
         ml = ml_model.predict(feature_vec, weights=None, game_meta=g_for_features)
-    except Exception:                                                     # noqa: BLE001
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"NO-ODDS PREDICT [{sport.upper()}] {_matchup}: skip -- "
+                f"ml predict raised {type(exc).__name__}: {exc}")
         return None
     home_prob = float(ml.get("home_win_prob") or 0.5)
 
@@ -10696,21 +10705,34 @@ _MODEL_PICK_STAT = {
 _SETTLE_GAMELOG_MEMO: dict = {}
 _SETTLE_GAMELOG_TTL = 120.0
 
+# Per-cycle budget for the verbose STAT-LOOKUP diagnostic.  A settlement pass
+# can call the lookup hundreds of times (one per pending prop), so we log only
+# the first few per pass -- enough to confirm in Railway logs WHAT season/date
+# is queried and what comes back, without flooding.  Reset before each settle.
+_STAT_LOOKUP_LOG_BUDGET = 0
 
-def _model_pick_stat_lookup(player: str, market: str):
-    """Actual stat for a player's just-completed game, for settling prop picks.
 
-    Two failure modes the old strict ``== today`` lookup hit, fixed here:
+def _reset_stat_lookup_log_budget(n: int = 15) -> None:
+    global _STAT_LOOKUP_LOG_BUDGET
+    _STAT_LOOKUP_LOG_BUDGET = int(n)
 
-      1. Stale cache -- get_player_gamelog caches per UTC day, so a log
-         fetched in the morning (before the game) was reused at settlement
-         and never contained the finished game.  We pass force_refresh=True
-         (memoized per pass) so the completed game is always present.
-      2. Post-midnight boundary -- settlement runs through ~1 AM ET, by which
-         point _today_et() has rolled to the next day while a late west-coast
-         game still carries the PRIOR ET date.  During that 12 AM-2 AM ET tail
-         we also accept yesterday's date; in daytime only today matches, so a
-         prop never settles early against the prior day's game.
+
+def _model_pick_stat_lookup(player: str, market: str, pick_date: str = None):
+    """Actual stat for a player's completed game, for settling prop picks.
+
+    *pick_date* (YYYY-MM-DD ET, the slate the pick belongs to) makes the
+    lookup grade a SPECIFIC past game rather than only "today":
+
+      * season is taken from pick_date's year -- the old hardcoded
+        _CURRENT_SEASON (2025) never returned 2026 gamelogs, so every 2026
+        prop stayed pending.
+      * the accepted game date is pick_date itself, so a backlog of picks
+        from earlier days settles against each pick's own game.
+
+    When *pick_date* is omitted (the ledger / Top-Plays same-day callers) the
+    original today-window behaviour is kept: force-refresh the gamelog (so the
+    just-finished game is present, not a stale morning cache) and accept today,
+    plus yesterday only during the 12 AM-2 AM ET post-midnight settlement tail.
     """
     try:
         import time as _time
@@ -10721,32 +10743,59 @@ def _model_pick_stat_lookup(player: str, market: str):
         )
         pid = search_player_by_name(player)
         if not pid:
+            _stat_lookup_log(player, market, None, None, "player-not-found")
             return None
         is_pitcher = (market or "").startswith("pitcher_")
 
-        memo_key = (int(pid), is_pitcher)
+        if pick_date:
+            try:
+                season = int(str(pick_date)[:4])
+            except (TypeError, ValueError):
+                season = _CURRENT_SEASON
+            acceptable = {str(pick_date)[:10]}
+        else:
+            season = _CURRENT_SEASON
+            now_et = datetime.now(timezone(timedelta(hours=-4)))
+            acceptable = {now_et.date().isoformat()}
+            if now_et.hour <= 2:        # post-midnight settlement tail
+                acceptable.add((now_et.date() - _td(days=1)).isoformat())
+
+        memo_key = (int(pid), is_pitcher, season)
         cached = _SETTLE_GAMELOG_MEMO.get(memo_key)
         now = _time.monotonic()
         if cached is not None and (now - cached[0]) < _SETTLE_GAMELOG_TTL:
             games = cached[1]
         else:
             games = get_player_gamelog(
-                int(pid), _CURRENT_SEASON,
+                int(pid), season,
                 is_pitcher=is_pitcher, force_refresh=True,
             ) or []
             _SETTLE_GAMELOG_MEMO[memo_key] = (now, games)
 
-        now_et = datetime.now(timezone(timedelta(hours=-4)))
-        acceptable = {now_et.date().isoformat()}
-        if now_et.hour <= 2:        # post-midnight settlement tail
-            acceptable.add((now_et.date() - _td(days=1)).isoformat())
         cand = [x for x in games if (x.get("date") or "")[:10] in acceptable]
         if not cand:
+            _stat_lookup_log(player, market, season, acceptable,
+                             f"no-game ({len(games)} in season)")
             return None
         g = max(cand, key=lambda x: (x.get("date") or ""))
-        return gamelog_stat_value(g, _MODEL_PICK_STAT.get(market, market))
+        actual = gamelog_stat_value(g, _MODEL_PICK_STAT.get(market, market))
+        _stat_lookup_log(player, market, season, acceptable,
+                         f"game {(g.get('date') or '')[:10]} -> {actual}")
+        return actual
     except Exception:                                                      # noqa: BLE001
         return None
+
+
+def _stat_lookup_log(player, market, season, acceptable, outcome) -> None:
+    """Budgeted one-liner so the settlement pass shows what the stat lookup
+    queried (season + accepted date) and returned -- verifiable in prod logs."""
+    global _STAT_LOOKUP_LOG_BUDGET
+    if _STAT_LOOKUP_LOG_BUDGET <= 0:
+        return
+    _STAT_LOOKUP_LOG_BUDGET -= 1
+    want = ",".join(sorted(acceptable)) if acceptable else "-"
+    _eprint(f"MODEL-PICKS: STAT-LOOKUP {player!r} {market} "
+            f"season={season} want={want} -> {outcome}")
 
 _STATSAPI_BRIDGE_CACHE: dict = {}     # et_date_iso -> (ts, {norm_team: game_info})
 _STATSAPI_BRIDGE_TTL = 3600.0         # 1 hour -- avoids re-fetching a date's
@@ -11175,6 +11224,7 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
     try:
         from src import model_picks as _mp
         _log_model_picks()
+        _reset_stat_lookup_log_budget(15)
         _summary = _mp.settle(
             final_scores=_final_scores_from(scores_by_sport),
             stat_lookup=_model_pick_stat_lookup,

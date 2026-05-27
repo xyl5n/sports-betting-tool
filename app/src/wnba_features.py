@@ -101,18 +101,29 @@ class WNBAFeatureBuilder:
         if h is None or a is None:
             return None
 
-        hp = self.client.get_player_stats(home_id)
-        ap = self.client.get_player_stats(away_id)
+        # Optional enrichment signals.  The full odds-path client
+        # (WNBAStatsClient) supplies player splits, back-to-back detection,
+        # head-to-head and referee foul-rate; the no-odds prefetch passes a
+        # bare GameStore that only computes team stats.  Default each missing
+        # source to a neutral value (via getattr) so a thin client still
+        # produces a feature vector instead of raising AttributeError -- which
+        # was silently caught upstream and skipped every no-odds WNBA game.
+        get_players = getattr(self.client, "get_player_stats", None)
+        hp = get_players(home_id) if callable(get_players) else {}
+        ap = get_players(away_id) if callable(get_players) else {}
 
         game_date = (game.get("commence_time", "") or "")[:10]
-        home_b2b = 1.0 if self.client._is_b2b(home_id, game_date) else 0.0
-        away_b2b = 1.0 if self.client._is_b2b(away_id, game_date) else 0.0
+        is_b2b = getattr(self.client, "_is_b2b", None)
+        home_b2b = 1.0 if (callable(is_b2b) and is_b2b(home_id, game_date)) else 0.0
+        away_b2b = 1.0 if (callable(is_b2b) and is_b2b(away_id, game_date)) else 0.0
 
-        hw, aw = self.client.get_h2h(home_id, away_id)
+        get_h2h = getattr(self.client, "get_h2h", None)
+        hw, aw = get_h2h(home_id, away_id) if callable(get_h2h) else (0, 0)
         h2h_total = hw + aw
         h2h_diff = (hw - aw) / max(h2h_total, 1)
 
-        ref_rate = self.client.get_referee_foul_rate(game.get("id"))
+        get_ref = getattr(self.client, "get_referee_foul_rate", None)
+        ref_rate = get_ref(game.get("id")) if callable(get_ref) else 40.0
 
         # Market data — OddsClient stores vig-free implied probability directly
         home_implied_prob = float(game.get("home_implied_prob") or 0.5)

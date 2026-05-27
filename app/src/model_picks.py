@@ -431,8 +431,19 @@ def settle(final_scores: Optional[dict] = None, stat_lookup=None) -> dict:
         if pick.get("player_name"):                       # prop
             p_checked += 1
             if stat_lookup is not None:
+                # The pick's ET slate date (from created_at) tells the lookup
+                # which season + game date to grade against, so a backlog of
+                # props from earlier days / a 2026 season settles instead of
+                # only matching games dated "today".
+                pick_date = _et_date(pick.get("created_at")) or None
                 try:
-                    actual = stat_lookup(pick.get("player_name"), pick.get("bet_type"))
+                    actual = stat_lookup(pick.get("player_name"),
+                                         pick.get("bet_type"), pick_date)
+                except TypeError:
+                    # A stat_lookup that doesn't accept the date arg (older
+                    # callers) -- fall back to the 2-arg form.
+                    actual = stat_lookup(pick.get("player_name"),
+                                         pick.get("bet_type"))
                 except Exception:                                         # noqa: BLE001
                     actual = None
                 if actual is not None:
@@ -481,8 +492,9 @@ def settle(final_scores: Optional[dict] = None, stat_lookup=None) -> dict:
              f"sample score ids={list(final_scores)[:5]}")
     if p_checked and p_graded == 0:
         _log("SETTLE-DEBUG: NO prop graded -- stat_lookup returned None for every "
-             "prop (player game-log not found / game not yet played in the lookup's "
-             "season+date window; the gamelog-lookup fix is in PR #223).")
+             "prop (player game-log not found, or no game on the pick's slate date "
+             "in that season; see the per-pick MODEL-PICKS: STAT-LOOKUP lines for "
+             "the exact season+date queried and what was returned).")
     return summary
 
 
