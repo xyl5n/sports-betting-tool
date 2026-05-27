@@ -314,6 +314,8 @@ def _section_unified_props_list(backend) -> None:
         # dismissed: set of _prop_swipe_key() strings; survives filter / sort
         # changes within the same page session (never serialised).
         dismissed: set = set()
+        # X-Ray table sort state: persists across filter / sort changes.
+        xray_sort  = {"col": "conf", "asc": False}
 
         # ── Card area (refreshable so sort, filters, and mode re-render) ──
         @ui.refreshable
@@ -348,7 +350,7 @@ def _section_unified_props_list(backend) -> None:
                 ui.element("div").style("flex: 1; min-width: 4px;")
                 # List | Swipe mode pills
                 with ui.row().style("gap: 3px; flex-shrink: 0;"):
-                    for _mkey, _mlabel in (("list", "≡ List"), ("swipe", "⇄ Swipe")):
+                    for _mkey, _mlabel in (("list", "≡ List"), ("swipe", "⇄ Swipe"), ("xray", "⊞ X-Ray")):
                         _active = view_state["mode"] == _mkey
                         def _mk_mode(mk=_mkey):
                             def _set():
@@ -373,7 +375,7 @@ def _section_unified_props_list(backend) -> None:
                 with ui.element("div").classes("game-grid w-full"):
                     for r_item in shown:
                         _prop_card(r_item, backend)
-            else:
+            elif view_state["mode"] == "swipe":
                 swipe_shown = [
                     r_item for r_item in shown
                     if _prop_swipe_key(r_item) not in dismissed
@@ -382,6 +384,8 @@ def _section_unified_props_list(backend) -> None:
                     swipe_shown, len(shown), backend, dismissed,
                     cards_refresh.refresh,
                 )
+            else:
+                _render_xray_mode(shown, backend, xray_sort, cards_refresh.refresh)
 
         # ── Filter button + collapsible panel ─────────────────────────────
         _filter_bar(rows, filters, cards_refresh.refresh)
@@ -907,6 +911,269 @@ def _render_swipe_mode(
     ui.run_javascript(_SWIPE_JS)
 
 
+# ── X-Ray table ──────────────────────────────────────────────────────────────
+# Column spec tuples: (header_label, sort_key_or_None, right_align, flex_css)
+# flex_css is applied identically to both the sticky header cell and every
+# data cell so the columns stay pixel-perfect aligned.
+_XRAY_COLS: tuple = (
+    ("PLAYER", "player", False, "flex: 1 1 180px; min-width: 160px;"),
+    ("LINE",   "line",   True,  "flex: 0 0 80px;"),
+    ("ODDS",   "odds",   True,  "flex: 0 0 72px;"),
+    ("CONF",   "conf",   True,  "flex: 0 0 72px;"),
+    ("EV",     "ev",     True,  "flex: 0 0 90px;"),
+    ("L5",     "l5",     True,  "flex: 0 0 110px;"),
+    ("L10",    "l10",    True,  "flex: 0 0 110px;"),
+    ("SZN",    "szn",    True,  "flex: 0 0 72px;"),
+    ("TRACK",  None,     True,  "flex: 0 0 90px;"),
+)
+
+# Sum of fixed-column flex-basis values + PLAYER min-width + a bit of padding
+# headroom.  Drives min-width on every row so the table doesn't collapse
+# before the outer overflow-x: auto wrapper kicks in.
+_XRAY_MIN_W = "900px"
+
+
+def _xray_sort_rows(rows: list[dict], xs: dict) -> list[dict]:
+    """Sort *rows* for the X-Ray table.  xs = {col, asc}."""
+    col = xs.get("col") or "conf"
+    asc = xs.get("asc", False)
+
+    def _key(r):
+        s = r.get("summary") or {}
+        if col == "player":
+            return (r.get("player") or "").lower()
+        if col == "line":
+            try:
+                return float(r.get("line") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        if col == "odds":
+            try:
+                return int(r.get("best_odds") or -9999)
+            except (TypeError, ValueError):
+                return -9999
+        if col == "conf":
+            return float(r.get("confidence") or 0)
+        if col == "ev":
+            v = r.get("ev_pct")
+            try:
+                return float(v) if v is not None else float("-inf")
+            except (TypeError, ValueError):
+                return float("-inf")
+        if col == "l5":
+            return _window_hit_rate(r, "last_5")
+        if col == "l10":
+            return _window_hit_rate(r, "last_10")
+        if col == "szn":
+            v = s.get("season_avg")
+            try:
+                return float(v) if v is not None else -1.0
+            except (TypeError, ValueError):
+                return -1.0
+        return 0
+
+    return sorted(rows, key=_key, reverse=not asc)
+
+
+def _render_xray_mode(shown: list[dict], backend,
+                      xray_sort: dict, on_refresh) -> None:
+    """Condensed, sortable data table: one prop per row.
+
+    Uses a flexbox-based grid (not <table>) so NiceGUI's div wrappers
+    around child elements don't break table-cell alignment.  Column widths
+    are kept identical between the sticky header row and data rows via the
+    shared _XRAY_COLS flex specs.
+
+    Sort state is held in the caller's *xray_sort* dict (col, asc).
+    Clicking a header mutates the dict in-place and calls *on_refresh*
+    (= cards_refresh.refresh), which re-renders the whole cards area with
+    the new sort applied.  The dict survives re-renders because it lives in
+    the _section_unified_props_list closure.
+    """
+    sorted_rows = _xray_sort_rows(shown, xray_sort)
+    active_col  = xray_sort.get("col") or "conf"
+    is_asc      = xray_sort.get("asc", False)
+
+    # Shared vertical cell padding — identical for header and data rows.
+    _PAD = "0 12px"
+
+    def _mk_sort_fn(k: str):
+        def _do():
+            if xray_sort["col"] == k:
+                xray_sort["asc"] = not xray_sort["asc"]
+            else:
+                xray_sort["col"] = k
+                # player name → ascending; all numeric columns → descending
+                xray_sort["asc"] = (k == "player")
+            on_refresh()
+        return _do
+
+    with ui.element("div").style(
+        "overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; "
+        f"border-radius: {t.RADIUS_MD}; border: 1px solid {t.BORDER};"
+    ):
+        # ── Sticky header row ────────────────────────────────────────────
+        with ui.element("div").style(
+            f"display: flex; flex-direction: row; align-items: center; "
+            f"background: {t.CARD_HI}; border-bottom: 2px solid {t.BORDER}; "
+            f"position: sticky; top: 0; z-index: 10; "
+            f"min-width: {_XRAY_MIN_W};"
+        ):
+            for hdr, sort_key, right_align, flex in _XRAY_COLS:
+                is_active = bool(sort_key and active_col == sort_key)
+                arrow     = (" ▲" if is_asc else " ▼") if is_active else ""
+                justify   = "flex-end" if right_align else "flex-start"
+                hdr_cell  = ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: {justify}; padding: {_PAD}; height: 36px; "
+                    f"cursor: {'pointer' if sort_key else 'default'}; "
+                    f"user-select: none; white-space: nowrap; "
+                    f"font-size: 9px; font-weight: 800; letter-spacing: .6px; "
+                    f"color: {t.TEXT if is_active else t.TEXT_DIM2};"
+                )
+                with hdr_cell:
+                    ui.label(hdr + arrow)
+                if sort_key:
+                    hdr_cell.on("click", _mk_sort_fn(sort_key))
+
+        # ── Data rows ────────────────────────────────────────────────────
+        for i, r in enumerate(sorted_rows):
+            row_bg  = t.CARD if i % 2 == 0 else "rgba(255,255,255,0.025)"
+            side    = (r.get("side") or "Over").strip().title()
+            is_over = side == "Over"
+            summary = r.get("summary") or {}
+
+            with ui.element("div").style(
+                f"display: flex; flex-direction: row; align-items: center; "
+                f"background: {row_bg}; min-width: {_XRAY_MIN_W}; height: 44px; "
+                f"border-bottom: 1px solid {t.BORDER_SOFT};"
+            ):
+                # PLAYER — avatar + linked name + market label
+                _, _, _, flex = _XRAY_COLS[0]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"padding: {_PAD}; gap: 8px; overflow: hidden;"
+                ):
+                    _card_avatar(r)
+                    with ui.column().style("gap: 0; min-width: 0; flex: 1 1 0;"):
+                        _slug = (r.get("player") or "").lower().replace(" ", "-")
+                        ui.link(
+                            r.get("player") or "—",
+                            f"/player/mlb/{_slug}",
+                        ).style(
+                            f"font-size: 12px; font-weight: 700; color: {t.TEXT}; "
+                            f"text-decoration: none; white-space: nowrap; "
+                            f"overflow: hidden; text-overflow: ellipsis; "
+                            f"display: block; max-width: 140px;"
+                        )
+                        ui.label(
+                            _short_market(r.get("market", "")).upper()
+                        ).style(
+                            f"font-size: 8px; font-weight: 800; letter-spacing: .4px; "
+                            f"color: {t.TEXT_DIM2};"
+                        )
+
+                # LINE — "O 5.5" / "U 2.5" coloured pill
+                _, _, _, flex = _XRAY_COLS[1]
+                chip_bg = t.POS if is_over else t.NEG
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label(
+                        f"{'O' if is_over else 'U'} {r.get('line', '—')}"
+                    ).style(
+                        f"background: {chip_bg}; color: {t.BG}; "
+                        f"font-size: 11px; font-weight: 800; letter-spacing: .3px; "
+                        f"padding: 2px 8px; border-radius: {t.RADIUS_SM}; "
+                        f"font-family: monospace; white-space: nowrap;"
+                    )
+
+                # ODDS
+                _, _, _, flex = _XRAY_COLS[2]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label(_odds_str(r.get("best_odds"))).style(
+                        f"font-size: 12px; font-weight: 700; "
+                        f"font-family: monospace; color: {t.TEXT_DIM};"
+                    )
+
+                # CONF — threshold-coloured percentage
+                _, _, _, flex = _XRAY_COLS[3]
+                conf     = float(r.get("confidence") or 0)
+                if conf >= 0.65:   conf_col = t.POS
+                elif conf >= 0.55: conf_col = t.WARN
+                else:              conf_col = t.TEXT_DIM
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label(f"{conf * 100:.0f}%").style(
+                        f"font-size: 13px; font-weight: 800; "
+                        f"font-family: monospace; color: {conf_col};"
+                    )
+
+                # EV — reuse _ev_badge(compact=True)
+                _, _, _, flex = _XRAY_COLS[4]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    _ev_badge(r.get("ev_pct"), compact=True)
+
+                # L5 + L10 — coloured pills via _hr_cell_bg
+                for w_idx, w_key in enumerate(("last_5", "last_10")):
+                    _, _, _, flex = _XRAY_COLS[5 + w_idx]
+                    hits  = int(summary.get(f"{w_key}_hits")  or 0)
+                    total = int(summary.get(f"{w_key}_games") or 0)
+                    with ui.element("div").style(
+                        f"{flex}; display: flex; align-items: center; "
+                        f"justify-content: center; padding: {_PAD};"
+                    ):
+                        if not total:
+                            ui.label("—").style(
+                                f"font-family: monospace; color: {t.TEXT_DIM2};"
+                            )
+                        else:
+                            pct              = hits / total
+                            cell_bg, colored = _hr_cell_bg(pct)
+                            lbl_txt          = f"{hits}/{total} · {int(round(pct * 100))}%"
+                            if colored:
+                                ui.label(lbl_txt).style(
+                                    f"background: {cell_bg}; color: #ffffff; "
+                                    f"font-size: 10.5px; font-weight: 800; "
+                                    f"padding: 2px 7px; border-radius: {t.RADIUS_PILL}; "
+                                    f"font-family: monospace; white-space: nowrap;"
+                                )
+                            else:
+                                ui.label(lbl_txt).style(
+                                    f"font-size: 10.5px; color: {t.TEXT}; "
+                                    f"font-family: monospace; white-space: nowrap;"
+                                )
+
+                # SZN — season average, neutral (no colour coding)
+                _, _, _, flex = _XRAY_COLS[7]
+                sa = summary.get("season_avg")
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: center; padding: {_PAD};"
+                ):
+                    ui.label("—" if sa is None else f"{sa:.2f}").style(
+                        f"font-size: 12px; color: {t.TEXT_DIM}; "
+                        f"font-family: monospace;"
+                    )
+
+                # TRACK — reuse the existing Track button
+                _, _, _, flex = _XRAY_COLS[8]
+                with ui.element("div").style(
+                    f"{flex}; display: flex; align-items: center; "
+                    f"justify-content: flex-end; padding: {_PAD};"
+                ):
+                    _track_btn(r, backend)
+
+
 def _prop_card(r: dict, backend) -> None:
     """One prop pick rendered as a card.
 
@@ -1142,6 +1409,21 @@ def _card_line_type_chip(r: dict) -> None:
     )
 
 
+def _hr_cell_bg(pct: float) -> tuple[str, bool]:
+    """Return (cell_bg_color, is_colored) for a hit-rate fraction (0..1).
+
+    Used by _card_summary_chips (prop card) and _render_xray_mode (table)
+    so the colour thresholds live in exactly one place.
+    """
+    if pct >= 0.70:
+        return "#22c55e", True   # bright green
+    if pct >= 0.55:
+        return "#84cc16", True   # yellow-green
+    if pct >= 0.40:
+        return t.CARD_HI, False  # neutral — no colour block
+    return "#ef4444", True       # red
+
+
 def _card_summary_chips(r: dict) -> None:
     """5-cell grid below the pick row: SEASON avg + L5/L10/L20 + H2H hit
     rate vs the line.  Same shape as the player-page summary row so the
@@ -1157,16 +1439,6 @@ def _card_summary_chips(r: dict) -> None:
     # cell_bg / is_colored control whether the cell gets a colored background
     # with white text (hit-rate cells) or stays neutral (SEASON avg).
     cells: list[tuple[str, str, str, str, bool]] = []
-
-    def _hr_cell_bg(pct: float) -> tuple[str, bool]:
-        """Return (cell_bg_color, is_colored) for a hit-rate percentage."""
-        if pct >= 0.70:
-            return "#22c55e", True   # bright green
-        if pct >= 0.55:
-            return "#84cc16", True   # yellow-green
-        if pct >= 0.40:
-            return t.CARD_HI, False  # neutral -- no color block
-        return "#ef4444", True       # red
 
     sa = summary.get("season_avg")
     cells.append((
