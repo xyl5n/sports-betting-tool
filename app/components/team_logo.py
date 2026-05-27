@@ -94,6 +94,16 @@ def _team_initials(team: str) -> str:
     return parts[-1][:3].upper()
 
 
+def abbrev(team: str, sport: str = "mlb") -> str:
+    """Public 2-3 letter team abbreviation for *team* (full name).  Uses the
+    canonical ESPN map (e.g. 'New York Yankees' -> 'NYY') and falls back to
+    nickname initials when the team isn't in the map."""
+    abbr_map = _WNBA_ABBR if (sport or "").lower() == "wnba" else _MLB_ABBR
+    abbr = (abbr_map.get(team) or abbr_map.get((team or "").strip())
+            or _team_initials(team))
+    return abbr.upper()
+
+
 def _team_color(team: str) -> str:
     """Deterministic HSL hash -- same algorithm the legacy template used
     so a given team gets the same fallback color before and after the
