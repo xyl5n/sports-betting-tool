@@ -165,7 +165,7 @@ def _layout(backend) -> None:
     per-card detail.  Content column now spans the full content width
     centered via margin: 0 auto."""
     with ui.column().classes("page-content w-full").style(
-        f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; "
+        f"max-width: {t.MAX_CONTENT_W}; margin: 0 auto; align-self: center; "
         f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
     ):
         _guarded_section("chips", lambda: _section_chips(backend))
