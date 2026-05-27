@@ -172,6 +172,7 @@ def _layout(backend) -> None:
         _guarded_section("todays_games_stub",
                          lambda: _section_todays_games_stub(backend))
         _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
+        _guarded_section("news", lambda: _section_news(backend))
         _guarded_section("confidence_carousel",
                          lambda: _section_confidence_carousel(backend))
         _guarded_section("ai_banner", _ai_banner)
@@ -1108,6 +1109,150 @@ def _all_serialized_games(backend) -> list[dict]:
         f"wnba_failures={wnba_failures}/{wnba_total}"
     )
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Section: ESPN news feed (between EV Scan and Highest Confidence)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Sport → tag label shown in the badge on each news row.
+# The homepage uses the MLB feed as its primary source; the tag makes
+# it obvious to the user where the headlines come from.
+_SPORT_TAG: dict[str, str] = {
+    "mlb":  "MLB",
+    "nba":  "NBA",
+    "nfl":  "NFL",
+    "nhl":  "NHL",
+    "wnba": "WNBA",
+}
+
+# Sport → badge colours.  Intentionally different from the primary pick
+# colours so news badges don't visually compete with the pick cards.
+_SPORT_TAG_STYLE: dict[str, str] = {
+    "mlb":  f"background: #1a2e4a; color: #60a5fa;",   # MLB blue
+    "nba":  f"background: #1f1a00; color: #f59e0b;",   # NBA amber
+    "nfl":  f"background: #1a1a2e; color: #a78bfa;",   # NFL purple
+    "nhl":  f"background: #001a1a; color: #34d399;",   # NHL teal
+    "wnba": f"background: #1f1a00; color: #f59e0b;",   # WNBA amber (NBA feed)
+}
+
+
+def _section_news(backend) -> None:
+    """ESPN RSS headlines — fetched server-side, cached 5 min.
+
+    The homepage always loads the MLB feed (primary sport).  The fetch
+    is synchronous with a 5-second timeout; the 5-minute cache means
+    only the first page load per Railway dyno pays the network cost.
+    All subsequent renders within the TTL window are pure in-process
+    dict reads (~microseconds).
+
+    Wrapped in _guarded_section so a network failure or a parse error
+    never blanks the rest of the home page.
+    """
+    # Determine the dominant active sport so the tag and feed match
+    # what the user is seeing in the rest of the page.
+    try:
+        wnba_active = bool(
+            (backend._wnba_analysis_state or {}).get("results")
+        )
+        mlb_active = bool(
+            (backend._analysis_state or {}).get("results")
+        )
+    except Exception:                                                     # noqa: BLE001
+        wnba_active = mlb_active = False
+
+    # MLB is the primary sport; fall back to WNBA only when MLB has no
+    # results and WNBA does.
+    sport = "wnba" if (wnba_active and not mlb_active) else "mlb"
+
+    try:
+        from src.news_feed import fetch as _nf_fetch
+        items = _nf_fetch(sport, max_items=10)
+    except Exception:                                                     # noqa: BLE001
+        items = []
+
+    tag_label = _SPORT_TAG.get(sport, "ESPN")
+    tag_style  = _SPORT_TAG_STYLE.get(
+        sport,
+        f"background: {t.CARD_HI}; color: {t.WARN};",
+    )
+
+    with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+        # ── Section header ────────────────────────────────────────────
+        with ui.row().classes("items-center w-full").style("gap: 8px;"):
+            ui.label("NEWS").style(
+                f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                f"color: {t.TEXT};"
+            )
+            if items:
+                ui.label(str(len(items))).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 11px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+            ui.label(f"via ESPN · {tag_label}").style(
+                f"font-size: 10.5px; color: {t.TEXT_DIM2}; "
+                f"margin-left: auto;"
+            )
+
+        # ── Empty / error state ───────────────────────────────────────
+        if not items:
+            ui.label("Headlines unavailable — check back shortly.").style(
+                f"color: {t.TEXT_DIM}; font-size: 12px; text-align: center; "
+                f"background: {t.CARD}; border: 1px dashed {t.BORDER}; "
+                f"border-radius: {t.RADIUS_MD}; padding: {t.SPACE_MD}; "
+                f"width: 100%;"
+            )
+            return
+
+        # ── News rows rendered as raw HTML ────────────────────────────
+        # ui.html() is used so the anchor tags are real <a> elements
+        # with proper href / target / rel attributes -- NiceGUI's link
+        # helpers add unwanted wrappers that break flex row alignment.
+        # Titles are HTML-escaped by news_feed._parse_items() before
+        # they reach this point so no double-escaping is needed here.
+        border_color = t.BORDER_SOFT
+
+        rows_html: list[str] = []
+        for i, item in enumerate(items):
+            is_last    = i == len(items) - 1
+            border_css = "" if is_last else (
+                f"border-bottom: 1px solid {border_color};"
+            )
+            time_span  = (
+                f'<span style="font-size:10.5px;color:{t.TEXT_DIM2};'
+                f'font-family:monospace;white-space:nowrap;flex-shrink:0;">'
+                f'{item["time_ago"]}</span>'
+            ) if item.get("time_ago") else ""
+            rows_html.append(
+                f'<a href="{item["link"]}" target="_blank" rel="noopener noreferrer"'
+                f' style="display:flex;align-items:center;gap:10px;'
+                f'padding:10px 14px;text-decoration:none;{border_css}'
+                f'transition:background 150ms ease-out;cursor:pointer;"'
+                f' onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'"'
+                f' onmouseout="this.style.background=\'\'">'
+                # Sport badge
+                f'<span style="font-size:8.5px;font-weight:800;letter-spacing:.5px;'
+                f'padding:2px 6px;border-radius:{t.RADIUS_PILL};white-space:nowrap;'
+                f'flex-shrink:0;{tag_style}">{tag_label}</span>'
+                # Time ago
+                f'{time_span}'
+                # Headline (already HTML-safe from news_feed module)
+                f'<span style="font-size:13px;color:{t.TEXT};flex:1;'
+                f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+                f'{item["title"]}</span>'
+                # Chevron
+                f'<span style="font-size:14px;color:{t.TEXT_DIM2};flex-shrink:0;'
+                f'line-height:1;">›</span>'
+                f'</a>'
+            )
+
+        ui.html(
+            f'<div style="background:{t.CARD};border:1px solid {t.BORDER};'
+            f'border-radius:{t.RADIUS_MD};overflow:hidden;width:100%;">'
+            + "".join(rows_html)
+            + "</div>"
+        )
 
 
 def _ai_banner() -> None:
