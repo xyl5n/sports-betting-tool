@@ -2964,12 +2964,14 @@ def _pg_stat_cell(row: dict) -> str:
     )
 
 
-def _pg_plain_cell(text: str, *, color: str = None, dim: bool = False) -> str:
+def _pg_plain_cell(text: str, *, color: str = None, dim: bool = False,
+                   font_px: int = 12, min_px: int | None = None) -> str:
     color = color or (t.TEXT_DIM2 if dim else t.TEXT)
+    mw = f"min-width:{min_px}px;" if min_px else ""
     return (
-        f'<td style="text-align:right;padding:7px 10px;font-size:12px;'
+        f'<td style="text-align:right;padding:7px 10px;font-size:{font_px}px;'
         f'font-family:monospace;color:{color};'
-        f'border-bottom:1px solid {t.BORDER_SOFT};white-space:nowrap;">{text}</td>'
+        f'border-bottom:1px solid {t.BORDER_SOFT};white-space:nowrap;{mw}">{text}</td>'
     )
 
 
@@ -2986,51 +2988,88 @@ def _pg_odds_str(row: dict) -> str:
         return "N/A"
 
 
-def _pg_header(stat_key: str) -> str:
+def _pg_header(stat_key: str, mobile: bool = False) -> str:
     import html as _html
+    # white-space:nowrap on every <th> in both layouts so column labels never
+    # wrap.  ODDS/LINE get a 48px floor in both; PITCHER gets an 80px floor on
+    # mobile (where the table uses auto layout instead of the fixed colgroup).
     th = (f"font-size:8.5px;font-weight:800;letter-spacing:.5px;"
-          f"color:{t.TEXT_DIM2};padding:7px 10px;border-bottom:1px solid {t.BORDER};")
+          f"color:{t.TEXT_DIM2};padding:7px 10px;border-bottom:1px solid {t.BORDER};"
+          f"white-space:nowrap;")
+    pitcher_th = th + ("min-width:80px;" if mobile else "")
+    num_th = th + "min-width:48px;"
     return (
         f'<thead><tr>'
         f'<th style="{th}text-align:left;">DATE / OPP</th>'
-        f'<th style="{th}text-align:left;">PITCHER</th>'
+        f'<th style="{pitcher_th}text-align:left;">PITCHER</th>'
         f'<th style="{th}text-align:right;">{_html.escape(stat_key)}</th>'
-        f'<th style="{th}text-align:right;">LINE</th>'
-        f'<th style="{th}text-align:right;">ODDS</th>'
+        f'<th style="{num_th}text-align:right;">LINE</th>'
+        f'<th style="{num_th}text-align:right;">ODDS</th>'
         f'</tr></thead>'
     )
 
 
-def _pg_game_tr(row: dict) -> str:
+def _pg_game_tr(row: dict, mobile: bool = False) -> str:
     import html as _html
-    # Date/Opp + Pitcher truncate (table-layout:fixed) so a long name never
-    # forces the table wider than its 50% grid track.
-    date_cell = (
-        f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
-        f'font-family:monospace;color:{t.TEXT_DIM};'
-        f'border-bottom:1px solid {t.BORDER_SOFT};white-space:nowrap;'
-        f'overflow:hidden;text-overflow:ellipsis;">{_pg_date_opp(row)}</td>'
-    )
-    name_cell = (
-        f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
-        f'font-weight:700;color:{t.TEXT};border-bottom:1px solid {t.BORDER_SOFT};'
-        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
-        f'{_html.escape(row.get("name") or "—")}</td>'
-    )
+    if mobile:
+        # Mobile (stacked, auto layout): DATE/OPP wraps instead of truncating,
+        # PITCHER keeps an 80px floor, content sits at 13px.
+        date_cell = (
+            f'<td style="text-align:left;padding:7px 10px;font-size:13px;'
+            f'font-family:monospace;color:{t.TEXT_DIM};'
+            f'border-bottom:1px solid {t.BORDER_SOFT};white-space:normal;">'
+            f'{_pg_date_opp(row)}</td>'
+        )
+        name_cell = (
+            f'<td style="text-align:left;padding:7px 10px;font-size:13px;'
+            f'font-weight:700;color:{t.TEXT};border-bottom:1px solid {t.BORDER_SOFT};'
+            f'min-width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f'{_html.escape(row.get("name") or "—")}</td>'
+        )
+        font_px = 13
+    else:
+        # Desktop (side-by-side, table-layout:fixed): Date/Opp + Pitcher
+        # truncate so a long name never forces the table past its 50% track.
+        date_cell = (
+            f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
+            f'font-family:monospace;color:{t.TEXT_DIM};'
+            f'border-bottom:1px solid {t.BORDER_SOFT};white-space:nowrap;'
+            f'overflow:hidden;text-overflow:ellipsis;">{_pg_date_opp(row)}</td>'
+        )
+        name_cell = (
+            f'<td style="text-align:left;padding:7px 10px;font-size:12px;'
+            f'font-weight:700;color:{t.TEXT};border-bottom:1px solid {t.BORDER_SOFT};'
+            f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f'{_html.escape(row.get("name") or "—")}</td>'
+        )
+        font_px = 12
     return (
         f'<tr>{date_cell}{name_cell}{_pg_stat_cell(row)}'
-        f'{_pg_plain_cell(_pg_line_str(row))}{_pg_plain_cell(_pg_odds_str(row), dim=True)}</tr>'
+        f'{_pg_plain_cell(_pg_line_str(row), font_px=font_px, min_px=48)}'
+        f'{_pg_plain_cell(_pg_odds_str(row), dim=True, font_px=font_px, min_px=48)}</tr>'
     )
 
 
-def _pitcher_games_table_html(rows: list[dict], stat_key: str) -> str:
+def _pitcher_games_table_html(rows: list[dict], stat_key: str,
+                              mobile: bool = False) -> str:
     """A flat Past-Games table -- identical 5-column layout in both boxes:
     DATE/OPP · PITCHER · stat · LINE · ODDS, newest first.
 
-    table-layout:fixed + an explicit <colgroup> keeps the two boxes aligned
-    column-for-column and makes long names/teams truncate rather than push
-    the table past its 50% grid track."""
-    body = "".join(_pg_game_tr(r) for r in rows)
+    Desktop: table-layout:fixed + an explicit <colgroup> keeps the two
+    side-by-side boxes aligned column-for-column and makes long names/teams
+    truncate rather than push the table past its 50% grid track.
+
+    Mobile: each table is full-width and stacked, so it uses table-layout:auto
+    (no colgroup) -- that lets the per-column min-widths apply and the DATE/OPP
+    cell wrap instead of being clipped to a fixed track."""
+    body = "".join(_pg_game_tr(r, mobile=mobile) for r in rows)
+    base = (f'background:{t.CARD};border:1px solid {t.BORDER};'
+            f'border-radius:{t.RADIUS_MD};overflow:hidden;')
+    if mobile:
+        return (
+            f'<table style="width:100%;table-layout:auto;border-collapse:collapse;{base}">'
+            f'{_pg_header(stat_key, mobile=True)}<tbody>{body}</tbody></table>'
+        )
     colgroup = (
         '<colgroup>'
         '<col style="width:30%;"><col style="width:31%;">'   # Date/Opp, Pitcher
@@ -3039,9 +3078,7 @@ def _pitcher_games_table_html(rows: list[dict], stat_key: str) -> str:
         '</colgroup>'
     )
     return (
-        f'<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
-        f'background:{t.CARD};border:1px solid {t.BORDER};'
-        f'border-radius:{t.RADIUS_MD};overflow:hidden;">'
+        f'<table style="width:100%;table-layout:fixed;border-collapse:collapse;{base}">'
         f'{colgroup}{_pg_header(stat_key)}<tbody>{body}</tbody></table>'
     )
 
@@ -3072,32 +3109,54 @@ def _pitcher_dual_box_html(similar_rows: list[dict], recent_rows: list[dict],
     Box 1 — similar pitchers vs the opponent (flat, newest first, ≤5).
     Box 2 — the last 5 pitchers (any) to face the opponent, newest first.
 
-    Uses a CSS grid with `minmax(0, 1fr)` tracks (not flex): the two columns
+    Two renders share one data set: a `.desktop-only` 50/50 CSS grid (the
+    original side-by-side layout) and a `.mobile-only` stacked column (Similar
+    on top, Last 5 below, each full width).  The global .mobile-only /
+    .desktop-only utilities (components/theme.py, 768px breakpoint) pick which
+    one the browser shows -- no data or logic differs between them.
+
+    The desktop grid uses `minmax(0, 1fr)` tracks (not flex): the two columns
     are exactly 50/50 and fill 100% regardless of cell content, so there's no
     empty gap beside them and a long pitcher name can't blow out a column.
     """
     team = opp_full or opp_u or "OPP"
 
-    if not opp_u:
-        box1 = _pg_heading_html("SIMILAR PITCHERS VS OPPONENT") + \
-            _pg_note_html("Opponent unknown for this game — no head-to-head data.")
-        box2 = _pg_heading_html("LAST 5 PITCHERS VS OPPONENT") + \
-            _pg_note_html("Opponent unknown for this game.")
-    else:
-        box1 = _pg_heading_html(f"SIMILAR PITCHERS VS {team}") + (
-            _pitcher_games_table_html(similar_rows, stat_key) if similar_rows
-            else _pg_note_html(f"No similar pitchers have faced {team}."))
-        box2 = _pg_heading_html(f"LAST 5 PITCHERS VS {team}") + (
-            _pitcher_games_table_html(recent_rows, stat_key) if recent_rows
-            else _pg_note_html(f"No recent pitchers found vs {team}."))
+    def _boxes(mobile: bool) -> tuple[str, str]:
+        if not opp_u:
+            b1 = _pg_heading_html("SIMILAR PITCHERS VS OPPONENT") + \
+                _pg_note_html("Opponent unknown for this game — no head-to-head data.")
+            b2 = _pg_heading_html("LAST 5 PITCHERS VS OPPONENT") + \
+                _pg_note_html("Opponent unknown for this game.")
+        else:
+            b1 = _pg_heading_html(f"SIMILAR PITCHERS VS {team}") + (
+                _pitcher_games_table_html(similar_rows, stat_key, mobile=mobile)
+                if similar_rows
+                else _pg_note_html(f"No similar pitchers have faced {team}."))
+            b2 = _pg_heading_html(f"LAST 5 PITCHERS VS {team}") + (
+                _pitcher_games_table_html(recent_rows, stat_key, mobile=mobile)
+                if recent_rows
+                else _pg_note_html(f"No recent pitchers found vs {team}."))
+        return b1, b2
 
-    return (
-        '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));'
-        'gap:10px;width:100%;box-sizing:border-box;align-items:start;">'
-        f'<div style="min-width:0;">{box1}</div>'
-        f'<div style="min-width:0;">{box2}</div>'
+    d1, d2 = _boxes(mobile=False)
+    desktop = (
+        '<div class="desktop-only" style="grid-template-columns:repeat(2,minmax(0,1fr));'
+        'gap:10px;width:100%;box-sizing:border-box;align-items:start;display:grid;">'
+        f'<div style="min-width:0;">{d1}</div>'
+        f'<div style="min-width:0;">{d2}</div>'
         '</div>'
     )
+
+    m1, m2 = _boxes(mobile=True)
+    mobile = (
+        '<div class="mobile-only" style="flex-direction:column;'
+        'gap:14px;width:100%;box-sizing:border-box;">'
+        f'<div style="width:100%;min-width:0;">{m1}</div>'
+        f'<div style="width:100%;min-width:0;">{m2}</div>'
+        '</div>'
+    )
+
+    return desktop + mobile
 
 
 def _fmt_short_date(iso: Optional[str]) -> str:
