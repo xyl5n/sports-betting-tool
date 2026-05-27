@@ -268,15 +268,26 @@ def _fetch_market_for_event(
     api_key: str, event_id: str, market: str,
     *, regions: str = "us",
 ) -> list[dict]:
-    """Fetch one market's lines for one game.  Returns the bookmakers
-    payload (list of dicts with markets + outcomes), [] on failure.
+    """DEPRECATED: single-market fetch kept for backwards compatibility.
+    Use _fetch_all_markets_for_event() instead."""
+    return _fetch_all_markets_for_event(api_key, event_id, (market,), regions=regions)
+
+
+def _fetch_all_markets_for_event(
+    api_key: str, event_id: str, markets: tuple[str, ...],
+    *, regions: str = "us",
+) -> list[dict]:
+    """Fetch ALL requested markets for one game in a single API call.
+    Returns the bookmakers payload (list of dicts), [] on failure.
+    One call per game instead of one call per market per game.
     """
+    markets_param = ",".join(markets)
     url = (
         f"{_BASE_URL}/sports/baseball_mlb/events/{event_id}/odds"
-        f"?apiKey={api_key}&regions={regions}&markets={market}"
+        f"?apiKey={api_key}&regions={regions}&markets={markets_param}"
         f"&oddsFormat=american"
     )
-    status, data = _fetch_with_log(url, label=f"event={event_id} market={market}")
+    status, data = _fetch_with_log(url, label=f"event={event_id} [{len(markets)} markets]")
     if status != 200 or not isinstance(data, dict):
         return []
     return data.get("bookmakers") or []
@@ -434,20 +445,26 @@ class PropsClient:
             payload = self.get_today_props()
             all_markets = payload.get("markets") or {}
 
-        n_props_total = 0
-        for market in markets:
-            market_props: list[dict] = []
-            for ev in events:
-                event_id = ev.get("id")
-                if not event_id:
-                    continue
-                books = _fetch_market_for_event(self.api_key, event_id, market)
-                if not books:
-                    continue
-                market_props.extend(_flatten_market_to_props(ev, market, books))
-            all_markets[market] = market_props
-            n_props_total += len(market_props)
-            _log(f"{label}: market={market} -> {len(market_props)} prop(s)")
+                n_props_total = 0
+        # BATCHED: one API call per game (all markets bundled) instead of
+        # one call per market per game. 11 markets × 15 games = 165 calls
+        # reduced to 15 calls per cycle.
+        for ev in events:
+            event_id = ev.get("id")
+            if not event_id:
+                continue
+            books = _fetch_all_markets_for_event(self.api_key, event_id, markets)
+            if not books:
+                continue
+            for market in markets:
+                market_props = _flatten_market_to_props(ev, market, books)
+                existing = all_markets.get(market) or []
+                existing = [p for p in existing if p.get("event_id") != event_id]
+                existing.extend(market_props)
+                all_markets[market] = existing
+                n_props_total += len(market_props)
+            _log(f"{label}: event={event_id} -> {sum(len(_flatten_market_to_props(ev, m, books)) for m in markets)} props across {len(markets)} markets")
+
 
         payload = {
             "date":        date_str,
