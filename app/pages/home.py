@@ -175,6 +175,7 @@ def _layout(backend) -> None:
         _guarded_section("news", lambda: _section_news(backend))
         _guarded_section("games", lambda: _section_games(backend))
         _guarded_section("rotation", lambda: _section_rotation(backend))
+        _guarded_section("heatmap", lambda: _section_heatmap(backend))
         _guarded_section("confidence_carousel",
                          lambda: _section_confidence_carousel(backend))
         _guarded_section("ai_banner", _ai_banner)
@@ -2028,6 +2029,214 @@ def _section_rotation(backend) -> None:
                     ui.echart(
                         _rotation_chart_opts(points, metric, sport)
                     ).style("width: 100%; height: 400px;")
+
+    _render()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Section: Season Heatmap
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _heatmap_table_html(points: list[dict]) -> str:
+    """Build the full HTML string for the season heatmap table.
+
+    Renders a single <table> block so every cell aligns properly without
+    NiceGUI's automatic div wrappers breaking <tr>/<td> semantics.
+
+    Columns: # | Team | W-L | Win % | Bar
+    Rows sorted by season_pct descending (best record first).
+    """
+    # ── Column header widths ────────────────────────────────────────────────
+    col_rank  = "32px"
+    col_team  = "auto"       # flex to fill remaining space
+    col_wl    = "64px"
+    col_pct   = "52px"
+    col_bar   = "128px"
+
+    th_style = (
+        f"padding: 0 10px 8px 10px; text-align: left; "
+        f"font-size: 10px; font-weight: 700; letter-spacing: .7px; "
+        f"color: {t.TEXT_DIM2}; white-space: nowrap; border-bottom: 1px solid {t.BORDER};"
+    )
+    th_right = th_style.replace("left", "right")
+
+    header = (
+        f"<thead><tr>"
+        f"<th style='{th_style} width:{col_rank}; padding-left:14px;'>#</th>"
+        f"<th style='{th_style} min-width:120px;'>TEAM</th>"
+        f"<th style='{th_right} width:{col_wl};'>W-L</th>"
+        f"<th style='{th_right} width:{col_pct};'>WIN%</th>"
+        f"<th style='{th_style} width:{col_bar}; text-align:center;'>BAR</th>"
+        f"</tr></thead>"
+    )
+
+    def _bar_color(pct100: float) -> str:
+        if pct100 >= 60:
+            return "#22c55e"
+        if pct100 >= 50:
+            return "#84cc16"
+        return "#ef4444"
+
+    rows_html: list[str] = []
+    for rank, pt in enumerate(points, start=1):
+        pct100   = pt["y"] * 100
+        wl_str   = f"{pt['szn_w']}-{pt['szn_l']}"
+        pct_str  = f"{pct100:.1f}%"
+        bar_col  = _bar_color(pct100)
+        bar_w    = f"{min(pct100, 100):.1f}%"   # fill proportional to win%
+        alt_bg   = "rgba(255,255,255,0.025)" if rank % 2 == 0 else "transparent"
+
+        td_base = (
+            f"padding: 0 10px; height: 40px; "
+            f"font-size: 12px; font-weight: 500; "
+            f"color: {t.TEXT}; white-space: nowrap; vertical-align: middle; "
+            f"border-bottom: 1px solid {t.BORDER_SOFT};"
+        )
+        td_dim   = td_base.replace(f"color: {t.TEXT}", f"color: {t.TEXT_DIM2}")
+        td_right = td_base + " text-align: right;"
+        td_mono  = td_right + " font-family: monospace;"
+
+        bar_html = (
+            f"<div style='width:100%;height:6px;background:{t.CARD_HI};"
+            f"border-radius:3px;overflow:hidden;'>"
+            f"<div style='width:{bar_w};height:100%;background:{bar_col};"
+            f"border-radius:3px;'></div>"
+            f"</div>"
+        )
+
+        rows_html.append(
+            f"<tr style='background:{alt_bg};'>"
+            f"<td style='{td_dim} padding-left:14px; width:{col_rank};'>{rank}</td>"
+            f"<td style='{td_base} font-weight:600;'>{pt['name']}</td>"
+            f"<td style='{td_mono} width:{col_wl};'>{wl_str}</td>"
+            f"<td style='{td_mono} width:{col_pct};'>{pct_str}</td>"
+            f"<td style='{td_base} width:{col_bar}; padding: 0 12px;'>{bar_html}</td>"
+            f"</tr>"
+        )
+
+    return (
+        f"<div style='overflow-x:auto; width:100%;'>"
+        f"<table style='width:100%; border-collapse:collapse; "
+        f"table-layout:fixed;'>"
+        + header
+        + "<tbody>" + "".join(rows_html) + "</tbody>"
+        + "</table></div>"
+    )
+
+
+def _section_heatmap(backend) -> None:
+    """Season Heatmap — every team ranked by ATS/ML/O/U season record.
+
+    Reuses team_rotation_cache.get_rotation_data() so no extra API calls
+    are made; data is already cached from the Team Rotation section above.
+    The 'y' field (season performance, 0–1) and szn_w/szn_l supply all
+    the data needed for the table.
+    """
+    metric_state: dict = {"metric": "ml"}
+    sport_state:  dict = {"sport": "mlb"}
+    try:
+        wnba_ok = bool((backend._wnba_analysis_state or {}).get("results"))
+        mlb_ok  = bool((backend._analysis_state       or {}).get("results"))
+        if wnba_ok and not mlb_ok:
+            sport_state["sport"] = "wnba"
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    @ui.refreshable
+    def _render() -> None:                                                 # noqa: WPS430
+        try:
+            from src.team_rotation_cache import get_rotation_data as _grd
+        except ImportError:
+            return
+
+        sport  = sport_state["sport"]
+        metric = metric_state["metric"]
+        raw    = _grd(sport=sport, metric=metric)
+
+        # Sort by season win% descending; filter out entries with no games
+        points = sorted(
+            [p for p in raw if (p["szn_w"] + p["szn_l"]) > 0],
+            key=lambda p: -p["y"],
+        )
+
+        with ui.column().classes("w-full").style(f"gap: {t.SPACE_SM};"):
+
+            # ── Header + toggles ──────────────────────────────────────────
+            with ui.row().classes("items-center w-full").style(
+                "gap: 8px; flex-wrap: wrap;"
+            ):
+                ui.label("SEASON HEATMAP").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .8px; "
+                    f"color: {t.TEXT};"
+                )
+                ui.label(str(len(points))).style(
+                    f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
+                    f"font-size: 11px; font-weight: 700; "
+                    f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
+                )
+                ui.element("div").style("flex: 1; min-width: 4px;")
+
+                # Sport toggle
+                with ui.row().style("gap: 3px; flex-shrink: 0;"):
+                    for _sk, _sl in (("mlb", "MLB"), ("wnba", "WNBA")):
+                        _sp_active = sport_state["sport"] == _sk
+
+                        def _mk_sport(sk=_sk):
+                            def _cb():
+                                sport_state["sport"] = sk
+                                _render.refresh()
+                            return _cb
+
+                        ui.button(_sl, on_click=_mk_sport()).props(
+                            "no-caps unelevated dense"
+                        ).style(
+                            f"background: {'rgba(124,58,237,0.15)' if _sp_active else t.CARD_HI}; "
+                            f"color: {t.PRIMARY if _sp_active else t.TEXT_DIM2}; "
+                            f"font-size: 10.5px; font-weight: 700; "
+                            f"padding: 4px 10px; "
+                            f"border-radius: {t.RADIUS_PILL}; min-height: 0;"
+                        )
+
+                # Metric toggle
+                with ui.row().style("gap: 3px; flex-shrink: 0;"):
+                    for _mk, _ml in (
+                        ("ml",  "ML"),
+                        ("ats", "ATS"),
+                        ("ou",  "O/U"),
+                    ):
+                        _m_active = metric_state["metric"] == _mk
+
+                        def _mk_metric(mk=_mk):
+                            def _cb():
+                                metric_state["metric"] = mk
+                                _render.refresh()
+                            return _cb
+
+                        ui.button(_ml, on_click=_mk_metric()).props(
+                            "no-caps unelevated dense"
+                        ).style(
+                            f"background: {t.PRIMARY if _m_active else t.CARD_HI}; "
+                            f"color: {t.BG if _m_active else t.TEXT_DIM}; "
+                            f"font-size: 10.5px; font-weight: 700; "
+                            f"padding: 4px 10px; "
+                            f"border-radius: {t.RADIUS_PILL}; min-height: 0;"
+                        )
+
+            # ── Table or empty state ──────────────────────────────────────
+            if not points:
+                with ui.row().classes("items-center justify-center w-full").style(
+                    f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; padding: 48px 20px;"
+                ):
+                    ui.label("No team data available yet — check back later.").style(
+                        f"font-size: 13px; color: {t.TEXT_DIM};"
+                    )
+            else:
+                with ui.element("div").style(
+                    f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
+                    f"border-radius: {t.RADIUS_MD}; overflow: hidden; width: 100%;"
+                ):
+                    ui.html(_heatmap_table_html(points))
 
     _render()
 
