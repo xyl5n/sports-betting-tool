@@ -653,7 +653,7 @@ def get_today_prop(player_name: str) -> Optional[dict]:
     3. ``None`` -- no cached pick for the player today; the hero card
        suppresses the TODAY chip entirely rather than fabricating one.
     """
-    name_lower = player_name.strip().lower()
+    name_norm = _norm_name(player_name)
 
     # ── 1. Scored cache (single source of truth, matches /props page) ─────
     try:
@@ -661,7 +661,7 @@ def get_today_prop(player_name: str) -> Optional[dict]:
         cached = load_scored_props() or {}
         best: Optional[dict] = None
         for pick in (cached.get("picks") or []):
-            if (pick.get("player") or "").strip().lower() != name_lower:
+            if _norm_name(pick.get("player") or "") != name_norm:
                 continue
             score = float(pick.get("confidence") or 0.0)
             if best is None or score > float(best.get("confidence") or 0.0):
@@ -692,7 +692,7 @@ def get_today_prop(player_name: str) -> Optional[dict]:
         daily     = load_daily_picks()
         prop_picks = (daily.get("picks") or {}).get("prop_picks") or []
         for pp in prop_picks:
-            if (pp.get("player") or "").strip().lower() == name_lower:
+            if _norm_name(pp.get("player") or "") == name_norm:
                 _log(
                     f"get_today_prop({player_name!r}): served from daily_picks "
                     f"({pp.get('market')} {pp.get('side')} {pp.get('line')} "
@@ -783,7 +783,7 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
        back to its "no props posted yet" empty state instead of
        fabricating one with an independent predict() call.
     """
-    name_lower = player_name.strip().lower()
+    name_norm = _norm_name(player_name)
     today = _today_str()
     out: list[dict] = []
     markets_seen: set[str] = set()
@@ -793,7 +793,7 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
         from .props_scored_cache import load_scored_props
         cached = load_scored_props() or {}
         for pick in (cached.get("picks") or []):
-            if (pick.get("player") or "").strip().lower() != name_lower:
+            if _norm_name(pick.get("player") or "") != name_norm:
                 continue
             commence = (pick.get("commence_time") or "")[:10]
             if commence and commence != today:
@@ -829,7 +829,7 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
         daily      = load_daily_picks()
         prop_picks = (daily.get("picks") or {}).get("prop_picks") or []
         for pp in prop_picks:
-            if (pp.get("player") or "").strip().lower() != name_lower:
+            if _norm_name(pp.get("player") or "") != name_norm:
                 continue
             market_name = pp.get("market") or ""
             if market_name in markets_seen:
@@ -865,7 +865,8 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
     _log(
         f"get_today_props_for_player({player_name!r}): "
         f"{len(out)} prop(s) "
-        f"[markets={[e.get('market') for e in out]} "
+        f"[query_norm={name_norm!r} "
+        f"markets={[e.get('market') for e in out]} "
         f"sources={[e.get('source') for e in out]}]"
     )
     return out
