@@ -872,6 +872,68 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
     return out
 
 
+def get_today_raw_lines_for_player(player_name: str) -> dict:
+    """Return EVERY raw book line for *player_name* today, keyed by market.
+
+    Unlike get_today_props_for_player (which reads the SCORED cache and so
+    only surfaces picks that cleared the confidence + edge threshold), this
+    reads the RAW props cache that props_client populates straight from The
+    Odds API.  It backs the player page's "ALL PROP MARKETS" skeleton, which
+    must show a line whenever any book posted one -- even for markets the
+    model scored poorly or skipped entirely.
+
+    Returns ``{market_key: {line, side, best_odds, best_book, n_books}}`` with
+    one representative (main-line) entry per market: the Over side carried by
+    the most books (tie-break: most favourable odds), falling back to Under.
+    Accent/punctuation-insensitive name match (same _norm_name the resolver
+    uses).  Empty dict when nothing is cached for the player today.
+
+    PURE CACHE READER -- never calls The Odds API; reads the same local /
+    Supabase props cache the /props page and the 15-min cycle share.
+    """
+    name_norm = _norm_name(player_name)
+    today = _today_str()
+    try:
+        from .props_client import get_client
+        raw = get_client().get_today_props() or {}
+    except Exception as exc:                                              # noqa: BLE001
+        _log(f"get_today_raw_lines_for_player({player_name!r}): "
+             f"raw cache read failed: {exc}")
+        return {}
+
+    def _rank(e: dict) -> tuple:
+        return (
+            1 if (e.get("side") or "").title() == "Over" else 0,
+            len(e.get("all_books") or []),
+            e.get("best_odds") if isinstance(e.get("best_odds"), int) else -10 ** 9,
+        )
+
+    out: dict[str, dict] = {}
+    for market_key, entries in (raw.get("markets") or {}).items():
+        cands = [
+            e for e in (entries or [])
+            if _norm_name(e.get("player_name") or "") == name_norm
+            and e.get("line") is not None
+            and (not (e.get("commence_time") or "")
+                 or (e.get("commence_time") or "")[:10] == today)
+        ]
+        if not cands:
+            continue
+        best = max(cands, key=_rank)
+        out[market_key] = {
+            "line":      best.get("line"),
+            "side":      (best.get("side") or "Over").title(),
+            "best_odds": best.get("best_odds"),
+            "best_book": best.get("best_book"),
+            "n_books":   len(best.get("all_books") or []),
+        }
+    _log(
+        f"get_today_raw_lines_for_player({player_name!r}): "
+        f"{len(out)} market(s) [query_norm={name_norm!r} markets={sorted(out)}]"
+    )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Player prop performance summary
 # ---------------------------------------------------------------------------
