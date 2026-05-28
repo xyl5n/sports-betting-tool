@@ -285,8 +285,6 @@ print("STARTUP [6/6]: Flask app created — registering routes...", flush=True, 
 
 _ANALYSIS_TTL        = 900  # 15 minutes — skip API if last run was within this window
 _ARCHIVE_PATH             = Path("data/bet_history_archive.json")
-_DAILY_SNAPSHOT_FILE      = Path("data/daily_snapshot.json")
-_DAILY_SNAPSHOT_TMP       = Path("data/daily_snapshot.json.tmp")
 
 # Step 2: single lock so concurrent requests (init + analyze) never race on the file.
 import threading as _threading

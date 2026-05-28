@@ -48,6 +48,7 @@ __all__ = [
     "_PICKS_HISTORY_FILES", "_ENSEMBLE_PICKS_FILE", "_BET_HISTORY_ARCHIVE",
     "_MLB_TEAM_NORM", "_MODEL_PICK_STAT", "_SETTLE_GAMELOG_TTL",
     "_STATSAPI_BRIDGE_TTL", "_AI_RUN_DELAY",
+    "_DAILY_SNAPSHOT_FILE", "_DAILY_SNAPSHOT_TMP",
 ]
 
 # moved from app.py:138
@@ -340,6 +341,11 @@ _ENSEMBLE_PICKS_FILE = Path("data/ensemble_picks_today.json")
 
 # moved from app.py:5911
 _BET_HISTORY_ARCHIVE = Path("data/bet_history_archive.json")
+# moved from app.py:288
+_DAILY_SNAPSHOT_FILE      = Path("data/daily_snapshot.json")
+# moved from app.py:289
+_DAILY_SNAPSHOT_TMP       = Path("data/daily_snapshot.json.tmp")
+
 
 # moved from app.py:10435
 # ── Auto-settlement helpers ───────────────────────────────────────────────────
