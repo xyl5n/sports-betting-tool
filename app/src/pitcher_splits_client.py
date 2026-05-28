@@ -11,6 +11,7 @@ Historical cache:  .cache/mlb_hist_psplits_{pid}_{yr}.json   (TTL 1yr)
 """
 from __future__ import annotations
 
+import logging
 import json
 import time
 from datetime import date, datetime, timedelta
@@ -43,8 +44,8 @@ def _load_live_cache() -> dict:
             raw = json.loads(_LIVE_CACHE_FILE.read_text(encoding="utf-8"))
             if time.time() - raw.get("_ts", 0) < _LIVE_CACHE_TTL:
                 return raw
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     return {}
 
 
@@ -53,8 +54,8 @@ def _save_live_cache(data: dict) -> None:
         _LIVE_CACHE_FILE.parent.mkdir(exist_ok=True)
         data["_ts"] = time.time()
         _LIVE_CACHE_FILE.write_text(json.dumps(data), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # ── Historical per-(pid, season) cache ───────────────────────────────────────
@@ -79,8 +80,8 @@ def _hist_cache_set(pid: int, season: int, value: dict) -> None:
     try:
         _HIST_CACHE_DIR.mkdir(exist_ok=True)
         _hist_cache_path(pid, season).write_text(json.dumps(value), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # ── API fetchers ─────────────────────────────────────────────────────────────

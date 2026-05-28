@@ -43,6 +43,7 @@ Persists to .cache/xgb_picks_history.json.  Schema:
 """
 from __future__ import annotations
 
+import logging
 import json
 import os
 import tempfile
@@ -81,8 +82,8 @@ def _restore_once() -> None:
         data = row.get("data") if isinstance(row.get("data"), dict) else row
         if isinstance(data, dict) and isinstance(data.get("picks"), list):
             _save_history(data, _mirror=False)   # overwrite stale local copy
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def _mirror_to_supabase(data: dict) -> None:
@@ -92,8 +93,8 @@ def _mirror_to_supabase(data: dict) -> None:
             return
         today = datetime.now(timezone.utc).date().isoformat()
         db.cache_set(_SUPA_KEY, None, today, data)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def _load_history() -> dict:
@@ -121,8 +122,8 @@ def _save_history(data: dict, *, _mirror: bool = True) -> None:
     except Exception:
         try:
             os.unlink(tmp_path)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         # Swallow -- tracker must never break prediction flow.
         return
     if _mirror:
@@ -283,8 +284,8 @@ def record_totals_pick(
         data = _load_history()
         _upsert(data["picks"], entry)
         _save_history(data)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # ── Settlement ───────────────────────────────────────────────────────────────

@@ -45,6 +45,7 @@ record never breaks live prediction.
 """
 from __future__ import annotations
 
+import logging
 import json
 import re
 from datetime import datetime, timezone
@@ -101,8 +102,8 @@ def _restore_once(path: Path) -> None:
         data = row.get("data") if isinstance(row.get("data"), dict) else row
         if isinstance(data, dict) and isinstance(data.get("picks"), list):
             _save(data, path, _mirror=False)   # overwrite stale local copy
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def _mirror_to_supabase(d: dict) -> None:
@@ -112,8 +113,8 @@ def _mirror_to_supabase(d: dict) -> None:
             return
         today = datetime.now(timezone.utc).date().isoformat()
         db.cache_set(_SUPA_KEY, None, today, d)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def _load(path: Path = _HISTORY_PATH) -> dict:
@@ -279,8 +280,8 @@ def record_lr_pick_totals(
             })
 
         _save(store, history_path)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # ── settlement ────────────────────────────────────────────────────────────────

@@ -122,8 +122,8 @@ def _cache_set(key: str, value) -> None:
     _CACHE_DIR.mkdir(exist_ok=True)
     try:
         _cache_path(key).write_text(json.dumps(value, default=str), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # ---------------------------------------------------------------------------
@@ -888,8 +888,8 @@ def get_enriched_seasons(seasons=_SEASONS, force_rebuild=False) -> np.ndarray:
             cached_seasons = tuple(saved.get("seasons_list", ()))
             if "row_seasons" in saved and cached_seasons == tuple(seasons):
                 return saved["row_seasons"]
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     # Need to rebuild to get accurate per-row season labels
     try:
@@ -915,8 +915,8 @@ def get_enriched_totals_X_y(seasons=_SEASONS, force_rebuild=False):
             cached_seasons = tuple(saved.get("seasons_list", ()))
             if "X_totals" in saved and cached_seasons == tuple(seasons):
                 return saved["X_totals"], saved["totals_combined"]
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     # Build fresh
     build_enriched_dataset(seasons, force_rebuild=True)
     saved = joblib.load(_DATASET_PATH)

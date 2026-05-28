@@ -14,6 +14,7 @@ pick the same winner (unanimous vote); conflicted games should be skipped.
 from pathlib import Path
 from typing import Optional, Protocol
 
+import logging
 import joblib
 import numpy as np
 import xgboost as xgb
@@ -569,8 +570,8 @@ class BettingModel:
                         nn_prob   = nn_prob,
                         nn_pick   = "home" if nn_prob >= 0.5 else "away",
                     )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # Weighted ensemble probability and consensus
         w = weights or {}
@@ -616,8 +617,8 @@ class BettingModel:
                     lr_prob_home = lr_prob,
                     game_id      = game_meta.get("id") or game_meta.get("game_id"),
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # ── Silent XGB-only pick recorder (does not affect return value) ─────
         if game_meta is not None and xgb_method == "xgboost":
@@ -629,8 +630,8 @@ class BettingModel:
                     xgb_prob = xgb_prob,
                     sport    = self.sport.name,
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # ── Step 1: pure-probability pick + confidence tier ──────────────────
         # The pick side is determined SOLELY by the probability the model

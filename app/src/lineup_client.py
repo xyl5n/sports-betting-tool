@@ -7,6 +7,7 @@ confirmed, 0.0 when either is still projected or unavailable.
 """
 from __future__ import annotations
 
+import logging
 import json
 import time
 from datetime import date
@@ -27,8 +28,8 @@ def _load_cache() -> dict:
             raw = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
             if time.time() - raw.get("_ts", 0) < _CACHE_TTL:
                 return raw
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     return {}
 
 
@@ -37,8 +38,8 @@ def _save_cache(data: dict) -> None:
         _CACHE_FILE.parent.mkdir(exist_ok=True)
         data["_ts"] = time.time()
         _CACHE_FILE.write_text(json.dumps(data), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 class LineupClient:

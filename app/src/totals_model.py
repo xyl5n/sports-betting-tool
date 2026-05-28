@@ -8,6 +8,7 @@ about total scoring volume, not which team scores more.
 """
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Optional
@@ -350,8 +351,8 @@ class TotalsModel:
                 market_line     = line,
                 sport           = "MLB",   # TotalsModel is MLB-only
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # ── Silent LR-only pick recorder for totals -- closes the gap where
         #    LR was tracked for ML + RL but not totals.  Same .cache/lr_picks_history.json
@@ -369,8 +370,8 @@ class TotalsModel:
                 market_line      = line,
                 game_id          = game.get("id") or game.get("game_id"),
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         if nn_pred is not None:
             pred_nn = nn_pred * park_factor
@@ -396,8 +397,8 @@ class TotalsModel:
                         extra     = {"nn_run_total": round(float(pred_nn), 3),
                                      "line": line},
                     )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
             w_xgb   = float(w.get("xgb", 1 / 3))
             w_lr    = float(w.get("lr",  1 / 3))
             w_nn    = float(w.get("nn",  1 / 3))
