@@ -11,6 +11,7 @@ line_move = current_home_implied_prob - opening_home_implied_prob
 """
 from __future__ import annotations
 
+import logging
 import json
 import time
 from pathlib import Path
@@ -30,8 +31,8 @@ def _load() -> dict:
     try:
         if _CACHE_FILE.exists():
             return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     return {}
 
 
@@ -39,8 +40,8 @@ def _save(data: dict) -> None:
     try:
         _CACHE_FILE.parent.mkdir(exist_ok=True)
         _CACHE_FILE.write_text(json.dumps(data), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def record_and_get_movement(

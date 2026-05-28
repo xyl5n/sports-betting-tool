@@ -24,6 +24,7 @@ All log lines are prefixed PLAYER-CLIENT so they are easy to grep in Railway log
 
 from __future__ import annotations
 
+import logging
 import json
 import re
 import sys
@@ -527,8 +528,8 @@ def get_player_gamelog(
                 games = (row.get("data") or {}).get("games") or []
                 _log(f"Returning stale Supabase cache for player {player_id} season {season}")
                 return games[:limit]
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         return []
 
     try:
@@ -621,8 +622,8 @@ def get_player_gamelog(
             row = _db.cache_get(cache_key)
             if row:
                 return ((row.get("data") or {}).get("games") or [])[:limit]
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         return []
 
 

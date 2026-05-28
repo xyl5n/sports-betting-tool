@@ -27,6 +27,11 @@ env/
 # Runtime artifacts
 *.log
 
+# Backup snapshots — these are timestamped copies created by ad-hoc
+# audit/restructure scripts and should never be tracked.  History lives
+# in git; do not commit a second copy of the tree.
+**/.backups/
+
 # Props backtest output — per-run snapshots and the rolling baseline are
 # developer/Railway artifacts, not source.  Keep them out of the repo;
 # Supabase is the cross-environment persistence layer for cross-PR diffs.

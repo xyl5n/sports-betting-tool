@@ -145,6 +145,17 @@ logging.basicConfig(
 _logger = logging.getLogger("sports_betting")
 
 
+# ── External API credentials & runtime config ────────────────────────────────
+# Read every env var once at boot instead of calling os.getenv on every
+# request.  Route handlers reference these constants directly; if Railway
+# rotates a key the process restarts and picks up the new value.  Keep the
+# existing "" / 2025 defaults so behavior matches the prior per-site reads.
+_ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
+_API_SPORTS_KEY = os.environ.get("API_SPORTS_KEY", "")
+_ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+_SEASON = int(os.environ.get("SEASON", "2025"))
+
+
 class _StdoutToLogger:
     """Route every print() call through the logger at DEBUG level.
 
@@ -556,8 +567,8 @@ def _purge_stale_caches_on_boot() -> None:
             # and let the next analysis run recreate it.
             try:
                 path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
             print(f"STARTUP WARNING: removed unreadable {path.name}: {exc}",
                   flush=True, file=sys.stderr)
 
@@ -949,8 +960,8 @@ def _write_daily_snapshot(sport: str, payload: dict, ts: datetime) -> None:
             print(f"SNAPSHOT write error (ignored): {_e}", flush=True, file=sys.stderr)
             try:
                 _DAILY_SNAPSHOT_TMP.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def _clear_snapshot_sport(sport: str) -> None:
@@ -983,8 +994,8 @@ def _clear_snapshot_sport(sport: str) -> None:
             print(f"SNAPSHOT clear error (ignored): {_e}", flush=True, file=sys.stderr)
             try:
                 _DAILY_SNAPSHOT_TMP.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # System prompt for the AI Breakdown chat UI (pages/ai_breakdown.py).
@@ -1040,7 +1051,7 @@ _upset_calc          = UpsetCalculator(cache=_cache)
 def _call_analyst(prompt: str, max_tokens: int = 600) -> str:
     """Call the Anthropic analyst model with a single user prompt."""
     import anthropic as _anthropic
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = _ANTHROPIC_API_KEY
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
     client = _anthropic.Anthropic(api_key=api_key)
@@ -1061,7 +1072,7 @@ def _call_analyst_chat(extra_context: str, messages: list, max_tokens: int = 800
     user message, in [{role, content}] form.
     """
     import anthropic as _anthropic
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = _ANTHROPIC_API_KEY
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
     system = _ANALYST_SYSTEM_PROMPT
@@ -1412,16 +1423,16 @@ def _load_pre_game_odds() -> dict:
                 gid: snap for gid, snap in raw.items()
                 if snap.get("commence_time", "")[:10] >= cutoff
             }
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     return {}
 
 def _save_pre_game_odds(store: dict) -> None:
     try:
         Path("data").mkdir(exist_ok=True)
         _PRE_GAME_ODDS_FILE.write_text(json.dumps(store, default=str), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 def _lock_in_pre_game_odds(games: list) -> list:
     """Pre-game odds lock.
@@ -2105,8 +2116,8 @@ def _save_wnba_analysis_cache(serialized, parlays, games_loaded, cv_acc, lr_cv_a
         _WNBA_ANALYSIS_CACHE_FILE.write_text(json.dumps(payload, default=str), encoding="utf-8")
         # Issue 4: mirror to Supabase so the cache survives Railway redeploys.
         _supabase_cache_set(_CACHE_KEY_ANALYSIS_WNBA, "wnba", payload["date"], payload)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # ── Correlation validation ────────────────────────────────────────────────────
@@ -2441,8 +2452,8 @@ def _generate_parlays(serialized: list, bankroll: float) -> dict:
             ct = datetime.fromisoformat(g["commence_time"].replace("Z", "+00:00"))
             if ct > now_utc:
                 all_legs.extend(_expand_game_legs(g))
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     value   = [l for l in all_legs if l["value_pick"]]
     any_pos = [l for l in all_legs if l["pick_edge"] > 0]
@@ -2518,8 +2529,8 @@ def _save_analysis_cache(serialized: list, parlays: dict, sport: str,
         )
         # Issue 4: mirror to Supabase so the cache survives Railway redeploys.
         _supabase_cache_set(_CACHE_KEY_ANALYSIS_MLB, "mlb", payload["date"], payload)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -2763,8 +2774,8 @@ def wnba_schedule_proxy():
     else:
         try:
             _cache.set(cache_key, data)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     return jsonify(data)
 
@@ -3128,8 +3139,8 @@ def _ensure_no_odds_predictor(sport: str):
             _no_odds_predictor_failed[sport] = True
             return None
 
-        season = int(os.getenv("SEASON", 2025))
-        sports_key = os.getenv("API_SPORTS_KEY", "")
+        season = _SEASON
+        sports_key = _API_SPORTS_KEY
 
         store = GameStore(
             api_key=sports_key,
@@ -3660,8 +3671,8 @@ def _debug_print(msg: str) -> None:
         _DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
         with _DEBUG_LOG.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def _today_et_str() -> str:
@@ -3933,8 +3944,8 @@ def init_analysis():
             if _at and _analysis_state.get("last_analyzed_at") is None:
                 try:
                     _analysis_state["last_analyzed_at"] = datetime.fromisoformat(_at)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    logging.warning("Suppressed exception in %s: %s", __name__, _exc)
             return jsonify({
                 "has_predictions": True,
                 "snapshot":        True,
@@ -3958,8 +3969,8 @@ def init_analysis():
         if _saved_at and _analysis_state.get("last_analyzed_at") is None:
             try:
                 _analysis_state["last_analyzed_at"] = datetime.fromisoformat(_saved_at)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         if not _ANALYSIS_CACHE_FILE.exists():
             return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
@@ -3973,8 +3984,8 @@ def init_analysis():
         if _at and _analysis_state.get("last_analyzed_at") is None:
             try:
                 _analysis_state["last_analyzed_at"] = datetime.fromisoformat(_at)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         _results = _filter_stale_games(payload.get("results", []))
         return jsonify({
@@ -4376,11 +4387,11 @@ def analyze():
     data       = request.get_json() or {}
     sport      = data.get("sport", "mlb")
     bankroll   = float(data.get("bankroll", 250))
-    season     = int(data.get("season", int(os.getenv("SEASON", 2025))))
+    season     = int(data.get("season", _SEASON))
     games_lim  = int(data.get("games", 0))
 
-    odds_key   = os.getenv("ODDS_API_KEY", "")
-    sports_key = os.getenv("API_SPORTS_KEY", "")
+    odds_key   = _ODDS_API_KEY
+    sports_key = _API_SPORTS_KEY
 
     if not odds_key or odds_key == "your_odds_api_key_here":
         return jsonify({"error": "ODDS_API_KEY not configured in .env"}), 400
@@ -4409,8 +4420,8 @@ def analyze():
                 _analysis_state["last_analyzed_at"] = datetime.fromisoformat(
                     _asp.get("analyzed_at", "")
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         return jsonify({
             "success":         True,
             "cached":          True,
@@ -4433,8 +4444,8 @@ def analyze():
         _oc_settle     = OddsClient(odds_key, _cache)
         _sport_cfg     = SPORTS.get(sport, SPORTS["mlb"])
         _settle_ledger.settle(_oc_settle, _sport_cfg.odds_key)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     # ── Cache control params from frontend ───────────────────────────────────
     # force_refresh=True  → always hit the API, ignore any cached results
@@ -4942,7 +4953,7 @@ def refresh_models():
     data     = request.get_json() or {}
     sport    = data.get("sport", _analysis_state.get("sport", "mlb"))
     bankroll = float(data.get("bankroll", _analysis_state.get("bankroll", 250)))
-    season   = int(data.get("season", int(os.getenv("SEASON", 2025))))
+    season   = int(data.get("season", _SEASON))
 
     if not _analysis_state.get("results"):
         # Fall back to disk cache so the button works after an app restart
@@ -4965,7 +4976,7 @@ def refresh_models():
     try:
         # Load store from disk cache — no API call if 24 h cache is still valid
         store = GameStore(
-            api_key=os.getenv("API_SPORTS_KEY", ""),
+            api_key=_API_SPORTS_KEY,
             base_url=sport_cfg.api_sports_base,
             league_id=sport_cfg.league_id,
             sport_tag=sport,
@@ -5202,8 +5213,8 @@ def get_model_performance():
             try:
                 arc = json.loads(_ARCHIVE_PATH.read_text(encoding="utf-8"))
                 history += arc if isinstance(arc, list) else []
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         def _model_correct(model_prob: float | None, bet_side: str, result: str) -> bool | None:
             """
@@ -5398,17 +5409,17 @@ def get_ledger():
 
     # Attempt to auto-settle MLB and WNBA games via Odds API (one shared client)
     settled: list = []
-    odds_key = os.getenv("ODDS_API_KEY", "")
+    odds_key = _ODDS_API_KEY
     if odds_key and odds_key != "your_odds_api_key_here":
         oc = OddsClient(odds_key, _cache)
         try:
             settled.extend(ledger.settle(oc, sport_cfg.odds_key))
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         try:
             settled.extend(wledger.settle(oc, "basketball_wnba"))
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     summary = ledger.get_summary()
 
@@ -7428,8 +7439,8 @@ def reset_sport():
                 _ANALYSIS_TIMESTAMPS_FILE.write_text(
                     json.dumps(ts_data, indent=2), encoding="utf-8"
                 )
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # 3. Clear in-memory analysis state so auto-status endpoints reflect the reset
         if sport == "mlb":
@@ -8769,8 +8780,8 @@ def ai_breakdown():
         _AI_BREAKDOWN_CACHE_FILE.write_text(
             json.dumps({"date": today, "data": parsed}, indent=2), encoding="utf-8"
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     return jsonify(parsed)
 
@@ -8851,7 +8862,7 @@ def ai_chat():
         # composition in our hands.  Specifically: replace
         # _ANALYST_SYSTEM_PROMPT here with the chat-specific one.
         import anthropic as _anthropic
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key = _ANTHROPIC_API_KEY
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not set in env / .env")
         client = _anthropic.Anthropic(api_key=api_key)
@@ -8975,7 +8986,7 @@ def ai_pick_analysis():
 
     try:
         import anthropic as _anthropic
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key = _ANTHROPIC_API_KEY
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not set in env / .env")
         client = _anthropic.Anthropic(api_key=api_key)
@@ -9283,8 +9294,8 @@ def analyze_wnba():
     force_refresh = bool(data.get("force_refresh", False))
     use_cached    = bool(data.get("use_cached", False))
 
-    odds_key   = os.getenv("ODDS_API_KEY", "")
-    sports_key = os.getenv("API_SPORTS_KEY", "")  # optional for WNBA (ESPN used instead)
+    odds_key   = _ODDS_API_KEY
+    sports_key = _API_SPORTS_KEY  # optional for WNBA (ESPN used instead)
 
     if not odds_key or odds_key == "your_odds_api_key_here":
         return jsonify({"error": "ODDS_API_KEY not configured in .env"}), 400
@@ -9303,8 +9314,8 @@ def analyze_wnba():
                 _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(
                     _wsp2.get("analyzed_at", "")
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         return jsonify({
             "success":        True,
             "cached":         True,
@@ -9353,8 +9364,8 @@ def analyze_wnba():
         _oc_settle = OddsClient(odds_key, _cache)
         _wl = Ledger(path="data/wnba_ledger.json", starting_bankroll=bankroll)
         _wl.settle(_oc_settle, "basketball_wnba")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     # ── Per-step checkpoint helper (mirrors MLB analyze)
     # Prints to stderr so each step shows up in Railway's deploy log
@@ -9786,8 +9797,8 @@ def init_wnba():
             if _wat and _wnba_analysis_state.get("last_analyzed_at") is None:
                 try:
                     _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(_wat)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    logging.warning("Suppressed exception in %s: %s", __name__, _exc)
             return jsonify({
                 "has_predictions": True,
                 "snapshot":        True,
@@ -9809,8 +9820,8 @@ def init_wnba():
         if _saved_at and _wnba_analysis_state.get("last_analyzed_at") is None:
             try:
                 _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(_saved_at)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         if not _WNBA_ANALYSIS_CACHE_FILE.exists():
             return jsonify({"has_predictions": False, "analyzed_at": _saved_at})
@@ -9822,8 +9833,8 @@ def init_wnba():
         if _at and _wnba_analysis_state.get("last_analyzed_at") is None:
             try:
                 _wnba_analysis_state["last_analyzed_at"] = datetime.fromisoformat(_at)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         _wresults = _filter_stale_games(payload.get("results", []))
         return jsonify({
@@ -9847,13 +9858,13 @@ def get_wnba_ledger():
     ledger   = Ledger(path="data/wnba_ledger.json", starting_bankroll=bankroll)
 
     settled: list = []
-    odds_key = os.getenv("ODDS_API_KEY", "")
+    odds_key = _ODDS_API_KEY
     if odds_key and odds_key != "your_odds_api_key_here":
         try:
             oc      = OddsClient(odds_key, _cache)
             settled = ledger.settle(oc, "basketball_wnba")
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
     summary = ledger.get_summary()
 
@@ -9970,7 +9981,7 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
     except Exception:
         wnba_bankroll = 250
 
-    season = int(os.getenv("SEASON", 2025))
+    season = _SEASON
 
     results: dict = {}
     mlb_results: list = []
@@ -10541,7 +10552,7 @@ def _settle_freshly_recorded_picks() -> dict:
       - _settle_model_trackers() updates xgb/lr/nn picks histories
       - _append_to_archive() writes to data/bet_history_archive.json
     """
-    odds_key = os.getenv("ODDS_API_KEY", "")
+    odds_key = _ODDS_API_KEY
     if not odds_key or odds_key == "your_odds_api_key_here":
         _eprint("IMMEDIATE-SETTLE: skipped (ODDS_API_KEY not configured)")
         return {"mlb_settled": 0, "wnba_settled": 0, "settled": []}
@@ -11049,7 +11060,7 @@ def _run_auto_settlement_job(force: bool = False) -> dict:
         return {"settled": 0, "wins": 0, "losses": 0,
                 "voided": 0, "skipped": "out of game-hours window"}
 
-    odds_key = os.getenv("ODDS_API_KEY", "")
+    odds_key = _ODDS_API_KEY
     if not odds_key or odds_key == "your_odds_api_key_here":
         return
 
@@ -11477,7 +11488,7 @@ def _refresh_game_odds_detect_moves() -> dict:
     significant moves (ML > 5 cents either side, totals line > 0.5).  Returns
     {'games','ml_moves','total_moves'}.  Best-effort -- never raises."""
     res = {"games": 0, "ml_moves": 0, "total_moves": 0}
-    odds_key = os.getenv("ODDS_API_KEY", "")
+    odds_key = _ODDS_API_KEY
     if not odds_key or odds_key == "your_odds_api_key_here":
         return res
     try:
@@ -11581,7 +11592,7 @@ def _detect_game_changes() -> dict:
         "counts": {"ml": 0, "total": 0, "rl": 0, "pitcher": 0,
                    "lineup": 0, "weather": 0},
     }
-    odds_key = os.getenv("ODDS_API_KEY", "")
+    odds_key = _ODDS_API_KEY
     if not odds_key or odds_key == "your_odds_api_key_here":
         return out
     try:
@@ -12624,7 +12635,7 @@ def _boot_health_report() -> None:
     )
 
     # ── 3. Odds API key
-    odds_key_set = bool(os.getenv("ODDS_API_KEY")) and os.getenv("ODDS_API_KEY") != "your_odds_api_key_here"
+    odds_key_set = bool(_ODDS_API_KEY) and _ODDS_API_KEY != "your_odds_api_key_here"
     _row(
         "Odds API key",
         odds_key_set,

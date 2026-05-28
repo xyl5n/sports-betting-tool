@@ -7,6 +7,7 @@ models can be trained together on completed game data.
 from pathlib import Path
 from typing import Optional
 
+import logging
 import joblib
 import numpy as np
 import xgboost as xgb
@@ -382,8 +383,8 @@ class RunLineModel:
         # Attach the actual feature names XGB trained on (subset of MLB_FEATURES).
         try:
             self.xgb.get_booster().feature_names = list(self._xgb_names)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         self.is_trained = True
 
         # ── LR: train CONDITIONAL P(margin >= 2 | home wins) ────────────────
@@ -640,8 +641,8 @@ class RunLineModel:
                     lr_prob_home = lr_prob,
                     game_id      = game.get("id") or game.get("game_id"),
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # ── Silent XGB-only pick recorder (does not affect ensemble output) ───
         # We record the JOINT probability (ml_p * cond_prob) so the recorded
@@ -654,8 +655,8 @@ class RunLineModel:
                 xgb_prob = xgb_prob,
                 sport    = "MLB",   # RunLineModel is MLB-only
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # NN models P(margin >= 2 | home wins) — same hurdle reformulation
         # as XGB/LR above. Compose with the moneyline NN's home-win prob to
@@ -703,8 +704,8 @@ class RunLineModel:
                         nn_prob   = nn_prob,
                         nn_pick   = "home" if nn_prob >= 0.5 else "away",
                     )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         # ── Diagnostic: individual model probabilities ─────────────────────────
         matchup = f"{game.get('away_team','?')} @ {game.get('home_team','?')}"
@@ -805,8 +806,8 @@ class RunLineModel:
                     print(f"  [RL constraint WARN] {matchup}: "
                           f"home_cover_-1.5 ({_hc:.3f}) > ml_home ({_ml_home_ref:.3f})",
                           flush=True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
         return {
             "home_cover_prob":   combined,

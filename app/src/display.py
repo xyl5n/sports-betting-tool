@@ -2,6 +2,7 @@
 Rich terminal display: prediction tables + SHAP waterfall charts.
 Windows-safe: uses only ASCII box-drawing and passes color via style= parameter.
 """
+import logging
 import sys
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -230,8 +231,8 @@ def make_console() -> Console:
         try:
             import ctypes
             ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     return Console(highlight=False, safe_box=True)
 
 

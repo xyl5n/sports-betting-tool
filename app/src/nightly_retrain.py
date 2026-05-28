@@ -87,8 +87,8 @@ def _save_log(data: dict) -> None:
         _logger.warning("retrain log write failed: %s", exc)
         try:
             os.unlink(tmp)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
 def _now_z() -> str:
@@ -260,8 +260,8 @@ def _shutdown() -> None:
     if _scheduler is not None:
         try:
             _scheduler.shutdown(wait=False)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.warning("Suppressed exception in %s: %s", __name__, _exc)
         _scheduler = None
 
 
@@ -273,8 +273,8 @@ def _next_run_iso() -> Optional[str]:
         job = _scheduler.get_job("nightly_retrain")
         if job and job.next_run_time:
             return job.next_run_time.isoformat()
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     return None
 
 

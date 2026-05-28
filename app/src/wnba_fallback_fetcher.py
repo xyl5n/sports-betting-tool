@@ -30,6 +30,7 @@ it is NOT used for live / upcoming game data.
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
@@ -362,8 +363,8 @@ def fetch_sportsdataverse_wnba_season(
         if not isinstance(df, pd.DataFrame):
             try:
                 df = df.to_pandas()
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.warning("Suppressed exception in %s: %s", __name__, _exc)
     except Exception as exc:
         print(f"  [wnba-fallback] sportsdataverse {season} unavailable: {exc}")
         return []
