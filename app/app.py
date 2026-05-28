@@ -12312,18 +12312,23 @@ if not _in_debug_mode or _werkzeug_main:
                     misfire_grace_time=3600,
                     max_instances=1,
                 )
-                # NOTE: the standalone 30-min auto_settlement job has been
-                # folded into the consolidated 15-min auto_props_refresh cycle
-                # below (step 5 calls _run_auto_settlement_job every 15 min).
-                # Remove any auto_settlement job a prior deploy registered so
-                # settlement isn't run twice.
-                try:
-                    _sched.remove_job("auto_settlement")
-                    print("STARTUP: removed standalone auto_settlement job "
-                          "(now part of the 15-min cycle)",
-                          flush=True, file=sys.stderr)
-                except Exception:                                          # noqa: BLE001
-                    pass
+                # 30-min standalone settlement during game hours (12 PM-1 AM ET).
+                # _run_auto_settlement_job already self-gates to the same window
+                # and is idempotent (settle_pending only touches pending picks),
+                # so running it both here and inside the 15-min cycle is safe;
+                # this standalone registration is what the boot health report
+                # and /api/auto_settlement_status look for via get_job("auto_settlement").
+                _sched.add_job(
+                    _run_auto_settlement_job,
+                    _CronTrigger(hour="12-23,0,1", minute="0,30", timezone=_ET),
+                    id="auto_settlement",
+                    replace_existing=True,
+                    misfire_grace_time=600,
+                    max_instances=1,
+                )
+                print("STARTUP: auto_settlement job scheduled — every 30 min, "
+                      "12 PM-1 AM ET (game hours)",
+                      flush=True, file=sys.stderr)
                 # ── Nightly three-job cycle ──────────────────────────────
                 # JOB 1  1:00 AM ET  final settlement
                 # JOB 2  2:00 AM ET  full clear
