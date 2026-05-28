@@ -286,7 +286,7 @@ class PropsLedger:
 
         Returns the list of newly settled bets.
         """
-        self._ensure_loaded()
+        self.reload()
         open_bets = self.get_open_bets()
         if not open_bets:
             return []
