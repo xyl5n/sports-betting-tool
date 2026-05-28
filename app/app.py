@@ -24,6 +24,12 @@ from state import *  # noqa: F401,F403
 # so legacy bare-name references throughout this file keep working.
 from utils import *  # noqa: F401,F403
 
+# Scheduler-owned helpers (currently: _eprint + 2 small job functions).
+# Star-imported so legacy bare-name references throughout this file keep
+# working without per-site rewrites.  See scheduler.py header for why
+# the other 7 jobs and the APScheduler bootstrap block still live here.
+from scheduler import *  # noqa: F401,F403
+
 print("STARTUP [1/6]: stdlib imports OK", flush=True, file=sys.stderr)
 
 try:
@@ -610,26 +616,6 @@ def _restore_caches_from_supabase_on_boot() -> None:
               flush=True, file=sys.stderr)
 
 
-def _eprint(*args, **kwargs) -> None:
-    """Safe stderr print that never raises.
-
-    Encodes with UTF-8 + errors='replace' so box-drawing chars, emoji, and any
-    non-cp1252 characters can't crash the crash-handler on Windows terminals.
-    Runs every message through the credential redactor so an HTTPError that
-    embeds `?apiKey=...` in its message can't leak the key into Railway logs.
-    Falls back to a no-op if stderr itself is unavailable.
-    """
-    try:
-        msg = " ".join(_redact(a) for a in args) + kwargs.get("end", "\n")
-        buf = getattr(sys.stderr, "buffer", None)
-        if buf is not None:
-            buf.write(msg.encode("utf-8", errors="replace"))
-            buf.flush()
-        else:
-            sys.stderr.write(msg)
-            sys.stderr.flush()
-    except Exception:
-        pass  # last resort — never let logging kill the app
 
 
 def _read_analysis_timestamps() -> dict:
@@ -9498,21 +9484,6 @@ def _write_auto_analysis_log(entry: dict) -> None:
         _eprint(f"AUTO-ANALYSIS: _write_auto_analysis_log error: {_exc}")
 
 
-def _run_meta_consensus_job() -> dict:
-    """APScheduler 8:30 AM ET job: one batched compound-beta review of today's
-    scored props -> meta_consensus_today cache.  Best-effort; never raises."""
-    try:
-        from services import meta_consensus
-        res = meta_consensus.run_meta_consensus()
-        _eprint(
-            f"META-CONSENSUS: done -- parsed={res.get('parsed', 0)}/"
-            f"{res.get('prop_count', 0)} (model={res.get('model')})"
-        )
-        return res
-    except Exception as exc:                                              # noqa: BLE001
-        _eprint(f"META-CONSENSUS: job failed: {type(exc).__name__}: {exc}\n"
-                f"{traceback.format_exc()}")
-        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
@@ -9688,17 +9659,6 @@ def _run_auto_analysis_job(label: str, is_retry: bool = False) -> None:
         _schedule_auto_retry(label)
 
 
-def _run_personal_daily_limit_refresh() -> None:
-    """4 AM ET: take a fresh My Bets daily-limit snapshot off the current
-    personal bankroll that morning (higher if the bankroll grew, lower if
-    it shrank).  Sizes NEW bets only -- never an already-placed stake."""
-    try:
-        from src import supa_ledger as _sl
-        limit = _sl.personal().refresh_daily_limit()
-        _eprint(f"DAILY-LIMIT [personal]: refreshed to ${limit:.2f} "
-                f"(20% of current bankroll)")
-    except Exception as exc:                                              # noqa: BLE001
-        _eprint(f"DAILY-LIMIT refresh failed: {type(exc).__name__}: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
