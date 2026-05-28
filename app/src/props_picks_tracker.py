@@ -58,7 +58,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -428,10 +428,10 @@ def settle_pending() -> dict:
                     gd = date.fromisoformat(g.get("date", "")[:10])
                 except (TypeError, ValueError):
                     continue
-                delta = abs((gd - pick_day).days)
-                if delta == 0:
+                delta_days = (gd - pick_day).days
+                if delta_days == 0:
                     matching.append(g)
-                elif delta == 1:
+                elif delta_days == 1:
                     nearby.append(g)
             if not matching and nearby:
                 matching = nearby
