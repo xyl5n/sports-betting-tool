@@ -205,3 +205,97 @@ Reassignment audit (AST):
   were left in app.py and documented above.
 
 Branch: claude/split-utils-state
+
+============================================================================
+PR #277 — app/scheduler.py (3 items, narrow scope)
+============================================================================
+
+Branch: claude/split-scheduler
+Base:   origin/main @ 468375f  (post PR #276 merge)
+Source: app/app.py @ 12,518 lines
+
+Pre-flight rule: STRICT move-only, no rewrites, __all__ required.
+
+Original target (user request):
+  "Extract APScheduler setup + ALL scheduled job functions"
+
+What the dep audit found:
+  9 scheduled job functions in app.py.  Each was analysed for free names
+  referenced inside its body.  Only 2 could move under "no rewrites":
+
+  Movable (clean):
+    _run_meta_consensus_job        15 lines, deps: _eprint, traceback
+    _run_personal_daily_limit_refresh 11 lines, deps: _eprint
+
+  Plus _eprint itself (every job depends on it; only deps are sys + _redact
+  from src.redact).
+
+  Deferred (would require rewriting call signatures or moving large
+  helper subtrees — both forbidden by the spec):
+    _run_auto_analysis_job (171 lines)        — uses Flask app.test_client(),
+                                                _log_model_picks, _noon_reconcile_*,
+                                                _schedule_auto_retry,
+                                                _write_auto_analysis_log
+    _run_job1_final_settlement (29 lines)     — chains into _run_auto_settlement_job
+    _run_job2_full_clear (130 lines)          — _supabase_cache_delete,
+                                                _DAILY_PICKS_FILE et al.
+    _run_job3_games_prefetch (42 lines)       — _fetch_raw_schedule
+    _run_overnight_ai_gen (25 lines)          — hydrate_state
+    _run_auto_settlement_job (384 lines)      — 13 app-only deps incl. Ledger,
+                                                _grade_model_trackers, etc.
+    _run_consolidated_refresh_cycle (133 lines) — 11 app-only deps incl.
+                                                  _detect_*_changes,
+                                                  _refresh_schedule_and_scores,
+                                                  _rerun_single_game
+
+  APScheduler setup block (app.py lines ~11784-11972):
+    Hard deps on `app.debug`, `_werkzeug_main`, and `_logger` -- all of
+    which the spec said keep in app.py.  Moving would require either a
+    circular import or passing those in as args (a rewrite).  Block stays.
+
+Pre-flight reassignment check (AST):
+    Original FunctionDef sites for the 3 moved names: 3 (expected).
+    Any post-initial reassignment: 0.
+    Verdict: SAFE under `from scheduler import *`.
+
+Functions moved (3):
+    _eprint                            moved from app.py:613
+    _run_meta_consensus_job            moved from app.py:9501
+    _run_personal_daily_limit_refresh  moved from app.py:9691
+
+Auxiliary import added to scheduler.py:
+    from src.redact import redact as _redact   (preserves the name `_eprint`
+                                                used at original site 623)
+
+scheduler.py exports (__all__):
+    _eprint, _run_meta_consensus_job, _run_personal_daily_limit_refresh
+
+app.py changes:
+    - 46 lines removed (the 3 functions + their preceding doc/comment
+      blocks where present).
+    - 1 new star-import line added right after `from utils import *`:
+        `from scheduler import *  # noqa: F401,F403`
+    - Net: 12,518 -> 12,478 lines (-40 net after counting the import).
+
+Reference count after move (resolved via star-import):
+    _eprint                              262 calls in app.py
+    _run_meta_consensus_job                2 references
+                                            (add_job site + scheduler.py def)
+    _run_personal_daily_limit_refresh      1 reference (add_job site)
+
+Verification:
+    ✓ python3 -m py_compile passes on app.py and scheduler.py.
+    ✓ `from scheduler import *` exposes all 3 moved names.
+    ✓ `from state import *; from utils import *; from scheduler import *`
+      all coexist in one process.
+    ✓ Runtime smoke: _eprint('test') prints to stderr correctly.
+    ✓ AST audit: zero dangling module-level redefs of moved names in app.py.
+    ✓ `import app` clears stdlib + numpy + scheduler initialization; only
+      fails on Flask (sandbox missing the dep, expected).
+
+Cumulative across PRs #276 + #277:
+    app/app.py:    13,004 -> 12,478 lines  (-526, -4.0%)
+    app/state.py:    new, 360 lines
+    app/utils.py:    new, 351 lines
+    app/scheduler.py: new, 86 lines
+    72 module-level definitions extracted from app.py.
