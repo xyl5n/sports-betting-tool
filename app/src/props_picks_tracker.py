@@ -58,7 +58,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -408,27 +408,37 @@ def settle_pending() -> dict:
                 n_settled += 1
             continue
 
-        matching = [g for g in games if g.get("date", "")[:10] == game_date]
-        if not matching:
-            # ±1 day fallback for UTC/ET boundary cases.  Late-night ET games
-            # whose gamelog 'date' was derived from a UTC timestamp can be a
-            # calendar day ahead; conversely a not-yet-ET-normalised
-            # commence_time can leave game_date a day behind.  Try the
-            # surrounding dates so the bet still settles.
-            try:
-                from datetime import date as _date, timedelta as _td
-                d = _date.fromisoformat(game_date)
-                nearby = {(d + _td(days=delta)).isoformat() for delta in (-1, 1)}
-                near_matches = [g for g in games
-                                if g.get("date", "")[:10] in nearby]
-                if near_matches:
-                    matching = near_matches
-                    found_date = matching[-1].get("date", "")[:10]
-                    _log(f"settle: ±1d fallback matched {player!r} {market} "
-                         f"(searched={game_date}, found={found_date}, "
-                         f"candidates={len(near_matches)})")
-            except Exception:                                             # noqa: BLE001
-                pass
+        # ±1d tolerance: the MLB Stats API gamelog 'date' is derived from a
+        # UTC timestamp, so late-ET games can land on the calendar day before
+        # or after the pick's stored game_date -- compare parsed date objects
+        # so the bet still settles.  Exact matches still win; adjacent-day
+        # entries are only used when no exact match exists (preserves the
+        # downstream `matching[-1]` selection for doubleheaders).
+        try:
+            pick_day = date.fromisoformat(game_date)
+        except (TypeError, ValueError):
+            pick_day = None
+        if pick_day is None:
+            matching = [g for g in games if g.get("date", "")[:10] == game_date]
+        else:
+            matching = []
+            nearby = []
+            for g in games:
+                try:
+                    gd = date.fromisoformat(g.get("date", "")[:10])
+                except (TypeError, ValueError):
+                    continue
+                delta = abs((gd - pick_day).days)
+                if delta == 0:
+                    matching.append(g)
+                elif delta == 1:
+                    nearby.append(g)
+            if not matching and nearby:
+                matching = nearby
+                found_date = matching[-1].get("date", "")[:10]
+                _log(f"settle: ±1d window matched {player!r} {market} "
+                     f"(searched={game_date}, found={found_date}, "
+                     f"candidates={len(matching)})")
 
         if not matching:
             _log(f"settle: no gamelog match for {player!r} on {game_date!r} "
