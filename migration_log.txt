@@ -112,3 +112,96 @@ Verification (Phase 1):
   ✓ python3 -c "from state import *" with __all__ exposes 43 names
   ✓ ast.parse on app.py confirms no module-level redefinitions of moved names
   ✓ Moved names still referenced 333× in app.py (via star import)
+
+============================================================================
+COMMIT 2 — app/utils.py (26 items)
+============================================================================
+
+Date/time helpers (3)
+  _today_et                        moved from app.py:[Phase 1 line 785]
+  _game_et_date                    moved from app.py:[Phase 1 line 795]
+  _et_date_of                      moved from app.py:[Phase 1 line 2806]
+
+Odds + probability math (4)
+  _format_odds                     moved from app.py:[Phase 1 line 1190]
+  _correlation_impl_prob           moved from app.py:[Phase 1 line 2125]
+  _american_to_prob                moved from app.py:[Phase 1 line 7670]
+  _fmt_odds                        moved from app.py:[Phase 1 line 9015]
+
+Percent / float (2)
+  _fmt_pct                         moved from app.py:[Phase 1 line 9026]
+  _to_float                        moved from app.py:[Phase 1 line 11550]
+
+String processing (2)
+  _strip_markdown_fences           moved from app.py:[Phase 1 line 1181]
+  _ai_daily_counter_key            moved from app.py:[Phase 1 line 455]
+
+Team / game normalization (4)
+  _norm_team_name                  moved from app.py:[Phase 1 line 10441]
+  _statsapi_norm_team              moved from app.py:[Phase 1 line 10864]
+  _norm_team                       moved from app.py:[Phase 1 line 11542]
+  _team_pair                       moved from app.py:[Phase 1 line 11546]
+
+Schedule helpers (5)
+  _espn_state_to_mlb_state         moved from app.py:[Phase 1 line 2643]
+  _wnba_period_ordinal             moved from app.py:[Phase 1 line 2652]
+  _schedule_is_postponed           moved from app.py:[Phase 1 line 2820]
+  _schedule_priority               moved from app.py:[Phase 1 line 2825]
+  _schedule_cache_key              moved from app.py:[Phase 1 line 2960]
+
+Picker / game helpers (3)
+  _team_key                        moved from app.py:[Phase 1 line 3040]
+  _no_odds_predictions_cache_key   moved from app.py:[Phase 1 line 3564]
+  _filter_stale_games              moved from app.py:[Phase 1 line 805]
+
+Data conversion + finders (3)
+  _py                              moved from app.py:[Phase 1 line 1527]
+  _match_result_id                 moved from app.py:[Phase 1 line 7586]
+  _find_analysis_row               moved from app.py:[Phase 1 line 7606]
+
+Originally on the utils.py list, NOT moved (deps stay in app.py):
+  _delete_file  — needs `_logger`; would create app↔utils circular import.
+  _audit_log    — needs `_eprint` (uses `_redact` from src.redact + sys.stderr).
+                  Could move if `_eprint` were moved too, but that expands scope.
+
+Cross-module dependency:
+  utils.py imports `_MLB_TEAM_NORM` and `_QUARTER_ORDINAL` from state.py
+  (used by `_norm_team_name` and `_wnba_period_ordinal` respectively).
+  Direction is utils -> state only; state has no knowledge of utils.
+
+app.py changes:
+  - 264 more lines removed (the 26 helper bodies + their leading
+    comments, where present).
+  - Added `from utils import *  # noqa: F401,F403` line immediately
+    after the `from state import *` added in Phase 1.
+  - Net: 12778 lines -> 12518 lines.
+
+Verification (Phase 2):
+  ✓ python3 -m py_compile utils.py
+  ✓ python3 -m py_compile app.py
+  ✓ `from utils import *` exposes all 26 helpers (via __all__).
+  ✓ `from state import *; from utils import *` both succeed in one process.
+  ✓ Spot-tests: _today_et(), _format_odds(150), _american_to_prob(-110)
+    all return expected values.
+  ✓ `import app` reaches the Flask check (i.e. clears all stdlib+numpy
+    initialization) without any NameError.  Sandbox-only fatal is Flask
+    not being installed -- production will succeed.
+
+============================================================================
+CUMULATIVE RESULT
+============================================================================
+
+app/app.py:        13,004 -> 12,518 lines  (-486, -3.7%)
+app/state.py:      new, 360 lines
+app/utils.py:      new, 351 lines
+
+Items extracted:   43 state + 26 utils = 69 module-level definitions
+Bare-name refs
+ resolved by *:    468 in app.py
+
+Reassignment audit (AST):
+  All initial-declaration sites are now in state.py.
+  Three post-initial rebinds (_STAT_LOOKUP_LOG_BUDGET x2, _sched x1)
+  were left in app.py and documented above.
+
+Branch: claude/split-utils-state
