@@ -71,6 +71,18 @@ __all__ = [
     "_statsapi_date_window",
     "_statsapi_schedule_index",
     "_fetch_mlb_statsapi_scores",
+    # PR #280 -- _run_auto_settlement_job + its remaining helper cluster.
+    # _STAT_LOOKUP_LOG_BUDGET is intentionally NOT in __all__ -- it's
+    # module-private state, mutated by _reset_stat_lookup_log_budget and
+    # _stat_lookup_log via `global` (which only works because both rebinders
+    # AND the variable now live in this same module -- the rebind blocker
+    # documented in PR #276's preamble is resolved by moving the whole
+    # cluster together).
+    "_reset_stat_lookup_log_budget",
+    "_stat_lookup_log",
+    "_model_pick_stat_lookup",
+    "_final_scores_from",
+    "_run_auto_settlement_job",
 ]
 
 # moved from app.py:613
@@ -628,3 +640,505 @@ def _fetch_mlb_statsapi_scores(game_picks: list) -> dict:
             f"{away_name} {info['away_score']} @ {home_name} {info['home_score']}"
         )
     return out
+
+# moved from app.py:9911
+# Per-cycle budget for the verbose STAT-LOOKUP diagnostic.  A settlement pass
+# can call the lookup hundreds of times (one per pending prop), so we log only
+# the first few per pass -- enough to confirm in Railway logs WHAT season/date
+# is queried and what comes back, without flooding.  Reset before each settle.
+_STAT_LOOKUP_LOG_BUDGET = 0
+
+# moved from app.py:9914
+def _reset_stat_lookup_log_budget(n: int = 15) -> None:
+    global _STAT_LOOKUP_LOG_BUDGET
+    _STAT_LOOKUP_LOG_BUDGET = int(n)
+
+# moved from app.py:9919
+def _model_pick_stat_lookup(player: str, market: str, pick_date: str = None):
+    """Actual stat for a player's completed game, for settling prop picks.
+
+    *pick_date* (YYYY-MM-DD ET, the slate the pick belongs to) makes the
+    lookup grade a SPECIFIC past game rather than only "today":
+
+      * season is taken from pick_date's year -- the old hardcoded
+        _CURRENT_SEASON (2025) never returned 2026 gamelogs, so every 2026
+        prop stayed pending.
+      * the accepted game date is pick_date itself, so a backlog of picks
+        from earlier days settles against each pick's own game.
+
+    When *pick_date* is omitted (the ledger / Top-Plays same-day callers) the
+    original today-window behaviour is kept: force-refresh the gamelog (so the
+    just-finished game is present, not a stale morning cache) and accept today,
+    plus yesterday only during the 12 AM-2 AM ET post-midnight settlement tail.
+    """
+    try:
+        import time as _time
+        from datetime import timedelta as _td
+        from src.player_profile_client import (
+            search_player_by_name, get_player_gamelog, gamelog_stat_value,
+            _CURRENT_SEASON,
+        )
+        pid = search_player_by_name(player)
+        if not pid:
+            _stat_lookup_log(player, market, None, None, "player-not-found")
+            return None
+        is_pitcher = (market or "").startswith("pitcher_")
+
+        if pick_date:
+            try:
+                season = int(str(pick_date)[:4])
+            except (TypeError, ValueError):
+                season = _CURRENT_SEASON
+            acceptable = {str(pick_date)[:10]}
+        else:
+            season = _CURRENT_SEASON
+            now_et = datetime.now(timezone(timedelta(hours=-4)))
+            acceptable = {now_et.date().isoformat()}
+            if now_et.hour <= 2:        # post-midnight settlement tail
+                acceptable.add((now_et.date() - _td(days=1)).isoformat())
+
+        memo_key = (int(pid), is_pitcher, season)
+        cached = _SETTLE_GAMELOG_MEMO.get(memo_key)
+        now = _time.monotonic()
+        if cached is not None and (now - cached[0]) < _SETTLE_GAMELOG_TTL:
+            games = cached[1]
+        else:
+            games = get_player_gamelog(
+                int(pid), season,
+                is_pitcher=is_pitcher, force_refresh=True,
+            ) or []
+            _SETTLE_GAMELOG_MEMO[memo_key] = (now, games)
+
+        cand = [x for x in games if (x.get("date") or "")[:10] in acceptable]
+        if not cand:
+            _stat_lookup_log(player, market, season, acceptable,
+                             f"no-game ({len(games)} in season)")
+            return None
+        g = max(cand, key=lambda x: (x.get("date") or ""))
+        actual = gamelog_stat_value(g, _MODEL_PICK_STAT.get(market, market))
+        _stat_lookup_log(player, market, season, acceptable,
+                         f"game {(g.get('date') or '')[:10]} -> {actual}")
+        return actual
+    except Exception:                                                      # noqa: BLE001
+        return None
+
+# moved from app.py:9988
+def _stat_lookup_log(player, market, season, acceptable, outcome) -> None:
+    """Budgeted one-liner so the settlement pass shows what the stat lookup
+    queried (season + accepted date) and returned -- verifiable in prod logs."""
+    global _STAT_LOOKUP_LOG_BUDGET
+    if _STAT_LOOKUP_LOG_BUDGET <= 0:
+        return
+    _STAT_LOOKUP_LOG_BUDGET -= 1
+    want = ",".join(sorted(acceptable)) if acceptable else "-"
+    _eprint(f"MODEL-PICKS: STAT-LOOKUP {player!r} {market} "
+            f"season={season} want={want} -> {outcome}")
+
+# moved from app.py:10009
+def _final_scores_from(scores_by_sport: dict) -> dict:
+    """Build {game_id: {home_team, away_team, home_score, away_score}} from
+    completed Odds API score rows, for model_picks game settlement."""
+    out: dict = {}
+    for rows in (scores_by_sport or {}).values():
+        for row in (rows or []):
+            if not row.get("completed"):
+                continue
+            gid = str(row.get("id") or "")
+            if not gid:
+                continue
+            ht, at = row.get("home_team"), row.get("away_team")
+            sc = {s.get("name"): s.get("score") for s in (row.get("scores") or [])}
+            try:
+                hs = int(sc.get(ht))
+                as_ = int(sc.get(at))
+            except (TypeError, ValueError):
+                continue
+            out[gid] = {"home_team": ht, "away_team": at,
+                        "home_score": hs, "away_score": as_}
+    return out
+
+# moved from app.py:10032
+def _run_auto_settlement_job(force: bool = False) -> dict:
+    """
+    APScheduler callback: every 30 min.
+    Gated to 11 AM–2 AM ET (game hours) unless `force=True`. Settles
+    completed bets via Odds API scores; voids postponed MLB games via
+    MLB Stats API. Logs summary to stderr.
+
+    Returns a summary dict {settled, wins, losses, voided, skipped} so
+    /api/admin/settle_now can surface counts in the admin toast.  The
+    scheduler ignores the return.
+    """
+    # ── Gate: only run during game hours (11 AM through 2 AM ET) ────────────
+    try:
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        _et = _ZoneInfo("America/New_York")
+    except Exception:
+        from datetime import timezone as _dtz, timedelta as _dtd
+        _et = _dtz(timedelta(hours=-5))
+    now_et   = datetime.now(_et)
+    et_hour  = now_et.hour
+    # Settlement window 12 PM-1 AM ET (noon-11:59 PM, plus 00:00-01:59 for late
+    # west-coast finishers).  Matches the cycle's in_settlement_window + the
+    # Top Plays gate so all stores settle on the same hours.
+    in_window = (et_hour >= 12) or (et_hour <= 1)
+    if not in_window and not force:
+        return {"settled": 0, "wins": 0, "losses": 0,
+                "voided": 0, "skipped": "out of game-hours window"}
+
+    odds_key = _ODDS_API_KEY
+    if not odds_key or odds_key == "your_odds_api_key_here":
+        return
+
+    _eprint(f"AUTO-SETTLE: checking at {now_et.strftime('%H:%M ET')}")
+    oc = OddsClient(odds_key, _cache)
+
+    settled: list = []
+
+       # ── Fetch scores ONCE per sport for this pass ──────────────────────────────
+    # The same score rows feed ledger settlement AND the bulk tracker grader
+    # below; fetching here (and passing the result down) guarantees a single
+    # Odds API scores call per sport per cycle instead of one per consumer.
+    scores_by_sport: dict[str, list] = {}
+    for _sk, _ck in (("baseball_mlb",    "scores_baseball_mlb_3"),
+                     ("basketball_wnba", "scores_basketball_wnba_3")):
+        try:
+            # Invalidate the stale cache so we always see fresh completions.
+            _cache.invalidate(_ck)
+            scores_by_sport[_sk] = oc.get_scores(sport_key=_sk, days_from=3) or []
+        except Exception as _sx:                                            # noqa: BLE001
+            _eprint(f"AUTO-SETTLE: get_scores({_sk}) failed: "
+                    f"{type(_sx).__name__}: {_sx}")
+            scores_by_sport[_sk] = []
+
+    # ── Augment with the free MLB Stats API for picks older than the Odds
+    # API /scores 3-day window (stale rows that would otherwise never settle).
+    # Forced passes only (cycle / JOB1 / admin) so routine ticks don't add
+    # statsapi calls.  Synthetic rows are keyed by the ORIGINAL Odds API id so
+    # _final_scores_from + settle() match them exactly like real score rows.
+    if force:
+        try:
+            from src import db as _db
+            _pending_rows = _db.model_picks_list(sport="mlb", status="pending")
+            # Odds API score rows are keyed by "id"; skip games already covered
+            # by the live (3-day) Odds API fetch above.
+            _covered = {
+                str(r.get("id")) for r in scores_by_sport.get("baseball_mlb", [])
+                if r.get("completed") and r.get("id")
+            }
+            # GAME rows only (props settle via the stat lookup, not scores), and
+            # only games the Odds API window didn't already cover.
+            _stale_games = [
+                r for r in (_pending_rows or [])
+                if not r.get("player_name")
+                and str(r.get("game_id") or "") not in _covered
+            ]
+            if _stale_games:
+                _eprint(
+                    f"SETTLE-STATSAPI: {len(_stale_games)} stale game pick(s) "
+                    f"outside the Odds API window -- resolving via statsapi"
+                )
+                _statsapi_scores = _fetch_mlb_statsapi_scores(_stale_games)
+                _eprint(f"SETTLE-STATSAPI: resolved {len(_statsapi_scores)} game(s)")
+                _synthetic = [
+                    {
+                        "id": _gid, "completed": True,
+                        "home_team": _sc["home_team"], "away_team": _sc["away_team"],
+                        "scores": [
+                            {"name": _sc["home_team"], "score": str(_sc["home_score"])},
+                            {"name": _sc["away_team"], "score": str(_sc["away_score"])},
+                        ],
+                    }
+                    for _gid, _sc in _statsapi_scores.items()
+                ]
+                if _synthetic:
+                    scores_by_sport["baseball_mlb"] = (
+                        scores_by_sport.get("baseball_mlb", []) + _synthetic
+                    )
+        except Exception as _sax:                                         # noqa: BLE001
+            _eprint(f"SETTLE-STATSAPI: augment failed: {type(_sax).__name__}: {_sax}")
+
+    # ── Open both ledgers up front so we can log bankroll before/after ─────────
+    def _open_ledger(_path):
+        try:
+            return Ledger(path=_path, starting_bankroll=250)
+        except Exception as _le:                                            # noqa: BLE001
+            _eprint(f"AUTO-SETTLE: open {_path} failed: "
+                    f"{type(_le).__name__}: {_le}")
+            return None
+
+    def _bankrolls(_ldr):
+        if _ldr is None:
+            return (0.0, 0.0)
+        return (float(_ldr.data.get("model_bankroll") or 0.0),
+                float(_ldr.data.get("personal_bankroll") or 0.0))
+
+    _mlb_ldr  = _open_ledger("data/ledger.json")
+    _wnba_ldr = _open_ledger("data/wnba_ledger.json")
+
+    mlb_model_before,  mlb_pers_before  = _bankrolls(_mlb_ldr)
+    wnba_model_before, wnba_pers_before = _bankrolls(_wnba_ldr)
+
+    # ── MLB ───────────────────────────────────────────────────────────────────
+    try:
+        if _mlb_ldr is not None and _mlb_ldr.data.get("open_bets"):
+            settled.extend(_mlb_ldr.settle(
+                oc, "baseball_mlb", scores=scores_by_sport.get("baseball_mlb")))
+    except Exception as _exc:
+        _eprint(f"AUTO-SETTLE: MLB error: {type(_exc).__name__}: {_exc}")
+
+    # ── WNBA ──────────────────────────────────────────────────────────────────
+    try:
+        if _wnba_ldr is not None and _wnba_ldr.data.get("open_bets"):
+            settled.extend(_wnba_ldr.settle(
+                oc, "basketball_wnba", scores=scores_by_sport.get("basketball_wnba")))
+    except Exception as _exc:
+        _eprint(f"AUTO-SETTLE: WNBA error: {type(_exc).__name__}: {_exc}")
+
+    # ── Postponed games (MLB Stats API) ───────────────────────────────────────
+    voided: list = []
+    try:
+        voided = _void_postponed_mlb_bets()
+    except Exception as _exc:
+        _eprint(f"AUTO-SETTLE: postponed check error: {type(_exc).__name__}: {_exc}")
+
+    # ── Props picks (tracked from the Props page → props_picks_history) ──────
+    # New props tracker (src.props_picks_tracker) replaces the old
+    # props_ledger; it settles pending picks against the player's actual
+    # box-score stat and books model P/L into the props bankroll.
+    props_summary = {"settled": 0, "won": 0, "lost": 0, "void": 0,
+                     "pnl": 0.0, "bankroll": 0.0, "still_pending": 0}
+    try:
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        props_summary = _ppt.settle_pending()
+        if props_summary.get("settled"):
+            _eprint(
+                f"PROPS-SETTLE: settled {props_summary['settled']} prop pick(s) — "
+                f"{props_summary['won']}W / {props_summary['lost']}L / "
+                f"{props_summary['void']}V | "
+                f"P/L ${props_summary['pnl']:+.2f} | "
+                f"bankroll ${props_summary['bankroll']:.2f} | "
+                f"{props_summary['still_pending']} still pending"
+            )
+        else:
+            _eprint(
+                f"PROPS-SETTLE: no props newly settled "
+                f"({props_summary.get('still_pending', 0)} still pending)"
+            )
+    except Exception as _pe:
+        _eprint(f"PROPS-SETTLE: error: {type(_pe).__name__}: {_pe}")
+    props_settled = props_summary.get("settled", 0)
+
+    # ── FIX 2: bulk-grade the per-model trackers (XGB/LR/NN) ──────────────────
+    # The per-bet ledger hook only grades trackers for games we actually
+    # placed bets on.  Grade EVERY analyzed pick whose game just completed by
+    # pulling the same Odds API scores and matching by game_id (XGB/LR) and
+    # matchup+date (NN).  Runs on every settlement pass (auto + nightly force).
+    graded = {"xgb": 0, "lr": 0, "nn": 0}
+    try:
+        graded = _grade_model_trackers(
+            oc, ["baseball_mlb", "basketball_wnba"],
+            scores_by_sport=scores_by_sport,
+        )
+        if any(graded.values()):
+            _eprint(f"TRACKER-GRADE: newly graded xgb={graded['xgb']} "
+                    f"lr={graded['lr']} nn={graded['nn']}")
+    except Exception as _ge:
+        _eprint(f"TRACKER-GRADE: error: {type(_ge).__name__}: {_ge}")
+
+    # ── Terminal summary ──────────────────────────────────────────────────────
+    wins   = sum(1 for s in settled if s.get("result") == "win")
+    losses = sum(1 for s in settled if s.get("result") == "loss")
+
+    if settled:
+        _eprint(
+            f"AUTO-SETTLE: settled {len(settled)} bet(s) — "
+            f"{wins}W / {losses}L"
+        )
+        _BET_TYPE_SHORT = {"single": "ML", "run_line": "RL", "spread": "SPR", "totals": "TOT"}
+        for s in settled:
+            bts    = _BET_TYPE_SHORT.get(s.get("bet_type", "single"), "ML")
+            result = s.get("result", "?").upper()
+            team   = s.get("bet_team", "?")
+            away   = s.get("away_team", "?")
+            home   = s.get("home_team", "?")
+            pnl    = s.get("model_pnl", 0.0)
+            _eprint(f"  {away} @ {home} | {bts} {team} → {result} | model P&L: ${pnl:+.2f}")
+    if voided:
+        _eprint(f"AUTO-SETTLE: voided {len(voided)} postponed bet(s) (stakes returned)")
+        for v in voided:
+            _eprint(f"  {v.get('away_team','?')} @ {v.get('home_team','?')} — POSTPONED, stake returned")
+    if not settled and not voided:
+        _eprint("AUTO-SETTLE: no newly settled bets")
+
+    # ── Total model P/L across everything settled this pass ─────────────────
+    # game-pick P/L is on each settled game bet's "model_pnl"; prop P/L
+    # comes from the props_picks_tracker settle summary.  Summing both
+    # gives the day's realized model P/L for the JOB 1 summary line.
+    game_pnl  = sum(float(s.get("model_pnl") or 0.0) for s in settled)
+    props_pnl = float(props_summary.get("pnl") or 0.0)
+    total_pnl = game_pnl + props_pnl
+
+    # ── Pass summary: per-tracker settled counts + bankroll before/after ──────
+    # ledger.settle() mutated the same instances we opened above, so reading
+    # their bankrolls now reflects the post-settlement balances.  Personal
+    # bankroll is unified across sports and lives in data/ledger.json.
+    mlb_model_after,  mlb_pers_after  = _bankrolls(_mlb_ldr)
+    wnba_model_after, _               = _bankrolls(_wnba_ldr)
+    model_before = mlb_model_before + wnba_model_before
+    model_after  = mlb_model_after  + wnba_model_after
+    _eprint(
+        "SETTLE-SUMMARY: game picks settled — "
+        f"xgb={graded.get('xgb', 0)} lr={graded.get('lr', 0)} "
+        f"nn={graded.get('nn', 0)} | ledger bets {len(settled)} "
+        f"({wins}W/{losses}L) | props settled {props_settled} | "
+        f"model bankroll ${model_before:.2f} -> ${model_after:.2f} | "
+        f"personal bankroll ${mlb_pers_before:.2f} -> ${mlb_pers_after:.2f}"
+    )
+
+    # Per-store settled tallies + error tags, surfaced in the cycle summary
+    # line below so all four systems can be verified at a glance in the logs.
+    _settle_errors: list[str] = []
+    model_picks_settled = 0
+    top_plays_settled = 0
+
+    # ── Per-model pick logging + settlement (PART 1-3) ────────────────────────
+    # Log the current picks (deduped) then settle today's pending ones against
+    # the final scores fetched above + each player's actual stat line.
+    try:
+        from src import model_picks as _mp
+        _log_model_picks()
+        _reset_stat_lookup_log_budget(15)
+        _summary = _mp.settle(
+            final_scores=_final_scores_from(scores_by_sport),
+            stat_lookup=_model_pick_stat_lookup,
+        )
+        model_picks_settled = sum(int(n) for n in (_summary or {}).values())
+        if _summary:
+            _eprint("MODEL-PICKS settled: "
+                    + ", ".join(f"{m}={n}" for m, n in sorted(_summary.items())))
+        # PART 7 — per-store status so every store can be verified in the logs.
+        for _line in _mp.store_summary_counts():
+            _eprint(f"SETTLE-SUMMARY store {_line}")
+    except Exception as _mpx:                                              # noqa: BLE001
+        _settle_errors.append(f"model_picks:{type(_mpx).__name__}")
+        _eprint(f"MODEL-PICKS: settle pass failed: {type(_mpx).__name__}: {_mpx}")
+
+    # ── Settle the /research model-analytics history ──────────────────────────
+    # Same player-stat lookup as model_picks; grades each pending research row
+    # and freezes its units P/L so the leaderboard's ROI/Win% reflect reality.
+    try:
+        from src import research_store as _rst
+        _rsum = _rst.settle(stat_lookup=_model_pick_stat_lookup)
+        if _rsum.get("settled"):
+            _eprint(f"RESEARCH-STORE: settled {_rsum['settled']} "
+                    f"({_rsum['wins']}W/{_rsum['losses']}L/{_rsum['voids']}V)")
+    except Exception as _rx:                                               # noqa: BLE001
+        _settle_errors.append(f"research_store:{type(_rx).__name__}")
+        _eprint(f"RESEARCH-STORE: settle pass failed: {type(_rx).__name__}: {_rx}")
+
+    # ── Settle the rebuilt Supabase ledgers (Model + My Bets) ─────────────────
+    # Grades each active staked bet against the same final scores / player
+    # stats and applies the frozen-stake bankroll movement once: WIN returns
+    # stake+profit, LOSS leaves the stake out, PUSH/VOID returns the stake.
+    try:
+        from src import ledger_integration as _li
+        _lsum = _li.settle_open_ledger_bets(
+            final_scores=_final_scores_from(scores_by_sport),
+            stat_lookup=_model_pick_stat_lookup,
+        )
+        for _sys, _s in (_lsum or {}).items():
+            if _s.get("settled"):
+                _eprint(f"LEDGER-SETTLE [{_sys}]: settled {_s['settled']} "
+                        f"({_s['wins']}W/{_s['losses']}L/{_s['pushes']}P)")
+    except Exception as _lx:                                               # noqa: BLE001
+        _settle_errors.append(f"ledger_integration:{type(_lx).__name__}")
+        _eprint(f"LEDGER-SETTLE failed: {type(_lx).__name__}: {_lx}")
+
+    # ── FIX 3: Supabase supa_ledger is the single authoritative model bankroll.
+    # ledger_integration above just moved it; mirror that value back into the
+    # ledger.json cache so the file's own settle math (run earlier this pass)
+    # can't leave the fallback display out of sync with Supabase.
+    try:
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            _supa_model_bal = float(_sl.model().bankroll())
+            for _ldr in (_mlb_ldr, _wnba_ldr):
+                if _ldr is not None:
+                    _ldr.sync_model_bankroll(_supa_model_bal)
+            _eprint("MODEL-BANKROLL: synced ledger.json cache to Supabase "
+                    f"authoritative ${_supa_model_bal:.2f}")
+    except Exception as _bx:                                               # noqa: BLE001
+        _settle_errors.append(f"bankroll_sync:{type(_bx).__name__}")
+        _eprint(f"MODEL-BANKROLL sync failed: {type(_bx).__name__}: {_bx}")
+
+    # ── Settle the standalone Top Plays scorecard (12 PM–1 AM ET) ─────────────
+    # Its own store, separate from model_picks + the ledgers.  Same final
+    # scores / stat lookup; on a win it adds profit in units off the frozen
+    # odds, on a loss it subtracts the staked units (no balance is moved).
+    if et_hour >= 12 or et_hour <= 1:
+        try:
+            from src import top_plays_tracker as _tpt
+            _tps = _tpt.settle(
+                final_scores=_final_scores_from(scores_by_sport),
+                stat_lookup=_model_pick_stat_lookup,
+            )
+            top_plays_settled = int(_tps.get("settled") or 0)
+            if _tps.get("settled"):
+                _eprint(f"TOP-PLAYS settled {_tps['settled']} "
+                        f"({_tps['wins']}W/{_tps['losses']}L/{_tps['pushes']}P)")
+        except Exception as _tx:                                           # noqa: BLE001
+            _settle_errors.append(f"top_plays:{type(_tx).__name__}")
+            _eprint(f"TOP-PLAYS settle failed: {type(_tx).__name__}: {_tx}")
+
+    # ── Recalculate the daily budget off the post-settlement bankroll ─────────
+    # A win adds profit / a loss removes the stake from the personal bankroll,
+    # so the budget (20% of bankroll), floor (1%) and ceiling (5%) must track
+    # the new total immediately (FIX 3).
+    if settled or voided:
+        try:
+            _persist_daily_budget(mlb_pers_after)
+        except Exception as _be:                                           # noqa: BLE001
+            _eprint(f"AUTO-SETTLE: budget recalc failed: {_be}")
+
+    # ── Consolidated settlement summary -- one line covering all four systems
+    # so a Railway log grep confirms each is firing (or shows which errored).
+    _err_txt = ("none" if not _settle_errors
+                else f"{len(_settle_errors)} ({', '.join(_settle_errors)})")
+    _eprint(
+        "SETTLE-CYCLE-SUMMARY: "
+        f"game_bets={len(settled)} ({wins}W/{losses}L) | "
+        f"model_picks={model_picks_settled} | "
+        f"props={int(props_summary.get('settled') or 0)} | "
+        f"top_plays={top_plays_settled} | voided={len(voided)} | "
+        f"errors={_err_txt}"
+    )
+
+    # ── Update state ──────────────────────────────────────────────────────────
+    with _auto_settlement_lock:
+        _auto_settlement_state.update({
+            "last_ran_at":  datetime.now(timezone.utc).isoformat(),
+            "last_settled": len(settled),
+            "last_wins":    wins,
+            "last_losses":  losses,
+            "last_voided":  len(voided),
+        })
+
+    return {
+        "settled":       len(settled),
+        "wins":          wins,
+        "losses":        losses,
+        "voided":        len(voided),
+        "model_picks_settled": model_picks_settled,
+        "props_settled": int(props_summary.get("settled") or 0),
+        "props_won":     int(props_summary.get("won") or 0),
+        "props_lost":    int(props_summary.get("lost") or 0),
+        "props_bankroll": float(props_summary.get("bankroll") or 0.0),
+        "top_plays_settled": top_plays_settled,
+        "settle_errors": list(_settle_errors),
+        "game_pnl":      round(game_pnl, 2),
+        "props_pnl":     round(props_pnl, 2),
+        "total_pnl":     round(total_pnl, 2),
+        "forced":        force,
+    }

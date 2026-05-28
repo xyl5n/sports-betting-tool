@@ -50,6 +50,7 @@ __all__ = [
     "_STATSAPI_BRIDGE_TTL", "_AI_RUN_DELAY",
     "_DAILY_SNAPSHOT_FILE", "_DAILY_SNAPSHOT_TMP",
     "_STATSAPI_BRIDGE_CACHE",
+    "_auto_settlement_state", "_SETTLE_GAMELOG_MEMO",
 ]
 
 # moved from app.py:138
@@ -376,3 +377,19 @@ _AI_RUN_DELAY = 0.15   # 150 ms between Groq calls (free-tier friendly)
 
 # moved from app.py:10239
 _STATSAPI_BRIDGE_CACHE: dict = {}     # et_date_iso -> (ts, {norm_team: game_info})
+
+# moved from app.py:1078
+_auto_settlement_state: dict = {
+    "last_ran_at":  None,   # ISO UTC
+    "last_settled": 0,
+    "last_wins":    0,
+    "last_losses":  0,
+    "last_voided":  0,
+}
+
+# moved from app.py:9917
+# Per-pass gamelog memo for settlement: (player_id, is_pitcher) -> (ts, games).
+# Settlement force-refreshes gamelogs (see below); a pitcher with three pending
+# prop markets would otherwise fire three identical statsapi calls in one pass.
+# Short TTL so a later cycle (15 min on) still picks up newly-finished games.
+_SETTLE_GAMELOG_MEMO: dict = {}

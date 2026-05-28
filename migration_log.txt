@@ -514,3 +514,146 @@ Remaining blockers (from PR #277's deferred list):
       still blocked on their own helper subtrees -- separate PRs.
     APScheduler bootstrap block (lines ~11400-11600):
       still blocked on `app.debug` + `_werkzeug_main`.
+
+============================================================================
+PR #280 — _run_auto_settlement_job + remaining helper cluster -> scheduler.py
+============================================================================
+
+Branch: claude/split-scheduler-280
+Base:   origin/main @ 51e7f08  (post PR #279 merge)
+Source: app/app.py @ 12,003 lines
+
+Pre-flight rule: STRICT move-only.
+
+Pre-flight reassignment check (AST):
+    Move set:                                       8 names
+    Original FunctionDef / Assign / AnnAssign:      8 (all expected)
+    Post-initial rebinds in the move set:           3 (all for
+                                                      _STAT_LOOKUP_LOG_BUDGET,
+                                                      INSIDE the cluster --
+                                                      see below)
+    Verdict: SAFE -- the rebinder functions move TOGETHER with the
+             variable to scheduler.py, so `global _STAT_LOOKUP_LOG_BUDGET`
+             inside the moved functions resolves to scheduler.py's
+             module scope.  Resolves the rebind blocker noted in
+             PR #276's preamble.
+
+Caller-graph audit confirmed the cluster is self-contained:
+    _STAT_LOOKUP_LOG_BUDGET      callers: _stat_lookup_log,
+                                          _reset_stat_lookup_log_budget
+                                          (both move with it)
+    _reset_stat_lookup_log_budget callers: _run_auto_settlement_job (moves)
+    _stat_lookup_log              callers: _model_pick_stat_lookup (moves)
+    _model_pick_stat_lookup       callers: _run_auto_settlement_job (moves)
+    _final_scores_from            callers: _run_auto_settlement_job (moves)
+    _SETTLE_GAMELOG_MEMO          callers: _model_pick_stat_lookup (moves)
+    _auto_settlement_state        callers: _run_auto_settlement_job (moves)
+                                          + get_auto_settlement_status (stays
+                                            in app.py, resolves via
+                                            `from state import *`)
+    _run_auto_settlement_job      callers: _run_consolidated_refresh_cycle,
+                                          _run_job1_final_settlement,
+                                          admin_settle_now (route),
+                                          bootstrap `_sched.add_job(...)`
+                                          -- all stay in app.py and resolve
+                                          the name via `from scheduler import *`.
+
+Commit 1 (af9aa0e)  state.py: 2 settlement state dicts
+----------------------------------------------------------------------------
+    _auto_settlement_state  moved from app.py:1078  ( 7 lines, AnnAssign)
+    _SETTLE_GAMELOG_MEMO    moved from app.py:9917  ( 5 lines including
+                                                       its preceding doc
+                                                       comment block,
+                                                       AnnAssign)
+
+Both appended to state.py's __all__.
+app.py: 12,003 -> 11,991 lines (-12).
+
+Commit 2 (this commit)  scheduler.py: settlement-job cluster
+----------------------------------------------------------------------------
+
+Names moved (sorted by original line for the # moved from comment):
+    _STAT_LOOKUP_LOG_BUDGET        moved from app.py:9911   ( 1 line,
+                                                              private --
+                                                              NOT in __all__)
+    _reset_stat_lookup_log_budget  moved from app.py:9914   ( 3 lines)
+    _model_pick_stat_lookup        moved from app.py:9919   (67 lines)
+    _stat_lookup_log               moved from app.py:9988   (10 lines)
+    _final_scores_from             moved from app.py:10009  (21 lines)
+    _run_auto_settlement_job       moved from app.py:10032  (384 lines)
+
+scheduler.py header changes:
+    NONE -- all imports needed (json, logging, sys, traceback, datetime,
+            timedelta, timezone, _urlreq) were already added by PR #279,
+            and the parallel _logger ref likewise.
+    __all__ expanded with 5 new names (_STAT_LOOKUP_LOG_BUDGET intentionally
+    excluded -- it's module-private state mutated only by the two
+    functions also living in scheduler.py).
+
+The _STAT_LOOKUP_LOG_BUDGET rebind decision:
+    PR #276 documented this name as "kept in app.py" because moving it to
+    state.py would have broken the `global ... = int(n)` rebinds inside
+    _reset_stat_lookup_log_budget and `global ... -= 1` inside
+    _stat_lookup_log -- under `from state import *`, the rebind would
+    only have updated app.py's local name and state.py would have kept
+    the original value.
+
+    PR #280 resolves the issue by moving the variable AND both rebinder
+    functions TOGETHER into scheduler.py.  Within a single module,
+    `global X = value` rebinds the module attribute correctly, and
+    Python's logging-style name resolution gives the same singleton
+    behavior to any later importer.
+
+    Runtime proof verified during this PR:
+        scheduler._STAT_LOOKUP_LOG_BUDGET initially == 0
+        _reset_stat_lookup_log_budget(5)
+        scheduler._STAT_LOOKUP_LOG_BUDGET now == 5   ✓
+
+Direction (no cycles):
+    scheduler.py -> state.py / utils.py / src.*     (one-way down)
+    app.py       -> scheduler.py / state.py / utils.py
+    scheduler.py NEVER imports app.py.
+
+app.py change: 11,991 -> 11,501 lines  (-490).
+Total this PR:  12,003 -> 11,501 lines  (-502).
+
+Reference count after move (resolved via star-import):
+    The 8 moved names appear 5 times in app.py outside their original
+    defs (route handler + bootstrap + cycle callers), all resolved via
+    star-import.
+
+Verification:
+    ✓ py_compile clean on state.py, scheduler.py, app.py.
+    ✓ `from scheduler import *` exposes 24 names (PR #277's 3 +
+      PR #278a's 4 + PR #279's 12 + PR #280's 5) via __all__.
+    ✓ `from state import *` exposes the 2 new state dicts.
+    ✓ Runtime smoke (rebind proof): scheduler._STAT_LOOKUP_LOG_BUDGET
+      rebinds correctly under _reset_stat_lookup_log_budget().
+    ✓ _STAT_LOOKUP_LOG_BUDGET is NOT exposed via `from scheduler import *`
+      (confirms it's module-private as designed).
+    ✓ AST audit: zero dangling module-level defs in app.py.
+    ✓ `import app` clears stdlib + numpy + scheduler; sandbox-only Flask
+      fatal as expected.
+
+Cumulative across PRs #276 + #277 + #278a + #279 + #280:
+    app/app.py:       13,004 -> 11,501 lines  (-1,503, -11.6%)
+    app/state.py:     378 -> 395 lines  (+17 cumulative)
+    app/utils.py:     351 lines  (unchanged)
+    app/scheduler.py: 630 -> 1,144 lines  (+514 cumulative)
+    99 module-level definitions extracted from the original 13K-line monolith.
+
+State of the #277 deferred list:
+    ✅ _run_overnight_ai_gen     -- moved in PR #279.
+    ✅ _run_auto_settlement_job  -- moved in THIS PR (#280).
+    Still in app.py (separate PRs needed):
+        _run_auto_analysis_job (171 lines) -- uses Flask app.test_client(),
+                                              _log_model_picks (moved),
+                                              _noon_reconcile_model_picks,
+                                              _schedule_auto_retry,
+                                              _write_auto_analysis_log
+        _run_job1_final_settlement (29 lines) -- chains into the (now-moved)
+                                                 _run_auto_settlement_job
+        _run_job2_full_clear (130 lines)      -- 6 app-only deps
+        _run_job3_games_prefetch (42 lines)   -- _fetch_raw_schedule
+        _run_consolidated_refresh_cycle (133 lines) -- 11 app-only deps
+        APScheduler bootstrap block            -- app.debug + _werkzeug_main
