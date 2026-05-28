@@ -292,7 +292,10 @@ def settle_pending() -> dict:
                 "pnl": 0.0, "bankroll": get_bankroll(), "still_pending": 0}
 
     now_ts = datetime.now(timezone.utc).timestamp()
-    season = datetime.now(timezone.utc).year
+    # NOTE: season is derived per-pick below from the prop's game_date, not
+    # from "now" -- otherwise picks from the prior season (e.g. settling a
+    # late-Dec game in early Jan) hit the wrong season and return 0 gamelog
+    # entries forever.
     _player_id_cache: dict[str, Optional[int]] = {}
 
     n_won = n_lost = n_void = 0
@@ -340,8 +343,27 @@ def settle_pending() -> dict:
                 _player_id_cache[player] = None
         player_id = _player_id_cache[player]
         if player_id is None:
-            _log(f"settle: player id lookup returned None for {player!r} -- skipping")
+            # The resolver's per-process NEGATIVE cache makes this failure
+            # permanent for the lifetime of the worker.  Pop the entry so the
+            # next settle pass gets one fresh MLB Stats API attempt -- lets us
+            # recover from transient API blips and from names that become
+            # resolvable after a profile update, without waiting for a redeploy.
+            try:
+                from .player_profile_client import _name_to_id_cache
+                _name_to_id_cache.pop((player or "").lower(), None)
+            except Exception:                                             # noqa: BLE001
+                pass
+            _player_id_cache.pop(player, None)
+            _log(f"settle: player id lookup returned None for {player!r} "
+                 f"-- cleared negative cache; will retry next pass")
             continue
+
+        # Season from the prop's game date so cross-year settlements query the
+        # right season's gamelog (see comment near _player_id_cache init).
+        try:
+            season = int((game_date or "")[:4])
+        except (TypeError, ValueError):
+            season = datetime.now(timezone.utc).year
 
         try:
             from .player_profile_client import get_player_gamelog
@@ -353,8 +375,9 @@ def settle_pending() -> dict:
         matching = [g for g in games if g.get("date", "")[:10] == game_date]
         if not matching:
             _log(f"settle: no gamelog match for {player!r} on {game_date!r} "
-                 f"(gamelog has {len(games)} entries, "
-                 f"dates={sorted({g.get('date','')[:10] for g in games[-5:]})}) -- retry next pass")
+                 f"(season={season}, gamelog has {len(games)} entries, "
+                 f"recent_dates={sorted({g.get('date','')[:10] for g in games[-5:]})})"
+                 f" -- retry next pass (box score may not be posted yet)")
             continue
 
         game = matching[-1]
