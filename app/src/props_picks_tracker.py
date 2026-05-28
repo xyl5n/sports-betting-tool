@@ -56,11 +56,13 @@ persisted alongside the picks list.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 # Same .cache/ directory + naming convention the game trackers use.
 _LOCAL_PATH = Path(".cache/props_picks_history.json")
@@ -280,7 +282,9 @@ def _payout_multiplier(odds: Optional[int]) -> float:
 # Picks older than this whose result still can't be determined are voided
 # rather than left pending forever.  Mark with status="no_result_found" so
 # the auto-void is distinguishable from a genuine push.
-_STALE_VOID_DAYS = 5
+STALE_PICK_DAYS = 5
+# Legacy alias kept for the per-pick inline helper below; same threshold.
+_STALE_VOID_DAYS = STALE_PICK_DAYS
 
 
 def _void_if_stale(pick: dict, commence, game_date) -> bool:
@@ -489,7 +493,40 @@ def settle_pending() -> dict:
             f"-> {result.upper()}  pnl=${model_pnl:+.2f}"
         )
 
-    if n_settled:
+    # ── Stale-pick sweep ────────────────────────────────────────────────────
+    # Any pick still pending whose game_date is more than STALE_PICK_DAYS in
+    # the past (ET) will never resolve -- the box score never materialised
+    # within the retry window.  Void them so they stop cluttering "My Bets".
+    # Distinct from the inline _void_if_stale() above, which only fires on
+    # the three grading-failure branches inside the loop; this sweep also
+    # catches picks that were never even reached this pass (e.g. their
+    # commence_time was missing so the loop skipped early).
+    today_et = datetime.now(ZoneInfo("America/New_York")).date()
+    n_stale_voided = 0
+    for pick in _picks:
+        if (pick.get("result") or "pending") != "pending":
+            continue
+        game_date_str = (pick.get("date") or "")[:10]
+        try:
+            game_day = date.fromisoformat(game_date_str)
+        except (TypeError, ValueError):
+            continue
+        if (today_et - game_day).days <= STALE_PICK_DAYS:
+            continue
+        pick["result"]     = "void"
+        pick["status"]     = "no_result_found"
+        pick["model_pnl"]  = 0.0
+        pick["settled_at"] = datetime.now(timezone.utc).isoformat()
+        logging.warning(
+            "props_picks_tracker stale sweep: voided pick_id=%s "
+            "game_date=%s (no result found after %d days)",
+            pick.get("id"), game_date_str, STALE_PICK_DAYS,
+        )
+        n_stale_voided += 1
+        n_void += 1
+        n_settled += 1
+
+    if n_settled or n_stale_voided:
         _save()
 
     return {

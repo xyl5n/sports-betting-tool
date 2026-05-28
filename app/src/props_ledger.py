@@ -40,11 +40,13 @@ Stat mapping (market → game-log key):
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 _CACHE_KEY  = "props_bets"
 _LOCAL_PATH = Path("data/props_bets.json")
@@ -55,6 +57,10 @@ _SETTLE_DELAY_SECS = 6 * 3600
 
 # How many days back to consider a game log entry "recent enough" to settle.
 _SETTLE_WINDOW_DAYS = 3
+
+# Pending bets whose game_date is older than this (ET) get auto-voided with
+# status="no_result_found" so they stop cluttering "My Bets" forever.
+STALE_PICK_DAYS = 5
 
 # Market key → (game-log field, is_pitcher)
 # "outs" is a special case computed from IP.
@@ -407,6 +413,38 @@ class PropsLedger:
             )
             if self.settle_bet(bet["id"], result, actual):
                 settled.append({**bet, "result": result, "actual_value": actual})
+
+        # ── Stale-pick sweep ────────────────────────────────────────────────
+        # Any bet still pending whose game_date (derived from commence_time)
+        # is more than STALE_PICK_DAYS in the past (ET) will never resolve --
+        # the box score never materialised within the retry window.  Void
+        # them so they stop cluttering "My Bets".
+        today_et = datetime.now(ZoneInfo("America/New_York")).date()
+        stale_voided = 0
+        for bet in self._bets:
+            if bet.get("result"):
+                continue   # already settled or voided
+            game_date_str = (bet.get("commence_time") or "")[:10]
+            try:
+                game_day = date.fromisoformat(game_date_str)
+            except (TypeError, ValueError):
+                continue
+            if (today_et - game_day).days <= STALE_PICK_DAYS:
+                continue
+            bet["result"]     = "void"
+            bet["status"]     = "no_result_found"
+            bet["actual_value"] = None
+            bet["settled_at"] = datetime.now(timezone.utc).isoformat()
+            logging.warning(
+                "props_ledger stale sweep: voided pick_id=%s "
+                "game_date=%s (no result found after %d days)",
+                bet.get("id"), game_date_str, STALE_PICK_DAYS,
+            )
+            settled.append({**bet})
+            stale_voided += 1
+
+        if stale_voided:
+            self.save()
 
         return settled
 
