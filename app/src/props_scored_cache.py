@@ -193,7 +193,7 @@ def clear_scored_props(date_str: Optional[str] = None) -> dict:
 # ── Public: scheduler-side scorer ───────────────────────────────────────────
 
 
-_CONF_THRESHOLD = 0.55
+_CONF_THRESHOLD = 0.51
 
 
 def score_today_props() -> dict:
@@ -380,8 +380,8 @@ def score_today_props() -> dict:
         try:
             lf = float(r["line"])
             if (r.get("side") or "Over").strip().title() == "Over":
-                return pv >= lf + 0.5
-            return pv <= lf - 0.5
+                return pv >= lf + 0.15
+            return pv <= lf - 0.15
         except (TypeError, ValueError):
             return True
 
