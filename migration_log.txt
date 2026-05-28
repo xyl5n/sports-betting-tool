@@ -399,3 +399,118 @@ Unblocks (per the deferred list in PR #277):
     _run_auto_analysis_job       was partially blocked on _log_model_picks
                                   (1 of its 11 deps).  Still blocked on
                                   Flask app.test_client() + the other 9.
+
+============================================================================
+PR #279 — settlement bridge + overnight AI helpers -> scheduler.py
+============================================================================
+
+Branch: claude/split-scheduler-279
+Base:   origin/main @ 24e3333  (post PR #278 merge)
+Source: app/app.py @ 12,364 lines
+
+Pre-flight rule: STRICT move-only.  EXCEPTION explicitly approved by user
+this PR: a parallel `_logger = logging.getLogger("sports_betting")` line
+is added to scheduler.py.  This is a NEW declaration (zero edits to any
+existing code) and resolves to the same singleton as app.py's _logger
+because Python's logging module is a process-wide name-keyed registry --
+both `_logger` names point at the same object.  Verified at runtime:
+`scheduler._logger is logging.getLogger("sports_betting")` is True.
+
+Pre-flight reassignment check (AST):
+    Move set:                             13 names
+    Original FunctionDef/AnnAssign sites: 13 (all expected)
+    Post-initial rebinds:                  0
+    Verdict: SAFE under `from <mod> import *`.
+
+User-named targets and their cascade closures:
+
+  _run_overnight_ai_gen     (no cascade -- pure stdlib + reachable names)
+  _persist_daily_budget     (no cascade)
+  _grade_model_trackers     + cascade: _completed_games_from_scores
+  _fetch_mlb_statsapi_scores + cascade: _statsapi_date_window,
+                                        _statsapi_pick_et_date,
+                                        _statsapi_schedule_index,
+                                        _STATSAPI_BRIDGE_CACHE (-> state.py)
+  _void_postponed_mlb_bets  + cascade: _fetch_mlb_linescore_raw,
+                                        _debug_print,
+                                        _today_et_str (also called from
+                                        elsewhere in app.py; star-import
+                                        resolves the legacy caller too)
+
+Commit 1 (da45ea1)  state.py: added _STATSAPI_BRIDGE_CACHE
+----------------------------------------------------------------------------
+    _STATSAPI_BRIDGE_CACHE  moved from app.py:10239  (1 line)
+
+This is mutable module-level dict state (keyed by ET date).  Belongs in
+state.py with the other shared mutable state.  Lifted now so the
+schedule-index helper moving in Commit 2 only has to star-import it.
+
+app.py: 12,364 -> 12,363 lines  (-1).
+
+Commit 2 (this commit)  scheduler.py: 12-function cluster
+----------------------------------------------------------------------------
+
+Functions moved (by original line number for readability):
+    _debug_print                  moved from app.py:3217   (12 lines)
+    _today_et_str                 moved from app.py:3231   ( 9 lines)
+    _fetch_mlb_linescore_raw      moved from app.py:3242   (24 lines)
+    _persist_daily_budget         moved from app.py:7150   (13 lines)
+    _run_overnight_ai_gen         moved from app.py:9789   (25 lines)
+    _void_postponed_mlb_bets      moved from app.py:9854   (75 lines)
+    _completed_games_from_scores  moved from app.py:10031  (34 lines)
+    _grade_model_trackers         moved from app.py:10067  (36 lines)
+    _statsapi_pick_et_date        moved from app.py:10241  (13 lines)
+    _statsapi_date_window         moved from app.py:10256  ( 9 lines)
+    _statsapi_schedule_index      moved from app.py:10267  (39 lines)
+    _fetch_mlb_statsapi_scores    moved from app.py:10308  (71 lines)
+
+scheduler.py header changes:
+    + import logging       (for the parallel _logger ref)
+    + import time          (used by _statsapi_schedule_index for TTL math)
+    + import urllib.request as _urlreq   (matches app.py:13 alias)
+    + from datetime import timedelta, timezone
+    + _logger = logging.getLogger("sports_betting")
+                          (parallel ref to the same singleton, see above)
+    __all__ expanded with the 12 new names.
+
+Direction (no cycles):
+    scheduler.py -> state.py / utils.py / src.*     (one-way down)
+    app.py       -> scheduler.py / state.py / utils.py
+    scheduler.py NEVER imports app.py.
+
+app.py change: 12,363 -> 12,003 lines  (-360).
+Total this PR:  12,364 -> 12,003 lines  (-361).
+
+Reference count after move (resolved via star-import):
+    12 moved function names + _STATSAPI_BRIDGE_CACHE
+    → 12 bare-name references in app.py, all via star-import.
+
+Verification:
+    ✓ py_compile clean on state.py, scheduler.py, app.py.
+    ✓ `from scheduler import *` exposes all 19 names (PR #277's 3 +
+      PR #278a's 4 + PR #279's 12) via the updated __all__.
+    ✓ `from state import *` exposes the new _STATSAPI_BRIDGE_CACHE.
+    ✓ Runtime: _today_et_str() returns today's ET date; _statsapi_date_window()
+      returns [date, date-1, date+1] as expected; _logger identity verified
+      against logging.getLogger("sports_betting").
+    ✓ AST audit: zero dangling module-level defs of moved names.
+    ✓ `import app` clears stdlib + numpy + scheduler initialization; only
+      fails on Flask (sandbox missing), production unaffected.
+
+Cumulative across PRs #276 + #277 + #278a + #279:
+    app/app.py:       13,004 -> 12,003 lines  (-1,001, -7.7%)
+    app/state.py:     374 -> 378 lines  (+4)
+    app/utils.py:     351 lines  (unchanged)
+    app/scheduler.py: 221 -> 630 lines  (+409)
+    91 module-level definitions extracted from the original 13K-line monolith.
+
+Remaining blockers (from PR #277's deferred list):
+    _run_auto_settlement_job (384 lines): had 13 app-only deps.  PR #279
+      lifted 4 of them (_grade_model_trackers, _fetch_mlb_statsapi_scores,
+      _void_postponed_mlb_bets, _persist_daily_budget) plus their helper
+      subtrees.  Remaining ~9 deps still in app.py.
+    _run_auto_analysis_job, _run_job2_full_clear, _run_job3_games_prefetch,
+    _run_consolidated_refresh_cycle:
+      still blocked on their own helper subtrees -- separate PRs.
+    APScheduler bootstrap block (lines ~11400-11600):
+      still blocked on `app.debug` + `_werkzeug_main`.

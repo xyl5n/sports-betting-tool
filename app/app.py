@@ -3214,55 +3214,10 @@ def _prefetch_no_odds_predictions(sport: str, date_str: str) -> dict:
 
 
 
-def _debug_print(msg: str) -> None:
-    """Print to stdout and append to log file with timestamp.  Messages
-    are redacted so a leaked URL or env-var secret can't end up in the
-    debug log file or stdout."""
-    line = f"[{datetime.now().strftime('%H:%M:%S')}] {_redact(msg)}"
-    _logger.debug("%s", line)
-    try:
-        _DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with _DEBUG_LOG.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except Exception as _exc:
-        logging.warning("Suppressed exception in %s: %s", __name__, _exc)
 
 
-def _today_et_str() -> str:
-    """Return today's date in America/New_York as YYYY-MM-DD."""
-    try:
-        # zoneinfo is stdlib in Python 3.9+
-        from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-    except Exception:
-        # fallback: UTC offset -5 (close enough for date purposes)
-        return (datetime.utcnow() - timedelta(hours=5)).strftime("%Y-%m-%d")
 
 
-def _fetch_mlb_linescore_raw(date_str: str) -> dict:
-    """
-    Direct fetch from MLB Stats API (bypasses in-memory cache).
-    Returns {gamePk: game_dict} for every game on date_str.
-    """
-    import urllib.request as _urlreq
-    import urllib.error  as _urlerr
-    url = (f"{_MLB_STATS_BASE}/schedule"
-           f"?sportId=1&date={date_str}&hydrate=linescore")
-    try:
-        req = _urlreq.Request(url, headers={"User-Agent": "SportsBettingApp/1.0"})
-        with _urlreq.urlopen(req, timeout=12) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        live_map: dict = {}
-        for d in data.get("dates", []):
-            for g in d.get("games", []):
-                live_map[int(g["gamePk"])] = g
-        return live_map
-    except _urlerr.URLError as exc:
-        _debug_print(f"[live-debug] URLError fetching MLB Stats: {exc}")
-        return {}
-    except Exception as exc:
-        _debug_print(f"[live-debug] Error fetching MLB Stats: {exc}")
-        return {}
 
 
 def _run_live_score_debug(label: str = "auto") -> str:
@@ -7147,19 +7102,6 @@ def _personal_bankroll_now() -> float:
         return 0.0
 
 
-def _persist_daily_budget(bankroll: float) -> dict:
-    """Recompute the daily budget off *bankroll* and persist it for today
-    (ET) so the My Bets banner + budget gate reflect a bankroll change
-    immediately.  Returns the budget dict."""
-    from src.ledger import compute_daily_budget
-    budget = compute_daily_budget(bankroll)
-    try:
-        from src import db as _db
-        if _db.is_supabase():
-            _db.cache_set("daily_budget", None, _today_et(), budget)
-    except Exception as _e:                                                # noqa: BLE001
-        _eprint(f"daily budget persist failed: {_e}")
-    return budget
 
 
 def _personal_spent_today() -> float:
@@ -9786,31 +9728,6 @@ def _run_job3_games_prefetch() -> None:
                 f"{type(_se).__name__}: {_se}")
 
 
-def _run_overnight_ai_gen() -> None:
-    """3:30 AM ET -- two-pass overnight AI pre-generation so every pick has a
-    breakdown before the user wakes.  Runs right after JOB 3 (3 AM prefetch).
-
-    Pass 1: game breakdowns on 70B (V3) + ALL props on 8B (V2).
-    Pass 2: top agreeing, high-confidence props re-run on 70B (V3).
-    Budget-aware cascading + spacing live in src/groq_models.  Daytime only
-    re-runs on line movement after this."""
-    _eprint("OVERNIGHT AI: starting two-pass pre-generation (V3 games + V2 props, "
-            "then V3 top props)")
-    try:
-        hydrate_state()
-    except Exception as _he:                                              # noqa: BLE001
-        _eprint(f"OVERNIGHT AI: hydrate failed: {_he}")
-    try:
-        from src import ai_summaries
-        game_results = (
-            [("mlb",  r) for r in (_analysis_state.get("results") or [])]
-            + [("wnba", r) for r in (_wnba_analysis_state.get("results") or [])]
-        )
-        summary = ai_summaries.run_overnight_generation(game_results)
-        _eprint(f"OVERNIGHT AI: done -- {summary}")
-    except Exception as _exc:                                             # noqa: BLE001
-        _eprint(f"OVERNIGHT AI: FAILED: {type(_exc).__name__}: {_exc}\n"
-                f"{traceback.format_exc()}")
 
 
 def get_todays_schedule(sport: str) -> list[dict]:
@@ -9851,81 +9768,6 @@ def _schedule_auto_retry(label: str) -> None:
 
 
 
-def _void_postponed_mlb_bets() -> list:
-    """
-    Check MLB Stats API for postponed games today. For each open MLB bet
-    matching a postponed game, void it (return stake, result='void').
-    Returns list of voided bet entries.
-    """
-    voided: list = []
-    try:
-        date_str = _today_et_str()
-        live_map = _fetch_mlb_linescore_raw(date_str)
-    except Exception as _e:
-        _eprint(f"AUTO-SETTLE: could not fetch MLB linescore for postponed check: {_e}")
-        return voided
-
-    # Collect postponed matchups as normalised (away, home) tuples
-    postponed: list = []
-    for _pk, _g in live_map.items():
-        try:
-            detail = _g.get("status", {}).get("detailedState", "")
-            if detail == "Postponed":
-                away = _g["teams"]["away"]["team"]["name"]
-                home = _g["teams"]["home"]["team"]["name"]
-                postponed.append((_norm_team_name(away), _norm_team_name(home)))
-        except Exception:
-            continue
-
-    if not postponed:
-        return voided
-
-    # Load MLB ledger and void matching open bets
-    try:
-        _ldr = Ledger(path="data/ledger.json", starting_bankroll=250)
-    except Exception as _e:
-        _eprint(f"AUTO-SETTLE: could not load MLB ledger for void: {_e}")
-        return voided
-
-    remaining: list = []
-    changed = False
-    for bet in _ldr.data.get("open_bets", []):
-        b_away = _norm_team_name(bet.get("away_team", ""))
-        b_home = _norm_team_name(bet.get("home_team", ""))
-        is_postponed = any(
-            (b_away in pa or pa in b_away) and (b_home in ph or ph in b_home)
-            for pa, ph in postponed
-        )
-        if is_postponed:
-            # Return stake to both bankrolls
-            model_amt = bet.get("model_amount", 0.0)
-            conf_amt  = bet.get("confirmed_amount", 0.0)
-            limit_hit = bet.get("limit_reached", False)
-            if not limit_hit:
-                if model_amt > 0:
-                    _ldr.data["model_bankroll"] = round(
-                        _ldr.data["model_bankroll"] + model_amt, 2)
-                if bet.get("confirmed") and conf_amt > 0:
-                    _ldr.data["personal_bankroll"] = round(
-                        _ldr.data["personal_bankroll"] + conf_amt, 2)
-            voided_entry = {
-                **bet,
-                "result":        "void",
-                "model_pnl":     0.0,
-                "confirmed_pnl": 0.0,
-                "settled_at":    datetime.now(timezone.utc).isoformat(),
-                "void_reason":   "postponed",
-            }
-            _ldr.data.setdefault("history", []).append(voided_entry)
-            voided.append(voided_entry)
-            changed = True
-        else:
-            remaining.append(bet)
-
-    if changed:
-        _ldr.data["open_bets"] = remaining
-        _ldr.save()
-    return voided
 
 
 def _settle_freshly_recorded_picks() -> dict:
@@ -10028,78 +9870,8 @@ def _settle_freshly_recorded_picks() -> dict:
     }
 
 
-def _completed_games_from_scores(scores: list) -> list[dict]:
-    """Normalize Odds API score rows into {id, home_team, away_team,
-    home_score, away_score, total_runs, game_date} for the tracker grader.
-    Only completed games with both scores are returned."""
-    out: list[dict] = []
-    for s in (scores or []):
-        if not isinstance(s, dict) or not s.get("completed"):
-            continue
-        gid = str(s.get("id") or "")
-        ht, at = s.get("home_team"), s.get("away_team")
-        hs = as_ = None
-        for nm in (s.get("scores") or []):
-            if not isinstance(nm, dict):
-                continue
-            try:
-                sc = int(nm.get("score"))
-            except (TypeError, ValueError):
-                continue
-            if nm.get("name") == ht:
-                hs = sc
-            elif nm.get("name") == at:
-                as_ = sc
-        if hs is None or as_ is None:
-            continue
-        out.append({
-            "id":         gid,
-            "home_team":  ht,
-            "away_team":  at,
-            "home_score": hs,
-            "away_score": as_,
-            "total_runs": hs + as_,
-            "game_date":  (s.get("commence_time") or "")[:10],
-        })
-    return out
 
 
-def _grade_model_trackers(oc, sport_keys: list[str], scores_by_sport=None) -> dict:
-    """Grade all pending XGB/LR/NN tracker picks against completed games.
-    Returns {'xgb': n, 'lr': n, 'nn': n} newly graded.
-
-    *scores_by_sport* may be a {sport_key: [score rows]} map pre-fetched
-    earlier in the same cycle; when present it's reused instead of calling
-    get_scores again (avoids a duplicate Odds API call)."""
-    graded = {"xgb": 0, "lr": 0, "nn": 0}
-    for sk in sport_keys:
-        if scores_by_sport is not None and sk in scores_by_sport:
-            scores = scores_by_sport.get(sk) or []
-        else:
-            try:
-                scores = oc.get_scores(sport_key=sk, days_from=3) or []
-            except Exception:                                               # noqa: BLE001
-                continue
-        games = _completed_games_from_scores(scores)
-        if not games:
-            continue
-        try:
-            from src import xgb_picks_tracker as _xgb
-            graded["xgb"] += _xgb.settle_picks(games)
-        except Exception as _e:                                             # noqa: BLE001
-            _eprint(f"TRACKER-GRADE xgb error: {_e}")
-        try:
-            from src import lr_picks_tracker as _lr
-            for g in games:
-                graded["lr"] += _lr.settle_lr_pick(g["id"], g["home_score"], g["away_score"])
-        except Exception as _e:                                             # noqa: BLE001
-            _eprint(f"TRACKER-GRADE lr error: {_e}")
-        try:
-            from src import nn_picks as _nn
-            graded["nn"] += _nn.settle_completed_games(games)
-        except Exception as _e:                                             # noqa: BLE001
-            _eprint(f"TRACKER-GRADE nn error: {_e}")
-    return graded
 
 
 
@@ -10236,147 +10008,14 @@ def _stat_lookup_log(player, market, season, acceptable, outcome) -> None:
     _eprint(f"MODEL-PICKS: STAT-LOOKUP {player!r} {market} "
             f"season={season} want={want} -> {outcome}")
 
-_STATSAPI_BRIDGE_CACHE: dict = {}     # et_date_iso -> (ts, {norm_team: game_info})
 
 
-def _statsapi_pick_et_date(iso):
-    """ET calendar date (YYYY-MM-DD) for a model_picks created_at timestamp
-    (stored UTC) -- the game is the ET day the pick was logged.  None on
-    parse failure."""
-    if not iso:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone(timedelta(hours=-4))).date().isoformat()
-    except Exception:                                                     # noqa: BLE001
-        return None
 
 
-def _statsapi_date_window(base_iso):
-    """[base-1, base, base+1] ET date strings, tolerating UTC/ET rollover and
-    games logged the morning before a late start."""
-    try:
-        from datetime import date as _date
-        b = _date.fromisoformat(base_iso)
-        return [(b + timedelta(days=o)).isoformat() for o in (0, -1, 1)]
-    except Exception:                                                     # noqa: BLE001
-        return [base_iso]
 
 
-def _statsapi_schedule_index(date_iso: str) -> dict:
-    """Final MLB games for one ET date from the free statsapi.mlb.com schedule
-    (hydrate=linescore), indexed by normalised team name ->
-    {home_team, away_team, home_score, away_score, gamePk}.  Cached 1h.
-    No API key, no day-window limit."""
-    now = time.time()
-    hit = _STATSAPI_BRIDGE_CACHE.get(date_iso)
-    if hit and (now - hit[0]) < _STATSAPI_BRIDGE_TTL:
-        return hit[1]
-    idx: dict = {}
-    url = (f"{_MLB_STATS_BASE}/schedule?sportId=1&date={date_iso}"
-           f"&hydrate=linescore")
-    try:
-        req = _urlreq.Request(url, headers={"User-Agent": "sports-betting-ai/1.0"})
-        with _urlreq.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:                                              # noqa: BLE001
-        _eprint(f"SETTLE-STATSAPI: schedule fetch failed for {date_iso}: "
-                f"{type(exc).__name__}: {exc}")
-        _STATSAPI_BRIDGE_CACHE[date_iso] = (now, {})
-        return {}
-    for d in (data.get("dates") or []):
-        for g in (d.get("games") or []):
-            if ((g.get("status") or {}).get("abstractGameState")) != "Final":
-                continue
-            teams = g.get("teams") or {}
-            home, away = teams.get("home") or {}, teams.get("away") or {}
-            ht = (home.get("team") or {}).get("name")
-            at = (away.get("team") or {}).get("name")
-            hs, as_ = home.get("score"), away.get("score")
-            if ht is None or at is None or hs is None or as_ is None:
-                continue
-            info = {"home_team": ht, "away_team": at,
-                    "home_score": int(hs), "away_score": int(as_),
-                    "gamePk": g.get("gamePk")}
-            idx[_statsapi_norm_team(ht)] = info
-            idx[_statsapi_norm_team(at)] = info
-    _STATSAPI_BRIDGE_CACHE[date_iso] = (now, idx)
-    return idx
 
 
-def _fetch_mlb_statsapi_scores(game_picks: list) -> dict:
-    """Resolve final scores for stale GAME model_picks rows from the free
-    statsapi.mlb.com schedule -- the fallback for picks whose game is older
-    than the Odds API /scores 3-day window.
-
-    model_picks stores ``game_id`` = the Odds API event id (32-char hex), which
-    statsapi does NOT understand (it keys games by a 6-digit gamePk), so a bare
-    id cannot be turned into a gamePk.  We bridge via the data the pick row DOES
-    carry: the picked TEAM (``pick_side``) plus the ET day it was logged
-    (``created_at``).  That date's statsapi schedule yields the gamePk, both
-    team names and the final score; we match the pick's team and return the
-    score keyed by the ORIGINAL Odds API ``game_id`` so settle()'s
-    ``final_scores.get(pick["game_id"])`` lookup hits.
-
-    *game_picks* must be GAME rows (no ``player_name``) -- props are graded via
-    the stat lookup, not scores, so the caller filters them out.  Returns
-    ``{odds_api_game_id: {home_team, away_team, home_score, away_score}}`` with
-    team names taken from the picks' own ``pick_side`` strings where they map,
-    so _grade_game's exact-name comparison succeeds.
-    """
-    # Group rows by Odds API game_id; gather the (Odds API) team names the
-    # picks used + a representative logged date.
-    by_gid: dict = {}
-    for pick in (game_picks or []):
-        gid = str(pick.get("game_id") or "").strip()
-        if not gid:
-            continue
-        grp = by_gid.setdefault(gid, {"teams": set(), "date": None})
-        side = (pick.get("pick_side") or "").strip()
-        if side and side.upper() not in ("OVER", "UNDER"):  # ml/rl carry a team
-            grp["teams"].add(side)
-        if grp["date"] is None:
-            grp["date"] = _statsapi_pick_et_date(pick.get("created_at"))
-
-    out: dict = {}
-    for gid, grp in by_gid.items():
-        teams, base_date = grp["teams"], grp["date"]
-        if not teams or not base_date:
-            continue                          # totals-only group / no date -> skip
-        info = match_team = None
-        for date_iso in _statsapi_date_window(base_date):
-            idx = _statsapi_schedule_index(date_iso)
-            for tm in teams:
-                hit = idx.get(_statsapi_norm_team(tm))
-                if hit:
-                    info, match_team = hit, tm
-                    break
-            if info:
-                break
-        if not info:
-            continue
-        # Use the picks' own (Odds API) team strings where they map back to the
-        # statsapi game, so _grade_game's `side == ht/at` succeeds; fall back to
-        # the statsapi names for the side the picks never referenced.
-        norm_to_pick = {_statsapi_norm_team(tm): tm for tm in teams}
-        home_name = norm_to_pick.get(_statsapi_norm_team(info["home_team"]),
-                                     info["home_team"])
-        away_name = norm_to_pick.get(_statsapi_norm_team(info["away_team"]),
-                                     info["away_team"])
-        out[gid] = {
-            "home_team":  home_name,
-            "away_team":  away_name,
-            "home_score": info["home_score"],
-            "away_score": info["away_score"],
-        }
-        _eprint(
-            f"SETTLE-STATSAPI: resolved game_id={gid} via team={match_team!r} "
-            f"date={base_date} -> gamePk={info.get('gamePk')} "
-            f"{away_name} {info['away_score']} @ {home_name} {info['home_score']}"
-        )
-    return out
 
 
 def _final_scores_from(scores_by_sport: dict) -> dict:

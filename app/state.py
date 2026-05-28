@@ -49,6 +49,7 @@ __all__ = [
     "_MLB_TEAM_NORM", "_MODEL_PICK_STAT", "_SETTLE_GAMELOG_TTL",
     "_STATSAPI_BRIDGE_TTL", "_AI_RUN_DELAY",
     "_DAILY_SNAPSHOT_FILE", "_DAILY_SNAPSHOT_TMP",
+    "_STATSAPI_BRIDGE_CACHE",
 ]
 
 # moved from app.py:138
@@ -372,3 +373,6 @@ _STATSAPI_BRIDGE_TTL = 3600.0         # 1 hour -- avoids re-fetching a date's
 
 # moved from app.py:12125
 _AI_RUN_DELAY = 0.15   # 150 ms between Groq calls (free-tier friendly)
+
+# moved from app.py:10239
+_STATSAPI_BRIDGE_CACHE: dict = {}     # et_date_iso -> (ts, {norm_team: game_info})
