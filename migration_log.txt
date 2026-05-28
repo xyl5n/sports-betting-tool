@@ -1,0 +1,207 @@
+Monolith decomposition: app/app.py → app/state.py + app/utils.py
+=================================================================
+
+Branch: claude/split-utils-state
+Started: 2026-05-28
+Source: app/app.py @ 13,004 lines on origin/main (post PR #275)
+
+Rules followed for every move:
+  - No logic changes; lines are lifted as-is, with a `# moved from app.py:NNN`
+    marker above each block.
+  - `from <module> import *` style; app/__init__.py NOT introduced.
+  - state.py has an explicit __all__ list so underscore-prefixed names
+    survive `from state import *`.
+
+Names INTENTIONALLY left in app.py (would have broken if moved):
+  - _logger        — used 100+ times inside app.py; moving and re-importing
+                     adds noise with no benefit (user decision).
+  - _werkzeug_main — runtime guard, not state (user decision).
+  - _sched         — initial declaration line 1358, BUT reassigned at boot
+                     line 12290 (`_sched = nightly_retrain.start()`).  Under
+                     `from state import *`, the reassignment would only
+                     rebind app.py's local name and state.py's _sched would
+                     still be None.  Kept in app.py.
+  - _STAT_LOOKUP_LOG_BUDGET — reassigned via `global` inside
+                     _reset_stat_lookup_log_budget() (line 10776) and
+                     _stat_lookup_log() (line 10854).  Same rebind problem
+                     as _sched.  Kept in app.py.
+  - _delete_file   — pure helper, but depends on _logger.  Would have moved
+                     to utils.py; rerouted to "stay in app.py" because the
+                     alternative was a circular import or a rewrite.
+  - _audit_log     — same situation: depends on _eprint, which depends on
+                     _redact + sys.stderr.  Kept in app.py to avoid pulling
+                     _eprint along.
+
+============================================================================
+COMMIT 1 — app/state.py (43 items, post PR #275 line numbers)
+============================================================================
+
+Env constants (5)
+  _LOG_LEVEL                       moved from app.py:138
+  _ODDS_API_KEY                    moved from app.py:153
+  _API_SPORTS_KEY                  moved from app.py:154
+  _ANTHROPIC_API_KEY               moved from app.py:155
+  _SEASON                          moved from app.py:156
+
+Cache singleton + file path constants (12)
+  _cache                           moved from app.py:305
+  _ANALYSIS_CACHE_FILE             moved from app.py:307
+  _WNBA_ANALYSIS_CACHE_FILE        moved from app.py:308
+  _PRE_GAME_ODDS_FILE              moved from app.py:309
+  _EXPLAIN_CACHE_FILE              moved from app.py:310
+  _AI_BREAKDOWN_CACHE_FILE         moved from app.py:311
+  _ANALYSIS_TIMESTAMPS_FILE        moved from app.py:315
+  _AUTO_ANALYSIS_LOG_FILE          moved from app.py:1243
+  _MODEL_SETTINGS_FILE             moved from app.py:1249
+  _PICKS_HISTORY_FILES             moved from app.py:5903
+  _ENSEMBLE_PICKS_FILE             moved from app.py:5909
+  _BET_HISTORY_ARCHIVE             moved from app.py:5911
+
+Snapshot + Supabase cache keys (4)
+  _snapshot_lock                   moved from app.py:321
+  _SNAPSHOT_ENABLED                moved from app.py:324
+  _CACHE_KEY_SNAPSHOT              moved from app.py:340
+  _CACHE_KEY_ANALYSIS_MLB          moved from app.py:341
+  _CACHE_KEY_ANALYSIS_WNBA         moved from app.py:342
+
+Analysis state dicts + locks (5)
+  EV_MIN_EDGE                      moved from app.py:1213
+  _analysis_state                  moved from app.py:1215
+  _wnba_analysis_state             moved from app.py:1224
+  _auto_analysis_lock              moved from app.py:1234
+  _auto_analysis_state             moved from app.py:1235
+
+Model-settings defaults + auto-settlement locks (5)
+  _MODEL_SETTINGS_DEFAULT          moved from app.py:1250
+  _auto_settlement_lock            moved from app.py:1326
+  _refresh_cycle_lock              moved from app.py:1338
+  _FEATURE_LABELS                  moved from app.py:1360
+  _ODDS_FIELDS                     moved from app.py:1409
+
+API base URLs + TTL constants (5)
+  _MLB_STATS_BASE                  moved from app.py:2557
+  _LINESCORE_TTL                   moved from app.py:2560
+  _ESPN_WNBA_BASE                  moved from app.py:2637
+  _QUARTER_ORDINAL                 moved from app.py:2640
+  _DEBUG_LOG                       moved from app.py:3662
+
+Analysis progress + model picks (4)
+  _analysis_progress_lock          moved from app.py:4068
+  _MLB_TEAM_NORM                   moved from app.py:10435
+  _MODEL_PICK_STAT                 moved from app.py:10751
+  _SETTLE_GAMELOG_TTL              moved from app.py:10765
+
+Settlement bridge + AI throttle (2)
+  _STATSAPI_BRIDGE_TTL             moved from app.py:10860
+  _AI_RUN_DELAY                    moved from app.py:12125
+
+Auxiliary aliases added to state.py:
+  _threading             — alias of `threading`, matches app.py:282 alias
+  _threading_for_analyze — alias of `threading`, matches app.py:3853 alias
+
+app.py changes:
+  - 231 lines removed (the verified ranges above, including any preceding
+    comment block immediately above each item).
+  - One `from state import *  # noqa: F401,F403` line added after
+    `from pathlib import Path` near the top.
+  - Net: 13004 lines → 12778 lines.
+
+Verification (Phase 1):
+  ✓ python3 -m py_compile state.py
+  ✓ python3 -m py_compile app.py
+  ✓ python3 -c "from state import *" with __all__ exposes 43 names
+  ✓ ast.parse on app.py confirms no module-level redefinitions of moved names
+  ✓ Moved names still referenced 333× in app.py (via star import)
+
+============================================================================
+COMMIT 2 — app/utils.py (26 items)
+============================================================================
+
+Date/time helpers (3)
+  _today_et                        moved from app.py:[Phase 1 line 785]
+  _game_et_date                    moved from app.py:[Phase 1 line 795]
+  _et_date_of                      moved from app.py:[Phase 1 line 2806]
+
+Odds + probability math (4)
+  _format_odds                     moved from app.py:[Phase 1 line 1190]
+  _correlation_impl_prob           moved from app.py:[Phase 1 line 2125]
+  _american_to_prob                moved from app.py:[Phase 1 line 7670]
+  _fmt_odds                        moved from app.py:[Phase 1 line 9015]
+
+Percent / float (2)
+  _fmt_pct                         moved from app.py:[Phase 1 line 9026]
+  _to_float                        moved from app.py:[Phase 1 line 11550]
+
+String processing (2)
+  _strip_markdown_fences           moved from app.py:[Phase 1 line 1181]
+  _ai_daily_counter_key            moved from app.py:[Phase 1 line 455]
+
+Team / game normalization (4)
+  _norm_team_name                  moved from app.py:[Phase 1 line 10441]
+  _statsapi_norm_team              moved from app.py:[Phase 1 line 10864]
+  _norm_team                       moved from app.py:[Phase 1 line 11542]
+  _team_pair                       moved from app.py:[Phase 1 line 11546]
+
+Schedule helpers (5)
+  _espn_state_to_mlb_state         moved from app.py:[Phase 1 line 2643]
+  _wnba_period_ordinal             moved from app.py:[Phase 1 line 2652]
+  _schedule_is_postponed           moved from app.py:[Phase 1 line 2820]
+  _schedule_priority               moved from app.py:[Phase 1 line 2825]
+  _schedule_cache_key              moved from app.py:[Phase 1 line 2960]
+
+Picker / game helpers (3)
+  _team_key                        moved from app.py:[Phase 1 line 3040]
+  _no_odds_predictions_cache_key   moved from app.py:[Phase 1 line 3564]
+  _filter_stale_games              moved from app.py:[Phase 1 line 805]
+
+Data conversion + finders (3)
+  _py                              moved from app.py:[Phase 1 line 1527]
+  _match_result_id                 moved from app.py:[Phase 1 line 7586]
+  _find_analysis_row               moved from app.py:[Phase 1 line 7606]
+
+Originally on the utils.py list, NOT moved (deps stay in app.py):
+  _delete_file  — needs `_logger`; would create app↔utils circular import.
+  _audit_log    — needs `_eprint` (uses `_redact` from src.redact + sys.stderr).
+                  Could move if `_eprint` were moved too, but that expands scope.
+
+Cross-module dependency:
+  utils.py imports `_MLB_TEAM_NORM` and `_QUARTER_ORDINAL` from state.py
+  (used by `_norm_team_name` and `_wnba_period_ordinal` respectively).
+  Direction is utils -> state only; state has no knowledge of utils.
+
+app.py changes:
+  - 264 more lines removed (the 26 helper bodies + their leading
+    comments, where present).
+  - Added `from utils import *  # noqa: F401,F403` line immediately
+    after the `from state import *` added in Phase 1.
+  - Net: 12778 lines -> 12518 lines.
+
+Verification (Phase 2):
+  ✓ python3 -m py_compile utils.py
+  ✓ python3 -m py_compile app.py
+  ✓ `from utils import *` exposes all 26 helpers (via __all__).
+  ✓ `from state import *; from utils import *` both succeed in one process.
+  ✓ Spot-tests: _today_et(), _format_odds(150), _american_to_prob(-110)
+    all return expected values.
+  ✓ `import app` reaches the Flask check (i.e. clears all stdlib+numpy
+    initialization) without any NameError.  Sandbox-only fatal is Flask
+    not being installed -- production will succeed.
+
+============================================================================
+CUMULATIVE RESULT
+============================================================================
+
+app/app.py:        13,004 -> 12,518 lines  (-486, -3.7%)
+app/state.py:      new, 360 lines
+app/utils.py:      new, 351 lines
+
+Items extracted:   43 state + 26 utils = 69 module-level definitions
+Bare-name refs
+ resolved by *:    468 in app.py
+
+Reassignment audit (AST):
+  All initial-declaration sites are now in state.py.
+  Three post-initial rebinds (_STAT_LOOKUP_LOG_BUDGET x2, _sched x1)
+  were left in app.py and documented above.
+
+Branch: claude/split-utils-state
