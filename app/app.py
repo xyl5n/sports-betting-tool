@@ -1075,13 +1075,6 @@ def _save_model_settings(settings: dict) -> dict:
         _eprint(f"_save_model_settings: Supabase cache_set failed: {exc}")
     return coerced
 
-_auto_settlement_state: dict = {
-    "last_ran_at":  None,   # ISO UTC
-    "last_settled": 0,
-    "last_wins":    0,
-    "last_losses":  0,
-    "last_voided":  0,
-}
 
 _refresh_cycle_state: dict = {
     "last_ran_at":   None,   # ISO UTC
@@ -9910,11 +9903,6 @@ def _noon_reconcile_model_picks() -> None:
 
 
 
-# Per-pass gamelog memo for settlement: (player_id, is_pitcher) -> (ts, games).
-# Settlement force-refreshes gamelogs (see below); a pitcher with three pending
-# prop markets would otherwise fire three identical statsapi calls in one pass.
-# Short TTL so a later cycle (15 min on) still picks up newly-finished games.
-_SETTLE_GAMELOG_MEMO: dict = {}
 
 # Per-cycle budget for the verbose STAT-LOOKUP diagnostic.  A settlement pass
 # can call the lookup hundreds of times (one per pending prop), so we log only
