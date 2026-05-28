@@ -277,6 +277,36 @@ def _payout_multiplier(odds: Optional[int]) -> float:
     return 1.0
 
 
+# Picks older than this whose result still can't be determined are voided
+# rather than left pending forever.  Mark with status="no_result_found" so
+# the auto-void is distinguishable from a genuine push.
+_STALE_VOID_DAYS = 5
+
+
+def _void_if_stale(pick: dict, commence, game_date) -> bool:
+    """If *pick*'s game started > _STALE_VOID_DAYS ago, void it in place with
+    status="no_result_found" (model_pnl=0, settled_at=now) and return True.
+    Otherwise return False and leave the pick pending."""
+    if not commence:
+        return False
+    try:
+        game_dt  = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+        age_days = (datetime.now(timezone.utc) - game_dt).days
+    except Exception:                                                     # noqa: BLE001
+        return False
+    if age_days < _STALE_VOID_DAYS:
+        return False
+    pick["result"]     = "void"
+    pick["status"]     = "no_result_found"
+    pick["model_pnl"]  = 0.0
+    pick["settled_at"] = datetime.now(timezone.utc).isoformat()
+    _log(
+        f"settle: VOID stale pick (age={age_days}d) {pick.get('player')!r} "
+        f"{pick.get('market')} on {game_date} -- status=no_result_found"
+    )
+    return True
+
+
 def settle_pending() -> dict:
     """Resolve every pending pick whose game has finished against the
     player's actual box-score stat (via the MLB Stats API game log),
@@ -356,6 +386,9 @@ def settle_pending() -> dict:
             _player_id_cache.pop(player, None)
             _log(f"settle: player id lookup returned None for {player!r} "
                  f"-- cleared negative cache; will retry next pass")
+            if _void_if_stale(pick, commence, game_date):
+                n_void += 1
+                n_settled += 1
             continue
 
         # Season from the prop's game date so cross-year settlements query the
@@ -370,14 +403,41 @@ def settle_pending() -> dict:
             games = get_player_gamelog(player_id, season, is_pitcher=is_pitcher)
         except Exception as exc:                                          # noqa: BLE001
             _log(f"settle: gamelog fetch failed for {player!r}: {exc}")
+            if _void_if_stale(pick, commence, game_date):
+                n_void += 1
+                n_settled += 1
             continue
 
         matching = [g for g in games if g.get("date", "")[:10] == game_date]
+        if not matching:
+            # ±1 day fallback for UTC/ET boundary cases.  Late-night ET games
+            # whose gamelog 'date' was derived from a UTC timestamp can be a
+            # calendar day ahead; conversely a not-yet-ET-normalised
+            # commence_time can leave game_date a day behind.  Try the
+            # surrounding dates so the bet still settles.
+            try:
+                from datetime import date as _date, timedelta as _td
+                d = _date.fromisoformat(game_date)
+                nearby = {(d + _td(days=delta)).isoformat() for delta in (-1, 1)}
+                near_matches = [g for g in games
+                                if g.get("date", "")[:10] in nearby]
+                if near_matches:
+                    matching = near_matches
+                    found_date = matching[-1].get("date", "")[:10]
+                    _log(f"settle: ±1d fallback matched {player!r} {market} "
+                         f"(searched={game_date}, found={found_date}, "
+                         f"candidates={len(near_matches)})")
+            except Exception:                                             # noqa: BLE001
+                pass
+
         if not matching:
             _log(f"settle: no gamelog match for {player!r} on {game_date!r} "
                  f"(season={season}, gamelog has {len(games)} entries, "
                  f"recent_dates={sorted({g.get('date','')[:10] for g in games[-5:]})})"
                  f" -- retry next pass (box score may not be posted yet)")
+            if _void_if_stale(pick, commence, game_date):
+                n_void += 1
+                n_settled += 1
             continue
 
         game = matching[-1]
