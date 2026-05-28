@@ -10236,7 +10236,6 @@ def _stat_lookup_log(player, market, season, acceptable, outcome) -> None:
     _eprint(f"MODEL-PICKS: STAT-LOOKUP {player!r} {market} "
             f"season={season} want={want} -> {outcome}")
 
-_STATSAPI_BRIDGE_CACHE: dict = {}     # et_date_iso -> (ts, {norm_team: game_info})
 
 
 def _statsapi_pick_et_date(iso):
