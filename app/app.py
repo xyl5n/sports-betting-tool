@@ -5400,7 +5400,6 @@ def _reset_each_ledger(mutator) -> dict:
     return summary
 
 
-_DAILY_PICKS_FILE    = Path("data/daily_picks.json")
 
 
 def _delete_file(path: Path) -> bool:
