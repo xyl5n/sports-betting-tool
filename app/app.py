@@ -15,6 +15,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Shared state: every mutable global, lock, cache singleton, and config
+# constant lives in state.py.  Star-imported here so legacy bare-name
+# references in this file keep working without per-site rewrites.
+from state import *  # noqa: F401,F403
+
 print("STARTUP [1/6]: stdlib imports OK", flush=True, file=sys.stderr)
 
 try:
@@ -112,30 +117,6 @@ def _validate_odds_api_key_on_boot() -> None:
 _validate_odds_api_key_on_boot()
 
 
-# NOTE: _validate_sharpapi_key_on_boot + _probe_sharpapi_leagues_on_boot
-# used to live here.  Both removed because:
-#   - SharpAPI is no longer used as a fallback (odds_client.OddsClient now
-#     treats The Odds API as the sole source -- see PR 'remove sharpapi
-#     fallback')
-#   - The startup probe + cred-check were adding network latency and log
-#     noise without adding value
-# SHARPAPI_KEY is left in env / .env.example in case we re-enable later;
-# no code touches it on this code path.
-
-
-# NOTE: _bust_daily_odds_cache_on_boot used to live here and was tied to
-# the old "1 Odds API call per sport per day" Supabase cache (see PR #37
-# and PR #40).  The quota model has moved to a per-day request counter
-# (see src/odds_client._odds_check_limit) with a 500-call ceiling, so
-# the daily-cache + boot-bust combo is no longer relevant.  Removing
-# the bust + the cache layer in one swoop.
-
-# ── Logging ───────────────────────────────────────────────────────────────────
-# LOG_LEVEL controls verbosity for Railway (set in Railway environment vars):
-#   WARNING  — only errors/warnings printed; safe for Railway's 500-line/sec cap (default)
-#   INFO     — adds one summary line per analysis run ("MLB analysis complete: N games")
-#   DEBUG    — full print() output restored; for local development only
-_LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(
     level=getattr(logging, _LOG_LEVEL, logging.WARNING),
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -145,15 +126,6 @@ logging.basicConfig(
 _logger = logging.getLogger("sports_betting")
 
 
-# ── External API credentials & runtime config ────────────────────────────────
-# Read every env var once at boot instead of calling os.getenv on every
-# request.  Route handlers reference these constants directly; if Railway
-# rotates a key the process restarts and picks up the new value.  Keep the
-# existing "" / 2025 defaults so behavior matches the prior per-site reads.
-_ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
-_API_SPORTS_KEY = os.environ.get("API_SPORTS_KEY", "")
-_ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-_SEASON = int(os.environ.get("SEASON", "2025"))
 
 
 class _StdoutToLogger:
@@ -301,45 +273,16 @@ app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
 print("STARTUP [6/6]: Flask app created — registering routes...", flush=True, file=sys.stderr)
 
-# ── Global state (single-user desktop app) ────────────────────────────────────
-_cache = Cache()
 _ANALYSIS_TTL        = 900  # 15 minutes — skip API if last run was within this window
-_ANALYSIS_CACHE_FILE      = Path("data/analysis_cache.json")
-_WNBA_ANALYSIS_CACHE_FILE = Path("data/wnba_analysis_cache.json")
-_PRE_GAME_ODDS_FILE       = Path("data/pre_game_odds.json")
-_EXPLAIN_CACHE_FILE       = Path("data/explain_cache.json")
-_AI_BREAKDOWN_CACHE_FILE  = Path("data/ai_breakdown_cache.json")
 _ARCHIVE_PATH             = Path("data/bet_history_archive.json")
-# Lightweight timestamp file — survives container restarts without reading the
-# full results payloads.  Shape: {"mlb": {"analyzed_at": "<iso>", "date": "YYYY-MM-DD"}, "wnba": {...}}
-_ANALYSIS_TIMESTAMPS_FILE = Path("data/analysis_timestamps.json")
 _DAILY_SNAPSHOT_FILE      = Path("data/daily_snapshot.json")
 _DAILY_SNAPSHOT_TMP       = Path("data/daily_snapshot.json.tmp")
 
 # Step 2: single lock so concurrent requests (init + analyze) never race on the file.
 import threading as _threading
-_snapshot_lock = _threading.Lock()
-
-# Step 3: master kill-switch.  Set env var SNAPSHOT_ENABLED=0 to bypass entirely.
-_SNAPSHOT_ENABLED = os.environ.get("SNAPSHOT_ENABLED", "1").strip() not in ("0", "false", "False", "FALSE")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Step 4: persistent-cache layer.  Snapshot + analysis caches mirror to
-#  Supabase (table `app_cache`, see src/db.py) so they survive Railway
-#  container restarts and redeployments.  Local files remain the primary
-#  read surface; this layer is the persistence sidecar.
-#
-#  Wrappers below tolerate every failure mode (Supabase off, table missing,
-#  network error) silently so file-based ops keep working when Supabase is
-#  unavailable.
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Keys used in the app_cache table.  Single source of truth so write +
-# restore + delete all agree.
-_CACHE_KEY_SNAPSHOT     = "daily_snapshot"
-_CACHE_KEY_ANALYSIS_MLB  = "analysis_cache:mlb"
-_CACHE_KEY_ANALYSIS_WNBA = "analysis_cache:wnba"
 
 
 def _ensure_data_dir() -> None:
@@ -1204,63 +1147,10 @@ def _load_archive_bets() -> list[dict]:
     except Exception:
         return []
 
-# ── EV / value-pick threshold ──────────────────────────────────────────────────
-# Minimum pick_edge for a game to receive value_pick=True in _serialize()
-# and to appear in the EV Scan section on the home page.  Exposed as a
-# module-level constant so the display label always stays in sync with the
-# actual gate, and the threshold can be tuned from one place without a
-# grep-and-replace across multiple files.
-EV_MIN_EDGE: float = 0.03
 
-_analysis_state: dict = {
-    "sport":              None,
-    "bankroll":           250.0,
-    "results":            [],   # raw result dicts (game, prediction, shap, meta)
-    "parlays":            {},
-    "last_analyzed_at":   None, # datetime (UTC) of last full run
-    "last_analysis_meta": {},   # games_loaded, cv/lr/nn accuracy, model_status
-}
 
-_wnba_analysis_state: dict = {
-    "sport":              "wnba",
-    "bankroll":           1000.0,
-    "results":            [],
-    "parlays":            {},
-    "last_analyzed_at":   None,
-    "last_analysis_meta": {},
-}
 
-# ── Auto-analysis scheduler state ─────────────────────────────────────────────
-_auto_analysis_lock  = threading.Lock()
-_auto_analysis_state: dict = {
-    "last_label":    None,
-    "last_started":  None,
-    "last_finished": None,
-    "last_duration": None,
-    "last_status":   None,   # "success" | "partial" | "error" | None
-    "last_results":  {},     # {"MLB": {...}, "WNBA": {...}}
-}
-_AUTO_ANALYSIS_LOG_FILE = Path("data/auto_analysis_log.json")
 
-# ── Model-bets settings (per-sport toggle for auto-pick) ─────────────────────
-# The Admin sub-page exposes a switch per sport so the user can disable a
-# sport from the model's auto-pick pool.  Default: MLB on, WNBA off.  Persisted
-# as a tiny JSON file so the choice survives restarts.
-_MODEL_SETTINGS_FILE = Path("data/model_settings.json")
-_MODEL_SETTINGS_DEFAULT = {
-    "mlb_enabled":         True,
-    "wnba_enabled":        False,
-    # Home-page top-bar "overall win rate" chip toggle.  When False the
-    # chip is hidden and the two remaining chips (best model + best bet
-    # type) stretch to fill the row.  See pages/home.py + pages/admin.py.
-    "show_overall_chip":   True,
-    # Per-day cap on /api/ai/chat Anthropic calls.  Counted in Supabase
-    # app_cache under key "ai_calls:<YYYY-MM-DD ET>".  When the count
-    # hits this number, the chat endpoint returns 429 and the UI
-    # disables Send.  Stored as int -- the save path below preserves
-    # int type for any default that is non-bool.
-    "ai_daily_limit":      20,
-}
 
 
 def _load_model_settings() -> dict:
@@ -1322,8 +1212,6 @@ def _save_model_settings(settings: dict) -> dict:
         _eprint(f"_save_model_settings: Supabase cache_set failed: {exc}")
     return coerced
 
-# ── Auto-settlement scheduler state ───────────────────────────────────────────
-_auto_settlement_lock  = threading.Lock()
 _auto_settlement_state: dict = {
     "last_ran_at":  None,   # ISO UTC
     "last_settled": 0,
@@ -1332,10 +1220,6 @@ _auto_settlement_state: dict = {
     "last_voided":  0,
 }
 
-# ── Consolidated 15-minute refresh-cycle state ────────────────────────────────
-# The auto_props_refresh job now runs one coordinated pass (schedule+scores →
-# game odds → prop lines → re-score → settlement → AI summaries).
-_refresh_cycle_lock  = threading.Lock()   # non-blocking guard against overlap
 _refresh_cycle_state: dict = {
     "last_ran_at":   None,   # ISO UTC
     "last_duration": None,   # seconds
@@ -1357,61 +1241,8 @@ _last_prop_state: dict[str, dict] = {}
 # Module-level scheduler reference (set at startup)
 _sched = None
 
-_FEATURE_LABELS = {
-    # NFL
-    "net_scoring_diff":     "Net scoring margin",
-    "ppg_diff":             "Points per game",
-    "papg_diff":            "Points allowed/gm",
-    "win_pct_diff":         "Win percentage",
-    "home_away_split_diff": "Home/Away split",
-    "last5_diff":           "Last-5 form",
-    "home_implied_prob":    "Market win prob",
-    "spread":               "Point spread",
-    # MLB — team stats
-    "net_run_diff":         "Net run margin",
-    "rpg_diff":             "Runs per game",
-    "rapg_diff":            "Runs allowed/gm",
-    "last10_diff":          "Last-10 form",
-    "hits_diff":            "Hits per game",
-    "errors_diff":          "Errors (fielding)",
-    "run_line":             "Run line",
-    # MLB — starting pitcher
-    "sp_era_diff":          "SP ERA advantage",
-    "sp_whip_diff":         "SP WHIP advantage",
-    "sp_k_rate_diff":       "SP strikeout rate",
-    "home_sp_rest":         "Home SP rest days",
-    "away_sp_rest":         "Away SP rest days",
-    "sp_hand_adv":          "Pitcher handedness",
-    # MLB — ballpark & weather
-    "park_run_factor":      "Ballpark run factor",
-    "wind_speed":           "Wind speed (mph)",
-    "wind_direction":       "Wind direction (°)",
-    # MLB — bullpen
-    "bullpen_era_diff":     "Bullpen ERA advantage",
-    "bullpen_fatigue_diff": "Bullpen fatigue edge",
-    # MLB — lineup
-    "lineup_confirmed":     "Lineup confirmed",
-    # MLB — market
-    "line_movement":        "Line movement",
-    # Totals model features
-    "combined_rpg":         "Combined runs/game",
-    "combined_rapg":        "Combined runs allowed/gm",
-    "combined_sp_era":      "Combined SP ERA",
-    "home_sp_k_rate":       "Home SP K rate",
-    "away_sp_k_rate":       "Away SP K rate",
-    "combined_bullpen_era": "Combined bullpen ERA",
-    "temperature":          "Temperature (°F)",
-}
 
 
-# ── Pre-game odds lock ────────────────────────────────────────────────────────
-# Odds fields that get snapshotted before first pitch and restored for in-progress games.
-_ODDS_FIELDS = (
-    "h2h_home_odds", "h2h_away_odds",
-    "home_implied_prob", "away_implied_prob",
-    "run_line_home_odds", "run_line_away_odds", "run_line_point", "spread",
-    "over_odds", "under_odds", "total_line",
-)
 
 def _load_pre_game_odds() -> dict:
     try:
@@ -2545,19 +2376,8 @@ def index():
     return render_template("index.html")
 
 
-# ── MLB Stats API proxy ────────────────────────────────────────────────────────
-# Fetches statsapi.mlb.com server-side so the browser never makes a cross-origin
-# request.  QWebEngineView's CORS policy can silently block direct external fetches
-# from an HTTP localhost origin; routing through Flask eliminates that entirely.
-#
-# Routes:
-#   /api/mlb/schedule?date=YYYY-MM-DD              → schedule (1-hour cache)
-#   /api/mlb/schedule?date=YYYY-MM-DD&hydrate=linescore → live scores (30-sec cache)
-
-_MLB_STATS_BASE = "https://statsapi.mlb.com/api/v1"
 # In-memory short-TTL cache for linescore data (avoids disk I/O on 60-s polling)
 _linescore_mem: dict[str, tuple[float, dict]] = {}   # key → (timestamp, data)
-_LINESCORE_TTL = 30   # seconds — live scores refresh this often
 
 
 @app.route("/api/mlb/schedule", methods=["GET"])
@@ -2620,24 +2440,8 @@ def mlb_schedule_proxy():
     return jsonify(data)
 
 
-# ── WNBA schedule + live scores proxy ──────────────────────────────────────────
-# Mirrors the MLB endpoint above but talks to ESPN's public scoreboard
-#   https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard
-# which exposes live state (status.type.state ∈ {pre, in, post}), the current
-# period (1-4 for regulation, 5+ for overtime), a displayClock string, and
-# per-team scores.  stats.wnba.com would work too but is bot-protected and
-# rate-limits aggressively — ESPN is reliable and unauthenticated.
-#
-# The response is reshaped to mirror the MLB Stats API structure
-#   { dates: [{ games: [{ gamePk, teams.{home,away}.team.name,
-#                         status.abstractGameState, linescore.* }] }] }
-# so the frontend can reuse the same _applyLiveMap / _findLiveByTeamName logic
-# (with a thin WNBA-flavoured wrapper for the period / quarter labelling).
-
-_ESPN_WNBA_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba"
 _wnba_linescore_mem: dict[str, tuple[float, dict]] = {}
 
-_QUARTER_ORDINAL = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
 
 
 def _espn_state_to_mlb_state(state: str, completed: bool) -> str:
@@ -3655,11 +3459,6 @@ def _prefetch_no_odds_predictions(sport: str, date_str: str) -> dict:
     return out
 
 
-# ── Live-score debug system ────────────────────────────────────────────────────
-# Writes to stdout AND data/debug_live.log so output is readable whether
-# the user runs via 'python desktop.pyw' (terminal) or via launch.bat (log file).
-
-_DEBUG_LOG = Path("data/debug_live.log")
 
 def _debug_print(msg: str) -> None:
     """Print to stdout and append to log file with timestamp.  Messages
@@ -4065,7 +3864,6 @@ _analysis_progress: dict[str, dict] = {
         "error": None, "n_games": None,
     },
 }
-_analysis_progress_lock = _threading_for_analyze.Lock()
 
 
 def _get_analysis_progress(sport: str) -> dict:
@@ -5900,15 +5698,7 @@ def _reset_each_ledger(mutator) -> dict:
     return summary
 
 
-_PICKS_HISTORY_FILES = (
-    Path(".cache/xgb_picks_history.json"),
-    Path(".cache/lr_picks_history.json"),
-    Path("data/nn_picks_history.json"),
-    Path(".cache/props_picks_history.json"),
-)
-_ENSEMBLE_PICKS_FILE = Path("data/ensemble_picks_today.json")
 _DAILY_PICKS_FILE    = Path("data/daily_picks.json")
-_BET_HISTORY_ARCHIVE = Path("data/bet_history_archive.json")
 
 
 def _delete_file(path: Path) -> bool:
@@ -10431,12 +10221,6 @@ def _schedule_auto_retry(label: str) -> None:
         _eprint(f"AUTO-ANALYSIS [{label}]: _schedule_auto_retry error: {_exc}")
 
 
-# ── Auto-settlement helpers ───────────────────────────────────────────────────
-_MLB_TEAM_NORM = {
-    "Oakland Athletics": "Athletics",
-    "Arizona Diamondbacks": "Diamondbacks",
-    "Tampa Bay Rays": "Rays",
-}
 
 def _norm_team_name(name: str) -> str:
     return _MLB_TEAM_NORM.get(name, name).strip().lower()
@@ -10748,13 +10532,6 @@ def _noon_reconcile_model_picks() -> None:
         _eprint(f"NOON-RECHECK failed: {type(exc).__name__}: {exc}")
 
 
-_MODEL_PICK_STAT = {
-    "pitcher_strikeouts": "K", "pitcher_earned_runs": "ER",
-    "pitcher_hits_allowed": "H", "pitcher_walks": "BB", "pitcher_outs": "outs",
-    "batter_hits": "H", "batter_total_bases": "TB", "batter_home_runs": "HR",
-    "batter_rbis": "RBI", "batter_runs_scored": "R", "batter_walks": "BB",
-    "batter_strikeouts": "SO",
-}
 
 
 # Per-pass gamelog memo for settlement: (player_id, is_pitcher) -> (ts, games).
@@ -10762,7 +10539,6 @@ _MODEL_PICK_STAT = {
 # prop markets would otherwise fire three identical statsapi calls in one pass.
 # Short TTL so a later cycle (15 min on) still picks up newly-finished games.
 _SETTLE_GAMELOG_MEMO: dict = {}
-_SETTLE_GAMELOG_TTL = 120.0
 
 # Per-cycle budget for the verbose STAT-LOOKUP diagnostic.  A settlement pass
 # can call the lookup hundreds of times (one per pending prop), so we log only
@@ -10857,7 +10633,6 @@ def _stat_lookup_log(player, market, season, acceptable, outcome) -> None:
             f"season={season} want={want} -> {outcome}")
 
 _STATSAPI_BRIDGE_CACHE: dict = {}     # et_date_iso -> (ts, {norm_team: game_info})
-_STATSAPI_BRIDGE_TTL = 3600.0         # 1 hour -- avoids re-fetching a date's
                                       # schedule on repeated Force Settlement.
 
 
@@ -12122,7 +11897,6 @@ _ai_run_state: dict = {
     "skipped": 0, "failed": 0,
     "started_at": None, "finished_at": None, "elapsed": None, "summary": None,
 }
-_AI_RUN_DELAY = 0.15   # 150 ms between Groq calls (free-tier friendly)
 
 
 def _run_ai_analysis_job(force: bool = False) -> None:
