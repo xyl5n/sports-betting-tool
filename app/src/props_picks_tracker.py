@@ -319,7 +319,7 @@ def settle_pending() -> dict:
     Returns a summary dict:
         {settled, won, lost, void, pnl, bankroll, still_pending}
     """
-    _ensure_loaded()
+    reload()
     pending = [p for p in _picks if (p.get("result") or "pending") == "pending"]
     if not pending:
         return {"settled": 0, "won": 0, "lost": 0, "void": 0,
