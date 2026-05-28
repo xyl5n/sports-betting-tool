@@ -272,6 +272,16 @@ except Exception as _e:
     sys.exit(1)
 
 print("STARTUP [5/6]: all src/ modules loaded", flush=True, file=sys.stderr)
+# Confirm the persistence backend so cross-process settlement/display sync can
+# be verified in the Railway logs (json mode => local-file-only, which does NOT
+# survive across worker processes / redeploys).
+try:
+    from src import db as _db_startup
+    print(f"SUPABASE STATUS: {_db_startup.is_supabase()}", flush=True, file=sys.stderr)
+    print(f"SUPABASE STATUS detail: {_db_startup.status()}", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"SUPABASE STATUS: unknown ({type(_e).__name__}: {_e})",
+          flush=True, file=sys.stderr)
 # Heavy analysis packages (xgboost, sklearn, shap, anthropic) are imported lazily
 # inside each route handler so Flask starts and passes its health check in < 2 s.
 
