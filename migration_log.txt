@@ -299,3 +299,103 @@ Cumulative across PRs #276 + #277:
     app/utils.py:    new, 351 lines
     app/scheduler.py: new, 86 lines
     72 module-level definitions extracted from app.py.
+
+============================================================================
+PR #278a — hydrate_state cluster -> scheduler.py (2 commits)
+============================================================================
+
+Branch: claude/split-scheduler-278a
+Base:   origin/main @ 0f33680  (post PR #277 merge)
+Source: app/app.py @ 12,478 lines
+
+Pre-flight rule: STRICT move-only, no rewrites, __all__ required.
+
+Pre-flight reassignment check (AST):
+    Move set:           6 names
+    Original FunctionDef / Assign sites: 6 (all expected)
+    Post-initial rebinds:                0
+    Verdict: SAFE under `from <mod> import *`.
+
+Free-name audit per moved function:
+    _read_daily_snapshot   needs: json, sys, _DAILY_SNAPSHOT_FILE,
+                                  _SNAPSHOT_ENABLED, _snapshot_lock
+    _snapshot_is_today     needs: _SNAPSHOT_ENABLED, _today_et
+    hydrate_state          needs: datetime, sys, _analysis_state,
+                                  _filter_stale_games, _read_daily_snapshot,
+                                  _snapshot_is_today, _today_et,
+                                  _wnba_analysis_state
+    _log_model_picks       needs: _analysis_state, _eprint,
+                                  _wnba_analysis_state
+                                  (plus inline src.* imports)
+
+Commit 1 (b59278b)  state.py: appended 2 path constants
+----------------------------------------------------------------------------
+
+Names moved into state.py:
+    _DAILY_SNAPSHOT_FILE   moved from app.py:288
+    _DAILY_SNAPSHOT_TMP    moved from app.py:289
+
+These should have been on PR #276's file-path-constants list -- the
+audit there missed them.  Lifting now so the hydrate cluster moving
+in Commit 2 doesn't have to reach back into app.py.  Both appended
+to state.py's __all__.
+
+app.py change: 12,478 -> 12,476 lines  (-2).
+
+Commit 2 (this commit)  scheduler.py: appended 4-function cluster
+----------------------------------------------------------------------------
+
+Names moved into scheduler.py:
+    _read_daily_snapshot   moved from app.py:722  (15 lines)
+    _snapshot_is_today     moved from app.py:739  ( 8 lines)
+    hydrate_state          moved from app.py:749  (68 lines)
+    _log_model_picks       moved from app.py:10198 (21 lines)
+
+scheduler.py header changes:
+    + import json
+    + from datetime import datetime
+    + from state import *      (cluster needs _DAILY_SNAPSHOT_FILE,
+                                _SNAPSHOT_ENABLED, _snapshot_lock,
+                                _analysis_state, _wnba_analysis_state)
+    + from utils import *      (cluster needs _today_et,
+                                _filter_stale_games)
+    __all__ expanded with the 4 new names.
+
+Direction (no cycles):
+    scheduler.py -> state.py, utils.py, src.*     (one-way down)
+    app.py       -> scheduler.py, state.py, utils.py
+    scheduler.py NEVER imports app.py.
+
+app.py change: 12,476 -> 12,364 lines  (-112).
+Total this PR:  12,478 -> 12,364 lines  (-114).
+
+Reference count after move (resolved via star-import):
+    _DAILY_SNAPSHOT_FILE, _DAILY_SNAPSHOT_TMP, _read_daily_snapshot,
+    _snapshot_is_today, hydrate_state, _log_model_picks
+    → 37 bare-name references in app.py, all via star-import.
+
+Verification:
+    ✓ py_compile clean on state.py, scheduler.py, app.py.
+    ✓ `from scheduler import *` exposes all 7 names (PR #277's 3 +
+      PR #278a's 4) via the updated __all__.
+    ✓ `from state import *` exposes the 2 new path constants.
+    ✓ Runtime: _read_daily_snapshot() reads the real snapshot file
+      from sandbox correctly; _snapshot_is_today({}) returns False.
+    ✓ AST audit: zero dangling module-level defs of moved names.
+    ✓ `import app` reaches the Flask check (sandbox fatal as expected).
+
+Cumulative across PRs #276 + #277 + #278a:
+    app/app.py:       13,004 -> 12,364 lines  (-640, -4.9%)
+    app/state.py:     360 -> 374 lines  (+14)
+    app/utils.py:     351 lines  (unchanged)
+    app/scheduler.py: 86 -> 221 lines  (+135)
+    78 module-level definitions extracted from the original 13K-line monolith.
+
+Unblocks (per the deferred list in PR #277):
+    _run_overnight_ai_gen        was blocked on hydrate_state -- now free.
+    _run_auto_settlement_job     was partially blocked on _log_model_picks
+                                  (1 of its 13 deps).  Still blocked on the
+                                  other 12; will need follow-up PRs.
+    _run_auto_analysis_job       was partially blocked on _log_model_picks
+                                  (1 of its 11 deps).  Still blocked on
+                                  Flask app.test_client() + the other 9.
