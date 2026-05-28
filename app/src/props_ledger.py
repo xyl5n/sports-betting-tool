@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -340,11 +340,37 @@ class PropsLedger:
                 _log(f"settle: gamelog fetch failed for {player!r}: {exc}")
                 continue
 
-            # Find the game matching the bet date
-            matching = [
-                g for g in games
-                if g.get("date", "")[:10] == game_date
-            ]
+            # ±1d tolerance: the MLB Stats API gamelog 'date' is derived from
+            # a UTC timestamp, so late-ET games can land on the calendar day
+            # AFTER the pick's stored game_date (UTC is ahead of ET, so the
+            # roll is forward-only).  Compare parsed date objects; exact
+            # matches still win, the +1d entry is used only when no exact
+            # match exists (preserves the `matching[-1]` selection below).
+            try:
+                pick_day = date.fromisoformat(game_date)
+            except (TypeError, ValueError):
+                pick_day = None
+            if pick_day is None:
+                matching = [g for g in games if g.get("date", "")[:10] == game_date]
+            else:
+                matching = []
+                nearby = []
+                for g in games:
+                    try:
+                        gd = date.fromisoformat(g.get("date", "")[:10])
+                    except (TypeError, ValueError):
+                        continue
+                    delta_days = (gd - pick_day).days
+                    if delta_days == 0:
+                        matching.append(g)
+                    elif delta_days == 1:
+                        nearby.append(g)
+                if not matching and nearby:
+                    matching = nearby
+                    found_date = matching[-1].get("date", "")[:10]
+                    _log(f"settle: ±1d window matched {player!r} {market} "
+                         f"(searched={game_date}, found={found_date}, "
+                         f"candidates={len(matching)})")
             if not matching:
                 _log(
                     f"settle: no game log entry for {player!r} on {game_date} — "
