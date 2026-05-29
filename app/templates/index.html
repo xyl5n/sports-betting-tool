@@ -1405,17 +1405,6 @@ body {
   .upcoming-grid { grid-template-columns: 1fr; }
 }
 
-/* ── EV + Props side-by-side row ─────────────────────────────────────── */
-.picks-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  align-items: start;
-}
-@media (max-width: 700px) {
-  .picks-row { grid-template-columns: 1fr; }
-}
-
 /* ── News grid ───────────────────────────────────────────────────────── */
 .news-grid {
   display: grid;
@@ -1495,6 +1484,33 @@ body {
         <span class="ai-banner-arrow">→</span>
       </button>
 
+      <!-- EV scans -->
+      <section class="section" id="section-ev">
+        <div class="section-hdr">
+          <h2>EV SCANS</h2>
+          <span class="count-badge" id="ev-count">0</span>
+          <span class="info-icon" title="Expected-value picks — model edge ≥ 5% vs market">ℹ</span>
+          <div class="date-nav">
+            <button class="date-arrow" aria-label="Previous day" onclick="changeDate(-1)">‹</button>
+            <span class="date-label" id="ev-date">Today</span>
+            <button class="date-arrow" aria-label="Next day" onclick="changeDate(1)">›</button>
+          </div>
+        </div>
+        <div class="stats-line" id="ev-stats">Run analysis to load today's picks</div>
+        <div class="cards-scroll" id="ev-cards"></div>
+      </section>
+
+      <!-- Confidence picks -->
+      <section class="section" id="section-confidence">
+        <div class="section-hdr">
+          <h2>CONFIDENCE PICKS</h2>
+          <span class="count-badge" id="conf-count">0</span>
+        </div>
+        <div class="cards-scroll" id="conf-cards">
+          <div class="empty-state">No confidence picks yet.</div>
+        </div>
+      </section>
+
       <!-- News -->
       <section class="section" id="section-news">
         <div class="section-hdr">
@@ -1504,6 +1520,21 @@ body {
         <div class="news-grid" id="news-cards">
           <div class="empty-state">No news loaded.</div>
         </div>
+      </section>
+
+      <!-- Props -->
+      <section class="section" id="section-props">
+        <div class="section-hdr">
+          <h2>PROPS</h2>
+          <button class="swipe-toggle" id="swipe-toggle" onclick="toggleSwipe()">Swipe Mode</button>
+          <div class="date-nav">
+            <button class="date-arrow" onclick="changeDate(-1)">‹</button>
+            <span class="date-label" id="props-date">Today</span>
+            <button class="date-arrow" onclick="changeDate(1)">›</button>
+          </div>
+          <a class="section-link" href="#" onclick="event.preventDefault(); showTab('props')">See All →</a>
+        </div>
+        <div class="cards-scroll" id="props-cards"></div>
       </section>
 
       <!-- Upcoming Games -->
@@ -1529,42 +1560,6 @@ body {
         </div>
         <div class="slate-list" id="slate-cards"></div>
       </section>
-
-      <!-- EV + Props side by side -->
-      <div class="picks-row" id="picks-row">
-
-        <!-- EV scans -->
-        <section class="section" id="section-ev">
-          <div class="section-hdr">
-            <h2>EV SCANS</h2>
-            <span class="count-badge" id="ev-count">0</span>
-            <span class="info-icon" title="Expected-value picks — model edge ≥ 5% vs market">ℹ</span>
-            <div class="date-nav">
-              <button class="date-arrow" aria-label="Previous day" onclick="changeDate(-1)">‹</button>
-              <span class="date-label" id="ev-date">Today</span>
-              <button class="date-arrow" aria-label="Next day" onclick="changeDate(1)">›</button>
-            </div>
-          </div>
-          <div class="stats-line" id="ev-stats">Run analysis to load today's picks</div>
-          <div class="cards-scroll" id="ev-cards"></div>
-        </section>
-
-        <!-- Props -->
-        <section class="section" id="section-props">
-          <div class="section-hdr">
-            <h2>PROPS</h2>
-            <button class="swipe-toggle" id="swipe-toggle" onclick="toggleSwipe()">Swipe Mode</button>
-            <div class="date-nav">
-              <button class="date-arrow" onclick="changeDate(-1)">‹</button>
-              <span class="date-label" id="props-date">Today</span>
-              <button class="date-arrow" onclick="changeDate(1)">›</button>
-            </div>
-            <a class="section-link" href="#" onclick="event.preventDefault(); showTab('props')">See All →</a>
-          </div>
-          <div class="cards-scroll" id="props-cards"></div>
-        </section>
-
-      </div>
 
     </section>
 
@@ -2065,14 +2060,18 @@ function setSport(s) {
 // dashboard and show the full slate of pick-cards for that sport.
 function applyHomeViewForSport() {
   const isAll  = _sport === 'all';
-  const rowEl  = $('picks-row');
-  const slEl   = $('section-slate');
-  const upEl   = $('section-upcoming');
+  const evEl   = $('section-ev');
+  const cfEl   = $('section-confidence');
   const newsEl = $('section-news');
-  if (rowEl) rowEl.style.display = isAll ? '' : 'none';
-  if (slEl)  slEl.style.display  = isAll ? 'none' : '';
-  if (upEl)  upEl.style.display  = isAll ? '' : 'none';
+  const ppEl   = $('section-props');
+  const upEl   = $('section-upcoming');
+  const slEl   = $('section-slate');
+  if (evEl)   evEl.style.display   = isAll ? '' : 'none';
+  if (cfEl)   cfEl.style.display   = isAll ? '' : 'none';
   if (newsEl) newsEl.style.display = isAll ? '' : 'none';
+  if (ppEl)   ppEl.style.display   = isAll ? '' : 'none';
+  if (upEl)   upEl.style.display   = isAll ? '' : 'none';
+  if (slEl)   slEl.style.display   = isAll ? 'none' : '';
   if (!isAll) {
     const title = $('slate-title');
     if (title) title.textContent = `${_sport.toUpperCase()} FULL SLATE`;
