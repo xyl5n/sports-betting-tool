@@ -183,12 +183,12 @@ def _layout(backend) -> None:
         _guarded_section("todays_games_stub",
                          lambda: _section_todays_games_stub(backend))
         _guarded_section("ev_compact", lambda: _section_ev_compact(backend))
+        _guarded_section("confidence_carousel",
+                         lambda: _section_confidence_carousel(backend))
         _guarded_section("news", lambda: _section_news(backend))
         _guarded_section("games", lambda: _section_games(backend))
         _guarded_section("rotation", lambda: _section_rotation(backend))
         _guarded_section("heatmap", lambda: _section_heatmap(backend))
-        _guarded_section("confidence_carousel",
-                         lambda: _section_confidence_carousel(backend))
         _guarded_section("ai_banner", _ai_banner)
         _guarded_section("model_performance",
                          lambda: _section_model_performance(backend))
