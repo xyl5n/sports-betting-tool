@@ -150,6 +150,34 @@ def _props_static(path: str):
     )
 
 
+@_ng_app.api_route(
+    "/api/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def _api_flask_bridge(path: str, request: _StarletteRequest):
+    # Catch-all that forwards any /api/* request to the in-process Flask app,
+    # same passthrough pattern as /props and /home-v2 but for the whole JSON
+    # API surface.  Unlike those GET-only page bridges, /api/* includes POST /
+    # PUT / PATCH / DELETE endpoints with JSON bodies (analyze, track, ledger
+    # confirm, set bankroll, …), so the HTTP method, query string, request
+    # body and content type are all forwarded.  Reading the body requires an
+    # async handler.
+    qs        = request.url.query
+    full_path = "/api/" + path + (f"?{qs}" if qs else "")
+    body      = await request.body()
+    rv = _flask_client.open(
+        full_path,
+        method=request.method,
+        data=body,
+        content_type=request.headers.get("content-type"),
+    )
+    return _StarletteResponse(
+        content=rv.get_data(),
+        status_code=rv.status_code,
+        media_type=rv.headers.get("Content-Type", "application/json"),
+    )
+
+
 # ── Boot-time analysis-state hydration ──────────────────────────────────────
 # Backend exposes hydrate_state() which re-reads daily_snapshot.json +
 # analysis_cache.json into the in-memory _analysis_state /
