@@ -1726,6 +1726,25 @@ body {
         <div class="slate-list" id="slate-cards"></div>
       </section>
 
+      {% if home_v2 and model_perf %}
+      <!-- Model Performance row (server-rendered, bottom of home) -->
+      <section class="section" id="section-model-perf">
+        <div class="section-hdr">
+          <h2>MODEL PERFORMANCE</h2>
+        </div>
+        <div class="model-perf-row">
+          <div class="model-perf-cell">
+            <span class="model-perf-val {{ model_perf.tone }}">{{ model_perf.pct_str if model_perf.settled else '—' }}</span>
+            <span class="model-perf-lbl">WIN %</span>
+          </div>
+          <div class="model-perf-cell">
+            <span class="model-perf-val">{{ model_perf.record }}</span>
+            <span class="model-perf-lbl">RECORD</span>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+
     </section>
 
     <!-- ─── SPORTS (live scores + predictions) ───────────────────────── -->
