@@ -304,25 +304,6 @@ def _ensure_data_dir() -> None:
               flush=True, file=sys.stderr)
 
 
-def _supabase_cache_get(key: str) -> dict | None:
-    """Synchronous read with a hard timeout.  Returns None on timeout or any
-    error so the caller can fall back to a local file without delay."""
-    import concurrent.futures
-    def _do():
-        from src import db as _db
-        row = _db.cache_get(key)
-        return (row or {}).get("data") if row else None
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            return ex.submit(_do).result(timeout=5.0)
-    except concurrent.futures.TimeoutError:
-        print(f"SUPABASE cache_get({key}) timed out after 5s",
-              flush=True, file=sys.stderr)
-        return None
-    except Exception as exc:                                              # noqa: BLE001
-        print(f"SUPABASE cache_get({key}) failed: {exc}",
-              flush=True, file=sys.stderr)
-        return None
 
 
 
