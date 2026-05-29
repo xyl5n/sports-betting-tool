@@ -53,6 +53,7 @@ __all__ = [
     "_auto_settlement_state", "_SETTLE_GAMELOG_MEMO",
     "_DAILY_PICKS_FILE",
     "_no_odds_predictor", "_no_odds_predictor_failed",
+    "_refresh_cycle_state", "_last_game_state", "_last_prop_state",
 ]
 
 # moved from app.py:138
@@ -414,3 +415,21 @@ _no_odds_predictor: dict[str, object] = {"mlb": None, "wnba": None}
 # moved from app.py:1739
 # Negative-cache slot so a failed first-load doesn't retry on every render.
 _no_odds_predictor_failed: dict[str, bool] = {"mlb": False, "wnba": False}
+
+# moved from app.py:975
+_refresh_cycle_state: dict = {
+    "last_ran_at":   None,   # ISO UTC
+    "last_duration": None,   # seconds
+    "last_summary":  None,   # dict of per-step counts
+}
+
+# moved from app.py:990
+# Per-cycle change-detection state (process-local).  Compared each 15-min tick.
+#   _last_game_state: gid -> {sport, ml_home, ml_away, total, rl_point,
+#                             pitchers, lineup, wind, temp}
+#   _last_prop_state: "player|market" -> {line, side, recommendation,
+#                             predicted_value, confidence}
+_last_game_state: dict[str, dict] = {}
+
+# moved from app.py:991
+_last_prop_state: dict[str, dict] = {}

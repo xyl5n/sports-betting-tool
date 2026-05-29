@@ -972,23 +972,11 @@ def _save_model_settings(settings: dict) -> dict:
     return coerced
 
 
-_refresh_cycle_state: dict = {
-    "last_ran_at":   None,   # ISO UTC
-    "last_duration": None,   # seconds
-    "last_summary":  None,   # dict of per-step counts
-}
 # Last-seen game lines (per Odds-API game id) for movement detection, and last
 # probable starters (per gamePk) for pitching-change detection.  Process-local.
 _last_seen_lines: dict[str, dict] = {}
 _last_probables:  dict[str, str]  = {}
 
-# Per-cycle change-detection state (process-local).  Compared each 15-min tick.
-#   _last_game_state: gid -> {sport, ml_home, ml_away, total, rl_point,
-#                             pitchers, lineup, wind, temp}
-#   _last_prop_state: "player|market" -> {line, side, recommendation,
-#                             predicted_value, confidence}
-_last_game_state: dict[str, dict] = {}
-_last_prop_state: dict[str, dict] = {}
 
 # Module-level scheduler reference (set at startup)
 _sched = None
