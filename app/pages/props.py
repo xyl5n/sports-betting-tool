@@ -27,13 +27,87 @@ from nicegui import ui
 from components import theme as t
 from components import navbar, bottom_nav, live_score, team_logo
 
-# localStorage key for the persisted Props view mode ("game" | "sort").
-_VIEW_MODE_LS_KEY = "propsViewMode"
+# localStorage keys for the persisted Props UI controls.  These survive a page
+# refresh AND a browser restart (localStorage, not sessionStorage), mirroring
+# the filter-persistence layer added in #294 so the page comes back exactly as
+# the user left it.
+_VIEW_MODE_LS_KEY = "propsViewMode"   # By Game | By Sort  ("game" | "sort")
+_SORT_LS_KEY      = "propsSortMode"   # active sort pill   (see _SORT_PILLS)
+_SUBMODE_LS_KEY   = "propsSubMode"    # By Sort sub-view   ("list"|"swipe"|"xray")
+_FILTERS_LS_KEY   = "propsFilters"    # filter bar state   (JSON blob)
 
 
 def _dbg(msg: str) -> None:
     """Tagged stderr log -- mirrors home.py's _dbg pattern."""
     print(f"[RENDER] {msg}", flush=True, file=sys.stderr)
+
+
+# ── Persistence helpers ───────────────────────────────────────────────────────
+# Best-effort localStorage writes/reads for the persisted controls above.  All
+# writes are wrapped in try/catch on the JS side so private-mode / quota errors
+# never surface to the user, matching the #294 Filters store semantics.
+
+def _persist(key: str, value: str) -> None:
+    """Persist a single string *value* under *key* in localStorage (no-op on
+    failure).  ``value`` is JSON-encoded so it is always a safe JS literal."""
+    import json as _json
+    ui.run_javascript(
+        f"try{{localStorage.setItem('{key}', {_json.dumps(value)})}}catch(e){{}}"
+    )
+
+
+def _persist_filters(filters: dict) -> None:
+    """Persist the filter-bar state as a JSON blob.  Sets (markets / games) are
+    stored as sorted lists since sets aren't JSON-serialisable."""
+    import json as _json
+    blob = _json.dumps({
+        "min_l10":   filters.get("min_l10", 0),
+        "show_alt":  bool(filters.get("show_alt")),
+        "markets":   sorted(filters.get("markets") or []),
+        "games":     sorted(filters.get("games") or []),
+        "min_conf":  filters.get("min_conf", 0.0),
+        "min_grade": filters.get("min_grade", 0.0),
+    })
+    _persist(_FILTERS_LS_KEY, blob)
+
+
+def _apply_filters_json(filters: dict, raw: str, rows: list[dict]) -> bool:
+    """Merge a persisted filters JSON blob into *filters* in place.
+
+    Stale market / game selections that aren't part of today's slate are
+    dropped -- game keys are event-specific and change daily, so persisting a
+    raw selection across days would otherwise trap the user in a permanent
+    "No props match these filters" empty state.  Returns True iff anything
+    actually changed (so the caller knows whether to re-render)."""
+    import json as _json
+    try:
+        d = _json.loads(raw)
+    except Exception:                                                     # noqa: BLE001
+        return False
+    if not isinstance(d, dict):
+        return False
+    market_opts, game_opts = _filter_options(rows)
+    new = _default_filters()
+    try:
+        new["min_l10"] = int(d.get("min_l10") or 0)
+    except (TypeError, ValueError):
+        pass
+    new["show_alt"] = bool(d.get("show_alt"))
+    try:
+        new["min_conf"] = float(d.get("min_conf") or 0.0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        new["min_grade"] = float(d.get("min_grade") or 0.0)
+    except (TypeError, ValueError):
+        pass
+    new["markets"] = {m for m in (d.get("markets") or []) if m in market_opts}
+    new["games"]   = {g for g in (d.get("games") or []) if g in game_opts}
+    if new == filters:
+        return False
+    filters.clear()
+    filters.update(new)
+    return True
 
 
 # Page-scoped CSS: let the 7-pill sort row wrap on very narrow phones so the
@@ -359,9 +433,7 @@ def _section_unified_props_list(backend) -> None:
                 def _mk_group(g):
                     def _set():
                         view_state["group"] = g
-                        ui.run_javascript(
-                            f"localStorage.setItem('{_VIEW_MODE_LS_KEY}', '{g}')"
-                        )
+                        _persist(_VIEW_MODE_LS_KEY, g)
                         cards_refresh.refresh()
                     return _set
                 with ui.row().style("gap: 3px; flex-shrink: 0;"):
@@ -384,6 +456,7 @@ def _section_unified_props_list(backend) -> None:
                             def _mk_mode(mk=_mkey):
                                 def _set():
                                     view_state["mode"] = mk
+                                    _persist(_SUBMODE_LS_KEY, mk)
                                     cards_refresh.refresh()
                                 return _set
                             ui.button(_mlabel, on_click=_mk_mode()).props(
@@ -419,27 +492,57 @@ def _section_unified_props_list(backend) -> None:
                 _render_xray_mode(shown, backend, xray_sort, cards_refresh.refresh)
 
         # ── Filter button + collapsible panel ─────────────────────────────
-        _filter_bar(rows, filters, cards_refresh.refresh)
+        bar_refresh = _filter_bar(rows, filters, cards_refresh.refresh)
 
         # ── Sort pills ─────────────────────────────────────────────────────
-        # Single row of 6 pills (L5 / L10 / L20 / H2H / Proj / Edge); only the
-        # order changes.  Default sort is Proj (biggest model-vs-book gap).
-        _sort_pills(state, cards_refresh.refresh)
+        # Single row of 7 pills (L5 / L10 / L20 / H2H / Proj / Edge / Conf);
+        # only the order changes.  Default sort is Proj (model-vs-book gap).
+        sort_refresh = _sort_pills(state, cards_refresh.refresh)
         cards_refresh()
 
-        # Hydrate the persisted view mode from localStorage (one-shot, after
-        # the socket connects); re-render only if it differs from the default.
-        async def _hydrate_view_mode() -> None:                           # noqa: WPS430
+        # Hydrate every persisted control from localStorage in one shot (after
+        # the socket connects); re-render only the pieces that actually differ
+        # from their defaults so a fresh visitor sees no flicker.
+        async def _hydrate_state() -> None:                               # noqa: WPS430
+            import json as _json
             try:
-                val = await ui.run_javascript(
-                    f"localStorage.getItem('{_VIEW_MODE_LS_KEY}')"
+                raw = await ui.run_javascript(
+                    "JSON.stringify({"
+                    f"g:localStorage.getItem('{_VIEW_MODE_LS_KEY}'),"
+                    f"s:localStorage.getItem('{_SORT_LS_KEY}'),"
+                    f"m:localStorage.getItem('{_SUBMODE_LS_KEY}'),"
+                    f"f:localStorage.getItem('{_FILTERS_LS_KEY}')"
+                    "})"
                 )
+                data = _json.loads(raw) if raw else {}
             except Exception:                                             # noqa: BLE001
                 return
-            if val in ("game", "sort") and val != view_state["group"]:
-                view_state["group"] = val
+            if not isinstance(data, dict):
+                return
+
+            changed = filters_changed = False
+            g = data.get("g")
+            if g in ("game", "sort") and g != view_state["group"]:
+                view_state["group"] = g
+                changed = True
+            s = data.get("s")
+            if s in _SORT_KEYS and s != state["sort"]:
+                state["sort"] = s
+                changed = True
+            m = data.get("m")
+            if m in ("list", "swipe", "xray") and m != view_state["mode"]:
+                view_state["mode"] = m
+                changed = True
+            f = data.get("f")
+            if f and _apply_filters_json(filters, f, rows):
+                changed = filters_changed = True
+
+            if filters_changed:
+                bar_refresh()
+            if changed:
+                sort_refresh()
                 cards_refresh.refresh()
-        ui.timer(0.1, _hydrate_view_mode, once=True)
+        ui.timer(0.1, _hydrate_state, once=True)
 
 
 def _render_by_game(shown: list[dict], backend, expanded: set) -> None:
@@ -543,7 +646,7 @@ def _no_match_message() -> None:
         )
 
 
-def _filter_bar(rows: list[dict], filters: dict, on_change) -> None:
+def _filter_bar(rows: list[dict], filters: dict, on_change):
     """Filter button + collapsible panel.  All controls read their option
     sets from the loaded props and mutate the shared *filters* dict, then call
     *on_change* (the card-list refresh) so the list re-renders without a page
@@ -579,11 +682,13 @@ def _filter_bar(rows: list[dict], filters: dict, on_change) -> None:
 
     def _reset() -> None:
         filters.update(_default_filters())
+        _persist_filters(filters)
         on_change()
         bar.refresh()
 
     def _set(key, value) -> None:
         filters[key] = value
+        _persist_filters(filters)
         on_change()
         bar.refresh()
 
@@ -621,6 +726,7 @@ def _filter_bar(rows: list[dict], filters: dict, on_change) -> None:
                     .props("dense")
 
     bar()
+    return bar.refresh
 
 
 def _empty_state_message() -> None:
@@ -688,9 +794,12 @@ _SORT_PILLS: tuple[tuple[str, str], ...] = (
     ("conf", "Conf"),
 )
 
+# Valid sort keys -- guards a persisted value before it's trusted on hydration.
+_SORT_KEYS: frozenset = frozenset(k for k, _ in _SORT_PILLS)
 
-def _sort_pills(state: dict, on_change) -> None:
-    """Render the six sort pills in one horizontal row, no title label.
+
+def _sort_pills(state: dict, on_change):
+    """Render the seven sort pills in one horizontal row, no title label.
     Active pill is highlighted green; clicking sets state['sort'] and
     refreshes the card list."""
     @ui.refreshable
@@ -702,6 +811,7 @@ def _sort_pills(state: dict, on_change) -> None:
                 _sort_pill(label, key, state.get("sort") == key,
                            state, on_change, render.refresh)
     render()
+    return render.refresh
 
 
 def _sort_pill(label: str, key: str, active: bool, state: dict,
@@ -715,6 +825,7 @@ def _sort_pill(label: str, key: str, active: bool, state: dict,
 
     def _click() -> None:
         state["sort"] = key
+        _persist(_SORT_LS_KEY, key)
         on_change()
         refresh()
 
@@ -1376,7 +1487,10 @@ def _prop_card(r: dict, backend) -> None:
     side = (r.get("side") or "Over").strip().title()
     is_over = side == "Over"
     chip_bg = t.POS if is_over else t.NEG
-    confidence_pct = r["confidence"] * 100
+    try:
+        confidence_pct = float(r.get("confidence") or 0.0) * 100
+    except (TypeError, ValueError):
+        confidence_pct = 0.0
 
     with ui.column().classes("w-full").style(
         f"background: {t.CARD}; border: 1px solid {t.BORDER}; "
@@ -1390,7 +1504,7 @@ def _prop_card(r: dict, backend) -> None:
             f"gap: 8px;"
         ):
             _card_avatar(r)
-            ui.label(_short_market(r["market"]).upper()).style(
+            ui.label(_short_market(r.get("market") or "").upper()).style(
                 f"background: {t.CARD_HI}; color: {t.TEXT_DIM}; "
                 f"font-size: 9.5px; font-weight: 800; letter-spacing: .5px; "
                 f"padding: 2px 8px; border-radius: {t.RADIUS_PILL};"
@@ -1403,8 +1517,9 @@ def _prop_card(r: dict, backend) -> None:
             )
 
         # Player name: links to player profile page.
-        _name_slug = r["player"].lower().replace(" ", "-")
-        ui.link(r["player"], f"/player/mlb/{_name_slug}").style(
+        _player = r.get("player") or "—"
+        _name_slug = _player.lower().replace(" ", "-")
+        ui.link(_player, f"/player/mlb/{_name_slug}").style(
             f"font-size: 16px; font-weight: 700; color: {t.TEXT}; "
             f"line-height: 1.2; text-decoration: none; "
             f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
@@ -1414,7 +1529,9 @@ def _prop_card(r: dict, backend) -> None:
         with ui.row().classes("items-center w-full").style(
             f"gap: 10px; flex-wrap: nowrap;"
         ):
-            ui.label(f"{side.upper()} {r['line']}").style(
+            _line_disp = r.get("line")
+            _line_disp = "—" if _line_disp is None else _line_disp
+            ui.label(f"{side.upper()} {_line_disp}").style(
                 f"background: {chip_bg}; color: {t.BG}; "
                 f"font-size: 13px; font-weight: 800; letter-spacing: .5px; "
                 f"padding: 6px 12px; border-radius: {t.RADIUS_SM}; "
@@ -1438,7 +1555,7 @@ def _prop_card(r: dict, backend) -> None:
         pv = r.get("predicted_value")
         if pv is not None:
             try:
-                line_f    = float(r["line"])
+                line_f    = float(r.get("line"))
                 side_str  = (r.get("side") or "Over").strip().title()
                 margin    = (pv - line_f) if side_str == "Over" else (line_f - pv)
                 pv_color  = t.POS if margin > 1.0 else t.WARN
