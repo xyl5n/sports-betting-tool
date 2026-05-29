@@ -962,3 +962,144 @@ Architectural note:
     serialization-module extraction) -- both larger than any single
     refactor in this series and outside the move-only contract these
     PRs have honored.
+
+============================================================================
+PHASE 2 — PR #283  serializer.py extraction
+============================================================================
+
+Branch: claude/split-serializer-283
+Base:   origin/main @ 6911aa2  (post PR #282 merge)
+Source: app/app.py @ 10,819 lines
+
+Pre-flight rule: STRICT move-only (Phase 2 returns to the strict rule;
+the only approved rewrite was PR #282's init() refactor).
+
+Phase 2 goal:  Extract the serialization layer (_serialize family) to
+unblock _run_consolidated_refresh_cycle (currently the last unmoved
+nightly job besides _run_auto_analysis_job, which is Flask-coupled).
+
+Pre-flight audit (recorded on branch claude/audit-serializer-283):
+  - _serialize           351 lines, ZERO Flask coupling
+  - _serialize_wnba      161 lines, ZERO Flask coupling
+  - _apply_correlation_rules 128 lines, ZERO Flask coupling
+  - _format_rl_shap       17 lines, ZERO Flask coupling
+  - Reassignment check:  0 post-initial rebinds across the 4-name set
+  - Verdict: SAFE under `from serializer import *`.
+
+Caller-graph audit:
+  _serialize callers (6):
+    schedule_for_date           Flask route   (resolves via star-import)
+    analyze                     Flask route   (resolves via star-import)
+    refresh_models              Flask route   (resolves via star-import)
+    ai_breakdown                Flask route   (resolves via star-import)
+    _build_chat_context         non-Flask     (resolves via star-import)
+    _rerun_single_game          non-Flask     (UNBLOCK TARGET --
+                                                moves in Commit 2 of this PR)
+  _serialize_wnba callers (2):
+    schedule_for_date           Flask route   (resolves via star-import)
+    analyze_wnba                Flask route   (resolves via star-import)
+  _apply_correlation_rules:  exclusively called by _serialize.
+  _format_rl_shap:           exclusively called by _serialize.
+
+Commit 1 (this commit)  serializer.py: 4 functions
+----------------------------------------------------------------------------
+
+Names moved (sorted by original line for the move comments):
+    _serialize                 moved from app.py:1182  (351 lines)
+    _serialize_wnba            moved from app.py:1537  (161 lines)
+    _apply_correlation_rules   moved from app.py:1765  (128 lines)
+    _format_rl_shap            moved from app.py:1895  ( 17 lines)
+
+serializer.py header:
+    from __future__ import annotations
+    import logging
+    import numpy as np
+    from src.kelly import size_bet, confidence_tier_from_prob
+    from state import *  # noqa: F401,F403
+    from utils import *  # noqa: F401,F403
+    _logger = logging.getLogger("sports_betting")    # parallel ref
+                                                     # (same singleton as
+                                                     # app.py + scheduler.py
+                                                     # per Python's logging
+                                                     # registry).
+    __all__ = ["_serialize", "_serialize_wnba",
+               "_apply_correlation_rules", "_format_rl_shap"]
+
+The src.kelly import is wrapped in app.py's try/except + STARTUP-print
+plumbing today; serializer.py just does the plain import.  An import
+failure would surface as ImportError in both modules -- functionally
+identical to today's SystemExit(1), but slightly less verbose in the
+log.  Acceptable trade.
+
+The parallel _logger reference follows the same pattern PR #279 set
+for scheduler.py.  No new code is being introduced -- this is the
+established "move-only" complement that lets the moved `_logger.warning(
+...)` call sites in _serialize work verbatim.
+
+Direction (no cycles):
+    serializer.py -> state.py / utils.py / src.kelly  (one-way down)
+    app.py        -> serializer.py                     (one-way down)
+    scheduler.py  -> serializer.py                     (one-way down)
+    serializer.py NEVER imports app.py or scheduler.py.
+
+app.py changes:
+    - 659 lines removed (the 4 functions + their preceding comment blocks).
+    - 1 new star-import line added right after `from scheduler import *`:
+        from serializer import *  # noqa: F401,F403
+    - Net: 10,819 -> 10,165 lines  (-654).
+
+Reference count after move (resolved via star-import):
+    10 bare-name references in app.py to the 4 moved names.
+
+Verification:
+    ✓ py_compile clean on app.py and serializer.py.
+    ✓ `from serializer import *` exposes all 4 names via __all__.
+    ✓ All 4 are callable from importing modules.
+    ✓ serializer._logger is identity-equal to
+      logging.getLogger("sports_betting") -- confirms the parallel
+      reference is the same singleton.
+    ✓ AST audit: zero dangling module-level defs of moved names.
+    ✓ `import app` clears stdlib + numpy + scheduler + serializer
+      initialization; sandbox-only Flask fatal expected.
+
+----------------------------------------------------------------------------
+Note: Commit 2 (_rerun_single_game move) DEFERRED to PR #284.
+----------------------------------------------------------------------------
+
+The original Phase 2 plan for PR #283 included a Commit 2 that would move
+_rerun_single_game to scheduler.py.  The Phase 2 audit summary (branch
+claude/audit-serializer-283) reported that _rerun_single_game's only
+blocker was _serialize -- so once Commit 1 above moved _serialize to
+serializer.py, _rerun_single_game would be unblocked.
+
+Re-auditing _rerun_single_game on this branch after Commit 1 landed
+revealed that the original audit summary was incomplete.  The function
+has three additional app.py-local stay-deps that the summary missed:
+
+    _update_result_in_state    (10 lines, no STAYS of its own -- CLEAN)
+    _update_snapshot_game      (17 lines, needs _write_daily_snapshot ->
+                                            _supabase_cache_set chain)
+    _ensure_no_odds_predictor  (120 lines, needs _no_odds_predictor +
+                                            _no_odds_predictor_failed
+                                            state dicts)
+
+Full cascade needed to move _rerun_single_game cleanly:
+    _update_result_in_state        ( 10 lines)
+    _update_snapshot_game          ( 17 lines)
+    _ensure_no_odds_predictor      (120 lines)
+    _write_daily_snapshot          ( 57 lines)
+    _supabase_cache_set            ( 20 lines)
+    _no_odds_predictor             (  1 line state dict)
+    _no_odds_predictor_failed      (  1 line state dict)
+    _rerun_single_game itself      ( 73 lines)
+    -----------------------------------
+    Total:                          ~299 lines, 6 functions + 2 state dicts
+
+None of the cascade members have Flask coupling.  Cascade is tractable
+but exceeds the narrow scope the user approved for this PR.  Deferred
+to PR #284 so the audit correction can be reviewed alongside the
+expanded move plan, rather than landing a 300-line cascade hidden under
+the original "single function" commit description.
+
+PR #283 ships with Commit 1 only.
+
