@@ -375,6 +375,7 @@ __all__ = [
     # cascade of 5 helpers + the target function + 2 state dicts
     # (in state.py via PR #284/1).
     "_supabase_cache_set",
+    "_supabase_cache_get",  # PR #290 -- co-located with set/delete
     "_write_daily_snapshot",
     "_ensure_no_odds_predictor",
     "_update_result_in_state",
@@ -2613,3 +2614,25 @@ def _run_consolidated_refresh_cycle() -> dict:
         )
         _refresh_cycle_lock.release()
     return summary
+
+# moved from app.py:307 (PR #290 -- co-located with _supabase_cache_set/_delete)
+def _supabase_cache_get(key: str) -> dict | None:
+    """Synchronous read with a hard timeout.  Returns None on timeout or any
+    error so the caller can fall back to a local file without delay."""
+    import concurrent.futures
+    def _do():
+        from src import db as _db
+        row = _db.cache_get(key)
+        return (row or {}).get("data") if row else None
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            return ex.submit(_do).result(timeout=5.0)
+    except concurrent.futures.TimeoutError:
+        print(f"SUPABASE cache_get({key}) timed out after 5s",
+              flush=True, file=sys.stderr)
+        return None
+    except Exception as exc:                                              # noqa: BLE001
+        print(f"SUPABASE cache_get({key}) failed: {exc}",
+              flush=True, file=sys.stderr)
+        return None
+
