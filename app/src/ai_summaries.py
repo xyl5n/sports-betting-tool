@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")

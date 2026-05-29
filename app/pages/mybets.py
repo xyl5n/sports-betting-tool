@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from nicegui import ui
