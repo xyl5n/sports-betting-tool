@@ -1647,3 +1647,111 @@ Remaining large non-Flask clusters from the Phase-E audit (future PRs):
     boot_startup         ~613 lines, 7 fn  -> app/boot.py (boot-ordering risk)
     The 2 Flask test_client jobs (_run_auto_analysis_job,
         _run_analysis_worker) remain the architectural blocker.
+
+============================================================================
+PR #289 — Phase C: app/predictor.py (no-odds game prediction cluster)
+============================================================================
+
+Branch: claude/split-predictor-289
+Base:   origin/main @ cfd3a2d  (post PR #288 merge)
+Source: app/app.py @ 8,703 lines
+
+Pre-flight rule: STRICT move-only.
+
+Step 1 -- Full BFS transitive closure (try/if/with-aware symbol table):
+    Seed: 4 named functions (confirmed _read_no_odds_predictions +
+    _write_no_odds_predictions as the other two).
+    BFS discovered ZERO members beyond the seed.
+    Final closure: 4 functions, 185 lines.
+        _predict_no_odds_game         (101)
+        _prefetch_no_odds_predictions  (53)
+        _write_no_odds_predictions     (18)
+        _read_no_odds_predictions      (13)
+    Intra-cluster: _prefetch_no_odds_predictions ->
+                   _predict_no_odds_game + _write_no_odds_predictions.
+
+Step 2 -- Two-gate pre-flight:
+    GATE 1 (reassignment): all 4 -- 1 module-bind, 0 global-rebinds. PASS.
+    GATE 2 (cycle check, recursing into top-level try/if/with bodies):
+        Cycle risks: NONE.  Critical verification: NONE of the satellite
+            modules (state/utils/serializer/scheduler/ai_prompts/parlay)
+            reference any of the 4 predictor functions -- so the
+            predictor->scheduler edge below is one-way / cycle-free.
+        Star-imports needed: utils, scheduler.
+        Module-level imports needed: NONE.
+        Infra names used: _eprint (lives in scheduler.py -- resolved via
+            `from scheduler import *`, NOT the _logger instance, so NO
+            parallel _logger ref).
+        Inline imports (move verbatim): `from src import db as _db`
+            in _read/_write (src.db is a leaf).
+
+    Per-module reachable-name usage:
+        utils:     _no_odds_predictions_cache_key
+        scheduler: _eprint, _fetch_raw_schedule, _ensure_no_odds_predictor
+
+    Explicit state-resolution check (per directive):
+        _no_odds_predictor / _no_odds_predictor_failed are in state.py's
+        __all__ (PR #284).  The predictor cluster does NOT reference them
+        directly -- they are consumed inside scheduler._ensure_no_odds_
+        predictor, which resolves them via scheduler's own
+        `from state import *`.  Nothing to resolve from predictor.py.
+
+ARCHITECTURE NOTE -- documented backwards edge (predictor -> scheduler):
+    The cluster needs 3 scheduler-resident names (_eprint,
+    _fetch_raw_schedule, _ensure_no_odds_predictor), so predictor.py
+    (low-level prediction) imports scheduler.py (high-level orchestration).
+    This is an inversion of the natural layering, BUT:
+      - It is CYCLE-FREE (verified: no satellite module, incl. scheduler,
+        references the 4 predictor functions).
+      - The 3 names ended up in scheduler.py only because scheduler was
+        the first/largest mover and absorbed them (PRs #277/#281/#284).
+      - Under move-only there is no cleaner path today.
+    Suggested future cleanup (would invert the edge back):
+      - relocate _eprint to a low-level logging module,
+      - relocate _fetch_raw_schedule to a data-fetch module,
+      - relocate _ensure_no_odds_predictor into predictor.py itself.
+
+Step 3 -- Single commit (no state items in the closure -- the relevant
+state dicts already moved in PR #284).  Extracted in source/dependency
+order (helpers before the _prefetch orchestrator).
+
+predictor.py header:
+    from utils import *      # _no_odds_predictions_cache_key
+    from scheduler import *  # _eprint, _fetch_raw_schedule,
+                             #   _ensure_no_odds_predictor
+    __all__ = [4 names]      # NO _logger (uses scheduler's _eprint)
+
+Direction (cycle-free):
+    state/utils/serializer -> scheduler -> predictor -> app
+    predictor.py NEVER imports app.py.
+
+app.py change: 8,703 -> 8,522 lines  (-181).
+    185 lines removed; 4-line `from predictor import *` block added after
+    `from parlay import *`.
+
+Verification:
+    ✓ py_compile clean on predictor.py and app.py.
+    ✓ `from predictor import *` exposes all 4 names; all callable.
+    ✓ _eprint / _fetch_raw_schedule / _ensure_no_odds_predictor /
+      _no_odds_predictions_cache_key all reachable inside predictor.
+    ✓ AST audit: zero dangling module-level defs.
+    ✓ 5 bare-name refs in app.py resolve via star-import.
+    ✓ All SEVEN star-imports (state/utils/scheduler/serializer/ai_prompts/
+      parlay/predictor) coexist in one process.
+    ✓ `import app` reaches the Flask check (sandbox fatal as expected).
+
+Cumulative across PRs #276..#289:
+    app/app.py:        13,004 -> 8,522 lines  (-4,482, -34.5%)
+    app/state.py:      492 lines
+    app/utils.py:      351 lines
+    app/scheduler.py:  2,599 lines
+    app/serializer.py: 719 lines
+    app/ai_prompts.py: 611 lines
+    app/parlay.py:     260 lines
+    app/predictor.py:  235 lines  (NEW)
+    159 module-level definitions extracted from the original 13K monolith.
+
+Remaining large non-Flask cluster from the Phase-E audit (future PR):
+    boot_startup         ~613 lines, 7 fn  -> app/boot.py (boot-ordering risk)
+    The 2 Flask test_client jobs (_run_auto_analysis_job,
+        _run_analysis_worker) remain the architectural blocker.
