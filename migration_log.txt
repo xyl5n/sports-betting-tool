@@ -2058,3 +2058,40 @@ Three-gate preflight (run before editing) — ALL PASS:
 
 Explicitly NOT changed: _game_bet_row, any other function, prop storage/settlement
 (src/props_picks_tracker.py), any ledger file, any route. py_compile clean.
+
+
+Model / My Bets update synchronization
+=======================================
+Branch: claude/ecstatic-fermi-3HaLD
+Date: 2026-05-29
+Scope: pages/mybets.py ONLY — mybets_page() page body only.
+
+Problem: the Model page (pages/model.py) wraps its bankroll/records/picks/
+  classifier sections in a module-level @ui.refreshable and drives it with
+  ui.timer(60.0, _tick), so the background 30-min auto-settlement job's
+  freshly-written results + updated bankroll appear within ~1 minute with no
+  manual reload.  The My Bets page had NO top-level auto-refresh: its
+  _personal_bankroll (settlement changes bankroll) and _unified_bets (open
+  bets settle -> move to SETTLED with result/P&L) rendered exactly once at
+  page load.  Result: after settlement the Model page updated but My Bets
+  stayed stale until a manual reload — the two pages fell out of sync.
+
+Fix: mirror the Model page pattern on My Bets.  Wrapped _personal_bankroll +
+  _unified_bets in a page-local @ui.refreshable (_live_sections) and added
+  ui.timer(60.0, _tick) calling _live_sections.refresh() — the identical
+  60s cadence (well under the 30-min settlement cron) the Model page uses.
+  Bankroll, AT RISK, TRACKED BETS and SETTLED now stay in sync with the
+  Model page as bets settle, without a reload.
+
+Nested @ui.refreshable + .refresh() matches this file's existing convention
+  (render() in _recommendations_section, card() in _game_bet_row /
+  _prop_bet_row, body() in _open_add_bet all do the same).
+
+Explicitly NOT changed:
+  - _recommendations_section: left OUTSIDE the auto-refresh wrapper.  It
+    already self-refreshes when a pick is tracked (render.refresh via
+    on_tracked) and owns its own paging state ({"i": 0}); a periodic refresh
+    would reset the "Show more" page on the user mid-browse.
+  - _add_bet_bar (static button) stays outside the wrapper.
+  - No data source, route, ledger, tracker, or settlement logic touched.
+  py_compile clean.
