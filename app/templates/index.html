@@ -106,6 +106,21 @@ body {
 .search-btn:hover { color: var(--text); border-color: var(--border); }
 .search-btn:active { transform: scale(.94); }
 
+/* ── Server-rendered sport toggle (Phase 2, home_v2) ──────────────────── */
+.sport-toggle {
+  display: flex; gap: 4px;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill); padding: 3px;
+}
+.sport-toggle-btn {
+  padding: 5px 14px; border-radius: var(--r-pill);
+  font-size: 12px; font-weight: 700; letter-spacing: .4px;
+  color: var(--text-dim); text-decoration: none;
+  transition: background .15s, color .15s;
+}
+.sport-toggle-btn:hover { color: var(--text); }
+.sport-toggle-btn.active { background: var(--cyan); color: #0d1117; }
+
 /* ── Sport filter pills ─────────────────────────────────────────────── */
 .sport-pills {
   display: flex; gap: 8px;
@@ -1459,6 +1474,12 @@ body {
     <div class="brand">
       <span><span class="brand-text-one">Sports </span><span class="brand-text-two">Analysis</span></span>
     </div>
+    {% if home_v2 %}
+    <nav class="sport-toggle" aria-label="Sport">
+      <a class="sport-toggle-btn {{ 'active' if sport == 'mlb' else '' }}" href="/?sport=mlb">MLB</a>
+      <a class="sport-toggle-btn {{ 'active' if sport == 'wnba' else '' }}" href="/?sport=wnba">WNBA</a>
+    </nav>
+    {% endif %}
     <button class="search-btn" id="search-btn" aria-label="Search" onclick="openSearch()">⌕</button>
   </header>
 
@@ -1526,7 +1547,7 @@ body {
       <!-- Confidence picks -->
       <section class="section" id="section-confidence">
         <div class="section-hdr">
-          <h2>CONFIDENCE PICKS</h2>
+          <h2>{% if home_v2 %}{{ sport|upper }} {% endif %}CONFIDENCE PICKS</h2>
           <span class="count-badge" id="conf-count">{{ confidence_picks|default([])|length }}</span>
         </div>
         <div class="cards-scroll" id="conf-cards">
