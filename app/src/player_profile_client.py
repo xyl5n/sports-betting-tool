@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import json
+import os
 import re
 import sys
 import time
@@ -44,8 +45,36 @@ _STATS_BASE     = "https://statsapi.mlb.com/api/v1"
 _CACHE_DIR      = Path(".cache")
 _HTTP_TIMEOUT   = 12
 _HTTP_SLEEP     = 0.05
-_CURRENT_SEASON = 2025
 _ET             = ZoneInfo("America/New_York")
+
+
+def _derive_current_season() -> int:
+    """Best-effort current MLB season year (issue #297).
+
+    The regular season runs late March through October (playoffs into
+    November).  Before March the latest *completed* season is the prior
+    calendar year, so we use that during the offseason to avoid serving
+    empty game logs.  Operators can pin a season explicitly via the
+    ``MLB_CURRENT_SEASON`` env var — useful right at the season boundary
+    when early-season sample sizes are still thin.
+
+    Because the season is part of every cache key (Supabase
+    ``player_gamelog_{id}_{season}`` and ``.cache/player_{id}_{season}.json``),
+    a year rollover re-keys automatically: stale prior-season entries are
+    simply never read again and the new season is fetched fresh.
+    """
+    override = os.environ.get("MLB_CURRENT_SEASON")
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            print(f"PLAYER-CLIENT: ignoring non-integer "
+                  f"MLB_CURRENT_SEASON={override!r}", file=sys.stderr, flush=True)
+    now = datetime.now(_ET)
+    return now.year if now.month >= 3 else now.year - 1
+
+
+_CURRENT_SEASON = _derive_current_season()
 
 # Module-level in-process caches (reset each Railway deploy — that's fine)
 _player_info_cache: dict[int, dict] = {}   # player_id -> info dict

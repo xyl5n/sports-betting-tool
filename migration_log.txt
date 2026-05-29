@@ -2154,3 +2154,52 @@ Verified: module imports clean; _today_et()/_today_str() return expected
   logic check confirms a 9:05 PM ET game (UTC 2026-05-30T01:05Z) viewed at
   5 PM ET is dropped by the OLD filter but kept by the NEW one. py_compile
   clean.
+
+============================================================================
+BUGFIX — Issue #297: _CURRENT_SEASON dynamic derivation (no longer 2025)
+============================================================================
+
+Branch: claude/kind-goodall-tc6pD
+
+Problem:
+    app/src/player_profile_client.py pinned `_CURRENT_SEASON = 2025`.  Every
+    player profile game log, season-stat, split, and name-search request was
+    therefore a full season stale (showing 2025 data during the 2026 season).
+    The constant is the single source imported by statcast_client, scheduler
+    (_model_pick_stat_lookup same-day fallback), ai_summaries,
+    player_ai_breakdown, player_matchup and pages/player.py — so fixing the
+    definition site propagates everywhere via the existing imports.
+
+Pre-flight checklist (from Issue #297):
+  - Cache-key re-keying:  season is part of every cache key
+      (Supabase "player_gamelog_{id}_{season}" + ".cache/player_{id}_{season}.json"),
+      so a year rollover re-keys automatically — stale 2025 entries are never
+      read again; 2026 is fetched fresh.  No manual cache purge needed.
+  - Model feature alignment:  _CURRENT_SEASON feeds player-facing DISPLAY
+      data only.  Prediction models already key off src.sports_config
+      .CURRENT_SEASON (= 2026) and the fixed training tuples
+      (_SEASONS = 2022..2025 etc.).  Flipping _CURRENT_SEASON to 2026 ALIGNS
+      the display with the model season rather than desyncing it.  The model
+      season constants (MLB_SEASON, _SEASONS, recency_weights.PREV_SEASON)
+      are intentionally left untouched.
+  - Early-season data volume:  derivation returns the prior completed season
+      during Jan–Feb (offseason) to avoid empty logs, and an MLB_CURRENT_SEASON
+      env override lets operators pin a season at the boundary when the new
+      season's samples are still thin.
+  - Deriving the season dynamically:  done — see _derive_current_season().
+
+Changes:
+  app/src/player_profile_client.py
+    + import os
+    + _derive_current_season() helper (env override -> ET month>=3 ? year : year-1)
+    * _CURRENT_SEASON = _derive_current_season()   (was: = 2025)
+    * _ET moved 1 line up so the deriver can read it at module load.
+  app/src/statcast_client.py
+    * except-fallback now derives the year dynamically (was: = 2025).
+
+Verification:
+  ✓ python3 -m py_compile on both modules.
+  ✓ Derivation returns 2026 today (2026-05-29); boundary table:
+      2026-01->2025, 2026-02->2025, 2026-03->2026, 2026-11->2026,
+      2026-12->2026, 2027-01->2026.
+  ✓ MLB_CURRENT_SEASON env override honoured.
