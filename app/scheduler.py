@@ -2201,13 +2201,22 @@ def _rerun_single_game(sport: str, game: dict, reasons: list) -> bool:
         if built is None:
             return False
         feature_vec, meta = built
+        ledger_path = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
         try:
-            mw = Ledger(path="data/ledger.json", starting_bankroll=1000.0).get_model_weights()
+            mw = Ledger(path=ledger_path, starting_bankroll=1000.0).get_model_weights()
         except Exception:                                                 # noqa: BLE001
             mw = None
         prediction = ml_model.predict(feature_vec, weights=mw, game_meta=game)
+
+        # Spread / run-line head.  MLB drives RunLineModel; WNBA drives
+        # WNBASpreadModel.  Both now share the same predict() signature -- the
+        # spread model accepts (and ignores) the ml_*_prob_home kwargs -- so a
+        # single call site covers both sports.  Previously the WNBA branch was
+        # excluded by a `sport == "mlb"` guard because passing those kwargs to
+        # the old WNBASpreadModel.predict() raised TypeError, so WNBA spread
+        # predictions were skipped entirely on the odds-refresh rerun.
         rl_pred = None
-        if sport == "mlb" and rl_model and getattr(rl_model, "is_trained", False):
+        if rl_model and getattr(rl_model, "is_trained", False):
             try:
                 rl_pred = rl_model.predict(
                     feature_vec, game, weights=mw,
@@ -2218,7 +2227,7 @@ def _rerun_single_game(sport: str, game: dict, reasons: list) -> bool:
             except Exception:                                             # noqa: BLE001
                 rl_pred = None
         totals_pred = None
-        if (sport == "mlb" and totals_model and getattr(totals_model, "is_trained", False)
+        if (totals_model and getattr(totals_model, "is_trained", False)
                 and game.get("total_line") is not None):
             try:
                 tv = fb.build_totals_from_meta(meta) if hasattr(fb, "build_totals_from_meta") else None
@@ -2227,15 +2236,27 @@ def _rerun_single_game(sport: str, game: dict, reasons: list) -> bool:
             except Exception:                                             # noqa: BLE001
                 totals_pred = None
 
-        raw = {"game": game, "prediction": prediction, "shap": None,
-               "meta": meta, "rl_pred": rl_pred, "totals_pred": totals_pred}
-        bankroll = float(_analysis_state.get("bankroll") or 250)
+        state = _wnba_analysis_state if sport == "wnba" else _analysis_state
+        bankroll = float(state.get("bankroll") or 250)
         try:
-            pstart = Ledger(path="data/ledger.json", starting_bankroll=1000.0) \
+            pstart = Ledger(path=ledger_path, starting_bankroll=1000.0) \
                 .data.get("personal_starting_bankroll", bankroll)
         except Exception:                                                 # noqa: BLE001
             pstart = bankroll
-        serialized = _serialize(raw, bankroll, sport, pstart)
+
+        # Route through the matching serializer.  WNBA carries its spread head
+        # under "spread_pred" (consumed by _serialize_wnba); MLB carries its
+        # run-line head under "rl_pred" (consumed by _serialize).  Sending WNBA
+        # through the MLB serializer produced MLB-shaped rows and silently
+        # dropped the spread + totals picks on every rerun.
+        if sport == "wnba":
+            raw = {"game": game, "prediction": prediction, "meta": meta,
+                   "spread_pred": rl_pred, "totals_pred": totals_pred}
+            serialized = _serialize_wnba(raw, bankroll, pstart)
+        else:
+            raw = {"game": game, "prediction": prediction, "shap": None,
+                   "meta": meta, "rl_pred": rl_pred, "totals_pred": totals_pred}
+            serialized = _serialize(raw, bankroll, sport, pstart)
         if not serialized.get("game_id"):
             serialized["game_id"] = gid
 

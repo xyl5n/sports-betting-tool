@@ -274,6 +274,9 @@ class WNBASpreadModel:
         feature_vec: np.ndarray,
         game: dict,
         weights: Optional[dict] = None,
+        ml_prob_home:    Optional[float] = None,
+        ml_lr_prob_home: Optional[float] = None,
+        ml_nn_prob_home: Optional[float] = None,
     ) -> Optional[dict]:
         """
         Return a spread prediction dict, or None if the model is not trained.
@@ -281,6 +284,18 @@ class WNBASpreadModel:
         *feature_vec* must be the 15-feature WNBA moneyline/spread vector.
         *game* should contain run_line_point (or spread), run_line_home_odds,
         run_line_away_odds.
+
+        ml_prob_home / ml_lr_prob_home / ml_nn_prob_home are accepted only for
+        call-site parity with RunLineModel.predict() so a single unified call
+        site can drive the spread/run-line "RL slot" for both sports.  They are
+        intentionally ignored here: unlike the MLB run-line model (a
+        *conditional* hurdle P(cover | win) that must be multiplied by the
+        moneyline P(home wins) to recover the joint probability), this WNBA
+        model predicts the point margin directly, so there is no conditional
+        probability to anchor to the moneyline head.  Without this parameter
+        parity the unified caller in scheduler._rerun_single_game raised
+        TypeError, which had forced WNBA spread predictions to be skipped
+        entirely on the 15-minute odds-refresh rerun.
         """
         if not self.is_trained:
             return None
