@@ -1484,6 +1484,7 @@ body {
   </header>
 
   <!-- ─── Sport filter pills ──────────────────────────────────────────── -->
+  {% if not home_v2 %}
   <nav class="sport-pills" id="sport-pills">
     <button class="pill active" data-sport="all"  onclick="setSport('all')">ALL</button>
     <button class="pill"        data-sport="mlb"  onclick="setSport('mlb')">MLB</button>
@@ -1492,6 +1493,7 @@ body {
     <button class="pill disabled" data-sport="nhl"  title="Coming soon">NHL</button>
     <button class="pill disabled" data-sport="nfl"  title="Coming soon">NFL</button>
   </nav>
+  {% endif %}
 
   <div class="content">
 
