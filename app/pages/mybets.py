@@ -34,11 +34,31 @@ def register(backend) -> None:
                 f"gap: {t.SPACE_LG}; padding: {t.SPACE_LG}; min-width: 0;"
             ):
                 _add_bet_bar(backend)
-                _personal_bankroll(backend)
-                # User's own bets first (active, then settled — handled inside
-                # _unified_bets), with recommended/suggested bets moved to the
-                # bottom of the page below them.
-                _unified_bets(backend)
+
+                # Auto-refresh the bankroll + tracked/settled bets on a fixed
+                # 60-second cadence so the background auto-settlement job's
+                # freshly-written results and the updated personal bankroll
+                # land here without a manual reload.  This mirrors the Model
+                # page (pages/model.py), which polls its own refreshable on the
+                # same cadence -- keeping the two pages in sync as bets settle.
+                @ui.refreshable
+                def _live_sections() -> None:                              # noqa: WPS430
+                    _personal_bankroll(backend)
+                    # User's own bets first (active, then settled — handled
+                    # inside _unified_bets).
+                    _unified_bets(backend)
+
+                _live_sections()
+
+                def _tick() -> None:                                       # noqa: WPS430
+                    _live_sections.refresh()
+
+                ui.timer(60.0, _tick)
+
+                # Recommended/suggested bets below the user's own bets.  Kept
+                # outside the auto-refresh wrapper: this section already
+                # self-refreshes when a pick is tracked and owns its own paging
+                # state, which a periodic refresh would otherwise reset.
                 _recommendations_section(backend)
         bottom_nav.render(active=t.TAB_MYBETS)
 
