@@ -28,6 +28,9 @@ _threading_for_analyze = threading
 # Cache instance is constructed by src.cache; importing here lets state.py
 # own the singleton without app.py touching it.
 from src.cache import Cache
+# UpsetCalculator instance (_upset_calc) is shared state -- moved here
+# in PR #286.  src.upset is a leaf module (no state/app import).
+from src.upset import UpsetCalculator
 
 # Explicit re-export list: `from state import *` skips underscore-prefixed
 # names by default, but every moved item starts with one underscore (they
@@ -54,6 +57,11 @@ __all__ = [
     "_DAILY_PICKS_FILE",
     "_no_odds_predictor", "_no_odds_predictor_failed",
     "_refresh_cycle_state", "_last_game_state", "_last_prop_state",
+    # PR #286 -- additional shared module-level state
+    "_ARCHIVE_PATH", "_ai_counter_mem", "_upset_calc",
+    "_last_seen_lines", "_last_probables",
+    "_linescore_mem", "_wnba_linescore_mem",
+    "_analysis_progress", "_ai_run_lock", "_ai_run_state",
 ]
 
 # moved from app.py:138
@@ -433,3 +441,52 @@ _last_game_state: dict[str, dict] = {}
 
 # moved from app.py:991
 _last_prop_state: dict[str, dict] = {}
+
+# moved from app.py:276
+_ARCHIVE_PATH             = Path("data/bet_history_archive.json")
+
+# moved from app.py:356
+_ai_counter_mem: dict[str, int] = {}     # in-process fallback when Supabase is off
+
+# moved from app.py:760
+_upset_calc          = UpsetCalculator(cache=_cache)
+
+# moved from app.py:977
+# Last-seen game lines (per Odds-API game id) for movement detection, and last
+# probable starters (per gamePk) for pitching-change detection.  Process-local.
+_last_seen_lines: dict[str, dict] = {}
+_last_probables:  dict[str, str]  = {}
+
+# moved from app.py:1439
+# In-memory short-TTL cache for linescore data (avoids disk I/O on 60-s polling)
+_linescore_mem: dict[str, tuple[float, dict]] = {}   # key → (timestamp, data)
+
+# moved from app.py:1502
+_wnba_linescore_mem: dict[str, tuple[float, dict]] = {}
+
+# moved from app.py:2399
+_analysis_progress: dict[str, dict] = {
+    "mlb":  {
+        "running": False, "step": "", "step_num": 0, "total_steps": 8,
+        "started_at": None, "completed_at": None,
+        "error": None, "n_games": None,
+    },
+    "wnba": {
+        "running": False, "step": "", "step_num": 0, "total_steps": 8,
+        "started_at": None, "completed_at": None,
+        "error": None, "n_games": None,
+    },
+}
+
+# moved from app.py:8795
+# ── On-demand "Run AI Analysis" (admin) ───────────────────────────────────────
+# Generates the Groq game summaries, prop summaries, and player breakdowns
+# that aren't already cached -- the same logic the post-analysis queue runs,
+# but on demand with live progress.  Sequential, 150 ms between Groq calls.
+_ai_run_lock  = threading.Lock()
+_ai_run_state: dict = {
+    "running": False, "phase": "", "done": 0, "total": 0,
+    "games_generated": 0, "props_generated": 0, "breakdowns_generated": 0,
+    "skipped": 0, "failed": 0,
+    "started_at": None, "finished_at": None, "elapsed": None, "summary": None,
+}

@@ -1358,3 +1358,101 @@ Architectural lesson recorded for future cascades:
     - PRs #283/#284 each underestimated cascade size because they only
       reported first-layer STAYS.  PR #285 ran the full closure first
       and landed cleanly with zero scope drift.
+
+============================================================================
+PR #286 — Phase E: state.py additions (10 of 11 candidates)
+============================================================================
+
+Branch: claude/split-state-286
+Base:   origin/main @ b17488b  (post PR #285 merge)
+Source: app/app.py @ 9,494 lines
+
+Pre-flight rule: STRICT move-only.
+
+Step 1 -- Pre-flight reassignment check (AST, scope + global tracking):
+    All 11 candidates: exactly 1 module-scope binding, 0 global-rebinds
+    inside functions.  All 11 PASS the bare-reassignment check.
+
+Step 1b -- RHS dependency / cycle check (added because a clean
+reassignment check is necessary but not sufficient -- the RHS
+expression can still pull an app.py-local name into state.py and
+create a cycle):
+
+    9 of 11 RHS expressions reference only stdlib / state.py names:
+        _ARCHIVE_PATH         Path(...)              -> Path (state.py)
+        _ai_counter_mem       {}                     -> none
+        _last_seen_lines      {}                     -> none
+        _last_probables       {}                     -> none
+        _linescore_mem        {}                     -> none
+        _wnba_linescore_mem   {}                     -> none
+        _analysis_progress    {nested dict literal}  -> none
+        _ai_run_lock          threading.Lock()       -> threading (state.py)
+        _ai_run_state         {dict literal}         -> none
+
+    1 of 11 needs a new import but is cycle-safe:
+        _upset_calc  = UpsetCalculator(cache=_cache)
+            UpsetCalculator  <- from src.upset (LEAF module; verified it
+                                imports neither state, app, scheduler nor
+                                serializer -- no cycle).
+            _cache           <- already in state.py (defined line 112,
+                                before the appended _upset_calc).
+            => state.py gains `from src.upset import UpsetCalculator`.
+            => MOVABLE.
+
+    1 of 11 is BLOCKED (DEFERRED):
+        _debug_thread = threading.Thread(target=_live_debug_loop, ...)
+            _live_debug_loop is an APP.PY FUNCTION.  Moving the Thread
+            declaration to state.py would force state.py to import
+            _live_debug_loop from app.py -> state->app CYCLE.
+            Additionally:
+              - _debug_thread.start() is called at app.py module scope on
+                the very next line (the thread is launched at import time).
+              - _debug_thread has ZERO external readers -- nothing outside
+                app.py references it.
+            Conclusion: _debug_thread is app.py-local boot glue, not shared
+            state.  It stays in app.py.  Would only become movable if
+            _live_debug_loop itself were extracted first (it's in the
+            "live_debug" non-Flask cluster from the Phase-E audit; a future
+            PR could move the loop + thread together).
+
+Step 2 -- Moved 10 items to state.py (the 9 trivially-safe + _upset_calc):
+    _ARCHIVE_PATH         moved from app.py:276
+    _ai_counter_mem       moved from app.py:356
+    _upset_calc           moved from app.py:760   (+ UpsetCalculator import)
+    _last_seen_lines      moved from app.py:977   (shared comment w/ next)
+    _last_probables       moved from app.py:978
+    _linescore_mem        moved from app.py:1439  (shared comment)
+    _wnba_linescore_mem   moved from app.py:1502
+    _analysis_progress    moved from app.py:2399  (12-line dict literal)
+    _ai_run_lock          moved from app.py:8795  (shared comment w/ next)
+    _ai_run_state         moved from app.py:8796  (6-line dict literal)
+
+Step 3 -- state.py __all__ updated with all 10 names.
+
+Deferred (1):
+    _debug_thread  -- app.py-local boot glue, RHS cycle on _live_debug_loop.
+                     Documented above.  Stays in app.py with its .start().
+
+app.py change: 9,494 -> 9,461 lines  (-33).
+state.py change: 435 -> 492 lines (+57: 10 moved blocks + UpsetCalculator
+                 import + __all__ entries + comments).
+
+Verification:
+    ✓ py_compile clean on state.py and app.py.
+    ✓ `from state import *` exposes all 10 moved names.
+    ✓ _debug_thread is NOT in state (correctly deferred).
+    ✓ _upset_calc resolves to a live UpsetCalculator instance after import.
+    ✓ AST audit: zero dangling module-level defs of the 10 moved names;
+      _debug_thread + its .start() remain intact in app.py.
+    ✓ 46 bare-name refs in app.py resolve via star-import.
+    ✓ All four star-imports (state/utils/scheduler/serializer) coexist.
+    ✓ `import app` reaches the Flask check (sandbox fatal as expected).
+
+Cumulative across PRs #276 + #277 + #278a + #279 + #280 + #281 + #282
+                  + #283 + #284 + #285 + #286:
+    app/app.py:       13,004 -> 9,461 lines   (-3,543, -27.2%)
+    app/state.py:     492 lines  (+57 this PR)
+    app/utils.py:     351 lines  (unchanged)
+    app/scheduler.py: 2,599 lines  (unchanged)
+    app/serializer.py: 719 lines  (unchanged)
+    141 module-level definitions extracted from the original 13K monolith.
