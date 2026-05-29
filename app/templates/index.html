@@ -3020,13 +3020,7 @@ async function init() {
   // visible before any data loads.
   paintDateLabels();
 
-  // Restore last sport
-  _sport = Filters.get('sport', _sport);
-  document.querySelectorAll('.pill').forEach(p => {
-    p.classList.toggle('active', p.dataset.sport === _sport);
-  });
-
-  // Restore last-run timestamp
+  // Restore last-run timestamp badge (reads localStorage only — no network).
   try {
     const raw = localStorage.getItem(LS_LAST_RUN);
     if (raw) {
@@ -3039,30 +3033,15 @@ async function init() {
     }
   } catch (_) {}
 
-  // Hydrate both sports from their /api/init endpoints in parallel
-  try {
-    const [mlbInit, wnbaInit] = await Promise.all([
-      fetch('/api/init').then(r => r.json()).catch(() => ({})),
-      fetch('/api/wnba/init').then(r => r.json()).catch(() => ({})),
-    ]);
-    if (mlbInit.has_predictions && mlbInit.results)  _mlb  = mlbInit.results;
-    if (wnbaInit.has_predictions && wnbaInit.results) _wnba = wnbaInit.results;
-    if (mlbInit.analyzed_at) {
-      const d = new Date(mlbInit.analyzed_at);
-      if (!_lastRun || d > _lastRun) setLastRun(d);
-    } else if (wnbaInit.analyzed_at) {
-      const d = new Date(wnbaInit.analyzed_at);
-      if (!_lastRun || d > _lastRun) setLastRun(d);
-    }
-  } catch (_) {}
-
-  // Bankroll + open-bet keys from both ledgers (so the TRACK buttons
-  // know which picks are already in the ledger before first render).
-  await fetchLedgerSummary();
-  if (_ledger.mlb?.bankroll  != null) _bankroll     = _ledger.mlb.bankroll;
-  if (_ledger.wnba?.bankroll != null) _wnbaBankroll = _ledger.wnba.bankroll;
-
-  renderAll();
+  // Pure server-rendered home page (NiceGUI → HTML migration, Phase 2):
+  // EV Scan, Confidence Picks and News are injected by Jinja in
+  // _render_home_v2() (app.py) from the `ev_picks`, `confidence_picks` and
+  // `news_items` context.  ALL client-side hydration has been removed — the
+  // former /api/init, /api/wnba/init and ledger (fetchLedgerSummary /
+  // /api/ledger) calls are gone, and renderAll() is intentionally NOT called
+  // on load (it would re-fetch /api/ledger via updateMoreSubtext).  The home
+  // sections are static, server-rendered markup, so the page renders entirely
+  // from the server context with no network calls on first paint.
 }
 document.addEventListener('DOMContentLoaded', init);
 
