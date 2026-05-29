@@ -31,6 +31,15 @@ from src.cache import Cache
 # UpsetCalculator instance (_upset_calc) is shared state -- moved here
 # in PR #286.  src.upset is a leaf module (no state/app import).
 from src.upset import UpsetCalculator
+# SPORTS is the per-sport config dict (pure data) consumed by app.py and by
+# scheduler._ensure_no_odds_predictor.  Hotfix for PR #289 / latent since
+# PR #284: _ensure_no_odds_predictor moved to scheduler.py referencing
+# SPORTS, but SPORTS was imported at app.py module scope INSIDE A TRY BLOCK
+# (app.py:254), which PR #284's pre-try-aware symbol table missed -- so
+# scheduler.py never gained SPORTS and raised NameError at runtime on the
+# first no-odds game.  Centralizing it here (src.sports_config is a leaf)
+# makes it reachable in every module via `from state import *`.
+from src.sports_config import SPORTS
 
 # Explicit re-export list: `from state import *` skips underscore-prefixed
 # names by default, but every moved item starts with one underscore (they
@@ -62,6 +71,8 @@ __all__ = [
     "_last_seen_lines", "_last_probables",
     "_linescore_mem", "_wnba_linescore_mem",
     "_analysis_progress", "_ai_run_lock", "_ai_run_state",
+    # PR #289 hotfix -- per-sport config dict (pure data, leaf import)
+    "SPORTS",
 ]
 
 # moved from app.py:138
