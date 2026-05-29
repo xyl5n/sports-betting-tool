@@ -1652,7 +1652,28 @@ let _lastRun   = null;                 // Date when last analyzed
 let _bankroll  = 250;
 
 const LS_LAST_RUN = 'atom_last_run';
-const LS_SPORT    = 'atom_sport';
+
+// ── Persistent filter store ──────────────────────────────────────────
+// A tiny localStorage-backed helper so UI filters survive a page refresh
+// AND a browser restart (unlike the sessionStorage we used before, which
+// was dropped when the tab closed).  Register a new filter by simply
+// reading it with a default and writing it on change — e.g. a future
+// market or confidence-tier filter is one Filters.get / Filters.set away.
+//   Filters.get('sport', 'all')   → stored value or the fallback
+//   Filters.set('sport', 'mlb')   → persist; silently no-ops if storage
+//                                    is unavailable (private mode, quota).
+const FILTER_NS = 'atom_filter_';
+const Filters = {
+  get(key, fallback = null) {
+    try {
+      const raw = localStorage.getItem(FILTER_NS + key);
+      return raw === null ? fallback : JSON.parse(raw);
+    } catch (_) { return fallback; }
+  },
+  set(key, val) {
+    try { localStorage.setItem(FILTER_NS + key, JSON.stringify(val)); } catch (_) {}
+  },
+};
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Helpers
@@ -1844,7 +1865,7 @@ function showTab(name) {
 
 function setSport(s) {
   _sport = s;
-  try { sessionStorage.setItem(LS_SPORT, s); } catch (_) {}
+  Filters.set('sport', s);
   document.querySelectorAll('.pill').forEach(p => {
     p.classList.toggle('active', p.dataset.sport === s);
   });
@@ -2661,10 +2682,7 @@ async function init() {
   paintDateLabels();
 
   // Restore last sport
-  try {
-    const s = sessionStorage.getItem(LS_SPORT);
-    if (s) _sport = s;
-  } catch (_) {}
+  _sport = Filters.get('sport', _sport);
   document.querySelectorAll('.pill').forEach(p => {
     p.classList.toggle('active', p.dataset.sport === _sport);
   });
@@ -2812,14 +2830,16 @@ function closeSubPage() { _swapMoreView('more-list-view'); }
 async function openMyBets() {
   _swapMoreView('more-bets-view');
   await fetchLedgerSummary();
-  // Default the sport selector to whichever pill is active (fall back to MLB).
+  // Restore the last-used selector; fall back to the active sport pill
+  // (then MLB) the first time, before the user has picked anything.
   const sel = $('bets-sport-select');
-  if (sel) sel.value = _sport === 'wnba' ? 'wnba' : 'mlb';
+  if (sel) sel.value = Filters.get('bets_sport', _sport === 'wnba' ? 'wnba' : 'mlb');
   renderMyBets();
 }
 
 function renderMyBets() {
   const sport = $('bets-sport-select')?.value || 'mlb';
+  Filters.set('bets_sport', sport);
   const d     = (sport === 'wnba' ? _ledger.wnba : _ledger.mlb) || {};
   const cur   = d.bankroll ?? (sport === 'wnba' ? _wnbaBankroll : _bankroll);
   const start = d.starting_bankroll ?? cur;
