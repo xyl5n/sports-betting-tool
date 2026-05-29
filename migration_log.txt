@@ -2387,3 +2387,78 @@ Verification:
       filter intact (inline test suite passed).
   ✓ news_feed._extract_image: media:thumbnail / enclosure / no-image cases
       (inline test suite passed).
+
+
+================================================================================
+PR #304 — Props page migration to Flask + Tailwind
+                (branch: claude/props-flask-tailwind-migration-OLlJM)
+================================================================================
+
+Goal: replace the NiceGUI props page with a Flask + Tailwind template in the
+PrizePicks card style.  Rendering layer ONLY — no model code, Supabase query,
+or scoring logic changed.  The new page reads the SAME scored-props cache the
+NiceGUI page consumed (src.props_scored_cache.load_scored_props).
+
+Deliberately-deferred items (MLB_SEASON, _supabase_cache_set_sync,
+_run_auto_analysis_job / _run_analysis_worker, _debug_thread) were NOT touched.
+
+Change 1 — New Flask route + view-model
+  app/app.py
+    + @app.route("/props") -> props_page(): reads load_scored_props(), flattens
+      each pick into a small JSON-serialisable view-model via _props_view_model,
+      passes props + distinct stat_labels to templates/props.html.  All filtering
+      / sorting happens client-side, so the route is a pure read + render.
+    + Helpers (all pure, JSON-safe):
+        _PROPS_MARKET_LABELS / _props_market_label  (mirrors pages/props.py
+            _short_market so both pages label markets identically)
+        _props_headshot_url   (MLB Stats API d_people:generic headshot URL)
+        _props_window_hit_rate(summary, window)  (last_10 / last_20 hit rate)
+        _props_game_time      (ISO UTC commence_time -> short ET clock label)
+        _props_view_model     (one pick -> flat card dict)
+    * Note: the cached `summary` carries L5/L10/L20 hit-WINDOW counts but only a
+      season AVERAGE (no season hit count), so the card's "Season" stat surfaces
+      the L20 rolling window as an honest best-effort proxy (documented inline).
+
+Change 2 — Tailwind template (PrizePicks style)
+  app/templates/props.html  (new)
+    + Tailwind via CDN (no build step) + Inter (Google Fonts).  OLED theme tokens
+      (bg #000, card #1a1a1a, border #2a2a2a, accent #7C3AED) wired into
+      tailwind.config so utilities use the palette.
+    + Sticky top nav + sticky filter bar (sport pills row 1, stat-type pills row
+      2 with horizontal scroll, sort dropdown right).  Card grid: 1 col mobile ->
+      2 tablet -> 3-4 desktop.  Server data handed to the client as JSON in a
+      <script type="application/json"> tag (no inline logic).
+
+Change 3 — Client-side interactivity (vanilla JS, no jQuery)
+  app/static/js/props.js  (new)
+    + Reads #props-data JSON once, then renders/filters/sorts entirely in-place
+      (no page reload).  Sport + stat-type pill filters, sort (Confidence ↓ /
+      Edge ↓ / Game Time ↑), per-card Over/Under toggle (state preserved across
+      re-renders), confidence bar colored by threshold (green >=70, yellow 50-69,
+      gray <50), cards <50% confidence rendered at 60% opacity, headshot with
+      emoji fallback via <img onerror>.  HTML-escapes all interpolated data.
+
+Change 4 — Legacy page + runtime wiring
+  app/pages/props.py
+    * NiceGUI page moved from @ui.page("/props") to @ui.page("/props-legacy")
+      so nothing breaks during the transition (acceptance criterion).
+  app/ui_app.py
+    + NiceGUI (FastAPI/uvicorn) owns the HTTP server; the Flask app is imported
+      as a module.  Added two thin FastAPI passthroughs onto nicegui.app — GET
+      /props and GET /static/{path} — backed by an in-process Flask test_client,
+      so the Tailwind template + /static assets are reachable at runtime.
+
+Verification:
+  ✓ pyflakes: ui_app.py clean; app.py introduced ZERO new findings vs HEAD
+      (only the pre-existing star-import noise remains); pages/props.py edit
+      added no new warnings (the 4 pre-existing f-string warnings are unrelated,
+      far from the one-line route rename).
+  ✓ _props_view_model inline test: stat label, confidence_pct, edge_pct,
+      l10/season hit-rate, headshot URL, ET game_time, and empty-input
+      defaults all correct (inline suite passed).
+  ✓ templates/props.html rendered via a standalone Flask app with sample data:
+      Tailwind CDN + Inter + props-data JSON + /static/js/props.js all present;
+      embedded JSON round-trips.
+  ✓ props.js: node --check clean; headless DOM-stub suite passed — confidence
+      sort, sport filter, edge sort, dimmed <50% cards, threshold colors, and
+      Over/Under toggle re-render all verified.

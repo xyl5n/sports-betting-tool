@@ -828,6 +828,169 @@ def index():
     return render_template("index.html")
 
 
+# ── Player-props page (Flask + Tailwind, PR #304) ───────────────────────────
+# Replaces the NiceGUI props page (now at /props-legacy) with a static
+# Tailwind template.  Pure rendering layer: it reads the SAME scored-props
+# cache the NiceGUI page used (src.props_scored_cache.load_scored_props) and
+# flattens each pick into a small, JSON-serialisable view-model the template
+# + static/js/props.js can filter entirely client-side.  No model code,
+# Supabase query, or scoring logic changes here.
+
+# Market-key -> short display label.  Mirrors pages/props.py `_short_market`
+# so the two pages stay visually consistent during the migration.
+_PROPS_MARKET_LABELS = {
+    "pitcher_strikeouts":   "Strikeouts",
+    "pitcher_outs":         "Outs Recorded",
+    "pitcher_hits_allowed": "Hits Allowed",
+    "pitcher_walks":        "Walks Allowed",
+    "pitcher_earned_runs":  "Earned Runs",
+    "pitcher_record_a_win": "Win",
+    "batter_hits":          "Hits",
+    "batter_total_bases":   "Total Bases",
+    "batter_home_runs":     "Home Runs",
+    "batter_rbis":          "RBIs",
+    "batter_runs_scored":   "Runs",
+    "batter_walks":         "Walks",
+    "batter_strikeouts":    "Strikeouts",
+    "batter_stolen_bases":  "Stolen Bases",
+}
+
+
+def _props_market_label(market):
+    """Human-readable label for a market key (falls back to Title Case)."""
+    if not market:
+        return ""
+    return _PROPS_MARKET_LABELS.get(market, str(market).replace("_", " ").title())
+
+
+def _props_headshot_url(player_id):
+    """MLB Stats API headshot URL.  The d_people:generic transform yields a
+    generic silhouette for unknown/invalid ids, so this is always safe to
+    emit; the template still keeps an emoji fallback via <img onerror>."""
+    if not player_id:
+        return ""
+    return (
+        "https://img.mlbstatic.com/mlb-photos/image/upload/"
+        "d_people:generic:headshot:67:current.png/w_213,q_auto:best/"
+        "v1/people/{}/headshot/67/current".format(player_id)
+    )
+
+
+def _props_window_hit_rate(summary, window):
+    """Hit rate (0..1) for a summary window like 'last_10' / 'last_20', or
+    None when there are no games recorded for that window."""
+    if not isinstance(summary, dict):
+        return None
+    hits = summary.get("{}_hits".format(window))
+    games = summary.get("{}_games".format(window))
+    try:
+        hits = float(hits or 0)
+        games = float(games or 0)
+    except (TypeError, ValueError):
+        return None
+    if games <= 0:
+        return None
+    return hits / games
+
+
+def _props_game_time(commence_time):
+    """Format an ISO-8601 UTC commence_time as a short ET clock label
+    ('7:05 PM'), or '' when missing/unparseable.  Display-only."""
+    if not commence_time:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        raw = str(commence_time).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(ZoneInfo("America/New_York"))
+        return dt.strftime("%-I:%M %p")
+    except Exception:                                                     # noqa: BLE001
+        return ""
+
+
+def _props_view_model(pick):
+    """Flatten one scored-props pick into the flat dict the Tailwind card +
+    client-side filters consume.  Every value is JSON-serialisable."""
+    summary = pick.get("summary") if isinstance(pick, dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+
+    try:
+        confidence = float(pick.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    try:
+        edge = float(pick.get("edge") or 0.0)
+    except (TypeError, ValueError):
+        edge = 0.0
+
+    l10 = _props_window_hit_rate(summary, "last_10")
+    # The scored summary carries hit-window counts for L5/L10/L20 but only a
+    # season *average* (not a season hit count), so we surface the longest
+    # available rolling window (L20) as the "season" hit-rate proxy.  Honest
+    # best-effort given the cached shape; labelled "Season" in the card.
+    season = _props_window_hit_rate(summary, "last_20")
+
+    side = (pick.get("recommendation") or pick.get("side") or "Over")
+    side = str(side).title()
+
+    return {
+        "sport":          str(pick.get("sport") or "MLB").upper(),
+        "player":         pick.get("player") or "",
+        "player_id":      pick.get("player_id"),
+        "headshot":       _props_headshot_url(pick.get("player_id")),
+        "position":       (pick.get("bucket") or "").title(),
+        "team":           pick.get("team") or "",
+        "matchup":        pick.get("team") or "",
+        "market":         pick.get("market") or "",
+        "stat_label":     _props_market_label(pick.get("market")),
+        "line":           pick.get("line"),
+        "side":           side,
+        "confidence":     round(confidence, 4),
+        "confidence_pct": round(confidence * 100, 1),
+        "edge":           round(edge, 4),
+        "edge_pct":       round(edge * 100, 1),
+        "l10_hit_rate":   None if l10 is None else round(l10 * 100, 1),
+        "season_hit_rate": None if season is None else round(season * 100, 1),
+        "model":          pick.get("source") or "model",
+        "game_time":      _props_game_time(pick.get("commence_time")),
+        "commence_time":  pick.get("commence_time") or "",
+    }
+
+
+@app.route("/props")
+def props_page():
+    """Serve the new Flask + Tailwind player-props page.  Reads the scored
+    props cache and passes a flat view-model list to templates/props.html as
+    JSON; all filtering/sorting happens client-side in static/js/props.js."""
+    try:
+        from src.props_scored_cache import load_scored_props
+        cache = load_scored_props() or {}
+    except Exception as exc:                                              # noqa: BLE001
+        print("PROPS PAGE: load_scored_props failed: {}".format(exc),
+              flush=True, file=sys.stderr)
+        cache = {}
+
+    picks = cache.get("picks") or []
+    props = [_props_view_model(p) for p in picks if isinstance(p, dict)]
+
+    # Distinct stat-type labels present in today's slate, for the filter pills.
+    seen = []
+    for p in props:
+        if p["stat_label"] and p["stat_label"] not in seen:
+            seen.append(p["stat_label"])
+
+    return render_template(
+        "props.html",
+        props=props,
+        stat_labels=seen,
+        generated_at=cache.get("generated_at"),
+        prop_date=cache.get("date"),
+    )
+
+
 
 
 @app.route("/api/mlb/schedule", methods=["GET"])
