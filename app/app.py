@@ -841,21 +841,12 @@ def health():
 
 
 # ── Home page ("/" + "/home-v2") — server-rendered (NiceGUI → HTML migration) ─
-# The home page logic lives in routes/home_v2.py.  We register it here, passing
-# the backend helpers it needs (snapshot readers, the home_stats + news_feed
-# modules, and the Ledger class) so that module never imports app.py.  Phase 3b
-# added the four model-record stat chips, the bottom Model Performance row, and
-# per-card Track buttons / settlement badges / matchup navigation.
+# The home page logic lives in routes/home_v2.py.  The route is wired up at the
+# BOTTOM of this file (see _home_v2_routes.register(...) at module end), once the
+# snapshot helpers it needs (_read_daily_snapshot / _snapshot_is_today, defined
+# late in this file) actually exist.  Importing the module here is safe — it runs
+# no code at import — but the register() CALL must run after those defs.
 from routes import home_v2 as _home_v2_routes  # noqa: E402
-
-_home_v2_routes.register(
-    app,
-    read_daily_snapshot=_read_daily_snapshot,
-    snapshot_is_today=_snapshot_is_today,
-    home_stats=_home_stats,
-    news_feed=news_feed,
-    Ledger=Ledger,
-)
 
 
 # ── Player-props page (Flask + Tailwind, PR #304) ───────────────────────────

@@ -1647,6 +1647,19 @@ body {
               </div>
             </div>
             <p class="ev-blurb">{{ p.matchup }}</p>
+            <footer class="ev-card-ftr">
+              {% if p.settled %}
+                {% if p.result == 'win' %}
+                <span class="settle-badge win">WIN</span>
+                <span class="settle-pnl pos">+${{ '%.2f'|format(p.pnl) }}</span>
+                {% else %}
+                <span class="settle-badge loss">LOST</span>
+                <span class="settle-pnl neg">-${{ '%.2f'|format(p.stake) }}</span>
+                {% endif %}
+              {% elif p.game_id %}
+                <button class="track-btn" onclick="event.stopPropagation(); trackPick('{{ p.game_id }}', '{{ p.bet_type }}', '{{ p.sport }}', this)">TRACK</button>
+              {% endif %}
+            </footer>
           </article>
           {% else %}
           <div class="empty-state">No confidence picks yet.</div>
@@ -1711,6 +1724,25 @@ body {
         </div>
         <div class="slate-list" id="slate-cards"></div>
       </section>
+
+      {% if home_v2 and model_perf %}
+      <!-- Model Performance row (server-rendered, bottom of home) -->
+      <section class="section" id="section-model-perf">
+        <div class="section-hdr">
+          <h2>MODEL PERFORMANCE</h2>
+        </div>
+        <div class="model-perf-row">
+          <div class="model-perf-cell">
+            <span class="model-perf-val {{ model_perf.tone }}">{{ model_perf.pct_str if model_perf.settled else '—' }}</span>
+            <span class="model-perf-lbl">WIN %</span>
+          </div>
+          <div class="model-perf-cell">
+            <span class="model-perf-val">{{ model_perf.record }}</span>
+            <span class="model-perf-lbl">RECORD</span>
+          </div>
+        </div>
+      </section>
+      {% endif %}
 
     </section>
 
