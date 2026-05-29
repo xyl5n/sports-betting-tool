@@ -842,30 +842,46 @@ def health():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Phase 2: "/" now serves the server-rendered home page (same context as
+    # /home-v2) instead of an empty, client-JS-driven shell.
+    return _render_home_v2(_home_v2_sport_arg())
 
 
-# ── /home-v2 — server-rendered home page (NiceGUI → HTML migration, Phase 1) ──
-# Parallel route that renders the SAME index.html template but with the EV
-# Scan / Confidence / News data injected server-side via Jinja, instead of
-# being fetched client-side.  The legacy NiceGUI home page at "/" (served by
-# ui_app.py) is untouched.  Each wrapper below tolerates missing data /
-# imports and returns [] so the page always renders.
+# ── /home-v2 — server-rendered home page (NiceGUI → HTML migration) ──────────
+# Renders index.html with the EV Scan / Confidence / News data injected
+# server-side via Jinja, instead of being fetched client-side.  Both "/" and
+# "/home-v2" share _render_home_v2() so they stay identical.  Each wrapper
+# below tolerates missing data / imports and returns [] so the page always
+# renders.
 
-def _home_v2_collect_games() -> list:
+_HOME_V2_SPORTS = ("mlb", "wnba")
+
+
+def _home_v2_sport_arg() -> str:
+    """Read + validate the ?sport= query arg, clamped to a known sport
+    ("mlb" default)."""
+    sport = (request.args.get("sport") or "mlb").lower()
+    return sport if sport in _HOME_V2_SPORTS else "mlb"
+
+
+def _home_v2_collect_games(sport: str | None = None) -> list:
     """Gather today's serialized games (the same shape
     home_stats.enumerate_value_picks expects) from the locked daily
-    snapshot, tagging each with _sport.  Returns [] on any failure."""
+    snapshot, tagging each with _sport.  When `sport` is given ("mlb" /
+    "wnba") only that sport's games are returned; otherwise both.
+    Returns [] on any failure."""
     games: list = []
     try:
         snap = _read_daily_snapshot()
         if not _snapshot_is_today(snap):
             return []
-        for sport in ("mlb", "wnba"):
-            block = snap.get(sport) or {}
+        for sp in _HOME_V2_SPORTS:
+            if sport and sp != sport:
+                continue
+            block = snap.get(sp) or {}
             for g in (block.get("results") or []):
                 row = dict(g)
-                row.setdefault("_sport", sport)
+                row.setdefault("_sport", sp)
                 games.append(row)
     except Exception as exc:                                              # noqa: BLE001
         logging.warning("Suppressed exception in %s: %s", __name__, exc)
@@ -929,11 +945,10 @@ def _home_v2_news(sport: str = "mlb", *, max_items: int = 10) -> list:
         return []
 
 
-@app.route("/home-v2")
-def home_v2():
-    """Server-rendered home page (parallel to the NiceGUI "/" home)."""
-    sport = (request.args.get("sport") or "mlb").lower()
-    games = _home_v2_collect_games()
+def _render_home_v2(sport: str):
+    """Render index.html with the full server-side home context for `sport`.
+    Shared by "/" and "/home-v2" so both pages are identical."""
+    games = _home_v2_collect_games(sport)
     return render_template(
         "index.html",
         home_v2=True,
@@ -942,6 +957,12 @@ def home_v2():
         confidence_picks=_home_v2_confidence_picks(games),
         news_items=_home_v2_news(sport),
     )
+
+
+@app.route("/home-v2")
+def home_v2():
+    """Server-rendered home page (alias of "/")."""
+    return _render_home_v2(_home_v2_sport_arg())
 
 
 # ── Player-props page (Flask + Tailwind, PR #304) ───────────────────────────
