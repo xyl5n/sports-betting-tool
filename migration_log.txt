@@ -1103,3 +1103,137 @@ the original "single function" commit description.
 
 PR #283 ships with Commit 1 only.
 
+
+============================================================================
+PR #284 — _rerun_single_game full cascade
+============================================================================
+
+Branch: claude/split-scheduler-284
+Base:   origin/main @ 5ae2876  (post PR #283 merge)
+Source: app/app.py @ 10,165 lines
+
+Pre-flight rule: STRICT move-only.
+
+This PR executes the cascade plan deferred from PR #283 (see deferral
+note at the end of the PR #283 section above).
+
+Pre-flight reassignment check (AST):
+    Move set:                                       8 names
+    Original FunctionDef / AnnAssign sites:         8 (all expected)
+    Post-initial rebinds:                            0
+    Verdict: SAFE under `from <mod> import *`.
+
+Commit 1 (9a3aca6)  state.py: 2 no-odds-predictor state dicts
+----------------------------------------------------------------------------
+    _no_odds_predictor          moved from app.py:1737  (1 line, AnnAssign)
+    _no_odds_predictor_failed   moved from app.py:1739  (1 line, AnnAssign)
+
+Both referenced by 3 app.py functions:
+    _ensure_no_odds_predictor   (moves in commit 2)
+    _boot_predictions_warmup    (stays in app.py)
+    _run                        (route helper, stays in app.py)
+
+The two staying callers reach the same dict via star-import, so
+mutations land on the shared object.
+
+app.py: 10,165 -> 10,153 lines  (-12).
+
+Commit 2 (this commit)  scheduler.py: 6 functions
+----------------------------------------------------------------------------
+
+Names moved (sorted by original line):
+    _supabase_cache_set         moved from app.py:317   ( 20 lines)
+    _write_daily_snapshot       moved from app.py:699   ( 57 lines)
+    _ensure_no_odds_predictor   moved from app.py:1742  (120 lines)
+    _update_result_in_state     moved from app.py:9045  ( 10 lines)
+    _update_snapshot_game       moved from app.py:9057  ( 17 lines)
+    _rerun_single_game          moved from app.py:9076  ( 73 lines)
+
+scheduler.py header:
+    NONE -- all imports needed (logging, sys, traceback, json, datetime
+            +timedelta+timezone, _urlreq, parallel _logger ref, plus the
+            existing `from state import *` / `from utils import *` /
+            `from serializer import *`) were already in place.
+    __all__ expanded with the 6 new exported names.
+
+External callers in app.py (resolve via star-import):
+    _supabase_cache_set         4 callers stay in app.py:
+                                  _write_analysis_timestamp,
+                                  _clear_snapshot_sport,
+                                  _save_wnba_analysis_cache,
+                                  _save_analysis_cache.
+    _write_daily_snapshot       2 callers stay in app.py:
+                                  analyze (Flask route),
+                                  analyze_wnba (Flask route).
+    _ensure_no_odds_predictor   1 caller stays:
+                                  _predict_no_odds_game.
+    _rerun_single_game          1 caller stays:
+                                  _run_consolidated_refresh_cycle (which
+                                  this PR was meant to fully unblock,
+                                  but see note below).
+
+Direction (no cycles):
+    scheduler.py -> state.py / utils.py / serializer.py / src.*
+    app.py       -> scheduler.py / state.py / utils.py / serializer.py
+    scheduler.py NEVER imports app.py.
+
+app.py change: 10,153 -> 9,856 lines  (-297).
+Total this PR:  10,165 -> 9,856 lines  (-309).
+
+Verification:
+    ✓ py_compile clean on state.py, scheduler.py, app.py.
+    ✓ `from scheduler import *` exposes 42 names total via __all__.
+    ✓ `from state import *` exposes the 2 new dicts.
+    ✓ All 6 moved functions callable from importing modules.
+    ✓ AST audit: zero dangling module-level defs of moved names.
+    ✓ 15 bare-name refs in app.py resolve via star-import.
+    ✓ `import app` reaches the Flask check (sandbox fatal as expected).
+
+_run_consolidated_refresh_cycle status (PARTIAL UNBLOCK)
+----------------------------------------------------------------------------
+
+Re-audit after Commit 2 lands:
+    Reachable via star-import (7):
+        _analysis_state, _eprint, _match_result_id, _refresh_cycle_lock,
+        _rerun_single_game (NEW), _run_auto_settlement_job, _wnba_analysis_state
+    STAYS in app.py (4 real blockers + 5 stdlib already in scheduler.py):
+        _detect_game_changes        -- function, not yet moved
+        _detect_prop_changes        -- function, not yet moved
+        _refresh_cycle_state        -- module-level state dict, not yet moved
+        _refresh_schedule_and_scores -- function, not yet moved
+        (datetime, sys, time, timedelta, timezone all already in scheduler.py)
+
+So _rerun_single_game is now fully extracted, but
+_run_consolidated_refresh_cycle is still blocked on 4 additional names.
+PR #285 should cascade those (plus their own helpers, if any) to land
+the last non-Flask job from the #277 deferred list.
+
+The "fully unblocked" assertion in this PR's directive was based on the
+PR #281 dep audit that listed only _rerun_single_game as the chain
+blocker.  That audit treated _detect_*_changes,
+_refresh_schedule_and_scores, and _refresh_cycle_state as separate
+STAYS but the deferral plan didn't carry them forward into PR #284's
+scope.
+
+Cumulative across PRs #276 + #277 + #278a + #279 + #280 + #281 + #282
+                  + #283 + #284:
+    app/app.py:       13,004 -> 9,856 lines   (-3,148, -24.2%)
+    app/state.py:     399 -> 416 lines  (+17)
+    app/utils.py:     351 lines  (unchanged)
+    app/scheduler.py: 1,910 -> 2,231 lines  (+321)
+    app/serializer.py: 719 lines  (unchanged from PR #283)
+    123 module-level definitions extracted from the original 13K-line
+    monolith.
+
+#277 deferred list final status:
+    ✅ APScheduler bootstrap              -- moved in PR #282
+    ✅ _run_overnight_ai_gen              -- moved in PR #279
+    ✅ _run_auto_settlement_job           -- moved in PR #280
+    ✅ _run_job1_final_settlement         -- moved in PR #281
+    ✅ _run_job2_full_clear               -- moved in PR #281
+    ✅ _run_job3_games_prefetch           -- moved in PR #281
+    ⚠️ _run_consolidated_refresh_cycle    -- ~50% unblocked: cascade
+                                              done up to _rerun_single_game.
+                                              4 remaining deps for PR #285.
+    ❌ _run_auto_analysis_job             -- Flask app.test_client() dep,
+                                              architectural decision needed.
