@@ -840,129 +840,22 @@ def health():
     return "OK", 200
 
 
-@app.route("/")
-def index():
-    # Phase 2: "/" now serves the server-rendered home page (same context as
-    # /home-v2) instead of an empty, client-JS-driven shell.
-    return _render_home_v2(_home_v2_sport_arg())
+# ── Home page ("/" + "/home-v2") — server-rendered (NiceGUI → HTML migration) ─
+# The home page logic lives in routes/home_v2.py.  We register it here, passing
+# the backend helpers it needs (snapshot readers, the home_stats + news_feed
+# modules, and the Ledger class) so that module never imports app.py.  Phase 3b
+# added the four model-record stat chips, the bottom Model Performance row, and
+# per-card Track buttons / settlement badges / matchup navigation.
+from routes import home_v2 as _home_v2_routes  # noqa: E402
 
-
-# ── /home-v2 — server-rendered home page (NiceGUI → HTML migration) ──────────
-# Renders index.html with the EV Scan / Confidence / News data injected
-# server-side via Jinja, instead of being fetched client-side.  Both "/" and
-# "/home-v2" share _render_home_v2() so they stay identical.  Each wrapper
-# below tolerates missing data / imports and returns [] so the page always
-# renders.
-
-_HOME_V2_SPORTS = ("mlb", "wnba")
-
-
-def _home_v2_sport_arg() -> str:
-    """Read + validate the ?sport= query arg, clamped to a known sport
-    ("mlb" default)."""
-    sport = (request.args.get("sport") or "mlb").lower()
-    return sport if sport in _HOME_V2_SPORTS else "mlb"
-
-
-def _home_v2_collect_games(sport: str | None = None) -> list:
-    """Gather today's serialized games (the same shape
-    home_stats.enumerate_value_picks expects) from the locked daily
-    snapshot, tagging each with _sport.  When `sport` is given ("mlb" /
-    "wnba") only that sport's games are returned; otherwise both.
-    Returns [] on any failure."""
-    games: list = []
-    try:
-        snap = _read_daily_snapshot()
-        if not _snapshot_is_today(snap):
-            return []
-        for sp in _HOME_V2_SPORTS:
-            if sport and sp != sport:
-                continue
-            block = snap.get(sp) or {}
-            for g in (block.get("results") or []):
-                row = dict(g)
-                row.setdefault("_sport", sp)
-                games.append(row)
-    except Exception as exc:                                              # noqa: BLE001
-        logging.warning("Suppressed exception in %s: %s", __name__, exc)
-    return games
-
-
-def _home_v2_view_pick(r: dict) -> dict:
-    """Flatten one enumerate_value_picks row into a small, template-friendly
-    view-model (pre-formatted percentages, no nested objects)."""
-    edge = float(r.get("edge") or 0)
-    prob = float(r.get("prob") or 0)
-    return {
-        "matchup":        r.get("matchup", ""),
-        "pick":           r.get("pick", ""),
-        "edge_pct":       round(edge * 100, 1),
-        "confidence_pct": round(prob * 100),
-        "odds":           r.get("odds"),
-        "sport":          (r.get("sport") or "mlb").lower(),
-        "game_id":        r.get("game_id"),
-        "bet_type":       r.get("bet_type", "single"),
-    }
-
-
-def _home_v2_ev_picks(games: list, *, min_edge: float = 0.05, limit: int = 15) -> list:
-    """EV-scan view-models: positive-edge picks at/above `min_edge`, sorted
-    by edge descending.  Mirrors the client-side collectValueBets()."""
-    if _home_stats is None:
-        return []
-    try:
-        rows = _home_stats.enumerate_value_picks(games, min_edge=min_edge)
-        rows.sort(key=lambda r: float(r.get("edge") or 0), reverse=True)
-        return [_home_v2_view_pick(r) for r in rows[:limit]]
-    except Exception as exc:                                              # noqa: BLE001
-        logging.warning("Suppressed exception in %s: %s", __name__, exc)
-        return []
-
-
-def _home_v2_confidence_picks(games: list, *, limit: int = 10) -> list:
-    """Confidence view-models: any positive-edge pick, sorted by model
-    probability (confidence) descending."""
-    if _home_stats is None:
-        return []
-    try:
-        rows = _home_stats.enumerate_value_picks(games, min_edge=0.0001)
-        rows.sort(key=lambda r: float(r.get("prob") or 0), reverse=True)
-        return [_home_v2_view_pick(r) for r in rows[:limit]]
-    except Exception as exc:                                              # noqa: BLE001
-        logging.warning("Suppressed exception in %s: %s", __name__, exc)
-        return []
-
-
-def _home_v2_news(sport: str = "mlb", *, max_items: int = 10) -> list:
-    """News headlines for `sport` from the existing ESPN RSS feed helper.
-    Returns [] (graceful empty state) on any error / missing import."""
-    if news_feed is None:
-        return []
-    try:
-        return news_feed.fetch(sport, max_items=max_items)
-    except Exception as exc:                                              # noqa: BLE001
-        logging.warning("Suppressed exception in %s: %s", __name__, exc)
-        return []
-
-
-def _render_home_v2(sport: str):
-    """Render index.html with the full server-side home context for `sport`.
-    Shared by "/" and "/home-v2" so both pages are identical."""
-    games = _home_v2_collect_games(sport)
-    return render_template(
-        "index.html",
-        home_v2=True,
-        sport=sport,
-        ev_picks=_home_v2_ev_picks(games),
-        confidence_picks=_home_v2_confidence_picks(games),
-        news_items=_home_v2_news(sport),
-    )
-
-
-@app.route("/home-v2")
-def home_v2():
-    """Server-rendered home page (alias of "/")."""
-    return _render_home_v2(_home_v2_sport_arg())
+_home_v2_routes.register(
+    app,
+    read_daily_snapshot=_read_daily_snapshot,
+    snapshot_is_today=_snapshot_is_today,
+    home_stats=_home_stats,
+    news_feed=news_feed,
+    Ledger=Ledger,
+)
 
 
 # ── Player-props page (Flask + Tailwind, PR #304) ───────────────────────────
