@@ -1758,8 +1758,7 @@ Remaining large non-Flask cluster from the Phase-E audit (future PR):
 
 ============================================================================
 PR #290 — Phase D: app/boot.py (startup / boot-sequence cluster)
-============================================================================
-
+=====================================================================
 Branch: claude/split-boot-290
 Base:   origin/main @ 93a12ac  (post PR #289 merge)
 Source: app/app.py @ 8,522 lines
@@ -1883,3 +1882,146 @@ only remaining large items in app.py are the 82 Flask routes (~5,000
 lines, by definition the HTTP boundary -- they stay) and the 2
 test_client jobs (_run_auto_analysis_job, _run_analysis_worker) which
 remain the standing architectural blocker.
+PR #289-HOTFIX — SPORTS NameError (latent since PR #284)
+============================================================================
+
+Branch: claude/predictor-289-hotfix
+Base:   origin/main @ 93a12ac  (post PR #289 merge)
+
+Symptom (Railway logs):
+    NO-ODDS PREDICT [MLB/WNBA]: setup failed: name 'SPORTS' is not defined
+
+Root cause:
+    The message is emitted by scheduler.py:2131 inside
+    _ensure_no_odds_predictor (moved to scheduler.py in PR #284).  That
+    function references SPORTS at line 2033 (`cfg = SPORTS.get(sport)`),
+    but scheduler.py never imported SPORTS.  SPORTS is imported in app.py
+    at line 254 via `from src.sports_config import SPORTS` -- INSIDE A
+    TRY BLOCK.  PR #284 predated the try/if/with-aware symbol table (the
+    PR #287 lesson), so its Gate-2 audit (tree.body-only scan) missed the
+    try-nested import and silently treated the SPORTS free-name as a
+    loop-var false positive.  The bug stayed latent because
+    SPORTS.get(sport) only executes at runtime on a real no-odds game --
+    never hit by the import-time `import app` smoke tests -- and the
+    NameError was swallowed by the function's `except Exception` handler.
+
+Fix (per directive Step 3 -- pure data constant -> state.py):
+    SPORTS is a pure data dict (src.sports_config:307, dict[str,SportConfig]).
+    src.sports_config is a verified leaf (imports no state/app/satellite).
+    Added `from src.sports_config import SPORTS` to state.py + "SPORTS" to
+    state.py __all__.  scheduler.py resolves it via its existing
+    `from state import *` (line 40); app.py's 18 SPORTS refs resolve via
+    `from state import *` (line 21).  app.py's existing try-import
+    (line 254) left in place -- harmless redundant re-bind of the same
+    object, preserves the "STARTUP: src.sports_config OK" diagnostic.
+
+Step 4 (other satellites referencing SPORTS): only scheduler.py (the
+    error site); it already does `from state import *`.  Fixed.
+
+Verification:
+    ✓ py_compile clean on state.py.
+    ✓ SPORTS in state __all__; type dict, keys ['mlb','wnba'].
+    ✓ scheduler.SPORTS.get("mlb") works (the exact failing line resolves).
+    ✓ app.py (18 refs) + scheduler.py (the error site) both resolve SPORTS.
+
+state.py: +1 import line, +1 __all__ entry.  No app.py change.
+
+----------------------------------------------------------------------------
+BROADER FINDING (proactive sweep) -- 6 MORE latent NameErrors in scheduler.py
+----------------------------------------------------------------------------
+A repo-wide "unresolved free name" sweep across all satellite modules
+(try/if/with-aware) found SPORTS was NOT isolated.  scheduler.py has 6
+more undefined module-level names, all of the SAME CLASS (referenced by
+functions moved in the pre-try-aware PRs #279/#280/#281/#284/#285, all
+swallowed by `except Exception` handlers, all confirmed undefined via
+runtime `hasattr(scheduler, name) == False`):
+
+    _serialize       in _rerun_single_game        (PR #284)  fix: from serializer import *
+    Path             in _write_daily_snapshot     (PR #284)  fix: from pathlib import Path
+    Ledger           in _void_postponed_mlb_bets  (PR #279)  fix: from src.ledger import Ledger
+    OddsClient       in _run_auto_settlement_job  (PR #280)  fix: from src.odds_client import OddsClient
+                     + _detect_game_changes       (PR #285)
+    GameStore        in _ensure_no_odds_predictor (PR #284)  fix: from src.<mod> import GameStore
+    ensemble_store   in _run_job2_full_clear      (PR #281)  fix: from src import ensemble_store
+
+(ai_prompts.py fmt/key flags were triaged as false positives -- params
+of a nested def _f(key, fmt).)
+
+DECISION: ship the SPORTS hotfix alone (this PR), and address the 6
+scheduler.py undefined names in a dedicated follow-up PR (#291) with full
+per-name import-source + leaf/cycle verification.  Recorded here so the
+follow-up has the complete inventory.
+
+============================================================================
+PR #292 — scheduler.py latent-NameError sweep (closes the PR #291 finding)
+============================================================================
+
+Branch: claude/scheduler-namefix-292
+Base:   origin/main @ 1a1c8c1  (post PR #291 SPORTS-hotfix merge)
+
+Closes the 6-bug finding documented under PR #291.  Import-fixes only --
+no code movement, no rewrites.
+
+Background: a proactive sweep during PR #291 found SPORTS was 1 of 7
+same-class latent NameErrors in scheduler.py.  SPORTS was fixed in #291;
+this PR fixes the remaining 6.  All were bare references in functions
+moved into scheduler.py during the pre-try-aware PRs, never imported
+here, raising NameError at runtime (swallowed by `except Exception`
+handlers -> silent degradation of those scheduler functions).
+
+Step 0 -- per-name source audit:
+  | Name           | Used at (scheduler.py)      | Owner                          | Covered? | Fix
+  | _serialize     | 2221                        | serializer.py __all__          | no       | from serializer import *
+  | Path           | 1976                        | stdlib (pathlib)               | no       | from pathlib import Path
+  | Ledger         | 674,1153,2188,2217          | src.ledger (leaf)              | no       | from src.ledger import Ledger
+  | OddsClient     | 1083,2317                   | src.odds_client (leaf)         | no       | from src.odds_client import OddsClient
+  | GameStore      | 2041                        | src.game_store (leaf)          | no       | from src.game_store import GameStore
+  | ensemble_store | 1800                        | src.ensemble_store (leaf)      | no       | import src.ensemble_store as ensemble_store
+
+  NB: the PR #291 background said scheduler imported serializer -- it did
+  NOT (only state + utils).  That was precisely why _serialize was
+  undefined.  Corrected here.
+
+Step 1 -- cycle check (new edges only):
+  scheduler -> serializer:  serializer.py imports only state/utils/
+    src.kelly (+ inline src.park_factors); it has NO scheduler import
+    (only comment/docstring mentions).  CYCLE-FREE.  Moreover serializer's
+    own docstring (PR #283) already declares "scheduler.py -> serializer.py
+    (one-way down)" -- this edge was anticipated; the fix realizes the
+    intended direction.  NOT an inversion.
+  scheduler -> src.{ledger,odds_client,game_store,ensemble_store}:  all 4
+    verified leaves (no state/app/satellite imports).  CYCLE-FREE.
+  Path: stdlib, no edge.
+
+Step 2 -- two-gate pre-flight:
+  GATE 1 (reassignment): no module-scope binding of any of the 6 names in
+    scheduler.py -> the new imports cannot be shadowed.  PASS.
+    (Pre-existing aliased inline imports `Ledger as _BudgetLedger`,
+    `Path as _Path/_P` are different names and unaffected.)
+  GATE 2 (RHS cycle, try/if/with-aware): covered by the Step-1 leaf +
+    no-cycle verification above.  PASS.
+
+Step 3 -- import lines added to scheduler.py (no code moved):
+    from pathlib import Path
+    from src.ledger import Ledger
+    from src.odds_client import OddsClient
+    from src.game_store import GameStore
+    import src.ensemble_store as ensemble_store
+    from serializer import *
+  +16 lines total (imports + explanatory comments).
+
+Verification:
+  ✓ py_compile clean on scheduler.py.
+  ✓ Runtime: all 6 names now RESOLVED in scheduler's namespace
+    (hasattr(scheduler, name) == True for all six; previously all False).
+  ✓ Re-ran the full try/if/with-aware latent-name sweep on scheduler.py:
+    ZERO remaining unresolved names.
+  ✓ serializer.py confirmed to NOT import scheduler (no cycle).
+  ✓ All satellite modules import cleanly; `import app` clears every
+    satellite import incl. the new scheduler->serializer edge, dying only
+    at the sandbox Flask import.
+
+RESULT: the 7-name latent-NameError class (SPORTS + these 6), introduced
+across PRs #276-#285 by the pre-try-aware audits and surfaced by the
+post-#287 try/if/with-aware sweep, is now FULLY CLOSED.  All satellite
+modules pass the unresolved-name sweep with zero findings.
