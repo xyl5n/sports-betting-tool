@@ -1310,6 +1310,100 @@ body {
   .slate-logo-lg { width: 42px; height: 42px; font-size: 12px; }
   .slate-team-name { font-size: 12px; }
 }
+
+/* ── Upcoming games grid ──────────────────────────────────────────────── */
+.upcoming-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  padding: 4px 0 8px;
+}
+.upcoming-card {
+  background: var(--card-bg, #1a1a2e);
+  border: 1px solid var(--border, #2a2a3e);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.upcoming-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted, #888);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.upcoming-sport-tag {
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.upcoming-matchup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.upcoming-team {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.upcoming-team-name {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.upcoming-team-odds {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent, #3b82f6);
+}
+.upcoming-vs {
+  font-size: 11px;
+  color: var(--muted, #888);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.upcoming-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted, #888);
+  border-top: 1px solid var(--border, #2a2a3e);
+  padding-top: 6px;
+  margin-top: 2px;
+}
+.upcoming-ou {
+  font-weight: 600;
+  color: var(--text, #e0e0e0);
+}
+.upcoming-pick-badge {
+  background: rgba(59,130,246,.15);
+  color: var(--accent, #3b82f6);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+@media (max-width: 480px) {
+  .upcoming-grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -1347,6 +1441,16 @@ body {
         <span class="ai-banner-text">Chat with <strong>AI</strong></span>
         <span class="ai-banner-arrow">→</span>
       </button>
+
+      <!-- Upcoming Games -->
+      <section class="section" id="section-upcoming">
+        <div class="section-hdr">
+          <h2>UPCOMING GAMES</h2>
+          <span class="count-badge" id="upcoming-count">0</span>
+          <span class="date-label" id="upcoming-date">Today</span>
+        </div>
+        <div class="upcoming-grid" id="upcoming-cards"></div>
+      </section>
 
       <!-- Full slate (shown when a specific sport pill is selected) -->
       <section class="section" id="section-slate" style="display:none">
@@ -1839,7 +1943,7 @@ function fmtTodayLabel() {
 }
 function paintDateLabels() {
   const label = fmtTodayLabel();
-  ['ev-date', 'props-date', 'sports-date'].forEach(id => {
+  ['ev-date', 'props-date', 'sports-date', 'upcoming-date'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.textContent = label;
   });
@@ -1895,6 +1999,8 @@ function applyHomeViewForSport() {
   const evEl   = $('section-ev');
   const ppEl   = $('section-props');
   const slEl   = $('section-slate');
+  const upEl   = $('section-upcoming');
+  if (upEl) upEl.style.display = isAll ? '' : 'none';
   if (evEl) evEl.style.display = isAll ? '' : 'none';
   if (ppEl) ppEl.style.display = isAll ? '' : 'none';
   if (slEl) slEl.style.display = isAll ? 'none' : '';
@@ -2091,6 +2197,66 @@ function collectProps() {
   }
   out.sort((a, b) => (b.edge || 0) - (a.edge || 0));
   return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Rendering — Upcoming Games
+// ═══════════════════════════════════════════════════════════════════════
+function renderUpcoming() {
+  const wrap  = $('upcoming-cards');
+  const count = $('upcoming-count');
+  const dateEl = $('upcoming-date');
+  if (!wrap) return;
+
+  // Use all games regardless of sport pill when on ALL view
+  const allGames = [
+    ..._mlb.map(g  => ({ ...g, _sport: 'mlb'  })),
+    ..._wnba.map(g => ({ ...g, _sport: 'wnba' })),
+  ].sort((a, b) => new Date(a.commence_time) - new Date(b.commence_time));
+
+  if (dateEl) dateEl.textContent = fmtTodayLabel();
+  if (count)  count.textContent  = allGames.length;
+
+  if (!allGames.length) {
+    wrap.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+      No games loaded yet. Open <strong>More → Admin</strong> to run analysis.
+    </div>`;
+    return;
+  }
+  wrap.innerHTML = allGames.map(buildUpcomingCard).join('');
+}
+
+function buildUpcomingCard(g) {
+  const sport   = g._sport;
+  const ou      = g.totals?.total_line != null ? `O/U ${g.totals.total_line}` : '';
+  const ouDir   = g.totals?.direction  ? ` <span class="upcoming-ou">${g.totals.direction.toUpperCase()}</span>` : '';
+  const hasPick = g.value_pick && g.pick_team;
+  const pickBadge = hasPick
+    ? `<span class="upcoming-pick-badge">✓ ${shortName(g.pick_team)}</span>`
+    : '';
+  return `<article class="upcoming-card" data-game-id="${g.game_id}">
+    <div class="upcoming-meta">
+      <span class="upcoming-sport-tag">${sport.toUpperCase()}</span>
+      <span>${fmtTimeET(g.commence_time)}</span>
+    </div>
+    <div class="upcoming-matchup">
+      <div class="upcoming-team">
+        ${teamLogoHtml(g.away_team, sport, 36)}
+        <span class="upcoming-team-name">${shortName(g.away_team)}</span>
+        <span class="upcoming-team-odds">${fmtOdds(g.away_odds)}</span>
+      </div>
+      <span class="upcoming-vs">VS</span>
+      <div class="upcoming-team">
+        ${teamLogoHtml(g.home_team, sport, 36)}
+        <span class="upcoming-team-name">${shortName(g.home_team)}</span>
+        <span class="upcoming-team-odds">${fmtOdds(g.home_odds)}</span>
+      </div>
+    </div>
+    <div class="upcoming-footer">
+      <span>${ou}${ouDir}</span>
+      ${pickBadge}
+    </div>
+  </article>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2651,6 +2817,7 @@ async function forceRefresh() {
 
 function renderAll() {
   applyHomeViewForSport();
+  renderUpcoming();
   renderEVScans();
   renderProps();
   renderFullSlate();
