@@ -2273,8 +2273,15 @@ def _refresh_schedule_and_scores() -> dict:
     """Step 1: refresh today's schedule (scores/status, written to Supabase by
     _fetch_raw_schedule) and repopulate the live-score cache.  Pitching-change
     detection now lives in _detect_game_changes (step 2).  Best-effort."""
-    import sys as _sys
     out = {"sports": 0}
+    # live_score.fetch_live(backend, ...) reaches the in-process Flask test
+    # client via ``backend.app.test_client()``, so ``backend`` must be the
+    # app.py module (it exposes module-level ``app = Flask(__name__)``), NOT
+    # the scheduler module -- the scheduler has no ``app`` attribute, so the
+    # old ``_sys.modules.get(__name__)`` raised AttributeError inside
+    # fetch_live and left the live-score cache permanently empty.  Runtime
+    # import is safe: app is fully in sys.modules long before any refresh.
+    import app as _app_module
     for sport in ("mlb", "wnba"):
         try:
             _fetch_raw_schedule(sport, _today_et())
@@ -2283,7 +2290,7 @@ def _refresh_schedule_and_scores() -> dict:
             _eprint(f"CYCLE step1 {sport} schedule error: {exc}")
         try:
             from components import live_score as _ls
-            _ls.fetch_live(_sys.modules.get(__name__), sport)
+            _ls.fetch_live(_app_module, sport)
         except Exception:                                                 # noqa: BLE001
             pass
     return out

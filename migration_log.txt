@@ -2203,3 +2203,44 @@ Verification:
       2026-01->2025, 2026-02->2025, 2026-03->2026, 2026-11->2026,
       2026-12->2026, 2027-01->2026.
   ✓ MLB_CURRENT_SEASON env override honoured.
+
+
+============================================================================
+BUGFIX — live_score.fetch_live: scheduler passed wrong module as `backend`
+============================================================================
+
+Branch: claude/cool-gauss-bZOEz
+
+Problem:
+    components/live_score.fetch_live(backend, sport) reaches the in-process
+    Flask test client via `backend.app.test_client()`, so `backend` must be
+    the app.py module (which exposes module-level `app = Flask(__name__)` at
+    app.py:221).  The page callers in pages/sport.py pass it correctly
+    (ui_app.py binds `import app as backend`).  But the 15-minute refresh
+    cycle's step-1 helper, scheduler._refresh_schedule_and_scores, passed
+    `_sys.modules.get(__name__)` — the SCHEDULER module — which has no `app`
+    attribute.  `backend.app` therefore raised AttributeError, caught by
+    fetch_live's own try/except (live_score.py:94) and printed:
+
+        [live_score] fetch_live(mlb) error:
+            AttributeError: module 'scheduler' has no attribute 'app'
+
+    fetch_live then returned 0 without populating the cache.  Because the
+    scheduled refresh cycle is the only background path that calls
+    fetch_live, the module-level _LIVE cache that live_score.lookup() reads
+    was never refreshed server-side between page loads.
+
+Fix:
+  app/scheduler.py  (_refresh_schedule_and_scores)
+    * Dropped `import sys as _sys` (its only use was the bad call site).
+    + Runtime `import app as _app_module` — the same pattern scheduler.init
+      already uses to break the app<->scheduler import cycle; safe at job
+      time because app is fully in sys.modules long before any refresh fires.
+    * fetch_live now receives `_app_module` instead of the scheduler module,
+      so `backend.app.test_client()` resolves to the real Flask app.
+
+Verification:
+  ✓ python -m ast parse on scheduler.py and components/live_score.py.
+  ✓ Contract audit: all three fetch_live call sites (pages/sport.py x2,
+      scheduler.py x1) now pass the app.py module; ui_app.py confirms
+      `backend` == app module everywhere.
