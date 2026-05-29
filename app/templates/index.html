@@ -1450,6 +1450,8 @@ body {
 </head>
 <body>
 
+{% if home_v2 %}<script>/* /home-v2: data is server-rendered — keep the SSR cards instead of letting the legacy client JS overwrite them. */ window.__HOME_V2_SSR__ = true;</script>{% endif %}
+
 <div class="app" id="app">
 
   <!-- ─── Top nav ─────────────────────────────────────────────────────── -->
@@ -1488,7 +1490,7 @@ body {
       <section class="section" id="section-ev">
         <div class="section-hdr">
           <h2>EV SCANS</h2>
-          <span class="count-badge" id="ev-count">0</span>
+          <span class="count-badge" id="ev-count">{{ ev_picks|default([])|length }}</span>
           <span class="info-icon" title="Expected-value picks — model edge ≥ 5% vs market">ℹ</span>
           <div class="date-nav">
             <button class="date-arrow" aria-label="Previous day" onclick="changeDate(-1)">‹</button>
@@ -1496,18 +1498,60 @@ body {
             <button class="date-arrow" aria-label="Next day" onclick="changeDate(1)">›</button>
           </div>
         </div>
-        <div class="stats-line" id="ev-stats">Run analysis to load today's picks</div>
-        <div class="cards-scroll" id="ev-cards"></div>
+        <div class="stats-line" id="ev-stats">{% if ev_picks|default([]) %}{{ ev_picks|length }} value picks · top edge +{{ ev_picks[0].edge_pct }}%{% else %}Run analysis to load today's picks{% endif %}</div>
+        <div class="cards-scroll" id="ev-cards">
+          {% for p in ev_picks|default([]) %}
+          <article class="ev-card" data-game-id="{{ p.game_id }}">
+            <header class="ev-card-hdr">
+              <span class="ev-sport">{{ p.sport|upper }} · {{ p.bet_type|upper }}</span>
+              <span class="ev-badge">VALUE</span>
+            </header>
+            <h3 class="ev-pick">{{ p.pick }}</h3>
+            <div class="ev-metrics">
+              <div class="ev-metric">
+                <span class="lbl">LIVE EDGE</span>
+                <span class="val edge">+{{ p.edge_pct }}%</span>
+              </div>
+              <div class="ev-metric">
+                <span class="lbl">OFFERED</span>
+                <span class="val">{% if p.odds is not none %}{{ '+' if p.odds > 0 else '' }}{{ p.odds }}{% else %}—{% endif %}</span>
+              </div>
+            </div>
+            <p class="ev-blurb">{{ p.matchup }}</p>
+          </article>
+          {% endfor %}
+        </div>
       </section>
 
       <!-- Confidence picks -->
       <section class="section" id="section-confidence">
         <div class="section-hdr">
           <h2>CONFIDENCE PICKS</h2>
-          <span class="count-badge" id="conf-count">0</span>
+          <span class="count-badge" id="conf-count">{{ confidence_picks|default([])|length }}</span>
         </div>
         <div class="cards-scroll" id="conf-cards">
+          {% for p in confidence_picks|default([]) %}
+          <article class="ev-card" data-game-id="{{ p.game_id }}">
+            <header class="ev-card-hdr">
+              <span class="ev-sport">{{ p.sport|upper }} · {{ p.bet_type|upper }}</span>
+              <span class="ev-badge">{{ p.confidence_pct }}%</span>
+            </header>
+            <h3 class="ev-pick">{{ p.pick }}</h3>
+            <div class="ev-metrics">
+              <div class="ev-metric">
+                <span class="lbl">CONFIDENCE</span>
+                <span class="val edge">{{ p.confidence_pct }}%</span>
+              </div>
+              <div class="ev-metric">
+                <span class="lbl">EDGE</span>
+                <span class="val">+{{ p.edge_pct }}%</span>
+              </div>
+            </div>
+            <p class="ev-blurb">{{ p.matchup }}</p>
+          </article>
+          {% else %}
           <div class="empty-state">No confidence picks yet.</div>
+          {% endfor %}
         </div>
       </section>
 
@@ -1515,10 +1559,18 @@ body {
       <section class="section" id="section-news">
         <div class="section-hdr">
           <h2>NEWS</h2>
-          <span class="count-badge" id="news-count">0</span>
+          <span class="count-badge" id="news-count">{{ news_items|default([])|length }}</span>
         </div>
         <div class="news-grid" id="news-cards">
+          {% for n in news_items|default([]) %}
+          <a class="news-card" href="{{ n.link or '#' }}" target="_blank" rel="noopener">
+            <span class="news-card-sport">{{ sport|default('mlb')|upper }}</span>
+            <span class="news-card-title">{{ n.title|safe }}</span>
+            <span class="news-card-meta">{{ n.source }}{% if n.time_ago %} · {{ n.time_ago }}{% endif %}</span>
+          </a>
+          {% else %}
           <div class="empty-state">No news loaded.</div>
+          {% endfor %}
         </div>
       </section>
 
@@ -2334,6 +2386,8 @@ async function renderNews() {
   const wrap  = $('news-cards');
   const count = $('news-count');
   if (!wrap) return;
+  // /home-v2 renders news server-side; don't clobber the SSR cards.
+  if (window.__HOME_V2_SSR__ && wrap.querySelector('.news-card')) return;
   try {
     const data = await fetch('/api/news').then(r => r.json()).catch(() => null);
     if (!data || !data.items || !data.items.length) {
@@ -2359,6 +2413,8 @@ async function renderNews() {
 const SPORTSBOOK_TAG = { mlb: 'DK', wnba: 'DK' };
 
 function renderEVScans() {
+  // /home-v2 renders EV cards server-side; don't clobber them client-side.
+  if (window.__HOME_V2_SSR__ && $('ev-cards') && $('ev-cards').querySelector('.ev-card')) return;
   const bets    = collectValueBets();
   const wrap    = $('ev-cards');
   const count   = $('ev-count');

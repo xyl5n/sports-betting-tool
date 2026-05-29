@@ -160,6 +160,23 @@ except Exception as _e:
           flush=True, file=sys.stderr)
     ensemble_store = _EnsembleStoreStub()  # type: ignore[assignment]
 
+# news_feed + home_stats — optional helpers used only by the server-rendered
+# /home-v2 home page (Phase 1 of the NiceGUI → HTML/JS/CSS migration).  Both
+# are pure (NiceGUI-free); guarded so a failed import never takes down Flask.
+try:
+    import src.news_feed as news_feed
+    print("STARTUP:   src.news_feed OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP WARNING: src.news_feed failed ({_e})", flush=True, file=sys.stderr)
+    news_feed = None  # type: ignore[assignment]
+
+try:
+    from pages import home_stats as _home_stats
+    print("STARTUP:   pages.home_stats OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP WARNING: pages.home_stats failed ({_e})", flush=True, file=sys.stderr)
+    _home_stats = None  # type: ignore[assignment]
+
 try:
     from src.game_store import GameStore
     print("STARTUP:   src.game_store OK", flush=True, file=sys.stderr)
@@ -826,6 +843,105 @@ def health():
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+# ── /home-v2 — server-rendered home page (NiceGUI → HTML migration, Phase 1) ──
+# Parallel route that renders the SAME index.html template but with the EV
+# Scan / Confidence / News data injected server-side via Jinja, instead of
+# being fetched client-side.  The legacy NiceGUI home page at "/" (served by
+# ui_app.py) is untouched.  Each wrapper below tolerates missing data /
+# imports and returns [] so the page always renders.
+
+def _home_v2_collect_games() -> list:
+    """Gather today's serialized games (the same shape
+    home_stats.enumerate_value_picks expects) from the locked daily
+    snapshot, tagging each with _sport.  Returns [] on any failure."""
+    games: list = []
+    try:
+        snap = _read_daily_snapshot()
+        if not _snapshot_is_today(snap):
+            return []
+        for sport in ("mlb", "wnba"):
+            block = snap.get(sport) or {}
+            for g in (block.get("results") or []):
+                row = dict(g)
+                row.setdefault("_sport", sport)
+                games.append(row)
+    except Exception as exc:                                              # noqa: BLE001
+        logging.warning("Suppressed exception in %s: %s", __name__, exc)
+    return games
+
+
+def _home_v2_view_pick(r: dict) -> dict:
+    """Flatten one enumerate_value_picks row into a small, template-friendly
+    view-model (pre-formatted percentages, no nested objects)."""
+    edge = float(r.get("edge") or 0)
+    prob = float(r.get("prob") or 0)
+    return {
+        "matchup":        r.get("matchup", ""),
+        "pick":           r.get("pick", ""),
+        "edge_pct":       round(edge * 100, 1),
+        "confidence_pct": round(prob * 100),
+        "odds":           r.get("odds"),
+        "sport":          (r.get("sport") or "mlb").lower(),
+        "game_id":        r.get("game_id"),
+        "bet_type":       r.get("bet_type", "single"),
+    }
+
+
+def _home_v2_ev_picks(games: list, *, min_edge: float = 0.05, limit: int = 15) -> list:
+    """EV-scan view-models: positive-edge picks at/above `min_edge`, sorted
+    by edge descending.  Mirrors the client-side collectValueBets()."""
+    if _home_stats is None:
+        return []
+    try:
+        rows = _home_stats.enumerate_value_picks(games, min_edge=min_edge)
+        rows.sort(key=lambda r: float(r.get("edge") or 0), reverse=True)
+        return [_home_v2_view_pick(r) for r in rows[:limit]]
+    except Exception as exc:                                              # noqa: BLE001
+        logging.warning("Suppressed exception in %s: %s", __name__, exc)
+        return []
+
+
+def _home_v2_confidence_picks(games: list, *, limit: int = 10) -> list:
+    """Confidence view-models: any positive-edge pick, sorted by model
+    probability (confidence) descending."""
+    if _home_stats is None:
+        return []
+    try:
+        rows = _home_stats.enumerate_value_picks(games, min_edge=0.0001)
+        rows.sort(key=lambda r: float(r.get("prob") or 0), reverse=True)
+        return [_home_v2_view_pick(r) for r in rows[:limit]]
+    except Exception as exc:                                              # noqa: BLE001
+        logging.warning("Suppressed exception in %s: %s", __name__, exc)
+        return []
+
+
+def _home_v2_news(sport: str = "mlb", *, max_items: int = 10) -> list:
+    """News headlines for `sport` from the existing ESPN RSS feed helper.
+    Returns [] (graceful empty state) on any error / missing import."""
+    if news_feed is None:
+        return []
+    try:
+        return news_feed.fetch(sport, max_items=max_items)
+    except Exception as exc:                                              # noqa: BLE001
+        logging.warning("Suppressed exception in %s: %s", __name__, exc)
+        return []
+
+
+@app.route("/home-v2")
+def home_v2():
+    """Server-rendered home page (parallel to the NiceGUI "/" home)."""
+    sport = (request.args.get("sport") or "mlb").lower()
+    games = _home_v2_collect_games()
+    return render_template(
+        "index.html",
+        home_v2=True,
+        sport=sport,
+        ev_picks=_home_v2_ev_picks(games),
+        confidence_picks=_home_v2_confidence_picks(games),
+        news_items=_home_v2_news(sport),
+    )
 
 
 # ── Player-props page (Flask + Tailwind, PR #304) ───────────────────────────
