@@ -54,6 +54,15 @@ def pill_toggle(
 
 # ── Card-style dropdown (multi-option select) ───────────────────────────────
 
+#: Popup-content class shared by every styled dropdown.  Lets the theme CSS
+#: dark-theme the popup AND dock it as a bottom-sheet on mobile (the popup is
+#: portalled out of the trigger's DOM subtree, so the trigger's own classes
+#: can't reach it -- this marker is the hook the CSS keys off).  Routing every
+#: ``ui.select`` through this helper is what makes "no native OS dropdown,
+#: bottom-sheet on mobile" hold globally (UI redesign, Change 3).
+SELECT_POPUP_CLASS = "styled-select-pop"
+
+
 def styled_select(
     options: Iterable | dict,
     value: Any,
@@ -61,16 +70,39 @@ def styled_select(
     *,
     min_width: str = "200px",
     placeholder: Optional[str] = None,
+    multiple: bool = False,
+    with_input: bool = False,
+    use_chips: bool = False,
 ):
-    """Dark-card dropdown for multi-option selectors (game, market,
-    stat-context, ...).  Pops a dark themed menu rather than the
-    default white Material list.
+    """Dark-card dropdown for option selectors (game, market, model,
+    stat-context, ...).  Pops a dark themed menu rather than the default
+    white Material list, and on mobile renders as a bottom-sheet picker
+    rather than the native OS dropdown.
 
-    *min_width* sets the trigger's minimum width so the control still
-    reads comfortably with short selections like ``"All"``.
+    This is the single canonical select for the whole app -- every filter
+    and picker should route through here (or ``custom_select``) so the look,
+    the popup theme, and the mobile bottom-sheet behaviour stay consistent.
+
+    *min_width*  sets the trigger's minimum width so the control still reads
+                 comfortably with short selections like ``"All"``.
+    *placeholder* floating label shown when nothing is selected.
+    *multiple*   multi-select (renders selections as chips when *use_chips*).
+    *with_input* type-to-filter combobox (used by the mybets add-bet wizard).
     """
-    el = ui.select(options=options, value=value, on_change=on_change)
-    props = "dense outlined options-dense"
+    el = ui.select(
+        options=options, value=value, on_change=on_change,
+        multiple=multiple, with_input=with_input,
+    )
+    # Quasar's q-select is never a native <select>; with the default
+    # behaviour it pops a menu on desktop and a dialog on mobile, which the
+    # theme CSS then docks to the bottom as a sheet picker.  The
+    # popup-content-class is the hook that CSS keys off (menu + dialog both).
+    props = (
+        f'dense outlined options-dense '
+        f'popup-content-class="{SELECT_POPUP_CLASS}"'
+    )
+    if use_chips:
+        props += " use-chips"
     if placeholder:
         # Wrap in double-quotes since the prop string is space-tokenized.
         props += f' label="{placeholder}"'
@@ -78,6 +110,11 @@ def styled_select(
         f"min-width: {min_width};"
     )
     return el
+
+
+#: Backwards-friendly alias -- the redesign brief refers to the global
+#: "custom select"; keep one name pointing at the canonical implementation.
+custom_select = styled_select
 
 
 # ── Switch (binary on/off) ──────────────────────────────────────────────────

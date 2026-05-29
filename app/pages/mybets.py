@@ -21,6 +21,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, sidebar, bottom_nav, track_button, live_score
+from components import controls
 
 
 def register(backend) -> None:
@@ -1284,10 +1285,8 @@ def _render_add(backend, s: dict, refresh, dialog, bankroll: float) -> None:
             def _on_team(e):
                 _ab_set(s, team=e.value, game=None, bet_type=None, step=3)
                 refresh()
-            ui.select(options=teams, value=s.get("team"), with_input=True,
-                      on_change=_on_team) \
-                .props("dense outlined options-dense").classes("styled-select") \
-                .style("width: 100%;")
+            controls.styled_select(teams, value=s.get("team"), with_input=True,
+                                    on_change=_on_team).style("width: 100%;")
             if not teams:
                 ui.label("No games loaded for today.").style(
                     f"color: {t.TEXT_DIM2}; font-size: 11px; font-style: italic;")
@@ -1297,10 +1296,8 @@ def _render_add(backend, s: dict, refresh, dialog, bankroll: float) -> None:
             def _on_player(e):
                 _ab_set(s, player=e.value, game=None, market=None, step=3)
                 refresh()
-            ui.select(options=players, value=s.get("player"), with_input=True,
-                      on_change=_on_player) \
-                .props("dense outlined options-dense").classes("styled-select") \
-                .style("width: 100%;")
+            controls.styled_select(players, value=s.get("player"), with_input=True,
+                                    on_change=_on_player).style("width: 100%;")
             if not players:
                 ui.label("No props loaded for today.").style(
                     f"color: {t.TEXT_DIM2}; font-size: 11px; font-style: italic;")
@@ -1319,8 +1316,7 @@ def _render_add(backend, s: dict, refresh, dialog, bankroll: float) -> None:
             def _on_game(e):
                 _ab_set(s, game=matches[e.value], step=4)
                 refresh()
-            ui.select(options=opts, value=None, on_change=_on_game) \
-                .props("dense outlined options-dense").classes("styled-select") \
+            controls.styled_select(opts, value=None, on_change=_on_game) \
                 .style("width: 100%;")
             if not matches:
                 ui.label("No game found for that team today.").style(
@@ -1341,10 +1337,8 @@ def _render_add(backend, s: dict, refresh, dialog, bankroll: float) -> None:
             def _on_pgame(e):
                 _ab_set(s, game=games[e.value], step=4)
                 refresh()
-            ui.select(options=opts, value=(0 if len(opts) == 1 else None),
-                      on_change=_on_pgame) \
-                .props("dense outlined options-dense").classes("styled-select") \
-                .style("width: 100%;")
+            controls.styled_select(opts, value=(0 if len(opts) == 1 else None),
+                                    on_change=_on_pgame).style("width: 100%;")
             if len(opts) == 1:
                 _ab_set(s, game=games[0])
         with ui.row().classes("w-full justify-between").style("gap: 8px;"):

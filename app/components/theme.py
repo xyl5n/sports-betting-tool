@@ -492,6 +492,24 @@ def page_head_css() -> str:
         background: {CARD_HI} !important;
       }}
 
+      /* Game-card bet columns (ML / RL / TOT) — proportional flex, never a
+         fixed px width (UI redesign, Change 2).  Each box already carries
+         flex:1; min-width:0 inline; pinning the row to flex:1 1 0 + min-width:0
+         here guarantees all three share the width equally and compress
+         gracefully down to the narrowest phone (≤390px) rather than forcing a
+         horizontal scroll.  flex-basis:0 means content width never widens a
+         column past its share. */
+      .bet-boxes {{
+        display: flex !important;
+        flex-wrap: nowrap !important;
+        width: 100%;
+        min-width: 0;
+      }}
+      .bet-boxes > * {{
+        flex: 1 1 0 !important;
+        min-width: 0 !important;
+      }}
+
       /* ── Themed form controls ─────────────────────────────────────────
          Quasar's defaults are Material-Design pale.  Override them so
          filter bars on /props, /player, /admin and /mybets read as
@@ -605,6 +623,51 @@ def page_head_css() -> str:
       }}
       .q-menu .q-item__section--main {{
         color: inherit !important;
+      }}
+
+      /* Custom select popup (Change 3) ─────────────────────────────
+         Every dropdown routed through controls.styled_select tags its
+         popup with .styled-select-pop.  On desktop it's the dark menu
+         above; on mobile Quasar renders the popup inside a q-dialog,
+         and these rules dock that dialog to the bottom of the screen as
+         a sheet picker -- never the native OS dropdown.                */
+      .styled-select-pop {{
+        background: {CARD} !important;
+        color: {TEXT} !important;
+      }}
+      .styled-select-pop .q-item {{
+        color: {TEXT} !important;
+        min-height: 44px !important;        /* comfortable touch target */
+      }}
+      .styled-select-pop .q-item:hover,
+      .styled-select-pop .q-item--active,
+      .styled-select-pop .q-item.q-manual-focusable--focused {{
+        background: {CARD_HI} !important;
+        color: {PRIMARY_HI} !important;
+      }}
+      /* Tick/checkbox accent inside multi-selects */
+      .styled-select-pop .q-checkbox__inner--truthy,
+      .styled-select-pop .q-item--active .q-icon {{
+        color: {PRIMARY_HI} !important;
+      }}
+
+      @media (max-width: {MOBILE_BREAKPOINT}) {{
+        /* Bottom-sheet: the dialog that wraps the popup on mobile gets
+           pinned to the bottom edge, full-width, with a rounded top and
+           a capped height so long option lists scroll inside the sheet. */
+        .q-dialog:has(.styled-select-pop) .q-dialog__inner {{
+          align-items: flex-end !important;
+          padding: 0 !important;
+        }}
+        .q-dialog:has(.styled-select-pop) .q-dialog__inner > div,
+        .styled-select-pop {{
+          width: 100vw !important;
+          max-width: 100vw !important;
+          max-height: 65vh !important;
+          border-radius: {RADIUS_LG} {RADIUS_LG} 0 0 !important;
+          border: 1px solid {BORDER} !important;
+          border-bottom: 0 !important;
+        }}
       }}
 
       /* Switch (q-toggle) ──────────────────────────────────────── */
@@ -795,6 +858,86 @@ def page_head_css() -> str:
       @media (max-width: {MOBILE_BREAKPOINT}) {{
         body, html {{
           overflow-x: hidden !important;
+        }}
+      }}
+
+      /* News cards (UI redesign, Change 1) ─────────────────────────
+         Article-style cards with a 16:9 banner photo, a sport badge
+         overlaid bottom-left, and the title + timestamp below.  Desktop
+         lays them out as a 2-3 column grid; mobile collapses to a single
+         horizontally-scrollable row.                                   */
+      .news-cards {{
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 12px;
+        width: 100%;
+      }}
+      .news-card {{
+        display: flex;
+        flex-direction: column;
+        background: {CARD_HI};
+        border: 1px solid {BORDER};
+        border-radius: {RADIUS_MD};
+        overflow: hidden;
+        text-decoration: none;
+        transition: border-color 150ms ease, transform 150ms ease;
+        min-width: 0;
+      }}
+      .news-card:hover {{
+        border-color: {PRIMARY};
+        transform: translateY(-2px);
+      }}
+      .news-thumb {{
+        position: relative;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        background-color: {CARD};
+        background-image: linear-gradient(135deg, {CARD_HI} 0%, {BG} 100%);
+        background-size: cover;
+        background-position: center;
+        flex-shrink: 0;
+      }}
+      .news-badge {{
+        position: absolute;
+        left: 8px; bottom: 8px;
+        font-size: 9px; font-weight: 800; letter-spacing: .5px;
+        padding: 2px 7px;
+        border-radius: {RADIUS_PILL};
+        backdrop-filter: blur(4px);
+        white-space: nowrap;
+      }}
+      .news-body {{
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px 12px 12px;
+        min-width: 0;
+      }}
+      .news-title {{
+        font-size: 13px; font-weight: 700; color: {TEXT};
+        line-height: 1.35;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }}
+      .news-time {{
+        font-size: 10.5px; color: {TEXT_DIM2};
+        font-family: monospace; white-space: nowrap;
+      }}
+      @media (max-width: {MOBILE_BREAKPOINT}) {{
+        .news-cards {{
+          display: flex;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          scroll-snap-type: x mandatory;
+          padding-bottom: 4px;
+        }}
+        .news-card {{
+          flex: 0 0 78%;
+          max-width: 320px;
+          scroll-snap-align: start;
         }}
       }}
     </style>

@@ -1704,53 +1704,46 @@ def _section_news(backend) -> None:
             )
             return
 
-        # ── News rows rendered as raw HTML ────────────────────────────
-        # ui.html() is used so the anchor tags are real <a> elements
-        # with proper href / target / rel attributes -- NiceGUI's link
-        # helpers add unwanted wrappers that break flex row alignment.
-        # Titles are HTML-escaped by news_feed._parse_items() before
-        # they reach this point so no double-escaping is needed here.
-        border_color = t.BORDER_SOFT
-
-        rows_html: list[str] = []
-        for i, item in enumerate(items):
-            is_last    = i == len(items) - 1
-            border_css = "" if is_last else (
-                f"border-bottom: 1px solid {border_color};"
-            )
-            time_span  = (
-                f'<span style="font-size:10.5px;color:{t.TEXT_DIM2};'
-                f'font-family:monospace;white-space:nowrap;flex-shrink:0;">'
-                f'{item["time_ago"]}</span>'
+        # ── News cards rendered as raw HTML ───────────────────────────
+        # ui.html() is used so the anchor tags are real <a> elements with
+        # proper href / target / rel attributes.  Each card is an
+        # article-style tile: a 16:9 banner photo (from the RSS item's
+        # media:thumbnail / enclosure), a sport badge overlaid bottom-left
+        # of the image, and the title + timestamp below.  Layout (grid on
+        # desktop, horizontal-scroll row on mobile) is driven entirely by
+        # the .news-cards / .news-card CSS in theme.page_head_css.
+        # Titles are HTML-escaped by news_feed._parse_items() before they
+        # reach this point so no double-escaping is needed here.
+        cards_html: list[str] = []
+        for item in items:
+            img = (item.get("image") or "").strip()
+            # Escape for safe embedding inside a double-quoted HTML attribute
+            # (ESPN media URLs routinely carry & query params).
+            img_safe = img.replace("&", "&amp;").replace('"', "%22")
+            # Only set background-image when we actually have a URL --
+            # otherwise the CSS gradient placeholder shows through.
+            thumb_style = (
+                f' style="background-image:url(&quot;{img_safe}&quot;),'
+                f'linear-gradient(135deg,{t.CARD_HI} 0%,{t.BG} 100%);"'
+            ) if img else ""
+            time_html = (
+                f'<div class="news-time">{item["time_ago"]}</div>'
             ) if item.get("time_ago") else ""
-            rows_html.append(
-                f'<a href="{item["link"]}" target="_blank" rel="noopener noreferrer"'
-                f' style="display:flex;align-items:center;gap:10px;'
-                f'padding:10px 14px;text-decoration:none;{border_css}'
-                f'transition:background 150ms ease-out;cursor:pointer;"'
-                f' onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'"'
-                f' onmouseout="this.style.background=\'\'">'
-                # Sport badge
-                f'<span style="font-size:8.5px;font-weight:800;letter-spacing:.5px;'
-                f'padding:2px 6px;border-radius:{t.RADIUS_PILL};white-space:nowrap;'
-                f'flex-shrink:0;{tag_style}">{tag_label}</span>'
-                # Time ago
-                f'{time_span}'
-                # Headline (already HTML-safe from news_feed module)
-                f'<span style="font-size:13px;color:{t.TEXT};flex:1;'
-                f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
-                f'{item["title"]}</span>'
-                # Chevron
-                f'<span style="font-size:14px;color:{t.TEXT_DIM2};flex-shrink:0;'
-                f'line-height:1;">›</span>'
+            cards_html.append(
+                f'<a class="news-card" href="{item["link"]}" target="_blank"'
+                f' rel="noopener noreferrer">'
+                f'<div class="news-thumb"{thumb_style}>'
+                f'<span class="news-badge" style="{tag_style}">{tag_label}</span>'
+                f'</div>'
+                f'<div class="news-body">'
+                f'<div class="news-title">{item["title"]}</div>'
+                f'{time_html}'
+                f'</div>'
                 f'</a>'
             )
 
         ui.html(
-            f'<div style="background:{t.CARD};border:1px solid {t.BORDER};'
-            f'border-radius:{t.RADIUS_MD};overflow:hidden;width:100%;">'
-            + "".join(rows_html)
-            + "</div>"
+            '<div class="news-cards">' + "".join(cards_html) + "</div>"
         )
 
 

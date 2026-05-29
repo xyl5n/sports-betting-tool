@@ -19,7 +19,7 @@ import sys
 from nicegui import ui
 
 from components import theme as t
-from components import navbar, bottom_nav
+from components import navbar, bottom_nav, controls
 from src import research_store as rs
 
 
@@ -27,19 +27,93 @@ def _dbg(msg: str) -> None:
     print(f"[RESEARCH] {msg}", flush=True, file=sys.stderr)
 
 
-# ── Filter option sets ───────────────────────────────────────────────────────
+# ── Filter option sets (UI redesign, Change 4) ───────────────────────────────
+# All dropdowns are {value: label} dicts so the value drives the store filter
+# while the label stays human-friendly.  Multi-select dropdowns carry an "all"
+# sentinel; selecting any concrete option drops it (see _on_multi).
 
-def _model_options() -> list[str]:
-    try:
-        from src.groq_models import MODELS
-        return [m["name"] for m in MODELS.values() if m.get("name")]
-    except Exception:                                                     # noqa: BLE001
-        return []
+# Prediction model.  XGBoost / Neural Net can't be told apart in the current
+# store (it only records the AI-review model + the prop market), so those
+# values map to no market restriction -- the UI shows a muted note explaining
+# selecting them won't narrow results.  Pitcher / Batter map to a market
+# prefix (best-effort), the user-approved Option 1 behaviour.
+_PRED_OPTIONS = {
+    "all":          "All",
+    "xgb_mlb":      "XGBoost (MLB)",
+    "nn_mlb":       "Neural Net (MLB)",
+    "pitcher_mlb":  "Pitcher Model (MLB)",
+    "xgb_wnba":     "XGBoost (WNBA)",
+    "nn_wnba":      "Neural Net (WNBA)",
+    "pitcher_wnba": "Pitcher Model (WNBA)",
+    "batter":       "Batter Model",
+}
+# Prediction model -> market-key prefix.  Absent => no restriction (show all).
+_PRED_PREFIX = {
+    "pitcher_mlb":  "pitcher_",
+    "pitcher_wnba": "pitcher_",
+    "batter":       "batter_",
+}
+# The values that carry no market mapping (and thus "show all" with a note).
+_PRED_SHOW_ALL = {"xgb_mlb", "nn_mlb", "xgb_wnba", "nn_wnba"}
 
+# AI review model.  Values are the actual model names frozen into the store
+# (groq_models.MODELS[...].name) so they match research_store rows directly.
+# "Ollama" is a forward-looking placeholder with no data yet -> sentinel that
+# never restricts (rendered with a "soon" label).
+_OLLAMA_SENTINEL = "__ollama__"
+_REVIEW_OPTIONS = {
+    "all":                      "All",
+    "llama-3.3-70b-versatile":  "Llama-3.3-70b",
+    "compound-beta":            "Compound-Beta",
+    "qwen/qwen3-32b":           "Qwen3",
+    _OLLAMA_SENTINEL:           "Ollama (soon)",
+}
 
-_SPORTS = (("all", "All"), ("mlb", "MLB"), ("wnba", "WNBA"))
-_WINDOWS = (("7d", "Last 7 Days"), ("30d", "Last 30 Days"),
-            ("season", "This Season"), ("all", "All Time"))
+_SPORT_OPTIONS = {"all": "All", "mlb": "MLB", "wnba": "WNBA"}
+
+_WINDOW_OPTIONS = {
+    "7d":     "Last 7 Days",
+    "30d":    "Last 30 Days",
+    "season": "This Season",
+    "all":    "All Time",
+}
+
+# Bet type (renamed from "Prop Type").  Each value maps to one or more store
+# market keys; selecting it keeps those markets as SEPARATE row groups in the
+# results table (the store groups by market, so this falls out naturally).
+_BET_TYPE_OPTIONS = {
+    "all":                 "All",
+    "moneyline":           "Moneyline",
+    "run_line":            "Run Line",
+    "total":               "Total",
+    "batter_hits":         "Hits",
+    "strikeouts":          "Strikeouts",
+    "batter_rbis":         "RBIs",
+    "batter_runs_scored":  "Runs",
+    "walks":               "Walks",
+    "batter_total_bases":  "Total Bases",
+    "pitcher_earned_runs": "Earned Runs",
+    "pitcher_outs":        "Outs",
+    "pitcher_hits_allowed": "Hits Allowed",
+}
+_BET_TYPE_MARKETS = {
+    "moneyline":            {"moneyline"},
+    "run_line":             {"run_line"},
+    "total":                {"total"},
+    "batter_hits":          {"batter_hits"},
+    "strikeouts":           {"pitcher_strikeouts", "batter_strikeouts"},
+    "batter_rbis":          {"batter_rbis"},
+    "batter_runs_scored":   {"batter_runs_scored"},
+    "walks":                {"pitcher_walks", "batter_walks"},
+    "batter_total_bases":   {"batter_total_bases"},
+    "pitcher_earned_runs":  {"pitcher_earned_runs"},
+    "pitcher_outs":         {"pitcher_outs"},
+    "pitcher_hits_allowed": {"pitcher_hits_allowed"},
+}
+# Sentinel passed to the store when a filter combination resolves to "match
+# nothing" (e.g. Pitcher Model + a batter-only bet type) so the table shows an
+# honest empty state instead of silently widening back to everything.
+_NO_MATCH = "__no_match__"
 
 _PROP_LABELS = {
     "pitcher_strikeouts":   "Strikeouts (K)",
@@ -103,9 +177,10 @@ def register(backend) -> None:
 
 def _layout() -> None:
     state = {
-        "models":   {"all"},          # set of model names, or {"all"}
+        "review":   {"all"},          # AI-review model names, or {"all"}
+        "pred":     {"all"},          # prediction-model values, or {"all"}
         "sport":    "all",
-        "prop":     "all",
+        "bets":     {"all"},          # bet-type values, or {"all"}
         "window":   "all",
         "sort_key": "win_pct",
         "sort_dir": "desc",
@@ -126,11 +201,11 @@ def _layout() -> None:
 
         @ui.refreshable
         def _dashboard() -> None:                                         # noqa: WPS430
-            models = None if "all" in state["models"] or not state["models"] \
-                else sorted(state["models"])
             agg = rs.aggregate(
-                models=models, sport=state["sport"],
-                prop_type=state["prop"], window=state["window"],
+                models=_effective_models(state),
+                sport=state["sport"],
+                prop_types=_effective_prop_types(state),
+                window=state["window"],
             )
             _kpi_row(agg["kpis"])
             _table(agg["table"], state, lambda: _dashboard.refresh())
@@ -138,81 +213,216 @@ def _layout() -> None:
         _dashboard()
 
 
-# ── Filter bar (sticky) ──────────────────────────────────────────────────────
+# ── Filter -> store query translation ─────────────────────────────────────────
+
+def _effective_models(state: dict):
+    """AI-review selection -> the *models* list research_store expects.
+    Drops the "all" + Ollama sentinels; returns None (= no restriction)
+    when nothing concrete is selected."""
+    sel = {m for m in state["review"] if m not in ("all", _OLLAMA_SENTINEL)}
+    return sorted(sel) if sel else None
+
+
+def _effective_prop_types(state: dict):
+    """Combine the Bet Type (multi) and prediction-Model (prefix) selections
+    into a single market allow-list for research_store.aggregate.
+
+    * None              -> no market restriction (show everything).
+    * {markets...}      -> only those markets (each still groups separately).
+    * {_NO_MATCH}       -> the combination excludes every market -> empty table.
+    """
+    bets = state["bets"]
+    if "all" in bets or not bets:
+        bt = None
+    else:
+        bt = set()
+        for b in bets:
+            bt |= _BET_TYPE_MARKETS.get(b, {b})
+
+    prefixes = {_PRED_PREFIX[p] for p in state["pred"] if p in _PRED_PREFIX}
+    if prefixes:
+        universe = set(rs.distinct_prop_types())
+        pm = {k for k in universe if any(k.startswith(pf) for pf in prefixes)}
+    else:
+        pm = None
+
+    if bt is None and pm is None:
+        return None
+    if bt is None:
+        eff = pm
+    elif pm is None:
+        eff = bt
+    else:
+        eff = bt & pm
+    return eff if eff else {_NO_MATCH}
+
+
+def _pred_note_active(state: dict) -> bool:
+    """True when the user picked an XGBoost/Neural-Net model whose results
+    can't be narrowed in the current data -> surface the muted note."""
+    return any(p in _PRED_SHOW_ALL for p in state["pred"])
+
+
+# ── Filter bar (dropdown bar; bottom-sheet on mobile) ────────────────────────
 
 def _filter_bar(state: dict, refresh) -> None:
-    # Sticky under the top nav; pill rows scroll horizontally on mobile.
-    with ui.column().style(
-        f"position: sticky; top: {t.NAVBAR_HEIGHT}; z-index: 20; "
-        f"background: {t.BG}; gap: 6px; width: 100%; "
-        f"padding: 8px 0; border-bottom: 1px solid {t.BORDER};"
-    ):
-        # MODEL (multiselect)
-        def _toggle_model(name: str):
-            def _h():
-                sel = state["models"]
-                if name == "all":
-                    state["models"] = {"all"}
-                else:
-                    sel.discard("all")
-                    sel.symmetric_difference_update({name})
-                    if not sel:
-                        state["models"] = {"all"}
-                refresh()
-            return _h
+    """Compact dropdown filter bar (UI redesign, Change 4).
 
-        model_opts = [("all", "All")] + [(n, _short_model(n)) for n in _model_options()]
-        with _pill_row("MODEL"):
-            for val, lab in model_opts:
-                active = (val == "all" and "all" in state["models"]) or val in state["models"]
-                _pill(lab, active, _toggle_model(val))
+    Desktop: a single horizontal bar of custom dropdowns above the stats
+    cards.  Mobile: collapsed behind a "Filters" button that opens a
+    bottom-sheet dialog holding the same dropdowns stacked.
 
-        # SPORT (single)
-        with _pill_row("SPORT"):
-            for val, lab in _SPORTS:
-                _pill(lab, state["sport"] == val, _single_setter(state, "sport", val, refresh))
+    Changing a filter re-renders only the results — the dropdowns keep
+    their own open state so multi-selects don't snap shut between picks.
+    Reset rebuilds both layouts so their displayed values resync.
+    """
 
-        # PROP TYPE (single, populated from the store)
-        prop_opts = [("all", "All")] + [(p, _prop_label(p)) for p in rs.distinct_prop_types()]
-        with _pill_row("PROP TYPE"):
-            for val, lab in prop_opts:
-                _pill(lab, state["prop"] == val, _single_setter(state, "prop", val, refresh))
+    def _set_single(key):
+        def _h(e):
+            state[key] = e.value
+            refresh()
+        return _h
 
-        # TIME WINDOW (single)
-        with _pill_row("WINDOW"):
-            for val, lab in _WINDOWS:
-                _pill(lab, state["window"] == val, _single_setter(state, "window", val, refresh))
+    def _set_multi(key):
+        def _h(e):
+            vals = set(e.value or [])
+            if len(vals) > 1:          # "All" is exclusive with concrete picks
+                vals.discard("all")
+            state[key] = vals or {"all"}
+            refresh()
+        return _h
 
-
-def _single_setter(state, key, val, refresh):
-    def _h():
-        state[key] = val
-        refresh()
-    return _h
-
-
-def _pill_row(label: str):
-    row = ui.row().classes("items-center no-wrap").style(
-        "gap: 6px; width: 100%; overflow-x: auto; "
-        "-webkit-overflow-scrolling: touch; padding-bottom: 2px;"
-    )
-    with row:
-        ui.label(label).style(
-            f"font-size: 9px; font-weight: 800; letter-spacing: .6px; "
-            f"color: {t.TEXT_DIM2}; flex-shrink: 0; min-width: 64px;"
+    def _field(label: str, stacked: bool):
+        col = ui.column().style(
+            "gap: 4px; min-width: 0; "
+            + ("width: 100%;" if stacked else "flex: 0 1 auto;")
         )
-    return row
+        with col:
+            ui.label(label).style(
+                f"font-size: 9px; font-weight: 800; letter-spacing: .5px; "
+                f"color: {t.TEXT_DIM2};"
+            )
+        return col
 
+    def _dropdowns(stacked: bool) -> None:
+        w = "width: 100%;" if stacked else ""
+        # MODEL (multi) — with the best-effort note for XGBoost / Neural Net.
+        with _field("MODEL", stacked):
+            controls.styled_select(
+                _PRED_OPTIONS, value=sorted(state["pred"]),
+                multiple=True, use_chips=True, placeholder="Model",
+                min_width="190px", on_change=_set_multi("pred"),
+            ).style(w).tooltip(
+                "XGBoost / Neural Net can't be distinguished in current "
+                "data — selecting them shows all results."
+            )
+            if _pred_note_active(state):
+                ui.label("Showing all — XGBoost / Neural Net aren't "
+                         "distinguishable in current data.").style(
+                    f"font-size: 9px; color: {t.TEXT_DIM2}; line-height: 1.3; "
+                    f"max-width: 230px;"
+                )
+        # AI REVIEW (multi)
+        with _field("AI REVIEW", stacked):
+            controls.styled_select(
+                _REVIEW_OPTIONS, value=sorted(state["review"]),
+                multiple=True, use_chips=True, placeholder="AI review",
+                min_width="190px", on_change=_set_multi("review"),
+            ).style(w)
+        # SPORT (single)
+        with _field("SPORT", stacked):
+            controls.styled_select(
+                _SPORT_OPTIONS, value=state["sport"],
+                min_width="120px", on_change=_set_single("sport"),
+            ).style(w)
+        # BET TYPE (multi)
+        with _field("BET TYPE", stacked):
+            controls.styled_select(
+                _BET_TYPE_OPTIONS, value=sorted(state["bets"]),
+                multiple=True, use_chips=True, placeholder="Bet type",
+                min_width="190px", on_change=_set_multi("bets"),
+            ).style(w)
+        # WINDOW (single)
+        with _field("WINDOW", stacked):
+            controls.styled_select(
+                _WINDOW_OPTIONS, value=state["window"],
+                min_width="150px", on_change=_set_single("window"),
+            ).style(w)
 
-def _pill(label: str, active: bool, on_click) -> None:
-    bg  = t.PRIMARY if active else t.CARD_HI
-    fg  = "#ffffff" if active else t.TEXT_DIM
-    ui.button(label, on_click=on_click).props("no-caps unelevated dense").style(
-        f"background: {bg}; color: {fg}; "
-        f"font-size: 11px; font-weight: 700; padding: 4px 12px; "
-        f"border-radius: {t.RADIUS_PILL}; min-height: 0; flex-shrink: 0; "
-        f"white-space: nowrap;"
-    )
+    def _reset() -> None:
+        state.update({"review": {"all"}, "pred": {"all"}, "sport": "all",
+                      "bets": {"all"}, "window": "all"})
+        refresh()
+        _desktop_bar.refresh()
+        _sheet_body.refresh()
+        sheet.close()
+
+    # ── Desktop: sticky horizontal bar ──────────────────────────────────
+    @ui.refreshable
+    def _desktop_bar() -> None:                                           # noqa: WPS430
+        with ui.row().classes("desktop-only items-end w-full").style(
+            f"position: sticky; top: {t.NAVBAR_HEIGHT}; z-index: 20; "
+            f"background: {t.BG}; gap: 14px; flex-wrap: wrap; "
+            f"padding: 10px 0; border-bottom: 1px solid {t.BORDER};"
+        ):
+            _dropdowns(stacked=False)
+            ui.button("Reset", icon="restart_alt", on_click=_reset).props(
+                "no-caps flat dense").style(
+                f"color: {t.TEXT_DIM}; font-size: 11px; font-weight: 700; "
+                f"align-self: flex-end; margin-bottom: 2px;"
+            )
+
+    # ── Mobile: Filters button -> bottom-sheet dialog ───────────────────
+    sheet = ui.dialog().props("position=bottom")
+    with sheet:
+        with ui.column().style(
+            f"background: {t.CARD}; border-top-left-radius: {t.RADIUS_LG}; "
+            f"border-top-right-radius: {t.RADIUS_LG}; "
+            f"border: 1px solid {t.BORDER}; border-bottom: 0; "
+            f"padding: {t.SPACE_MD}; gap: 12px; width: 100%; max-width: 100%;"
+        ):
+            with ui.row().classes("items-center justify-between w-full"):
+                ui.label("FILTERS").style(
+                    f"font-size: 13px; font-weight: 800; letter-spacing: .6px; "
+                    f"color: {t.TEXT};"
+                )
+                ui.button(icon="close", on_click=sheet.close).props(
+                    "flat round dense").style(f"color: {t.TEXT_DIM};")
+
+            @ui.refreshable
+            def _sheet_body() -> None:                                    # noqa: WPS430
+                with ui.column().style("gap: 12px; width: 100%;"):
+                    _dropdowns(stacked=True)
+            _sheet_body()
+
+            with ui.row().classes("items-center justify-between w-full").style(
+                "gap: 8px;"
+            ):
+                ui.button("Reset", icon="restart_alt", on_click=_reset).props(
+                    "no-caps flat dense").style(
+                    f"color: {t.TEXT_DIM}; font-size: 12px; font-weight: 700;"
+                )
+                ui.button("Done", on_click=sheet.close).props(
+                    "no-caps unelevated dense").style(
+                    f"background: {t.PRIMARY}; color: #fff; font-size: 12px; "
+                    f"font-weight: 800; padding: 6px 18px; "
+                    f"border-radius: {t.RADIUS_PILL};"
+                )
+
+    with ui.row().classes("mobile-only items-center w-full").style(
+        f"position: sticky; top: {t.NAVBAR_HEIGHT}; z-index: 20; "
+        f"background: {t.BG}; gap: 8px; padding: 10px 0; "
+        f"border-bottom: 1px solid {t.BORDER};"
+    ):
+        ui.button("Filters", icon="filter_list", on_click=sheet.open).props(
+            "no-caps unelevated dense").style(
+            f"background: {t.CARD_HI}; color: {t.TEXT}; "
+            f"border: 1px solid {t.BORDER}; min-height: 34px; "
+            f"padding: 4px 14px; font-size: 12px; font-weight: 800; "
+            f"border-radius: {t.RADIUS_PILL};"
+        )
+
+    _desktop_bar()
 
 
 def _short_model(name: str) -> str:
