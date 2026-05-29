@@ -795,3 +795,170 @@ Remaining work after this PR:
     Big Flask-coupled subsystems (test_client + the serialization
     pipeline) -- they need significantly more architectural work, not
     just helper-extraction.
+
+============================================================================
+PR #282 — APScheduler bootstrap -> scheduler.init() [FIRST APPROVED REWRITE]
+============================================================================
+
+Branch: claude/split-scheduler-282
+Base:   origin/main @ 6a9a250  (post PR #281 merge)
+Source: app/app.py @ 11,021 lines
+
+FIRST AND ONLY APPROVED REWRITE in the decomposition series.
+============================================================
+PRs #276 - #281 honored a strict "move-only, no rewrites" rule.  This
+PR is the documented exception, explicitly approved by the user, and is
+the only place the rule is broken.  The exception is scoped:
+
+  1. The Werkzeug-double-import guard variable becomes a function
+     parameter:
+       Before (in app.py):
+         _werkzeug_main = os.environ.get("WERKZEUG_RUN_MAIN", "false") == "true"
+         if not _in_debug_mode or _werkzeug_main:
+             ...192 lines of bootstrap...
+       After:
+         in scheduler.py:
+             def init(app, werkzeug_main):
+                 _in_debug_mode = app.debug
+                 if not _in_debug_mode or werkzeug_main:
+                     ...same 192 lines, verbatim...
+                 return _sched
+         in app.py:
+             _werkzeug_main = os.environ.get("WERKZEUG_RUN_MAIN", "false") == "true"
+             _sched = init(app, _werkzeug_main)
+
+  2. app.debug is read from the passed-in `app` argument instead of the
+     global `app` reference.  (Same name resolution, just made explicit.)
+
+  3. A 3-line runtime import of `app` is added at the top of init():
+         import app as _app_module
+         _run_auto_analysis_job = _app_module._run_auto_analysis_job
+         _run_consolidated_refresh_cycle = _app_module._run_consolidated_refresh_cycle
+     This breaks the otherwise-circular dependency for the two jobs that
+     still live in app.py (Flask-coupled, separately blocked).  Safe
+     because init() is invoked from app.py's module-level code AFTER
+     both function definitions, so app is already in sys.modules.  These
+     three lines disappear when the two remaining jobs eventually move.
+
+Everything else inside init() is the verbatim bootstrap block from
+app.py:10284-10475 -- comments, prints, cron triggers, error handling,
+manifest enumeration, all byte-for-byte the same.
+
+Pre-flight reassignment check (AST):
+    Move set:                                   3 names
+        _NightlyRetrainStub  (class)
+        nightly_retrain      (try-import + except-assign at app.py:239/244)
+        init                 (new name introduced in scheduler.py)
+    Original declarations:                      2 in app.py (stub, ntr)
+    Post-initial rebinds:                       0 outside the try/except
+                                                pair (which moves together
+                                                and is the SAME definition).
+    Verdict: SAFE.
+
+Caller-graph audit:
+    nightly_retrain         -- 4 callers in app.py:
+                               admin_nightly_log (Flask route, stays),
+                               admin_nightly_force (Flask route, stays),
+                               admin_scheduler_health (Flask route, stays),
+                               init() itself (moves with it).
+                               The 3 staying routes resolve the name via
+                               `from scheduler import *`.
+    _NightlyRetrainStub     -- 1 caller in app.py:
+                               admin_nightly_force (isinstance check).
+                               Resolves via star-import.
+    init                    -- 1 caller in app.py:
+                               module-level bootstrap line (the new 2-line
+                               replacement).
+    _sched                  -- INITIAL declaration `_sched = None` stays
+                               in app.py.  The reassignment inside the
+                               bootstrap (`_sched = nightly_retrain.start()`)
+                               now happens inside init() as a LOCAL var.
+                               init() returns it; app.py captures with
+                               `_sched = init(app, _werkzeug_main)`.
+                               PR #276's "stays in app.py" decision for
+                               _sched is preserved -- the rebind site is
+                               still in app.py, just at one call site.
+
+Items moved (app.py -> scheduler.py):
+    _NightlyRetrainStub class        from app.py:228   (8 lines + 1 lead comment)
+    nightly_retrain try/except       from app.py:238   (7 lines)
+    Bootstrap block                  from app.py:10284 (192 lines)
+
+scheduler.py changes:
+    + def init(app, werkzeug_main) function (newly created -- the only
+      new declaration introduced by this PR).
+    + _NightlyRetrainStub class (moved verbatim).
+    + nightly_retrain try/except (moved verbatim).
+    + Added explanatory section header above the cluster.
+    __all__ expanded with `_NightlyRetrainStub`, `nightly_retrain`, `init`.
+
+app.py changes:
+    - Stub class, try/except import, and the 192-line bootstrap block
+      all removed.
+    + 5-line replacement: a section header comment, the
+      _werkzeug_main env read, and the init() call site.
+    Net: 11,021 -> 10,819 lines  (-202 = -209 removed + 7 added).
+
+Module direction (no cycles at module-load time):
+    state.py / utils.py / src.*  - leaf modules
+    scheduler.py imports state, utils, src.*, and at INIT-CALL-TIME imports
+                                    app to fetch the 2 remaining job names
+    app.py imports scheduler / state / utils as star-imports
+
+    The lazy `import app` inside init() is safe because Python's import
+    system already has app in sys.modules by the time init() is called
+    (app.py's module-level code triggers init() AFTER all top-level
+    definitions are executed).
+
+Verification:
+    ✓ py_compile clean on app.py and scheduler.py.
+    ✓ `from scheduler import *` exposes 36 names (PR #277's 3 +
+      PR #278a's 4 + PR #279's 12 + PR #280's 5 + PR #281's 9 +
+      PR #282's 3) via updated __all__.
+    ✓ Runtime checks:
+        - nightly_retrain is the real src.nightly_retrain module
+          (or the stub if the import fails -- same behavior as before).
+        - _NightlyRetrainStub is a class.
+        - inspect.signature(init) -> (app, werkzeug_main).  ✓ matches
+          the user-specified contract.
+    ✓ AST audit: zero dangling module-level defs of moved names in app.py.
+    ✓ 6 bare-name refs in app.py resolve via star-import.
+    ✓ `import app` reaches the Flask check (sandbox missing Flask, expected
+      production-only check).  Importantly, the STARTUP "src.nightly_retrain
+      OK" log line fires DURING the from-scheduler-import-* on app.py's
+      side -- the timing of this print is now slightly earlier in the boot
+      sequence (it runs as scheduler.py initializes rather than mid-app.py),
+      but it still fires exactly once.  Operators should see no functional
+      difference in Railway logs.
+
+Cumulative across PRs #276 + #277 + #278a + #279 + #280 + #281 + #282:
+    app/app.py:       13,004 -> 10,819 lines  (-2,185, -16.8%)
+    app/state.py:     399 lines       (unchanged this PR)
+    app/utils.py:     351 lines       (unchanged)
+    app/scheduler.py: 1,654 -> 1,910 lines  (+256)
+    111 module-level definitions + the bootstrap entry point now live
+    outside app.py.
+
+#277 deferred list status:
+    ✅ APScheduler bootstrap            -- moved in THIS PR (refactored
+                                           into init()).
+    ✅ _run_overnight_ai_gen, _run_auto_settlement_job,
+       _run_job1_final_settlement, _run_job2_full_clear,
+       _run_job3_games_prefetch          -- moved across PRs #279-#281.
+    Remaining in app.py (Flask-coupled, would each need their own
+    architectural PR):
+        _run_auto_analysis_job (171 lines) -- Flask app.test_client()
+        _run_consolidated_refresh_cycle (133 lines) -- _serialize chain
+
+Architectural note:
+    Across PRs #276-#282 the codebase has gone from a single 13K-line
+    file containing global state, pure helpers, scheduled jobs, the
+    Flask app, and the bootstrap, to four files with clean dependency
+    direction (state -> utils -> scheduler -> app).  Two jobs remain
+    in app.py because they're irreducibly entangled with Flask
+    request-cycle code (test_client) or the analysis serialization
+    pipeline (_serialize).  Extracting either would require its own
+    architectural decision (a fake test_client adapter, or a clean
+    serialization-module extraction) -- both larger than any single
+    refactor in this series and outside the move-only contract these
+    PRs have honored.
