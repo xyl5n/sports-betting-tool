@@ -1404,6 +1404,48 @@ body {
 @media (max-width: 480px) {
   .upcoming-grid { grid-template-columns: 1fr; }
 }
+
+/* ── News grid ───────────────────────────────────────────────────────── */
+.news-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 4px 0 8px;
+}
+.news-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color .15s;
+}
+.news-card:hover { border-color: var(--accent, #3b82f6); }
+.news-card-sport {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--accent, #3b82f6);
+  letter-spacing: .05em;
+}
+.news-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text, #e0e0e0);
+}
+.news-card-meta {
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  margin-top: 2px;
+}
+@media (max-width: 600px) {
+  .news-grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -1442,6 +1484,59 @@ body {
         <span class="ai-banner-arrow">→</span>
       </button>
 
+      <!-- EV scans -->
+      <section class="section" id="section-ev">
+        <div class="section-hdr">
+          <h2>EV SCANS</h2>
+          <span class="count-badge" id="ev-count">0</span>
+          <span class="info-icon" title="Expected-value picks — model edge ≥ 5% vs market">ℹ</span>
+          <div class="date-nav">
+            <button class="date-arrow" aria-label="Previous day" onclick="changeDate(-1)">‹</button>
+            <span class="date-label" id="ev-date">Today</span>
+            <button class="date-arrow" aria-label="Next day" onclick="changeDate(1)">›</button>
+          </div>
+        </div>
+        <div class="stats-line" id="ev-stats">Run analysis to load today's picks</div>
+        <div class="cards-scroll" id="ev-cards"></div>
+      </section>
+
+      <!-- Confidence picks -->
+      <section class="section" id="section-confidence">
+        <div class="section-hdr">
+          <h2>CONFIDENCE PICKS</h2>
+          <span class="count-badge" id="conf-count">0</span>
+        </div>
+        <div class="cards-scroll" id="conf-cards">
+          <div class="empty-state">No confidence picks yet.</div>
+        </div>
+      </section>
+
+      <!-- News -->
+      <section class="section" id="section-news">
+        <div class="section-hdr">
+          <h2>NEWS</h2>
+          <span class="count-badge" id="news-count">0</span>
+        </div>
+        <div class="news-grid" id="news-cards">
+          <div class="empty-state">No news loaded.</div>
+        </div>
+      </section>
+
+      <!-- Props -->
+      <section class="section" id="section-props">
+        <div class="section-hdr">
+          <h2>PROPS</h2>
+          <button class="swipe-toggle" id="swipe-toggle" onclick="toggleSwipe()">Swipe Mode</button>
+          <div class="date-nav">
+            <button class="date-arrow" onclick="changeDate(-1)">‹</button>
+            <span class="date-label" id="props-date">Today</span>
+            <button class="date-arrow" onclick="changeDate(1)">›</button>
+          </div>
+          <a class="section-link" href="#" onclick="event.preventDefault(); showTab('props')">See All →</a>
+        </div>
+        <div class="cards-scroll" id="props-cards"></div>
+      </section>
+
       <!-- Upcoming Games -->
       <section class="section" id="section-upcoming">
         <div class="section-hdr">
@@ -1464,37 +1559,6 @@ body {
           </div>
         </div>
         <div class="slate-list" id="slate-cards"></div>
-      </section>
-
-      <!-- EV scans -->
-      <section class="section" id="section-ev">
-        <div class="section-hdr">
-          <h2>EV SCANS</h2>
-          <span class="count-badge" id="ev-count">0</span>
-          <span class="info-icon" title="Expected-value picks — model edge ≥ 5% vs market">ⓘ</span>
-          <div class="date-nav">
-            <button class="date-arrow" aria-label="Previous day" onclick="changeDate(-1)">‹</button>
-            <span class="date-label" id="ev-date">Today</span>
-            <button class="date-arrow" aria-label="Next day" onclick="changeDate(1)">›</button>
-          </div>
-        </div>
-        <div class="stats-line" id="ev-stats">Run analysis to load today's picks</div>
-        <div class="cards-scroll" id="ev-cards"></div>
-      </section>
-
-      <!-- Props -->
-      <section class="section" id="section-props">
-        <div class="section-hdr">
-          <h2>PROPS</h2>
-          <button class="swipe-toggle" id="swipe-toggle" onclick="toggleSwipe()">Swipe Mode</button>
-          <div class="date-nav">
-            <button class="date-arrow" onclick="changeDate(-1)">‹</button>
-            <span class="date-label" id="props-date">Today</span>
-            <button class="date-arrow" onclick="changeDate(1)">›</button>
-          </div>
-          <a class="section-link" href="#" onclick="event.preventDefault(); showTab('props')">See All →</a>
-        </div>
-        <div class="cards-scroll" id="props-cards"></div>
       </section>
 
     </section>
@@ -1997,13 +2061,17 @@ function setSport(s) {
 function applyHomeViewForSport() {
   const isAll  = _sport === 'all';
   const evEl   = $('section-ev');
+  const cfEl   = $('section-confidence');
+  const newsEl = $('section-news');
   const ppEl   = $('section-props');
-  const slEl   = $('section-slate');
   const upEl   = $('section-upcoming');
-  if (upEl) upEl.style.display = isAll ? '' : 'none';
-  if (evEl) evEl.style.display = isAll ? '' : 'none';
-  if (ppEl) ppEl.style.display = isAll ? '' : 'none';
-  if (slEl) slEl.style.display = isAll ? 'none' : '';
+  const slEl   = $('section-slate');
+  if (evEl)   evEl.style.display   = isAll ? '' : 'none';
+  if (cfEl)   cfEl.style.display   = isAll ? '' : 'none';
+  if (newsEl) newsEl.style.display = isAll ? '' : 'none';
+  if (ppEl)   ppEl.style.display   = isAll ? '' : 'none';
+  if (upEl)   upEl.style.display   = isAll ? '' : 'none';
+  if (slEl)   slEl.style.display   = isAll ? 'none' : '';
   if (!isAll) {
     const title = $('slate-title');
     if (title) title.textContent = `${_sport.toUpperCase()} FULL SLATE`;
@@ -2257,6 +2325,32 @@ function buildUpcomingCard(g) {
       ${pickBadge}
     </div>
   </article>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Rendering — News
+// ═══════════════════════════════════════════════════════════════════════
+async function renderNews() {
+  const wrap  = $('news-cards');
+  const count = $('news-count');
+  if (!wrap) return;
+  try {
+    const data = await fetch('/api/news').then(r => r.json()).catch(() => null);
+    if (!data || !data.items || !data.items.length) {
+      wrap.innerHTML = '<div class="empty-state" style="grid-column:1/-1">No news available.</div>';
+      if (count) count.textContent = '0';
+      return;
+    }
+    if (count) count.textContent = data.items.length;
+    wrap.innerHTML = data.items.map(n => `
+      <a class="news-card" href="${n.url || '#'}" target="_blank" rel="noopener">
+        <span class="news-card-sport">${(n.sport || 'General').toUpperCase()}</span>
+        <span class="news-card-title">${n.title || ''}</span>
+        <span class="news-card-meta">${n.source ? n.source + ' · ' : ''}${n.age || ''}</span>
+      </a>`).join('');
+  } catch (_) {
+    wrap.innerHTML = '<div class="empty-state" style="grid-column:1/-1">Could not load news.</div>';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2817,6 +2911,7 @@ async function forceRefresh() {
 
 function renderAll() {
   applyHomeViewForSport();
+  renderNews();
   renderUpcoming();
   renderEVScans();
   renderProps();
