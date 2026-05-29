@@ -1563,3 +1563,87 @@ Remaining large non-Flask clusters from the Phase-E audit (future PRs):
     boot_startup         ~613 lines, 7 fn  -> app/boot.py (boot-ordering risk)
     The 2 Flask test_client jobs (_run_auto_analysis_job,
         _run_analysis_worker) remain the architectural blocker.
+
+============================================================================
+PR #288 — Phase B: app/parlay.py (parlay generation cluster)
+============================================================================
+
+Branch: claude/split-parlay-288
+Base:   origin/main @ e4cdfaa  (post PR #287 merge)
+Source: app/app.py @ 8,917 lines
+
+Pre-flight rule: STRICT move-only.
+
+Step 1 -- Full BFS transitive closure (try/if/with-aware symbol table,
+per the PR #287 lesson):
+    Seed: 4 named functions (4th confirmed as _unique_legs).
+    BFS discovered ZERO members beyond the seed.
+    Final closure: 4 functions, 215 lines.
+        _expand_game_legs   (72)
+        _generate_parlays   (69)
+        _compute_parlay     (60)
+        _unique_legs        (14)
+
+Step 2 -- Two-gate pre-flight:
+    GATE 1 (reassignment): all 4 -- 1 module-bind, 0 global-rebinds. PASS.
+    GATE 2 (cycle check, recursing into top-level try/if/with bodies):
+        Cycle risks: NONE.
+        Star-imports needed: NONE -- the parlay cluster references no
+            state/utils/serializer/scheduler/ai_prompts name.  It is the
+            most self-contained cluster extracted so far.
+        Module-level imports needed:
+            american_to_decimal  <- src.kelly  (leaf, verified)
+            datetime, timezone   <- datetime   (stdlib)
+            logging              <- stdlib (logging.warning in a suppressed
+                                   -exception handler -- NOT the _logger
+                                   instance, so NO parallel logger ref).
+        Infra names (_logger/_eprint/_debug_print/_redact): NONE.
+
+Step 3 -- Single commit (no state items in the closure).  Extracted in
+source/dependency order (_compute_parlay, _expand_game_legs, _unique_legs
+helpers before the _generate_parlays builder).  The "── Parlay
+generation ──" section-header comment (app.py:1032-1033) was moved with
+the cluster so app.py is left with no orphaned header.
+
+parlay.py header:
+    import logging
+    from datetime import datetime, timezone
+    from src.kelly import american_to_decimal
+    __all__ = [4 names]
+    (NO star-imports, NO _logger)
+
+Direction (no cycles):
+    src.kelly  ->  parlay.py  ->  app.py
+    parlay.py imports neither the other satellite modules nor app.py.
+    (parlay.py is a near-leaf: only src.kelly + stdlib.)
+
+app.py change: 8,917 -> 8,703 lines  (-214).
+    218 lines removed (4 defs + section header + preceding comments);
+    4-line `from parlay import *` block added after `from ai_prompts import *`.
+
+Verification:
+    ✓ py_compile clean on parlay.py and app.py.
+    ✓ `from parlay import *` exposes all 4 names via __all__; all callable.
+    ✓ american_to_decimal reachable inside parlay.
+    ✓ AST audit: zero dangling module-level defs; orphaned "Parlay
+      generation" header confirmed removed from app.py.
+    ✓ 5 bare-name refs in app.py resolve via star-import.
+    ✓ All SIX star-imports (state/utils/scheduler/serializer/ai_prompts/
+      parlay) coexist in one process.
+    ✓ `import app` reaches the Flask check (sandbox fatal as expected).
+
+Cumulative across PRs #276..#288:
+    app/app.py:        13,004 -> 8,703 lines  (-4,301, -33.1%)
+    app/state.py:      492 lines
+    app/utils.py:      351 lines
+    app/scheduler.py:  2,599 lines
+    app/serializer.py: 719 lines
+    app/ai_prompts.py: 611 lines
+    app/parlay.py:     260 lines  (NEW)
+    155 module-level definitions extracted from the original 13K monolith.
+
+Remaining large non-Flask clusters from the Phase-E audit (future PRs):
+    no_odds_predictor    ~185 lines, 4 fn  -> app/predictor.py
+    boot_startup         ~613 lines, 7 fn  -> app/boot.py (boot-ordering risk)
+    The 2 Flask test_client jobs (_run_auto_analysis_job,
+        _run_analysis_worker) remain the architectural blocker.
