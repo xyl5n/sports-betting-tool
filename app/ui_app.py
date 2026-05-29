@@ -109,6 +109,7 @@ bets.register(backend)
 # Flask test client.  The NiceGUI props page remains served at /props-legacy.
 from nicegui import app as _ng_app                                       # noqa: E402
 from starlette.responses import Response as _StarletteResponse           # noqa: E402
+from starlette.requests import Request as _StarletteRequest              # noqa: E402
 
 _flask_client = backend.app.test_client()
 
@@ -116,6 +117,22 @@ _flask_client = backend.app.test_client()
 @_ng_app.get("/props")
 def _props_flask_page():
     rv = _flask_client.get("/props")
+    return _StarletteResponse(
+        content=rv.get_data(),
+        status_code=rv.status_code,
+        media_type=rv.headers.get("Content-Type", "text/html"),
+    )
+
+
+@_ng_app.get("/home-v2")
+def _home_v2_flask_page(request: _StarletteRequest):
+    # Bridge the server-rendered Flask /home-v2 page (NiceGUI → HTML
+    # migration, Phase 1) onto NiceGUI's FastAPI server, same in-process
+    # test-client passthrough as /props.  The query string is forwarded so
+    # ?sport=wnba reaches the Flask route.
+    qs   = request.url.query
+    path = "/home-v2" + (f"?{qs}" if qs else "")
+    rv   = _flask_client.get(path)
     return _StarletteResponse(
         content=rv.get_data(),
         status_code=rv.status_code,
