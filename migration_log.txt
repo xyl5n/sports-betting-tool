@@ -1456,3 +1456,110 @@ Cumulative across PRs #276 + #277 + #278a + #279 + #280 + #281 + #282
     app/scheduler.py: 2,599 lines  (unchanged)
     app/serializer.py: 719 lines  (unchanged)
     141 module-level definitions extracted from the original 13K monolith.
+
+============================================================================
+PR #287 — Phase A: app/ai_prompts.py (AI prompt + analyst-call cluster)
+============================================================================
+
+Branch: claude/split-aiprompts-287
+Base:   origin/main @ 4718d8c  (post PR #286 merge)
+Source: app/app.py @ 9,461 lines
+
+Pre-flight rule: STRICT move-only.
+
+Step 1 -- Full BFS transitive closure (run BEFORE scoping, per the
+#285 lesson):
+    Seed: 8 named functions (with _call_analyst* resolved to the exact
+    pair _call_analyst + _call_analyst_chat).
+    BFS expansion discovered exactly 1 additional member:
+        _ANALYST_SYSTEM_PROMPT (string constant, shared by both
+                                _call_analyst and _call_analyst_chat).
+    Final closure: 10 items (9 functions + 1 constant), 534 fn-lines.
+
+    Closure tree:
+      _build_pick_analysis_context (167)  -> _pitcher_block_for_ai,
+                                             _resolve_pitcher_data_for_ai
+      _build_explain_prompt        (93)
+      _build_breakdown_prompt      (78)
+      _build_chat_context          (77)   -> _sp_pitch_mix_text
+      _resolve_pitcher_data_for_ai (37)
+      _pitcher_block_for_ai        (37)
+      _call_analyst_chat           (22)   -> _ANALYST_SYSTEM_PROMPT
+      _call_analyst                (14)   -> _ANALYST_SYSTEM_PROMPT
+      _ANALYST_SYSTEM_PROMPT       (14, constant)
+      _sp_pitch_mix_text           (9)
+
+Step 2 -- Two-gate pre-flight on the full closure:
+    GATE 1 (reassignment): all 10 -- 1 module-bind, 0 global-rebinds. PASS.
+    GATE 2 (cycle check): ZERO app.py-local function/class/state refs.
+
+    GATE 2 follow-up (caught a gap in the first pass): the initial Gate-2
+    scan missed `Ledger` because it is imported at app.py module scope
+    INSIDE A TRY BLOCK (line 227: `from src.ledger import Ledger`), and
+    the symbol-table builder only walked direct tree.body children.  A
+    second scan that recurses into top-level try/if/with bodies found:
+        _build_chat_context references `Ledger` (line 819).
+    src.ledger verified leaf (imports no state/app/scheduler/serializer)
+    => ai_prompts.py gains `from src.ledger import Ledger`.  No cycle.
+
+    Reachable-name home-module map (decides the star-imports):
+        state.py:    _ANTHROPIC_API_KEY, _FEATURE_LABELS
+        utils.py:    _fmt_odds, _fmt_pct, _format_odds
+        serializer:  _serialize
+        scheduler-ONLY: <none>   (so ai_prompts does NOT import scheduler)
+    Infrastructure-name check: cluster uses NO _logger / _eprint /
+        _debug_print / _redact  => ai_prompts.py needs NO parallel _logger.
+
+    Inline imports (move verbatim inside their function bodies):
+        datetime, zoneinfo, anthropic, src.pitcher_client, src.ai_context.
+
+Step 3 -- Single commit (no new state dicts in the closure, so no
+state.py change).  Created ai_prompts.py with the 10-item closure,
+extracted in source/dependency order (constant + helpers before the
+big builders).
+
+ai_prompts.py header:
+    from src.ledger import Ledger     # only app-module-level dep
+    from state import *
+    from utils import *
+    from serializer import *
+    __all__ = [the 10 names]
+    (NO _logger -- cluster uses no infra names)
+
+Direction (no cycles):
+    state.py / utils.py  ->  serializer.py  ->  ai_prompts.py  ->  app.py
+    ai_prompts NEVER imports app.py or scheduler.py.
+
+app.py change: 9,461 -> 8,917 lines  (-544).
+    548 lines removed (10 defs + preceding comment blocks); 4-line
+    `from ai_prompts import *` block added after `from serializer import *`.
+
+Verification:
+    ✓ py_compile clean on ai_prompts.py and app.py.
+    ✓ `from ai_prompts import *` exposes all 10 names via __all__.
+    ✓ _ANALYST_SYSTEM_PROMPT resolves to a 1012-char str; Ledger +
+      _serialize reachable inside ai_prompts.
+    ✓ AST audit: zero dangling module-level defs of moved names.
+    ✓ 7 bare-name refs in app.py resolve via star-import.
+    ✓ All FIVE star-imports (state/utils/scheduler/serializer/ai_prompts)
+      coexist in one process.
+    ✓ `import app` reaches the Flask check (sandbox fatal as expected).
+
+Cumulative across PRs #276..#287:
+    app/app.py:        13,004 -> 8,917 lines  (-4,087, -31.4%)
+    app/state.py:      492 lines
+    app/utils.py:      351 lines
+    app/scheduler.py:  2,599 lines
+    app/serializer.py: 719 lines
+    app/ai_prompts.py: 611 lines  (NEW)
+    151 module-level definitions extracted from the original 13K monolith.
+
+First PR to take app.py past the 31% reduction mark, and the first new
+top-level module since serializer.py (PR #283).
+
+Remaining large non-Flask clusters from the Phase-E audit (future PRs):
+    parlay_builder       ~215 lines, 4 fn  -> app/parlay.py
+    no_odds_predictor    ~185 lines, 4 fn  -> app/predictor.py
+    boot_startup         ~613 lines, 7 fn  -> app/boot.py (boot-ordering risk)
+    The 2 Flask test_client jobs (_run_auto_analysis_job,
+        _run_analysis_worker) remain the architectural blocker.
