@@ -273,7 +273,6 @@ app.jinja_env.auto_reload = True
 print("STARTUP [6/6]: Flask app created — registering routes...", flush=True, file=sys.stderr)
 
 _ANALYSIS_TTL        = 900  # 15 minutes — skip API if last run was within this window
-_ARCHIVE_PATH             = Path("data/bet_history_archive.json")
 
 # Step 2: single lock so concurrent requests (init + analyze) never race on the file.
 import threading as _threading
@@ -353,7 +352,6 @@ def _supabase_cache_set_sync(key: str, sport: str | None, date: str,
 # restarts.  Falls back to an in-process dict when Supabase is offline so
 # the chat still works (counter just resets on container restart).
 
-_ai_counter_mem: dict[str, int] = {}     # in-process fallback when Supabase is off
 
 
 
@@ -757,7 +755,6 @@ _ANALYST_SYSTEM_PROMPT = (
     "clear recommendation of either: 'Agree with model', 'Disagree — my pick is X', or "
     "'Lean with caution' if you partially agree but see significant risk."
 )
-_upset_calc          = UpsetCalculator(cache=_cache)
 
 
 # ── Anthropic helper ──────────────────────────────────────────────────────────
@@ -972,10 +969,6 @@ def _save_model_settings(settings: dict) -> dict:
     return coerced
 
 
-# Last-seen game lines (per Odds-API game id) for movement detection, and last
-# probable starters (per gamePk) for pitching-change detection.  Process-local.
-_last_seen_lines: dict[str, dict] = {}
-_last_probables:  dict[str, str]  = {}
 
 
 # Module-level scheduler reference (set at startup)
@@ -1435,8 +1428,6 @@ def index():
     return render_template("index.html")
 
 
-# In-memory short-TTL cache for linescore data (avoids disk I/O on 60-s polling)
-_linescore_mem: dict[str, tuple[float, dict]] = {}   # key → (timestamp, data)
 
 
 @app.route("/api/mlb/schedule", methods=["GET"])
@@ -1499,7 +1490,6 @@ def mlb_schedule_proxy():
     return jsonify(data)
 
 
-_wnba_linescore_mem: dict[str, tuple[float, dict]] = {}
 
 
 
@@ -2396,18 +2386,6 @@ def _run_daily_picks_selection() -> None:
 
 import threading as _threading_for_analyze   # local alias to avoid name shadow
 
-_analysis_progress: dict[str, dict] = {
-    "mlb":  {
-        "running": False, "step": "", "step_num": 0, "total_steps": 8,
-        "started_at": None, "completed_at": None,
-        "error": None, "n_games": None,
-    },
-    "wnba": {
-        "running": False, "step": "", "step_num": 0, "total_steps": 8,
-        "started_at": None, "completed_at": None,
-        "error": None, "n_games": None,
-    },
-}
 
 
 def _get_analysis_progress(sport: str) -> dict:
@@ -8788,17 +8766,6 @@ def admin_props_repull():
                         "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
-# ── On-demand "Run AI Analysis" (admin) ───────────────────────────────────────
-# Generates the Groq game summaries, prop summaries, and player breakdowns
-# that aren't already cached -- the same logic the post-analysis queue runs,
-# but on demand with live progress.  Sequential, 150 ms between Groq calls.
-_ai_run_lock  = threading.Lock()
-_ai_run_state: dict = {
-    "running": False, "phase": "", "done": 0, "total": 0,
-    "games_generated": 0, "props_generated": 0, "breakdowns_generated": 0,
-    "skipped": 0, "failed": 0,
-    "started_at": None, "finished_at": None, "elapsed": None, "summary": None,
-}
 
 
 def _run_ai_analysis_job(force: bool = False) -> None:
