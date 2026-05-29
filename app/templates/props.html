@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Player Props</title>
+
+  <!-- Tailwind via CDN (no build step) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <script>
+    // Theme tokens shared with Tailwind utilities.
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg:     "#000000",
+            card:   "#1a1a1a",
+            cardhi: "#222222",
+            border: "#2a2a2a",
+            accent: "#7C3AED",
+            accenthi: "#9F67FF",
+            pos:    "#22c55e",
+            neg:    "#ef4444",
+            warn:   "#eab308",
+          },
+          fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    html, body { background: #000; }
+    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    /* Hide scrollbar on the horizontal stat-pill row but keep it scrollable. */
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    /* Card hover: subtle lift + purple glow. */
+    .prop-card { transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease; }
+    .prop-card:hover { transform: translateY(-3px); box-shadow: 0 10px 30px -10px rgba(124,58,237,.55); }
+    .dimmed { opacity: .6; }
+  </style>
+</head>
+
+<body class="bg-bg text-white min-h-screen">
+
+  <!-- ── Sticky top nav ────────────────────────────────────────────── -->
+  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
+    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
+        <span class="text-accent">●</span> Sports Analysis
+      </a>
+      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
+        <a href="/" class="hover:text-white transition">Home</a>
+        <a href="/props" class="text-white font-semibold">Props</a>
+        <a href="/props-legacy" class="hover:text-white transition">Legacy</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── Sticky filter bar ─────────────────────────────────────────── -->
+  <div class="sticky top-14 z-20 bg-bg/95 backdrop-blur border-b border-border">
+    <div class="mx-auto max-w-7xl px-4 py-3 space-y-3">
+
+      <!-- Row 1: sport pills + sort -->
+      <div class="flex items-center justify-between gap-3">
+        <div id="sport-pills" class="flex items-center gap-2">
+          <button data-sport="all" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-accent text-white">All</button>
+          <button data-sport="mlb" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-card text-gray-300 border border-border">MLB</button>
+          <button data-sport="wnba" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-card text-gray-300 border border-border">WNBA</button>
+        </div>
+
+        <div class="flex items-center gap-2 shrink-0">
+          <label for="sort-select" class="text-xs text-gray-500 hidden sm:inline">Sort</label>
+          <select id="sort-select"
+                  class="bg-card border border-border text-sm rounded-lg px-2.5 py-1.5 text-gray-200 focus:outline-none focus:border-accent">
+            <option value="confidence">Confidence ↓</option>
+            <option value="edge">Edge ↓</option>
+            <option value="time">Game Time ↑</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Row 2: stat-type pills (horizontal scroll) -->
+      <div id="stat-pills" class="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-1 px-1">
+        <button data-stat="all"
+                class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-accent text-white bg-accent/20">All</button>
+        {% for label in stat_labels %}
+        <button data-stat="{{ label }}"
+                class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-border text-gray-300 bg-card">{{ label }}</button>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Card grid ─────────────────────────────────────────────────── -->
+  <main class="mx-auto max-w-7xl px-4 py-5">
+    <div id="empty-state"
+         class="hidden text-center text-gray-500 py-20 text-sm">
+      No props match these filters.
+    </div>
+    <div id="card-grid"
+         class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <!-- cards injected by props.js -->
+    </div>
+  </main>
+
+  <!-- Server data handed to the client as JSON; all filtering is client-side. -->
+  <script id="props-data" type="application/json">{{ props | tojson }}</script>
+  <script src="/static/js/props.js" defer></script>
+</body>
+</html>

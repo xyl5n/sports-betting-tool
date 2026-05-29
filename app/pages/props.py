@@ -217,7 +217,11 @@ _SWIPE_JS = """
 
 
 def register(backend) -> None:
-    @ui.page("/props")
+    # NOTE: This NiceGUI page now lives at /props-legacy.  The primary /props
+    # route is served by the new Flask + Tailwind template (see app.py
+    # `props_page()` and ui_app.py runtime wiring) as part of the PR #304
+    # migration.  Kept accessible during the transition so nothing breaks.
+    @ui.page("/props-legacy")
     def props_page():
         _dbg("props_page ENTER")
         try:

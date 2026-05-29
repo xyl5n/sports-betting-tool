@@ -100,6 +100,39 @@ picks.register(backend)
 bets.register(backend)
 
 
+# ── Flask + Tailwind props page wiring (PR #304) ────────────────────────────
+# NiceGUI (FastAPI/uvicorn) owns the HTTP server here; the Flask app in app.py
+# is imported as a module and is normally only reached in-process via
+# test_client.  The migrated props page is a plain Flask route returning a
+# Tailwind template, so we bridge it onto NiceGUI's FastAPI app with two thin
+# passthroughs (the page itself + its /static assets) using an in-process
+# Flask test client.  The NiceGUI props page remains served at /props-legacy.
+from nicegui import app as _ng_app                                       # noqa: E402
+from starlette.responses import Response as _StarletteResponse           # noqa: E402
+
+_flask_client = backend.app.test_client()
+
+
+@_ng_app.get("/props")
+def _props_flask_page():
+    rv = _flask_client.get("/props")
+    return _StarletteResponse(
+        content=rv.get_data(),
+        status_code=rv.status_code,
+        media_type=rv.headers.get("Content-Type", "text/html"),
+    )
+
+
+@_ng_app.get("/static/{path:path}")
+def _props_static(path: str):
+    rv = _flask_client.get("/static/" + path)
+    return _StarletteResponse(
+        content=rv.get_data(),
+        status_code=rv.status_code,
+        media_type=rv.headers.get("Content-Type", "application/octet-stream"),
+    )
+
+
 # ── Boot-time analysis-state hydration ──────────────────────────────────────
 # Backend exposes hydrate_state() which re-reads daily_snapshot.json +
 # analysis_cache.json into the in-memory _analysis_state /
