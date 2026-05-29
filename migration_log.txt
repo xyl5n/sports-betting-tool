@@ -1237,3 +1237,124 @@ Cumulative across PRs #276 + #277 + #278a + #279 + #280 + #281 + #282
                                               4 remaining deps for PR #285.
     ❌ _run_auto_analysis_job             -- Flask app.test_client() dep,
                                               architectural decision needed.
+
+============================================================================
+PR #285 — _run_consolidated_refresh_cycle full transitive closure
+============================================================================
+
+Branch: claude/split-scheduler-285
+Base:   origin/main @ 2bf73c1  (post PR #284 merge)
+Source: app/app.py @ 9,856 lines
+
+Pre-flight rule: STRICT move-only.
+
+Lesson from PRs #283/#284: deferral plans must carry the FULL transitive
+closure forward, not just the first-layer STAYS.  This PR did the full
+BFS expansion before scoping the move.
+
+Transitive closure (BFS from _run_consolidated_refresh_cycle):
+
+  _run_consolidated_refresh_cycle  (function, 133 lines)
+    ├── _detect_game_changes        (function, 114 lines)
+    │   ├── _last_game_state        (annassign, 1 line state dict)
+    │   └── _probables_by_pair      (function, 22 lines)
+    ├── _detect_prop_changes        (function, 50 lines)
+    │   └── _last_prop_state        (annassign, 1 line state dict)
+    ├── _refresh_cycle_state        (annassign, 5 lines state dict)
+    └── _refresh_schedule_and_scores (function, 18 lines)
+
+  Closure size: 8 items (5 functions + 3 state dicts), ~344 lines.
+
+  Verified: _probables_by_pair only uses reachable names
+            (_MLB_STATS_BASE, _eprint, _team_pair, _today_et, _urlreq, json).
+            No further recursion needed -- it's a leaf of the closure.
+
+  Verified: ZERO external callers outside the 8-item closure for any of
+            the 8 items.  No app.py code references them today.  The only
+            reference to _run_consolidated_refresh_cycle itself was inside
+            init()'s _sched.add_job(...) call -- already in scheduler.py
+            since PR #282 -- so the function's reference site moves with it.
+
+Pre-flight reassignment check (AST):
+    Move set:                                       8 names
+    Original FunctionDef / AnnAssign sites:         8 (all expected)
+    Post-initial rebinds:                           0
+    Verdict: SAFE under `from <mod> import *`.
+
+Commit 1 (4e7368e)  state.py: 3 refresh-cycle state dicts
+----------------------------------------------------------------------------
+    _refresh_cycle_state  moved from app.py:975   (5 lines, AnnAssign)
+    _last_game_state      moved from app.py:990   (1 line + comments)
+    _last_prop_state      moved from app.py:991   (1 line)
+
+All three appended to state.py's __all__.
+app.py: 9,856 -> 9,844 lines (-12).
+
+Commit 2 (this commit)  scheduler.py: 5 functions in dependency order
+----------------------------------------------------------------------------
+
+Names moved (sorted by original line):
+    _refresh_schedule_and_scores  moved from app.py:8582  ( 18 lines)
+    _probables_by_pair            moved from app.py:8696  ( 22 lines)
+    _detect_game_changes          moved from app.py:8720  (114 lines)
+    _detect_prop_changes          moved from app.py:8842  ( 50 lines)
+    _run_consolidated_refresh_cycle moved from app.py:8894 (133 lines)
+
+scheduler.py header:
+    NONE -- all imports needed (sys, time, json, traceback, datetime
+            + timedelta + timezone, _urlreq, parallel _logger ref, plus
+            existing `from state import *` / `from utils import *` /
+            `from serializer import *`) were already in place.
+    __all__ expanded with 5 new names.
+
+Direction (no cycles):
+    scheduler.py -> state.py / utils.py / serializer.py / src.*
+    app.py       -> scheduler.py / state.py / utils.py / serializer.py
+    scheduler.py NEVER imports app.py.
+
+app.py change: 9,844 -> 9,494 lines (-350).
+Total this PR:  9,856 -> 9,494 lines (-362).
+
+Verification:
+    ✓ py_compile clean on state.py, scheduler.py, app.py.
+    ✓ `from scheduler import *` exposes 47 names total via __all__.
+    ✓ `from state import *` exposes the 3 new state dicts.
+    ✓ All 5 moved functions callable from importing modules.
+    ✓ AST audit: zero dangling module-level defs of moved names.
+    ✓ ZERO bare-name refs in app.py to the closure -- confirms the
+      "0 external callers" prediction was correct.  This is the
+      cleanest closure of the entire decomposition series.
+    ✓ `import app` reaches the Flask check (sandbox fatal as expected).
+
+Cumulative across PRs #276 + #277 + #278a + #279 + #280 + #281 + #282
+                  + #283 + #284 + #285:
+    app/app.py:       13,004 -> 9,494 lines   (-3,510, -27.0%)
+    app/state.py:     435 lines  (+19 this PR)
+    app/utils.py:     351 lines  (unchanged)
+    app/scheduler.py: 2,599 lines  (+368 this PR)
+    app/serializer.py: 719 lines  (unchanged since PR #283)
+    131 module-level definitions extracted.
+
+#277 deferred list — final status:
+    ✅ APScheduler bootstrap              -- PR #282
+    ✅ _run_overnight_ai_gen              -- PR #279
+    ✅ _run_auto_settlement_job           -- PR #280
+    ✅ _run_job1_final_settlement         -- PR #281
+    ✅ _run_job2_full_clear               -- PR #281
+    ✅ _run_job3_games_prefetch           -- PR #281
+    ✅ _run_consolidated_refresh_cycle    -- PR #285 (THIS PR)
+    ❌ _run_auto_analysis_job             -- only item remaining; Flask
+                                             app.test_client() dep means
+                                             it needs its own architectural
+                                             PR (test_client adapter or
+                                             internal-call refactor).
+
+EVERY non-Flask scheduled job is now in scheduler.py.
+
+Architectural lesson recorded for future cascades:
+    - Don't ship a deferral plan with just the first-layer STAYS.
+    - Run the BFS closure to depth N until all leaf deps are either
+      reachable or stdlib/3rd-party, BEFORE producing a scope number.
+    - PRs #283/#284 each underestimated cascade size because they only
+      reported first-layer STAYS.  PR #285 ran the full closure first
+      and landed cleanly with zero scope drift.
