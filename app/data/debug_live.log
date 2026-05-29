@@ -1034,3 +1034,179 @@
 [11:05:26] 
 [11:05:26]   Match result: 15 matched, 0 unmatched out of 15
 [11:05:26] ================================================================
+[12:42:34] ================================================================
+[12:42:34] LIVE SCORE DEBUG  trigger=auto-60s  date=2026-05-29  results_in_state=15  flat=15
+[12:42:34] ================================================================
+[12:42:34]   Fetching: https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=2026-05-29&hydrate=linescore
+[12:42:34]   MLB Stats API returned 15 game(s)
+[12:42:34] 
+[12:42:34]   Games from MLB Stats API:
+[12:42:34]     pk=822732   [Preview ] (Scheduled           ) San Diego Padres @ Washington Nationals
+[12:42:34]     pk=822894   [Preview ] (Scheduled           ) Kansas City Royals @ Texas Rangers
+[12:42:34]     pk=822978   [Preview ] (Scheduled           ) Los Angeles Angels @ Tampa Bay Rays
+[12:42:34]     pk=823055   [Preview ] (Scheduled           ) Chicago Cubs @ St. Louis Cardinals
+[12:42:34]     pk=823135   [Preview ] (Scheduled           ) Arizona Diamondbacks @ Seattle Mariners
+[12:42:34]     pk=823377   [Preview ] (Scheduled           ) Minnesota Twins @ Pittsburgh Pirates
+[12:42:34]     pk=823623   [Preview ] (Scheduled           ) Miami Marlins @ New York Mets
+[12:42:34]     pk=823946   [Preview ] (Scheduled           ) Philadelphia Phillies @ Los Angeles Dodgers
+[12:42:34]     pk=824191   [Preview ] (Scheduled           ) Milwaukee Brewers @ Houston Astros
+[12:42:34]     pk=824353   [Preview ] (Scheduled           ) San Francisco Giants @ Colorado Rockies
+[12:42:34]     pk=824433   [Preview ] (Scheduled           ) Boston Red Sox @ Cleveland Guardians
+[12:42:34]     pk=824515   [Preview ] (Scheduled           ) Atlanta Braves @ Cincinnati Reds
+[12:42:34]     pk=824594   [Preview ] (Scheduled           ) Detroit Tigers @ Chicago White Sox
+[12:42:34]     pk=824835   [Preview ] (Scheduled           ) Toronto Blue Jays @ Baltimore Orioles
+[12:42:34]     pk=825002   [Preview ] (Scheduled           ) New York Yankees @ Athletics
+[12:42:34] 
+[12:42:34]   State summary: Preview=15
+[12:42:34] 
+[12:42:34]   Matching stored results to live_map:
+[12:42:34]     [0efc76f321b5fc7e...]  Atlanta Braves @ Cincinnati Reds  →  ✓ MATCH  pk=824515  state=Preview
+[12:42:34]     [765d27e397e587aa...]  Minnesota Twins @ Pittsburgh Pirates  →  ✓ MATCH  pk=823377  state=Preview
+[12:42:34]     [8c92a04b11da0a1f...]  San Diego Padres @ Washington Nationals  →  ✓ MATCH  pk=822732  state=Preview
+[12:42:34]     [ddd9481c210fa90d...]  Toronto Blue Jays @ Baltimore Orioles  →  ✓ MATCH  pk=824835  state=Preview
+[12:42:34]     [d32dadf5a576ba27...]  Boston Red Sox @ Cleveland Guardians  →  ✓ MATCH  pk=824433  state=Preview
+[12:42:34]     [95952a4215c0c1d2...]  Los Angeles Angels @ Tampa Bay Rays  →  ✓ MATCH  pk=822978  state=Preview
+[12:42:34]     [6493e9132fdd464e...]  Miami Marlins @ New York Mets  →  ✓ MATCH  pk=823623  state=Preview
+[12:42:34]     [4018fbc29a76d207...]  Chicago Cubs @ St. Louis Cardinals  →  ✓ MATCH  pk=823055  state=Preview
+[12:42:34]     [1587b2f52f5f1a49...]  Detroit Tigers @ Chicago White Sox  →  ✓ MATCH  pk=824594  state=Preview
+[12:42:34]     [57848c1e5cf12fb4...]  Kansas City Royals @ Texas Rangers  →  ✓ MATCH  pk=822894  state=Preview
+[12:42:34]     [274a30921628d47b...]  Milwaukee Brewers @ Houston Astros  →  ✓ MATCH  pk=824191  state=Preview
+[12:42:34]     [2106f4fc8ef576ea...]  San Francisco Giants @ Colorado Rockies  →  ✓ MATCH  pk=824353  state=Preview
+[12:42:34]     [26c7991c125b7365...]  New York Yankees @ Athletics  →  ✓ MATCH  pk=825002  state=Preview
+[12:42:34]     [bc8152dee5f6a9c8...]  Arizona Diamondbacks @ Seattle Mariners  →  ✓ MATCH  pk=823135  state=Preview
+[12:42:34]     [18e8a4acb1d40019...]  Philadelphia Phillies @ Los Angeles Dodgers  →  ✓ MATCH  pk=823946  state=Preview
+[12:42:34] 
+[12:42:34]   Match result: 15 matched, 0 unmatched out of 15
+[12:42:34] ================================================================
+[12:43:34] ================================================================
+[12:43:34] LIVE SCORE DEBUG  trigger=auto-60s  date=2026-05-29  results_in_state=15  flat=15
+[12:43:34] ================================================================
+[12:43:34]   Fetching: https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=2026-05-29&hydrate=linescore
+[12:43:34]   MLB Stats API returned 15 game(s)
+[12:43:34] 
+[12:43:34]   Games from MLB Stats API:
+[12:43:34]     pk=822732   [Preview ] (Scheduled           ) San Diego Padres @ Washington Nationals
+[12:43:34]     pk=822894   [Preview ] (Scheduled           ) Kansas City Royals @ Texas Rangers
+[12:43:34]     pk=822978   [Preview ] (Scheduled           ) Los Angeles Angels @ Tampa Bay Rays
+[12:43:34]     pk=823055   [Preview ] (Scheduled           ) Chicago Cubs @ St. Louis Cardinals
+[12:43:34]     pk=823135   [Preview ] (Scheduled           ) Arizona Diamondbacks @ Seattle Mariners
+[12:43:34]     pk=823377   [Preview ] (Scheduled           ) Minnesota Twins @ Pittsburgh Pirates
+[12:43:34]     pk=823623   [Preview ] (Scheduled           ) Miami Marlins @ New York Mets
+[12:43:34]     pk=823946   [Preview ] (Scheduled           ) Philadelphia Phillies @ Los Angeles Dodgers
+[12:43:34]     pk=824191   [Preview ] (Scheduled           ) Milwaukee Brewers @ Houston Astros
+[12:43:34]     pk=824353   [Preview ] (Scheduled           ) San Francisco Giants @ Colorado Rockies
+[12:43:34]     pk=824433   [Preview ] (Scheduled           ) Boston Red Sox @ Cleveland Guardians
+[12:43:34]     pk=824515   [Preview ] (Scheduled           ) Atlanta Braves @ Cincinnati Reds
+[12:43:34]     pk=824594   [Preview ] (Scheduled           ) Detroit Tigers @ Chicago White Sox
+[12:43:34]     pk=824835   [Preview ] (Scheduled           ) Toronto Blue Jays @ Baltimore Orioles
+[12:43:34]     pk=825002   [Preview ] (Scheduled           ) New York Yankees @ Athletics
+[12:43:34] 
+[12:43:34]   State summary: Preview=15
+[12:43:34] 
+[12:43:34]   Matching stored results to live_map:
+[12:43:34]     [0efc76f321b5fc7e...]  Atlanta Braves @ Cincinnati Reds  →  ✓ MATCH  pk=824515  state=Preview
+[12:43:34]     [765d27e397e587aa...]  Minnesota Twins @ Pittsburgh Pirates  →  ✓ MATCH  pk=823377  state=Preview
+[12:43:34]     [8c92a04b11da0a1f...]  San Diego Padres @ Washington Nationals  →  ✓ MATCH  pk=822732  state=Preview
+[12:43:34]     [ddd9481c210fa90d...]  Toronto Blue Jays @ Baltimore Orioles  →  ✓ MATCH  pk=824835  state=Preview
+[12:43:34]     [d32dadf5a576ba27...]  Boston Red Sox @ Cleveland Guardians  →  ✓ MATCH  pk=824433  state=Preview
+[12:43:34]     [95952a4215c0c1d2...]  Los Angeles Angels @ Tampa Bay Rays  →  ✓ MATCH  pk=822978  state=Preview
+[12:43:34]     [6493e9132fdd464e...]  Miami Marlins @ New York Mets  →  ✓ MATCH  pk=823623  state=Preview
+[12:43:34]     [4018fbc29a76d207...]  Chicago Cubs @ St. Louis Cardinals  →  ✓ MATCH  pk=823055  state=Preview
+[12:43:34]     [1587b2f52f5f1a49...]  Detroit Tigers @ Chicago White Sox  →  ✓ MATCH  pk=824594  state=Preview
+[12:43:34]     [57848c1e5cf12fb4...]  Kansas City Royals @ Texas Rangers  →  ✓ MATCH  pk=822894  state=Preview
+[12:43:34]     [274a30921628d47b...]  Milwaukee Brewers @ Houston Astros  →  ✓ MATCH  pk=824191  state=Preview
+[12:43:34]     [2106f4fc8ef576ea...]  San Francisco Giants @ Colorado Rockies  →  ✓ MATCH  pk=824353  state=Preview
+[12:43:34]     [26c7991c125b7365...]  New York Yankees @ Athletics  →  ✓ MATCH  pk=825002  state=Preview
+[12:43:34]     [bc8152dee5f6a9c8...]  Arizona Diamondbacks @ Seattle Mariners  →  ✓ MATCH  pk=823135  state=Preview
+[12:43:34]     [18e8a4acb1d40019...]  Philadelphia Phillies @ Los Angeles Dodgers  →  ✓ MATCH  pk=823946  state=Preview
+[12:43:34] 
+[12:43:34]   Match result: 15 matched, 0 unmatched out of 15
+[12:43:34] ================================================================
+[12:44:34] ================================================================
+[12:44:34] LIVE SCORE DEBUG  trigger=auto-60s  date=2026-05-29  results_in_state=15  flat=15
+[12:44:34] ================================================================
+[12:44:34]   Fetching: https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=2026-05-29&hydrate=linescore
+[12:44:34]   MLB Stats API returned 15 game(s)
+[12:44:34] 
+[12:44:34]   Games from MLB Stats API:
+[12:44:34]     pk=822732   [Preview ] (Scheduled           ) San Diego Padres @ Washington Nationals
+[12:44:34]     pk=822894   [Preview ] (Scheduled           ) Kansas City Royals @ Texas Rangers
+[12:44:34]     pk=822978   [Preview ] (Scheduled           ) Los Angeles Angels @ Tampa Bay Rays
+[12:44:34]     pk=823055   [Preview ] (Scheduled           ) Chicago Cubs @ St. Louis Cardinals
+[12:44:34]     pk=823135   [Preview ] (Scheduled           ) Arizona Diamondbacks @ Seattle Mariners
+[12:44:34]     pk=823377   [Preview ] (Scheduled           ) Minnesota Twins @ Pittsburgh Pirates
+[12:44:34]     pk=823623   [Preview ] (Scheduled           ) Miami Marlins @ New York Mets
+[12:44:34]     pk=823946   [Preview ] (Scheduled           ) Philadelphia Phillies @ Los Angeles Dodgers
+[12:44:34]     pk=824191   [Preview ] (Scheduled           ) Milwaukee Brewers @ Houston Astros
+[12:44:34]     pk=824353   [Preview ] (Scheduled           ) San Francisco Giants @ Colorado Rockies
+[12:44:34]     pk=824433   [Preview ] (Scheduled           ) Boston Red Sox @ Cleveland Guardians
+[12:44:34]     pk=824515   [Preview ] (Scheduled           ) Atlanta Braves @ Cincinnati Reds
+[12:44:34]     pk=824594   [Preview ] (Scheduled           ) Detroit Tigers @ Chicago White Sox
+[12:44:34]     pk=824835   [Preview ] (Scheduled           ) Toronto Blue Jays @ Baltimore Orioles
+[12:44:34]     pk=825002   [Preview ] (Scheduled           ) New York Yankees @ Athletics
+[12:44:34] 
+[12:44:34]   State summary: Preview=15
+[12:44:34] 
+[12:44:34]   Matching stored results to live_map:
+[12:44:34]     [0efc76f321b5fc7e...]  Atlanta Braves @ Cincinnati Reds  →  ✓ MATCH  pk=824515  state=Preview
+[12:44:34]     [765d27e397e587aa...]  Minnesota Twins @ Pittsburgh Pirates  →  ✓ MATCH  pk=823377  state=Preview
+[12:44:34]     [8c92a04b11da0a1f...]  San Diego Padres @ Washington Nationals  →  ✓ MATCH  pk=822732  state=Preview
+[12:44:34]     [ddd9481c210fa90d...]  Toronto Blue Jays @ Baltimore Orioles  →  ✓ MATCH  pk=824835  state=Preview
+[12:44:34]     [d32dadf5a576ba27...]  Boston Red Sox @ Cleveland Guardians  →  ✓ MATCH  pk=824433  state=Preview
+[12:44:34]     [95952a4215c0c1d2...]  Los Angeles Angels @ Tampa Bay Rays  →  ✓ MATCH  pk=822978  state=Preview
+[12:44:34]     [6493e9132fdd464e...]  Miami Marlins @ New York Mets  →  ✓ MATCH  pk=823623  state=Preview
+[12:44:34]     [4018fbc29a76d207...]  Chicago Cubs @ St. Louis Cardinals  →  ✓ MATCH  pk=823055  state=Preview
+[12:44:34]     [1587b2f52f5f1a49...]  Detroit Tigers @ Chicago White Sox  →  ✓ MATCH  pk=824594  state=Preview
+[12:44:34]     [57848c1e5cf12fb4...]  Kansas City Royals @ Texas Rangers  →  ✓ MATCH  pk=822894  state=Preview
+[12:44:34]     [274a30921628d47b...]  Milwaukee Brewers @ Houston Astros  →  ✓ MATCH  pk=824191  state=Preview
+[12:44:34]     [2106f4fc8ef576ea...]  San Francisco Giants @ Colorado Rockies  →  ✓ MATCH  pk=824353  state=Preview
+[12:44:34]     [26c7991c125b7365...]  New York Yankees @ Athletics  →  ✓ MATCH  pk=825002  state=Preview
+[12:44:34]     [bc8152dee5f6a9c8...]  Arizona Diamondbacks @ Seattle Mariners  →  ✓ MATCH  pk=823135  state=Preview
+[12:44:34]     [18e8a4acb1d40019...]  Philadelphia Phillies @ Los Angeles Dodgers  →  ✓ MATCH  pk=823946  state=Preview
+[12:44:34] 
+[12:44:34]   Match result: 15 matched, 0 unmatched out of 15
+[12:44:34] ================================================================
+[12:45:34] ================================================================
+[12:45:34] LIVE SCORE DEBUG  trigger=auto-60s  date=2026-05-29  results_in_state=15  flat=15
+[12:45:34] ================================================================
+[12:45:34]   Fetching: https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=2026-05-29&hydrate=linescore
+[12:45:34]   MLB Stats API returned 15 game(s)
+[12:45:34] 
+[12:45:34]   Games from MLB Stats API:
+[12:45:34]     pk=822732   [Preview ] (Scheduled           ) San Diego Padres @ Washington Nationals
+[12:45:34]     pk=822894   [Preview ] (Scheduled           ) Kansas City Royals @ Texas Rangers
+[12:45:34]     pk=822978   [Preview ] (Scheduled           ) Los Angeles Angels @ Tampa Bay Rays
+[12:45:34]     pk=823055   [Preview ] (Scheduled           ) Chicago Cubs @ St. Louis Cardinals
+[12:45:34]     pk=823135   [Preview ] (Scheduled           ) Arizona Diamondbacks @ Seattle Mariners
+[12:45:34]     pk=823377   [Preview ] (Scheduled           ) Minnesota Twins @ Pittsburgh Pirates
+[12:45:34]     pk=823623   [Preview ] (Scheduled           ) Miami Marlins @ New York Mets
+[12:45:34]     pk=823946   [Preview ] (Scheduled           ) Philadelphia Phillies @ Los Angeles Dodgers
+[12:45:34]     pk=824191   [Preview ] (Scheduled           ) Milwaukee Brewers @ Houston Astros
+[12:45:34]     pk=824353   [Preview ] (Scheduled           ) San Francisco Giants @ Colorado Rockies
+[12:45:34]     pk=824433   [Preview ] (Scheduled           ) Boston Red Sox @ Cleveland Guardians
+[12:45:34]     pk=824515   [Preview ] (Scheduled           ) Atlanta Braves @ Cincinnati Reds
+[12:45:34]     pk=824594   [Preview ] (Scheduled           ) Detroit Tigers @ Chicago White Sox
+[12:45:34]     pk=824835   [Preview ] (Scheduled           ) Toronto Blue Jays @ Baltimore Orioles
+[12:45:34]     pk=825002   [Preview ] (Scheduled           ) New York Yankees @ Athletics
+[12:45:34] 
+[12:45:34]   State summary: Preview=15
+[12:45:34] 
+[12:45:34]   Matching stored results to live_map:
+[12:45:34]     [0efc76f321b5fc7e...]  Atlanta Braves @ Cincinnati Reds  →  ✓ MATCH  pk=824515  state=Preview
+[12:45:34]     [765d27e397e587aa...]  Minnesota Twins @ Pittsburgh Pirates  →  ✓ MATCH  pk=823377  state=Preview
+[12:45:34]     [8c92a04b11da0a1f...]  San Diego Padres @ Washington Nationals  →  ✓ MATCH  pk=822732  state=Preview
+[12:45:34]     [ddd9481c210fa90d...]  Toronto Blue Jays @ Baltimore Orioles  →  ✓ MATCH  pk=824835  state=Preview
+[12:45:34]     [d32dadf5a576ba27...]  Boston Red Sox @ Cleveland Guardians  →  ✓ MATCH  pk=824433  state=Preview
+[12:45:34]     [95952a4215c0c1d2...]  Los Angeles Angels @ Tampa Bay Rays  →  ✓ MATCH  pk=822978  state=Preview
+[12:45:34]     [6493e9132fdd464e...]  Miami Marlins @ New York Mets  →  ✓ MATCH  pk=823623  state=Preview
+[12:45:34]     [4018fbc29a76d207...]  Chicago Cubs @ St. Louis Cardinals  →  ✓ MATCH  pk=823055  state=Preview
+[12:45:34]     [1587b2f52f5f1a49...]  Detroit Tigers @ Chicago White Sox  →  ✓ MATCH  pk=824594  state=Preview
+[12:45:34]     [57848c1e5cf12fb4...]  Kansas City Royals @ Texas Rangers  →  ✓ MATCH  pk=822894  state=Preview
+[12:45:34]     [274a30921628d47b...]  Milwaukee Brewers @ Houston Astros  →  ✓ MATCH  pk=824191  state=Preview
+[12:45:34]     [2106f4fc8ef576ea...]  San Francisco Giants @ Colorado Rockies  →  ✓ MATCH  pk=824353  state=Preview
+[12:45:34]     [26c7991c125b7365...]  New York Yankees @ Athletics  →  ✓ MATCH  pk=825002  state=Preview
+[12:45:34]     [bc8152dee5f6a9c8...]  Arizona Diamondbacks @ Seattle Mariners  →  ✓ MATCH  pk=823135  state=Preview
+[12:45:34]     [18e8a4acb1d40019...]  Philadelphia Phillies @ Los Angeles Dodgers  →  ✓ MATCH  pk=823946  state=Preview
+[12:45:34] 
+[12:45:34]   Match result: 15 matched, 0 unmatched out of 15
+[12:45:34] ================================================================
