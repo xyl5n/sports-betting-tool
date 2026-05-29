@@ -1461,6 +1461,57 @@ body {
 @media (max-width: 600px) {
   .news-grid { grid-template-columns: 1fr; }
 }
+
+/* ── Phase 3b: server-rendered home extras ──────────────────────────── */
+.stat-chips {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  margin: 4px 0;
+}
+.stat-chip {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.stat-chip-label {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .5px;
+  color: var(--text-dim); text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.stat-chip-main {
+  font-size: 18px; font-weight: 800; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.stat-chip-sub { font-size: 11px; color: var(--text-dim); }
+.stat-chip-main.pos { color: var(--green); }
+.stat-chip-main.neg { color: var(--red); }
+@media (max-width: 600px) {
+  .stat-chips { grid-template-columns: repeat(2, 1fr); }
+}
+
+.settle-badge {
+  font-size: 9.5px; font-weight: 800; letter-spacing: .5px;
+  padding: 2px 7px; border-radius: 3px; color: #0d1117;
+}
+.settle-badge.win  { background: var(--green); }
+.settle-badge.loss { background: var(--red); color: #fff; }
+.settle-pnl { font-size: 12px; font-weight: 800; }
+.settle-pnl.pos { color: var(--green); }
+.settle-pnl.neg { color: var(--red); }
+.ev-card.settled-win  { border-color: rgba(34,197,94,.35); }
+.ev-card.settled-loss { border-color: rgba(239,68,68,.35); }
+
+.model-perf-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 4px 0 8px;
+}
+.model-perf-cell {
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 14px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+}
+.model-perf-val { font-size: 26px; font-weight: 800; color: var(--text); font-family: monospace; }
+.model-perf-val.pos { color: var(--green); }
+.model-perf-val.neg { color: var(--red); }
+.model-perf-lbl { font-size: 10px; font-weight: 700; letter-spacing: .5px; color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -1509,6 +1560,19 @@ body {
         <span class="ai-banner-arrow">→</span>
       </button>
 
+      {% if home_v2 and stat_chips %}
+      <!-- Model-record stat chips (server-rendered) -->
+      <div class="stat-chips">
+        {% for c in stat_chips %}
+        <div class="stat-chip">
+          <span class="stat-chip-label">{{ c.label }}</span>
+          <span class="stat-chip-main {{ c.tone }}">{{ c.main }}</span>
+          <span class="stat-chip-sub">{{ c.sub }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       <!-- EV scans -->
       <section class="section" id="section-ev">
         <div class="section-hdr">
@@ -1524,7 +1588,7 @@ body {
         <div class="stats-line" id="ev-stats">{% if ev_picks|default([]) %}{{ ev_picks|length }} value picks · top edge +{{ ev_picks[0].edge_pct }}%{% else %}Run analysis to load today's picks{% endif %}</div>
         <div class="cards-scroll" id="ev-cards">
           {% for p in ev_picks|default([]) %}
-          <article class="ev-card" data-game-id="{{ p.game_id }}">
+          <article class="ev-card{% if p.result == 'win' %} settled-win{% elif p.result == 'loss' %} settled-loss{% endif %}" data-game-id="{{ p.game_id }}"{% if p.game_id %} onclick="location.href='/matchup/{{ p.sport }}/{{ p.game_id }}'" style="cursor:pointer"{% endif %}>
             <header class="ev-card-hdr">
               <span class="ev-sport">{{ p.sport|upper }} · {{ p.bet_type|upper }}</span>
               <span class="ev-badge">VALUE</span>
@@ -1541,6 +1605,19 @@ body {
               </div>
             </div>
             <p class="ev-blurb">{{ p.matchup }}</p>
+            <footer class="ev-card-ftr">
+              {% if p.settled %}
+                {% if p.result == 'win' %}
+                <span class="settle-badge win">WIN</span>
+                <span class="settle-pnl pos">+${{ '%.2f'|format(p.pnl) }}</span>
+                {% else %}
+                <span class="settle-badge loss">LOST</span>
+                <span class="settle-pnl neg">-${{ '%.2f'|format(p.stake) }}</span>
+                {% endif %}
+              {% elif p.game_id %}
+                <button class="track-btn" onclick="event.stopPropagation(); trackPick('{{ p.game_id }}', '{{ p.bet_type }}', '{{ p.sport }}', this)">TRACK</button>
+              {% endif %}
+            </footer>
           </article>
           {% endfor %}
         </div>
@@ -1554,7 +1631,7 @@ body {
         </div>
         <div class="cards-scroll" id="conf-cards">
           {% for p in confidence_picks|default([]) %}
-          <article class="ev-card" data-game-id="{{ p.game_id }}">
+          <article class="ev-card{% if p.result == 'win' %} settled-win{% elif p.result == 'loss' %} settled-loss{% endif %}" data-game-id="{{ p.game_id }}"{% if p.game_id %} onclick="location.href='/matchup/{{ p.sport }}/{{ p.game_id }}'" style="cursor:pointer"{% endif %}>
             <header class="ev-card-hdr">
               <span class="ev-sport">{{ p.sport|upper }} · {{ p.bet_type|upper }}</span>
               <span class="ev-badge">{{ p.confidence_pct }}%</span>
@@ -1571,6 +1648,19 @@ body {
               </div>
             </div>
             <p class="ev-blurb">{{ p.matchup }}</p>
+            <footer class="ev-card-ftr">
+              {% if p.settled %}
+                {% if p.result == 'win' %}
+                <span class="settle-badge win">WIN</span>
+                <span class="settle-pnl pos">+${{ '%.2f'|format(p.pnl) }}</span>
+                {% else %}
+                <span class="settle-badge loss">LOST</span>
+                <span class="settle-pnl neg">-${{ '%.2f'|format(p.stake) }}</span>
+                {% endif %}
+              {% elif p.game_id %}
+                <button class="track-btn" onclick="event.stopPropagation(); trackPick('{{ p.game_id }}', '{{ p.bet_type }}', '{{ p.sport }}', this)">TRACK</button>
+              {% endif %}
+            </footer>
           </article>
           {% else %}
           <div class="empty-state">No confidence picks yet.</div>
@@ -1635,6 +1725,25 @@ body {
         </div>
         <div class="slate-list" id="slate-cards"></div>
       </section>
+
+      {% if home_v2 and model_perf %}
+      <!-- Model Performance row (server-rendered, bottom of home) -->
+      <section class="section" id="section-model-perf">
+        <div class="section-hdr">
+          <h2>MODEL PERFORMANCE</h2>
+        </div>
+        <div class="model-perf-row">
+          <div class="model-perf-cell">
+            <span class="model-perf-val {{ model_perf.tone }}">{{ model_perf.pct_str if model_perf.settled else '—' }}</span>
+            <span class="model-perf-lbl">WIN %</span>
+          </div>
+          <div class="model-perf-cell">
+            <span class="model-perf-val">{{ model_perf.record }}</span>
+            <span class="model-perf-lbl">RECORD</span>
+          </div>
+        </div>
+      </section>
+      {% endif %}
 
     </section>
 
