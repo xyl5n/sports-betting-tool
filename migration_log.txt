@@ -2312,3 +2312,78 @@ Verification:
   ✓ End-to-end: a model fit on synthetic data -> predict() with the kwargs ->
       _serialize_wnba() produces a "spread_pick" block with no KeyError,
       sport == "wnba".
+
+
+================================================================================
+UI REDESIGN — News cards · mobile overflow · global custom selects · Research
+                filter redesign     (branch: claude/blissful-pasteur-DJJ4U)
+================================================================================
+
+Scope: presentation-only UI work on the NiceGUI front-end (ui_app.py + pages/).
+No model-facing or scheduler code touched.  Four independent changes:
+
+Change 1 — News cards (article-style with banner photo)
+  app/src/news_feed.py
+    + _extract_image(): pulls a 16:9 banner URL from each RSS <item>, trying
+      media:thumbnail -> media:content -> <enclosure type="image/*"> in order;
+      returns "" when none found.  New "image" field on every item dict.
+  app/pages/home.py  (_section_news)
+    * Replaced the list-row markup with article-style cards: 16:9 thumbnail on
+      top (CSS gradient placeholder when no image), sport badge overlaid
+      bottom-left, title (2-line clamp) + timestamp below.  Layout driven by
+      .news-cards / .news-card CSS: 2-3 column grid on desktop, horizontally
+      scrollable snap row on mobile.  Image URL escaped for safe attr embed.
+  app/components/theme.py
+    + .news-cards / .news-card / .news-thumb / .news-badge / .news-body / 
+      .news-title / .news-time block (+ mobile horizontal-scroll media query).
+
+Change 2 — Mobile overflow / cutoff (Picks page + all pages)
+  app/components/theme.py
+    + .bet-boxes rule: pins the ML/RL/TOT column row to flex:1 1 0 + min-width:0
+      so the three bet columns share width equally and compress gracefully down
+      to <=390px instead of overflowing.  Bet boxes already carried flex:1;
+      min-width:0 inline (bet_box.py); this hard-guarantees no horizontal
+      scroll.  Existing body/html overflow-x:hidden (<=768px) safety belt kept.
+
+Change 3 — Global custom-styled selects (no native OS dropdowns)
+  app/components/controls.py  (styled_select / custom_select alias)
+    * Single canonical dropdown for the whole app.  Adds multiple / with_input
+      / use_chips support and a shared popup-content-class (styled-select-pop).
+      Quasar's q-select is never a native <select>; default behaviour pops a
+      themed dark menu on desktop and a dialog on mobile.
+  app/components/theme.py
+    + .styled-select-pop popup theme + a mobile (<=768px) bottom-sheet docking
+      rule (q-dialog:has(.styled-select-pop) -> pinned to bottom, rounded top,
+      capped height) so every select is a bottom-sheet picker on phones.
+  app/pages/props.py, app/pages/mybets.py
+    * Routed all remaining raw ui.select call sites through controls.styled_select
+      so the look + popup + mobile behaviour are consistent everywhere.
+
+Change 4 — Research page filter redesign (pills -> compact dropdown bar)
+  app/src/research_store.py  (_filtered / aggregate)
+    + prop_types= multi-select market allow-list (supersedes single prop_type);
+      distinct markets still group separately, so multi-selected bet types stay
+      as separate row groups in the results table.  Backward compatible.
+  app/pages/research.py
+    * Replaced the pill-row filter bar with five custom dropdowns: Model (multi,
+      best-effort prop mapping), AI Review (multi, maps to stored Groq model
+      names; Ollama = disabled placeholder), Sport (single), Bet Type (multi),
+      Window (single).  Desktop: single sticky horizontal bar.  Mobile: a
+      "Filters" button opening a bottom-sheet dialog with the dropdowns stacked.
+    * _effective_models / _effective_prop_types translate the new filters to the
+      store query.  Prediction-Model mapping: Pitcher Model -> pitcher_* markets,
+      Batter Model -> batter_* markets; XGBoost / Neural Net can't be told apart
+      in current data so they don't restrict (a tooltip + muted note explain
+      this — user-approved Option 1).  Empty combinations resolve to a
+      _NO_MATCH sentinel -> honest empty table rather than silently widening.
+    * Results table, KPI cards, sorting unchanged — only the filter UI changed.
+
+Verification:
+  ✓ python3 -m py_compile on all touched files.
+  ✓ pyflakes clean on controls.py, theme.py, research.py, news_feed.py,
+      research_store.py (props/mybets/home: only pre-existing warnings).
+  ✓ research_store.aggregate: multi prop_types keep groups separate; "all"
+      sentinel = no restriction; single restrict; _NO_MATCH = empty; models
+      filter intact (inline test suite passed).
+  ✓ news_feed._extract_image: media:thumbnail / enclosure / no-image cases
+      (inline test suite passed).

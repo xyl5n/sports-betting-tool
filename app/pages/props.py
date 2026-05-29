@@ -26,6 +26,7 @@ from nicegui import ui
 
 from components import theme as t
 from components import navbar, bottom_nav, live_score, team_logo
+from components import controls
 
 # localStorage keys for the persisted Props UI controls.  These survive a page
 # refresh AND a browser restart (localStorage, not sessionStorage), mirroring
@@ -699,27 +700,29 @@ def _filter_bar(rows: list[dict], filters: dict, on_change):
         ):
             sel_style = (f"min-width: 180px; flex: 1 1 200px;")
             with ui.row().classes("w-full").style("gap: 12px; flex-wrap: wrap;"):
-                ui.select(_L10_OPTIONS, value=filters["min_l10"],
-                          label="Min last-10 hit rate",
-                          on_change=lambda e: _set("min_l10", e.value)) \
-                    .props("outlined dense").style(sel_style)
-                ui.select(_CONF_OPTIONS, value=filters["min_conf"],
-                          label="Min model confidence",
-                          on_change=lambda e: _set("min_conf", e.value)) \
-                    .props("outlined dense").style(sel_style)
-                ui.select(_GRADE_OPTIONS, value=filters["min_grade"],
-                          label="Min matchup grade",
-                          on_change=lambda e: _set("min_grade", e.value)) \
-                    .props("outlined dense").style(sel_style)
+                controls.styled_select(
+                    _L10_OPTIONS, value=filters["min_l10"],
+                    placeholder="Min last-10 hit rate", min_width="180px",
+                    on_change=lambda e: _set("min_l10", e.value)).style(sel_style)
+                controls.styled_select(
+                    _CONF_OPTIONS, value=filters["min_conf"],
+                    placeholder="Min model confidence", min_width="180px",
+                    on_change=lambda e: _set("min_conf", e.value)).style(sel_style)
+                controls.styled_select(
+                    _GRADE_OPTIONS, value=filters["min_grade"],
+                    placeholder="Min matchup grade", min_width="180px",
+                    on_change=lambda e: _set("min_grade", e.value)).style(sel_style)
             with ui.row().classes("w-full").style("gap: 12px; flex-wrap: wrap;"):
-                ui.select(market_opts, value=sorted(filters["markets"]),
-                          multiple=True, label="Prop type",
-                          on_change=lambda e: _set("markets", set(e.value or []))) \
-                    .props("outlined dense use-chips").style(sel_style)
-                ui.select(game_opts, value=sorted(filters["games"]),
-                          multiple=True, label="Game",
-                          on_change=lambda e: _set("games", set(e.value or []))) \
-                    .props("outlined dense use-chips").style(sel_style)
+                controls.styled_select(
+                    market_opts, value=sorted(filters["markets"]),
+                    multiple=True, use_chips=True, placeholder="Prop type",
+                    min_width="180px",
+                    on_change=lambda e: _set("markets", set(e.value or []))).style(sel_style)
+                controls.styled_select(
+                    game_opts, value=sorted(filters["games"]),
+                    multiple=True, use_chips=True, placeholder="Game",
+                    min_width="180px",
+                    on_change=lambda e: _set("games", set(e.value or []))).style(sel_style)
             with ui.row().classes("items-center").style("gap: 8px;"):
                 ui.switch("Show alternative lines", value=filters["show_alt"],
                           on_change=lambda e: _set("show_alt", bool(e.value))) \

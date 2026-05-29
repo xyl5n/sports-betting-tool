@@ -16,6 +16,7 @@ Each item dict:
         "title":    str,   # headline, HTML-safe
         "link":     str,   # canonical article URL
         "time_ago": str,   # "42m ago" / "3h ago" / "2d ago"
+        "image":    str,   # 16:9 banner/thumbnail URL ("" when none found)
         "source":   str,   # always "ESPN"
     }
 
@@ -75,6 +76,35 @@ def _time_ago(pub_date_str: str) -> str:
         return ""
 
 
+# Media RSS namespace ESPN uses for <media:content> / <media:thumbnail>.
+_MRSS = "http://search.yahoo.com/mrss/"
+
+
+def _extract_image(elem: ET.Element) -> str:
+    """Pull a banner/thumbnail URL out of an RSS <item>.
+
+    ESPN exposes article art in any of three shapes depending on the feed:
+      * <media:thumbnail url="...">  (Media RSS)
+      * <media:content   url="..." medium="image">
+      * <enclosure url="..." type="image/jpeg">
+    We try them in that order and return the first usable URL, or "" so the
+    caller can fall back to a placeholder rather than a broken <img>.
+    """
+    # media:thumbnail / media:content (namespaced)
+    for tag in (f"{{{_MRSS}}}thumbnail", f"{{{_MRSS}}}content"):
+        for node in elem.iter(tag):
+            url = (node.get("url") or "").strip()
+            if url:
+                return url
+    # <enclosure type="image/*">
+    for node in elem.iter("enclosure"):
+        url  = (node.get("url") or "").strip()
+        typ  = (node.get("type") or "").lower()
+        if url and (typ.startswith("image/") or not typ):
+            return url
+    return ""
+
+
 def _parse_items(xml_bytes: bytes) -> list[dict]:
     """Parse RSS 2.0 bytes and return a list of item dicts.
 
@@ -97,6 +127,7 @@ def _parse_items(xml_bytes: bytes) -> list[dict]:
             "title":    _html.escape(title),
             "link":     clean_link,
             "time_ago": _time_ago(pub),
+            "image":    _extract_image(elem),
             "source":   "ESPN",
         })
     return items

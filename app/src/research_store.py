@@ -313,15 +313,25 @@ def _in_window(r: dict, window: str, now: datetime) -> bool:
     return dt >= now - timedelta(days=days)
 
 
-def _filtered(rows_in, *, models, sport, prop_type, window, now) -> list[dict]:
+def _filtered(rows_in, *, models, sport, prop_type, window, now,
+              prop_types=None) -> list[dict]:
     models_l = {m.lower() for m in models} if models and "all" not in models else None
+    # Multi-select bet-type allow-list (UI redesign, Change 4).  When given,
+    # it supersedes the single *prop_type* arg; rows whose market isn't in the
+    # set are dropped.  Distinct markets still group separately downstream, so
+    # multi-selected bet types stay as separate row groups in the table.
+    ptypes = (set(prop_types)
+              if prop_types and "all" not in prop_types else None)
     out = []
     for r in rows_in:
         if (r.get("result") or "pending") not in ("win", "loss", "void"):
             continue
         if sport and sport != "all" and (r.get("sport") or "").lower() != sport.lower():
             continue
-        if prop_type and prop_type != "all" and r.get("prop_type") != prop_type:
+        if ptypes is not None:
+            if r.get("prop_type") not in ptypes:
+                continue
+        elif prop_type and prop_type != "all" and r.get("prop_type") != prop_type:
             continue
         if models_l is not None and (r.get("model") or "").lower() not in models_l:
             continue
@@ -376,16 +386,23 @@ def aggregate(rows_in: Optional[list[dict]] = None, *,
               models: Optional[list[str]] = None,
               sport: str = "all",
               prop_type: str = "all",
+              prop_types: Optional[list[str]] = None,
               window: str = "all",
               now: Optional[datetime] = None) -> dict:
     """Group filtered settled rows by (model, prop_type).  Returns
     {kpis, table} where table rows carry picks/wins/win_pct/avg_edge/roi/streak.
+
+    *prop_types* is a multi-select allow-list of market keys (UI Change 4);
+    when given it supersedes the single *prop_type*.  Distinct markets group
+    separately, so multi-selected bet types stay separated in the table.
+
     Pure: pass *rows_in* to test without I/O (defaults to the live store)."""
     if rows_in is None:
         rows_in = rows()
     now = now or datetime.now(timezone.utc)
     flt = _filtered(rows_in, models=models, sport=sport,
-                    prop_type=prop_type, window=window, now=now)
+                    prop_type=prop_type, prop_types=prop_types,
+                    window=window, now=now)
 
     groups: dict[tuple, list[dict]] = {}
     for r in flt:
