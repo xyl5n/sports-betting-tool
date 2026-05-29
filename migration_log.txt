@@ -2025,3 +2025,36 @@ RESULT: the 7-name latent-NameError class (SPORTS + these 6), introduced
 across PRs #276-#285 by the pre-try-aware audits and surfaced by the
 post-#287 try/if/with-aware sweep, is now FULLY CLOSED.  All satellite
 modules pass the unresolved-name sweep with zero findings.
+
+
+My Bets: dollar amounts on player-prop rows
+============================================
+Branch: feature/mybets-prop-money
+Date: 2026-05-29
+Scope: pages/mybets.py ONLY — _prop_bet_row() only.
+
+Change: prop rows now show money (mirroring _game_bet_row), in the right column:
+  - PENDING  -> stake "$10.00" + "to win $X.XX" (potential winnings)
+  - WON      -> "+$X.XX"  (X = model_pnl)
+  - LOST     -> "-$X.XX"  (X = abs(model_pnl))
+  - VOID     -> "$0.00"
+
+Data sources (all already on the prop record / store; nothing new stored):
+  - odds        : bet["odds"]
+  - model_pnl   : bet["model_pnl"]  (0.0 until settled, then +win / -loss)
+  - stake       : _FLAT_STAKE          imported from src/props_picks_tracker
+  - potential   : _FLAT_STAKE * _payout_multiplier(odds)  (both imported)
+  Constant + helper are IMPORTED (lazy, inside _prop_bet_row), never hardcoded.
+
+Three-gate preflight (run before editing) — ALL PASS:
+  Gate 1 (AST reassignment): _FLAT_STAKE assigned exactly once, module level
+          (props_picks_tracker.py:71), never reassigned in any scope; mybets.py
+          binds no colliding name. -> import value is stable.
+  Gate 2 (RHS cycle): props_picks_tracker module-level imports are stdlib only
+          (no mybets import) and mybets imports the tracker lazily inside funcs
+          -> no import cycle; lazy import inside _prop_bet_row is safe.
+  Gate 3 (constant reference): _payout_multiplier is a module-level def and
+          _FLAT_STAKE is a module-level name in props_picks_tracker. -> resolvable.
+
+Explicitly NOT changed: _game_bet_row, any other function, prop storage/settlement
+(src/props_picks_tracker.py), any ledger file, any route. py_compile clean.

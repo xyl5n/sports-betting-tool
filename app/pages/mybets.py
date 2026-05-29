@@ -1023,6 +1023,31 @@ def _prop_bet_row(backend, b: dict, settled: bool, bankroll: float = 0.0) -> Non
         matchup = bet.get("game") or bet.get("team") or ""
         game_dt = _game_datetime_str(bet)
 
+        # ── Money (mirror the game-bet right column) ─────────────────────────
+        # Source the flat stake + payout multiplier from the prop store so the
+        # values stay correct if the stake ever changes -- never hardcoded.
+        # Lazy import (matches this file's other props_picks_tracker uses) and
+        # degrades gracefully: on failure we fall back to status-only display.
+        money_lines: list[tuple[str, str]] = []
+        try:
+            from src.props_picks_tracker import _FLAT_STAKE, _payout_multiplier
+            stake     = float(_FLAT_STAKE)
+            potential = round(_FLAT_STAKE * _payout_multiplier(odds), 2)
+            mpnl      = float(bet.get("model_pnl") or 0.0)
+            if settled and result in ("won", "win"):
+                money_lines = [(f"+${mpnl:.2f}", t.POS)]
+            elif settled and result in ("lost", "loss"):
+                money_lines = [(f"-${abs(mpnl):.2f}", t.NEG)]
+            elif settled and result == "void":
+                money_lines = [("$0.00", t.TEXT_DIM)]
+            else:  # PENDING: stake wagered + potential payout
+                money_lines = [
+                    (f"${stake:.2f}", t.TEXT),
+                    (f"to win ${potential:.2f}", t.TEXT_DIM2),
+                ]
+        except Exception:                                                  # noqa: BLE001
+            money_lines = []
+
         border = (
             f"1px solid {result_color}"
             if settled and result in ("won", "win", "lost", "loss", "void")
@@ -1074,6 +1099,19 @@ def _prop_bet_row(backend, b: dict, settled: bool, bankroll: float = 0.0) -> Non
                 with ui.column().style(
                     "gap: 2px; text-align: right; align-items: flex-end; flex-shrink: 0;"
                 ):
+                    for _i, (_txt, _col) in enumerate(money_lines):
+                        # First money line matches the game-bet amount style;
+                        # any secondary line (the pending "to win") is smaller.
+                        if _i == 0:
+                            ui.label(_txt).style(
+                                f"font-size: 13px; font-weight: 700; "
+                                f"color: {_col}; font-family: monospace;"
+                            )
+                        else:
+                            ui.label(_txt).style(
+                                f"font-size: 10px; font-weight: 600; "
+                                f"color: {_col}; font-family: monospace;"
+                            )
                     ui.label(result.upper() if (settled and result) else "PENDING").style(
                         f"font-size: 10.5px; font-weight: 800; letter-spacing: .5px; "
                         f"color: {result_color if settled else t.TEXT_DIM2};"
