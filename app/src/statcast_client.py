@@ -33,7 +33,10 @@ from . import db as _db
 try:
     from .player_profile_client import _CURRENT_SEASON
 except Exception:                                                         # noqa: BLE001
-    _CURRENT_SEASON = 2025
+    # Mirror player_profile_client's dynamic derivation (issue #297) so the
+    # fallback isn't pinned to a stale season if the import ever fails.
+    _now = datetime.now(timezone.utc)
+    _CURRENT_SEASON = _now.year if _now.month >= 3 else _now.year - 1
 
 
 def _log(msg: str) -> None:
