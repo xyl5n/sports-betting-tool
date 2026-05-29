@@ -1725,18 +1725,6 @@ def _picks_index_for_historical(sport: str, date_str: str) -> dict[str, dict]:
     return {k: {"history_rows": v} for k, v in out.items()}
 
 
-# ── No-odds predictions: model output for games The Odds API hasn't priced ───
-# Schedule rows flagged with _no_odds normally render as a "No Odds Available"
-# placeholder.  We can do better: the trained model only needs team identity
-# (+ optional spread/implied prob, both of which default to neutral values) to
-# emit ML / RL / totals predictions.  This block lazy-loads the predictor stack
-# on first request and reuses it across subsequent calls.  First request after
-# a Railway deploy is slow (GameStore.load() touches the API to hydrate the
-# season window); subsequent requests within the same boot are cheap.
-
-_no_odds_predictor: dict[str, object] = {"mlb": None, "wnba": None}
-# Negative-cache slot so a failed first-load doesn't retry on every render.
-_no_odds_predictor_failed: dict[str, bool] = {"mlb": False, "wnba": False}
 
 
 def _ensure_no_odds_predictor(sport: str):
