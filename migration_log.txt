@@ -657,3 +657,141 @@ State of the #277 deferred list:
         _run_job3_games_prefetch (42 lines)   -- _fetch_raw_schedule
         _run_consolidated_refresh_cycle (133 lines) -- 11 app-only deps
         APScheduler bootstrap block            -- app.debug + _werkzeug_main
+
+============================================================================
+PR #281 — schedule helpers + 3 nightly jobs -> scheduler.py
+============================================================================
+
+Branch: claude/split-scheduler-281
+Base:   origin/main @ 9db3067  (post PR #280 merge)
+Source: app/app.py @ 11,501 lines
+
+Pre-flight rule: STRICT move-only.
+
+User target: _run_job1_final_settlement, _run_job2_full_clear,
+             _run_job3_games_prefetch, _run_consolidated_refresh_cycle.
+
+Dep audit on each:
+
+  _run_job1_final_settlement   29 lines.  STAYS: only `traceback`
+                                          (stdlib, already in scheduler.py).
+                                          ✅ MOVES.
+  _run_job2_full_clear        130 lines.  STAYS: _DAILY_PICKS_FILE,
+                                          _supabase_cache_delete,
+                                          traceback.  Cascades clean
+                                          (path constant -> state.py,
+                                          16-line helper -> scheduler.py).
+                                          ✅ MOVES with 2 cascades.
+  _run_job3_games_prefetch     42 lines.  STAYS: _fetch_raw_schedule,
+                                          traceback.  Cascade clean
+                                          (_fetch_raw_schedule pulls in
+                                          _dedup_schedule_games and 3
+                                          _normalize_* helpers; all
+                                          either pure or only reference
+                                          utils.py names).
+                                          ✅ MOVES with 5 cascades.
+  _run_consolidated_refresh_cycle 133 lines.  STAYS: _detect_game_changes,
+                                          _detect_prop_changes,
+                                          _refresh_cycle_state (state),
+                                          _refresh_schedule_and_scores,
+                                          _rerun_single_game.
+                                          _rerun_single_game chains into
+                                          _serialize (a large Flask-
+                                          coupled function).
+                                          ❌ DEFERRED.
+
+Pre-flight reassignment check (AST):
+    Move set:                                      10 names
+    Original FunctionDef/Assign sites:             10 (all expected)
+    Post-initial rebinds:                           0
+    Verdict: SAFE under `from <mod> import *`.
+
+Commit 1 (37fd982)  state.py: 1 path constant
+----------------------------------------------------------------------------
+    _DAILY_PICKS_FILE  moved from app.py:5403  (1 line)
+
+Referenced by _run_job2_full_clear (moving) AND two Flask routes
+(admin_model_reset, admin_reset_model_record, both staying); state.py
+is the only place both sides can see it without a circular import.
+
+app.py: 11,501 -> 11,500 lines (-1).
+
+Commit 2 (this commit)  scheduler.py: 9 functions
+----------------------------------------------------------------------------
+
+Schedule-fetch helper subtree (6 functions):
+    _supabase_cache_delete           moved from app.py:350    (16 lines)
+    _normalize_espn_wnba_scoreboard  moved from app.py:2285   (64 lines)
+    _dedup_schedule_games            moved from app.py:2413   (40 lines)
+    _normalize_mlb_schedule          moved from app.py:2455   (43 lines)
+    _normalize_wnba_schedule         moved from app.py:2500   (30 lines)
+    _fetch_raw_schedule              moved from app.py:2534   (74 lines)
+
+Nightly jobs (3 functions):
+    _run_job1_final_settlement       moved from app.py:9516   ( 29 lines)
+    _run_job2_full_clear             moved from app.py:9547   (130 lines)
+    _run_job3_games_prefetch         moved from app.py:9679   ( 42 lines)
+
+scheduler.py header changes:
+    NONE -- all imports already in place (sys, traceback, json, datetime
+            +timedelta+timezone, _urlreq, parallel _logger ref, plus the
+            existing `from state import *` / `from utils import *`).
+    __all__ expanded with the 9 new exported names.
+
+External callers of moved names (resolve via star-import):
+    _fetch_raw_schedule:
+      - get_todays_schedule (Flask route)
+      - schedule_for_date (Flask route)
+      - _prefetch_no_odds_predictions (still in app.py)
+      - _prefetch_schedules_next_n_days (still in app.py)
+      - _refresh_schedule_and_scores (still in app.py)
+    _normalize_espn_wnba_scoreboard:
+      - wnba_schedule_proxy (Flask route)
+    _DAILY_PICKS_FILE:
+      - admin_model_reset (Flask route)
+      - admin_reset_model_record (Flask route)
+    Three nightly jobs:
+      - APScheduler bootstrap block at line ~10773 (still in app.py).
+
+Direction (no cycles):
+    scheduler.py -> state.py / utils.py / src.*     (one-way down)
+    app.py       -> scheduler.py / state.py / utils.py
+    scheduler.py NEVER imports app.py.
+
+app.py change: 11,500 -> 11,021 lines  (-479).
+Total this PR:  11,501 -> 11,021 lines  (-480).
+
+Verification:
+    ✓ py_compile clean on state.py, scheduler.py, app.py.
+    ✓ `from scheduler import *` exposes 33 names (PR #277's 3 +
+      PR #278a's 4 + PR #279's 12 + PR #280's 5 + PR #281's 9).
+    ✓ `from state import *` exposes _DAILY_PICKS_FILE.
+    ✓ All 9 moved functions are callable from the importing module.
+    ✓ AST audit: zero dangling module-level defs in app.py.
+    ✓ 13 bare-name references in app.py resolve via star-import.
+    ✓ `import app` clears stdlib + numpy + scheduler; sandbox-only
+      Flask fatal as expected.
+
+Cumulative across PRs #276 + #277 + #278a + #279 + #280 + #281:
+    app/app.py:       13,004 -> 11,021 lines  (-1,983, -15.2%)
+    app/state.py:     395 -> 399 lines  (+4)
+    app/utils.py:     351 lines  (unchanged)
+    app/scheduler.py: 1,144 -> 1,654 lines  (+510)
+    109 module-level definitions extracted from the original 13K monolith.
+
+#277 deferred list status:
+    ✅ _run_overnight_ai_gen          -- moved in PR #279
+    ✅ _run_auto_settlement_job       -- moved in PR #280
+    ✅ _run_job1_final_settlement     -- moved in THIS PR
+    ✅ _run_job2_full_clear           -- moved in THIS PR
+    ✅ _run_job3_games_prefetch       -- moved in THIS PR
+    Still in app.py (separate PRs):
+        _run_auto_analysis_job (171 lines) -- Flask app.test_client() dep
+        _run_consolidated_refresh_cycle (133 lines) -- _serialize chain
+        APScheduler bootstrap block -- app.debug + _werkzeug_main
+
+Remaining work after this PR:
+    Two jobs and the bootstrap block remain in app.py.  Both jobs hit
+    Big Flask-coupled subsystems (test_client + the serialization
+    pipeline) -- they need significantly more architectural work, not
+    just helper-extraction.

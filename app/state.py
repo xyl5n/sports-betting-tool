@@ -51,6 +51,7 @@ __all__ = [
     "_DAILY_SNAPSHOT_FILE", "_DAILY_SNAPSHOT_TMP",
     "_STATSAPI_BRIDGE_CACHE",
     "_auto_settlement_state", "_SETTLE_GAMELOG_MEMO",
+    "_DAILY_PICKS_FILE",
 ]
 
 # moved from app.py:138
@@ -393,3 +394,6 @@ _auto_settlement_state: dict = {
 # prop markets would otherwise fire three identical statsapi calls in one pass.
 # Short TTL so a later cycle (15 min on) still picks up newly-finished games.
 _SETTLE_GAMELOG_MEMO: dict = {}
+
+# moved from app.py:5403
+_DAILY_PICKS_FILE    = Path("data/daily_picks.json")
