@@ -2095,3 +2095,62 @@ Explicitly NOT changed:
   - _add_bet_bar (static button) stays outside the wrapper.
   - No data source, route, ledger, tracker, or settlement logic touched.
   py_compile clean.
+
+
+Player Pages <-> daily props wiring fix (ET-aware commence filter)
+===================================================================
+Branch: claude/practical-mayer-UMCwY
+Date: 2026-05-29
+Scope: src/player_profile_client.py ONLY — get_today_props_for_player()
+  and get_today_raw_lines_for_player() readers; one new helper.
+
+Problem: the player profile page (/player/mlb/{slug}) showed "no props
+  today" for players whose games start in the evening ET, even though the
+  /props page listed those exact props.  Root cause was a timezone bug in
+  the two per-player cache readers:
+
+      today = _today_str()                  # UTC date
+      ...
+      commence = (pick.get("commence_time") or "")[:10]   # UTC date slice
+      if commence and commence != today:    # UTC vs UTC
+          continue
+
+  commence_time is a UTC ISO-8601 string.  A 7-10 PM ET game has a UTC
+  commence date of *tomorrow*.  Viewed during the afternoon ET (UTC still
+  on the current calendar day), the slice "2026-05-30" != today "2026-05-29"
+  so every evening game was silently dropped.  Meanwhile the canonical
+  /props reader (pages/props.py) and get_today_prop() apply NO date filter
+  at all — the scored + raw caches are already scoped to today's ET slate
+  by their cache key (props_client / props_scored_cache._today_et).  So the
+  player page disagreed with /props for exactly the evening slate.
+
+Fix: added _today_et() + _commence_is_today_et(commence_time), which
+  converts the UTC timestamp to America/New_York before comparing against
+  today's ET date (the same conversion props_client._fetch_events_for_today
+  already uses).  Missing / unparseable timestamps pass through (return
+  True) so a malformed row is never silently hidden.  Both readers now call
+  this helper instead of the UTC string-slice compare; the now-unused
+  ``today = _today_str()`` locals were removed from both functions.
+
+  The guard is kept (rather than removed outright) because the caches are
+  ET-date-scoped already, so it only screens stray rows — but it now does so
+  in the correct timezone, matching what /props effectively sees.
+
+Imports: added ``from zoneinfo import ZoneInfo`` and module-level
+  ``_ET = ZoneInfo("America/New_York")`` (mirrors props_client /
+  props_scored_cache).
+
+Explicitly NOT changed:
+  - get_today_prop() (singular): already had no date filter; left as-is so
+    the hero card and the tab list now agree.
+  - _today_str() (UTC) and its other call sites: those compare a cache
+    row's own stored UTC date against the current UTC date for once-per-
+    UTC-day gamelog refresh — self-consistent, intentionally untouched.
+  - _CURRENT_SEASON, name resolution, slug generation, scoring, schema:
+    untouched. No route, scheduler, or write path modified.
+
+Verified: module imports clean; _today_et()/_today_str() return expected
+  values; _commence_is_today_et passes None/garbage through; standalone
+  logic check confirms a 9:05 PM ET game (UTC 2026-05-30T01:05Z) viewed at
+  5 PM ET is dropped by the OLD filter but kept by the NEW one. py_compile
+  clean.

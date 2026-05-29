@@ -36,6 +36,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from . import db as _db
 
@@ -44,6 +45,7 @@ _CACHE_DIR      = Path(".cache")
 _HTTP_TIMEOUT   = 12
 _HTTP_SLEEP     = 0.05
 _CURRENT_SEASON = 2025
+_ET             = ZoneInfo("America/New_York")
 
 # Module-level in-process caches (reset each Railway deploy — that's fine)
 _player_info_cache: dict[int, dict] = {}   # player_id -> info dict
@@ -91,6 +93,42 @@ def _fetch_json(url: str, *, label: str, retries: int = 2) -> Optional[dict]:
 
 def _today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _today_et() -> str:
+    """Today's calendar date in US/Eastern.
+
+    The props caches (props_client / props_scored_cache) are both keyed
+    by the ET date, so this is the only "today" that lines up with a
+    prop's slate.  Kept distinct from ``_today_str`` (UTC), which still
+    backs the per-UTC-day gamelog refresh keys.
+    """
+    return datetime.now(_ET).date().isoformat()
+
+
+def _commence_is_today_et(commence_time: Optional[str]) -> bool:
+    """True when *commence_time* (a UTC ISO-8601 string) lands on today's
+    Eastern calendar date, OR when it is missing / unparseable.
+
+    Why this exists: the scored + raw props caches are already scoped to
+    today's ET slate by their cache key, and both the /props page and
+    ``get_today_prop`` read them with no extra date filter.  The two
+    per-player readers below USED to re-filter with ``commence[:10] ==
+    utc_today``, which compares the game's *UTC* date against the *UTC*
+    "today".  A 7-10 PM ET game has a UTC commence date of *tomorrow*, so
+    that string compare silently dropped every evening game from the
+    player page — the player profile showed "no props today" for exactly
+    the games /props was happily listing.  Comparing in ET (after
+    converting the timestamp) keeps the defensive guard without the
+    timezone-rollover hole.
+    """
+    if not commence_time:
+        return True
+    try:
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        return dt.astimezone(_ET).date().isoformat() == _today_et()
+    except Exception:                                                     # noqa: BLE001
+        return True
 
 
 def _parse_ip(value) -> float:
@@ -785,7 +823,6 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
        fabricating one with an independent predict() call.
     """
     name_norm = _norm_name(player_name)
-    today = _today_str()
     out: list[dict] = []
     markets_seen: set[str] = set()
 
@@ -796,8 +833,11 @@ def get_today_props_for_player(player_name: str) -> list[dict]:
         for pick in (cached.get("picks") or []):
             if _norm_name(pick.get("player") or "") != name_norm:
                 continue
-            commence = (pick.get("commence_time") or "")[:10]
-            if commence and commence != today:
+            # ET-aware "is this today's game?" guard.  The cache is already
+            # ET-date-scoped, so this only screens stray rows -- but it MUST
+            # compare in ET, not UTC, or every evening game is dropped (see
+            # _commence_is_today_et).
+            if not _commence_is_today_et(pick.get("commence_time")):
                 continue
             entry = _scored_cache_to_entry(pick)
             out.append(entry)
@@ -893,7 +933,6 @@ def get_today_raw_lines_for_player(player_name: str) -> dict:
     Supabase props cache the /props page and the 15-min cycle share.
     """
     name_norm = _norm_name(player_name)
-    today = _today_str()
     try:
         from .props_client import get_client
         raw = get_client().get_today_props() or {}
@@ -915,8 +954,7 @@ def get_today_raw_lines_for_player(player_name: str) -> dict:
             e for e in (entries or [])
             if _norm_name(e.get("player_name") or "") == name_norm
             and e.get("line") is not None
-            and (not (e.get("commence_time") or "")
-                 or (e.get("commence_time") or "")[:10] == today)
+            and _commence_is_today_et(e.get("commence_time"))
         ]
         if not cands:
             continue
