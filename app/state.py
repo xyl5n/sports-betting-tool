@@ -52,6 +52,7 @@ __all__ = [
     "_STATSAPI_BRIDGE_CACHE",
     "_auto_settlement_state", "_SETTLE_GAMELOG_MEMO",
     "_DAILY_PICKS_FILE",
+    "_no_odds_predictor", "_no_odds_predictor_failed",
 ]
 
 # moved from app.py:138
@@ -397,3 +398,19 @@ _SETTLE_GAMELOG_MEMO: dict = {}
 
 # moved from app.py:5403
 _DAILY_PICKS_FILE    = Path("data/daily_picks.json")
+
+# moved from app.py:1737
+# ── No-odds predictions: model output for games The Odds API hasn't priced ───
+# Schedule rows flagged with _no_odds normally render as a "No Odds Available"
+# placeholder.  We can do better: the trained model only needs team identity
+# (+ optional spread/implied prob, both of which default to neutral values) to
+# emit ML / RL / totals predictions.  This block lazy-loads the predictor stack
+# on first request and reuses it across subsequent calls.  First request after
+# a Railway deploy is slow (GameStore.load() touches the API to hydrate the
+# season window); subsequent requests within the same boot are cheap.
+
+_no_odds_predictor: dict[str, object] = {"mlb": None, "wnba": None}
+
+# moved from app.py:1739
+# Negative-cache slot so a failed first-load doesn't retry on every render.
+_no_odds_predictor_failed: dict[str, bool] = {"mlb": False, "wnba": False}
