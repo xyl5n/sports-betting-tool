@@ -1755,3 +1755,131 @@ Remaining large non-Flask cluster from the Phase-E audit (future PR):
     boot_startup         ~613 lines, 7 fn  -> app/boot.py (boot-ordering risk)
     The 2 Flask test_client jobs (_run_auto_analysis_job,
         _run_analysis_worker) remain the architectural blocker.
+
+============================================================================
+PR #290 — Phase D: app/boot.py (startup / boot-sequence cluster)
+============================================================================
+
+Branch: claude/split-boot-290
+Base:   origin/main @ 93a12ac  (post PR #289 merge)
+Source: app/app.py @ 8,522 lines
+
+Pre-flight rule: STRICT move-only.
+
+Step 0 -- BOOT-SEQUENCE ANALYSIS (done FIRST, per directive):
+    Call-site map for all 7 originally-named boot functions:
+        _validate_odds_api_key_on_boot   module-scope @ app.py:144 (very early)
+        _ensure_data_dir                 inside _purge/_restore only (not module-scope)
+        _purge_stale_caches_on_boot      module-scope @ 7983 (after _sched=init @7976)
+        _restore_caches_from_supabase_on_boot  module-scope @ 7984
+        _model_cache_boot_inventory      module-scope @ 8095
+        _boot_health_report              module-scope @ 8277
+        _boot_predictions_warmup         module-scope @ 8428
+    Key findings:
+      - Only DEFINITIONS move; every CALL stays in app.py at its original
+        module-scope position -> boot order byte-for-byte preserved.
+      - NO boot function references `_sched` (verified) -> none depend on
+        scheduler-started state, so the after-_sched=init ordering is
+        irrelevant to correctness.
+      - boot.py contains zero module-scope calls (defs only) -> importing
+        it is side-effect-free and does not perturb the boot sequence.
+    No function deferred at Step 0.
+
+Step 1 -- Full BFS transitive closure (try/if/with-aware):
+    Seed: 7 functions.  BFS discovered 2 additional members:
+        _next_run_iso        (used by _boot_health_report)
+        _supabase_cache_get  (used by the 2 cache-restore boot fns)
+    Raw closure: 9 functions, 643 lines.
+
+Step 2 -- Two-gate pre-flight:
+    GATE 1 (reassignment): all 9 -- 1 module-bind, 0 global-rebinds. PASS.
+    GATE 2 (cycle check, try/if/with-aware):
+        Cycle risks: NONE.  Critical sink verification: NO satellite
+            module references ANY of the 9 closure functions, so boot is a
+            pure leaf-sink.  Resulting chain (cycle-free):
+                state/utils -> scheduler -> predictor -> boot -> app
+        Per-module reachable usage:
+            state:     9 cache-file-path + cache-key consts + _ODDS_API_KEY
+            utils:     _today_et
+            predictor: _prefetch_no_odds_predictions, _read_no_odds_predictions  (boot -> predictor edge)
+            scheduler: _eprint, nightly_retrain, _supabase_cache_get  (boot -> scheduler edge)
+        Backwards inter-satellite edges (flagged per #289 lesson):
+            boot -> predictor and boot -> scheduler.  Both cycle-free
+            (boot is a pure sink).  These are natural for a boot module
+            (it orchestrates everything), so less of a smell than #289's
+            predictor -> scheduler.
+        Infra: _eprint only (from scheduler) -> NO parallel _logger.
+
+    _supabase_cache_get placement decision (user-approved):
+        It is a generic cache helper, not boot logic; its siblings
+        _supabase_cache_set/_delete already live in scheduler.py.  Rather
+        than fragment the cache family across boot/scheduler/app, it was
+        moved to scheduler.py (Commit 1) to co-locate the trio.  boot.py
+        then resolves it via `from scheduler import *`.  This drops the
+        boot closure from 9 to 8 functions.
+
+Commit 1 (4687f02)  scheduler.py: co-locate _supabase_cache_get
+----------------------------------------------------------------------------
+    _supabase_cache_get  moved app.py:307 -> scheduler.py (19 lines)
+    Now all three Supabase cache helpers (get/set/delete) live in
+    scheduler.py.  Deps: nested _do() + stdlib sys (both fine in
+    scheduler).  No satellite referenced it pre-move -> no cycle.
+    Added to scheduler.py __all__.  app.py's _ai_get_daily_count caller
+    resolves it via the existing `from scheduler import *`.
+    app.py: 8,522 -> 8,503 lines (-19).
+
+Commit 2 (this commit)  boot.py: 8 boot functions
+----------------------------------------------------------------------------
+    Names moved (source order):
+        _validate_odds_api_key_on_boot         (53)
+        _ensure_data_dir                       (9)
+        _purge_stale_caches_on_boot            (132)
+        _restore_caches_from_supabase_on_boot  (37)
+        _model_cache_boot_inventory            (100)
+        _next_run_iso                          (11)
+        _boot_health_report                    (157)
+        _boot_predictions_warmup               (125)
+    boot.py header:
+        import json, logging, os, sys; from pathlib import Path
+        from state import *; from utils import *;
+        from scheduler import *; from predictor import *
+        __all__ = [8 names]   (NO _logger -- uses scheduler._eprint)
+    `from boot import *` inserted at app.py:53 (after `from predictor
+    import *`), which is BEFORE the earliest boot call at app.py:83 and
+    before the Flask import at app.py:71 -- ordering verified statically
+    AND dynamically (sandbox `import app` cleared line 53 and only died at
+    the line-71 Flask import, proving the boot import itself succeeded).
+
+    app.py change: 8,503 -> 7,864 lines  (-639).
+    Total this PR:  8,522 -> 7,864 lines  (-658).
+
+Verification:
+    ✓ py_compile clean on boot.py, scheduler.py, app.py.
+    ✓ `from boot import *` exposes all 8 names; all callable.
+    ✓ _eprint / nightly_retrain / _supabase_cache_get (scheduler),
+      _prefetch_no_odds_predictions / _read_no_odds_predictions (predictor),
+      _today_et (utils), _ODDS_API_KEY (state) all reachable in boot.
+    ✓ AST audit: zero dangling defs; all 6 module-scope boot CALL sites
+      preserved in app.py at their original positions (83, 7725, 7726,
+      7730, 7744, 7770).
+    ✓ All EIGHT satellite modules import cleanly.
+    ✓ `import app` clears `from boot import *` (line 53) and dies only at
+      the Flask import (line 71) -- sandbox-only, production-unaffected.
+
+Cumulative across PRs #276..#290:
+    app/app.py:        13,004 -> 7,864 lines  (-5,140, -39.5%)
+    app/state.py:      492 lines
+    app/utils.py:      351 lines
+    app/scheduler.py:  ~2,640 lines (gained _supabase_cache_get)
+    app/serializer.py: 719 lines
+    app/ai_prompts.py: 611 lines
+    app/parlay.py:     260 lines
+    app/predictor.py:  235 lines
+    app/boot.py:       709 lines  (NEW)
+    168 module-level definitions extracted from the original 13K monolith.
+
+ALL non-Flask clusters from the Phase-E audit are now extracted.  The
+only remaining large items in app.py are the 82 Flask routes (~5,000
+lines, by definition the HTTP boundary -- they stay) and the 2
+test_client jobs (_run_auto_analysis_job, _run_analysis_worker) which
+remain the standing architectural blocker.
