@@ -49,6 +49,255 @@ from utils import *  # noqa: F401,F403
 # call site.  Decision documented in migration_log.txt under PR #279.
 _logger = logging.getLogger("sports_betting")
 
+# ── PR #282: nightly_retrain integration + APScheduler bootstrap ─────────
+# Moved from app.py.  Both the stub class (used when src.nightly_retrain
+# fails to import) and the import itself live here so the bootstrap
+# init() function below can call nightly_retrain.start() without
+# reaching back into app.py.  App.py routes that read nightly_retrain
+# resolve the name via `from scheduler import *`.
+
+# nightly_retrain — graceful stub if APScheduler is absent or any import fails
+class _NightlyRetrainStub:
+    """No-op stub used when src.nightly_retrain fails to import."""
+    def start(self, **kw): return None
+    def get_log(self):
+        return {"runs": [], "last_success": None,
+                "next_run": None, "scheduler_running": False,
+                "error": "nightly_retrain module unavailable"}
+    def run_nightly_retrain(self): pass
+
+try:
+    import src.nightly_retrain as nightly_retrain
+    print("STARTUP:   src.nightly_retrain OK", flush=True, file=sys.stderr)
+except Exception as _e:
+    print(f"STARTUP WARNING: src.nightly_retrain failed ({_e}) — scheduler disabled",
+          flush=True, file=sys.stderr)
+    nightly_retrain = _NightlyRetrainStub()  # type: ignore[assignment]
+
+
+def init(app, werkzeug_main):
+    """Bootstrap APScheduler and register every scheduled job.
+
+    Single call site -- app.py's module-level code invokes this exactly
+    once after all routes are registered.  Body is the verbatim bootstrap
+    block that used to live inline in app.py:10284-10475, with two minimal
+    parameterizations approved as the FIRST AND ONLY APPROVED REWRITE in
+    the decomposition series (see migration_log.txt PR #282):
+
+      1. _werkzeug_main is a parameter now (was computed inline).
+      2. app.debug is read from the passed Flask `app` argument.
+
+    Two scheduled job functions still live in app.py because their move
+    is blocked by separate issues (Flask app.test_client() in the case of
+    _run_auto_analysis_job, the _serialize chain in the case of
+    _run_consolidated_refresh_cycle).  Both are pulled in via a runtime
+    import of `app` -- safe because init() is invoked from app.py's
+    module-level code AFTER both functions are defined, so the names are
+    already in sys.modules['app'].
+
+    Returns the running APScheduler (or None if disabled / failed).
+    """
+    # Runtime import to break the otherwise-circular dependency.
+    # See docstring above.  When _run_auto_analysis_job and
+    # _run_consolidated_refresh_cycle eventually move to scheduler.py,
+    # these two lines disappear.
+    import app as _app_module
+    _run_auto_analysis_job = _app_module._run_auto_analysis_job
+    _run_consolidated_refresh_cycle = _app_module._run_consolidated_refresh_cycle
+
+    # ── Nightly retrain scheduler ─────────────────────────────────────────────────
+    print("STARTUP: all routes registered — starting scheduler...", flush=True, file=sys.stderr)
+
+    # Start the APScheduler background job that fires every night at 2 AM ET.
+    # Guard against Werkzeug's double-import when debug=True / use_reloader=True:
+    # the reloader spawns a child process and sets WERKZEUG_RUN_MAIN=true there;
+    # we only want the scheduler running in that child, not the parent watcher.
+    _in_debug_mode  = app.debug
+    if not _in_debug_mode or werkzeug_main:
+        # Seed the rebuilt ledger bankrolls in Supabase if absent (My Bets
+        # $166.55, Model one combined $1000).  seed-if-absent never overwrites
+        # a live balance, so bankrolls survive redeploys.
+        try:
+            from src import supa_ledger as _sl_boot
+            _seeded = _sl_boot.seed_starting_bankrolls()
+            if any(_seeded.values()):
+                print(f"STARTUP: seeded ledger bankrolls {_seeded}",
+                      flush=True, file=sys.stderr)
+        except Exception as _se_boot:                                          # noqa: BLE001
+            print(f"STARTUP WARNING: ledger seed failed: {_se_boot}",
+                  flush=True, file=sys.stderr)
+        try:
+            _sched = nightly_retrain.start()
+            if _sched is None:
+                print("STARTUP: scheduler not started (APScheduler unavailable or disabled)", flush=True, file=sys.stderr)
+            else:
+                # Add 8 AM and 12 PM ET auto-analysis jobs to the existing scheduler
+                try:
+                    from apscheduler.triggers.cron import CronTrigger as _CronTrigger
+                    _ET = "America/New_York"
+                    _sched.add_job(
+                        _run_auto_analysis_job,
+                        _CronTrigger(hour=8,  minute=0, timezone=_ET),
+                        id="auto_analysis_morning",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                        kwargs={"label": "morning"},
+                    )
+                    _sched.add_job(
+                        _run_auto_analysis_job,
+                        _CronTrigger(hour=12, minute=0, timezone=_ET),
+                        id="auto_analysis_noon",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                        kwargs={"label": "noon"},
+                    )
+                    # 8:30 AM ET: Meta-Consensus -- ONE batched compound-beta review
+                    # of all props the 8:00 morning pipeline scored.
+                    _sched.add_job(
+                        _run_meta_consensus_job,
+                        _CronTrigger(hour=8, minute=30, timezone=_ET),
+                        id="meta_consensus_morning",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                    )
+                    # 30-min standalone settlement during game hours (12 PM-1 AM ET).
+                    # _run_auto_settlement_job already self-gates to the same window
+                    # and is idempotent (settle_pending only touches pending picks),
+                    # so running it both here and inside the 15-min cycle is safe;
+                    # this standalone registration is what the boot health report
+                    # and /api/auto_settlement_status look for via get_job("auto_settlement").
+                    _sched.add_job(
+                        _run_auto_settlement_job,
+                        _CronTrigger(hour="12-23,0,1", minute="0,30", timezone=_ET),
+                        id="auto_settlement",
+                        replace_existing=True,
+                        misfire_grace_time=600,
+                        max_instances=1,
+                    )
+                    print("STARTUP: auto_settlement job scheduled — every 30 min, "
+                          "12 PM-1 AM ET (game hours)",
+                          flush=True, file=sys.stderr)
+                    # ── Nightly three-job cycle ──────────────────────────────
+                    # JOB 1  1:00 AM ET  final settlement
+                    # JOB 2  2:00 AM ET  full clear
+                    # JOB 3  3:00 AM ET  games prefetch (schedule only)
+                    _sched.add_job(
+                        _run_job1_final_settlement,
+                        _CronTrigger(hour=1, minute=0, timezone=_ET),
+                        id="nightly_settlement",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                    )
+                    _sched.add_job(
+                        _run_job2_full_clear,
+                        _CronTrigger(hour=2, minute=0, timezone=_ET),
+                        id="nightly_clear",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                    )
+                    _sched.add_job(
+                        _run_job3_games_prefetch,
+                        _CronTrigger(hour=3, minute=0, timezone=_ET),
+                        id="nightly_prefetch",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                    )
+                    # 3:30 AM ET: two-pass overnight AI pre-generation (after the
+                    # 3 AM prefetch) so breakdowns are ready before the user wakes.
+                    _sched.add_job(
+                        _run_overnight_ai_gen,
+                        _CronTrigger(hour=3, minute=30, timezone=_ET),
+                        id="overnight_ai_gen",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                    )
+                    # 4 AM ET: refresh the My Bets daily limit off the morning bankroll.
+                    _sched.add_job(
+                        _run_personal_daily_limit_refresh,
+                        _CronTrigger(hour=4, minute=0, timezone=_ET),
+                        id="personal_daily_limit",
+                        replace_existing=True,
+                        misfire_grace_time=3600,
+                        max_instances=1,
+                    )
+                    # Belt-and-braces: if an older deploy registered the
+                    # retired midnight_reset job (persisted in a jobstore),
+                    # remove it so it can't fire alongside the new cycle.
+                    try:
+                        _sched.remove_job("midnight_reset")
+                        print("STARTUP: removed retired midnight_reset job",
+                              flush=True, file=sys.stderr)
+                    except Exception:                                          # noqa: BLE001
+                        pass
+                    print("STARTUP: auto-analysis jobs scheduled — 8:00 AM and 12:00 PM ET (full model re-analysis)", flush=True, file=sys.stderr)
+                    print("STARTUP: nightly cycle scheduled — JOB1 settle 1 AM, JOB2 clear 2 AM, JOB3 prefetch 3 AM ET", flush=True, file=sys.stderr)
+
+                    # Consolidated 15-min refresh cycle (keeps the historic
+                    # auto_props_refresh job id).  One coordinated pass during game
+                    # hours (11 AM-1 AM ET, i.e. hours 11-23 plus 0,1): schedule +
+                    # live scores → game odds (line-move flagging) → prop lines →
+                    # re-score → top-plays record → settlement → Groq summary queue.
+                    # This single cycle now also performs the intraday settlement
+                    # that used to live in the standalone 30-min auto_settlement job.
+                    try:
+                        _sched.add_job(
+                            _run_consolidated_refresh_cycle,
+                            _CronTrigger(hour="11-23,0,1", minute="0,15,30,45",
+                                         timezone=_ET),
+                            id="auto_props_refresh",
+                            replace_existing=True,
+                            misfire_grace_time=600,
+                            max_instances=1,
+                        )
+                        print(
+                            "STARTUP: auto_props_refresh job scheduled — CONSOLIDATED "
+                            "15-min cycle, every :00/:15/:30/:45 during 11 AM–1 AM ET "
+                            "(schedule+scores → odds → props → re-score → top-plays → "
+                            "settlement → AI summaries); settlement gated 12 PM–1 AM ET",
+                            flush=True, file=sys.stderr,
+                        )
+                    except Exception as _pe:
+                        print(
+                            f"STARTUP WARNING: could not add auto_props_refresh: {_pe}",
+                            flush=True, file=sys.stderr,
+                        )
+                except Exception as _ae:
+                    print(f"STARTUP WARNING: could not add auto-analysis jobs: {_ae}", flush=True, file=sys.stderr)
+                print("STARTUP: nightly retrain scheduler running — fires 2 AM ET", flush=True, file=sys.stderr)
+
+                # Per-job manifest: print id + next_run_time + trigger for every
+                # registered job so the deploy log gives an at-a-glance view
+                # of what's actually going to fire.  Catches the case where
+                # nightly_retrain.start() silently failed to register the 2 AM
+                # job, or where DST shifted next_run_time unexpectedly.
+                try:
+                    from zoneinfo import ZoneInfo as _ZI
+                    _et_tz = _ZI("America/New_York")
+                    print("STARTUP: scheduler job manifest --", flush=True, file=sys.stderr)
+                    for _job in _sched.get_jobs():
+                        nxt = getattr(_job, "next_run_time", None)
+                        nxt_s = (
+                            nxt.astimezone(_et_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+                            if nxt else "—"
+                        )
+                        print(f"  • {_job.id:<24s} next={nxt_s}  trigger={_job.trigger}",
+                              flush=True, file=sys.stderr)
+                except Exception as _me:                                      # noqa: BLE001
+                    print(f"STARTUP WARNING: could not enumerate scheduler jobs: {_me}",
+                          flush=True, file=sys.stderr)
+        except Exception as _sched_err:
+            print(f"STARTUP WARNING: nightly retrain scheduler failed: {_sched_err}",
+                  flush=True, file=sys.stderr)
+            _logger.warning("nightly retrain scheduler failed to start: %s", _sched_err)
+    return _sched
+
 __all__ = [
     "_eprint",
     "_run_meta_consensus_job",
@@ -96,6 +345,13 @@ __all__ = [
     "_run_job1_final_settlement",
     "_run_job2_full_clear",
     "_run_job3_games_prefetch",
+    # PR #282 -- APScheduler bootstrap.  `init` is the entry point;
+    # `nightly_retrain` and `_NightlyRetrainStub` are exposed so app.py's
+    # routes (admin nightly-retrain endpoints + admin diagnostics) can
+    # keep referencing them by bare name via `from scheduler import *`.
+    "_NightlyRetrainStub",
+    "nightly_retrain",
+    "init",
 ]
 
 # moved from app.py:613
