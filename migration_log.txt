@@ -2244,3 +2244,71 @@ Verification:
   ✓ Contract audit: all three fetch_live call sites (pages/sport.py x2,
       scheduler.py x1) now pass the app.py module; ui_app.py confirms
       `backend` == app module everywhere.
+
+
+============================================================================
+BUGFIX — WNBASpreadModel.predict() signature mismatch: WNBA spread + totals
+         picks skipped on the odds-refresh rerun
+============================================================================
+
+Branch: claude/fervent-archimedes-VcN44
+
+Problem:
+    The 15-minute consolidated refresh cycle re-runs the game model for any
+    game whose odds/pitcher/lineup changed inside the 5 AM-12 PM ET window,
+    one game at a time, via scheduler._rerun_single_game(sport, game, reasons)
+    (invoked for BOTH sports at scheduler.py ~2530, with sport taken from
+    gc["sport_by_id"]).
+
+    Inside that function the spread / run-line "RL slot" prediction was gated
+    `if sport == "mlb" and rl_model and rl_model.is_trained`.  WNBA was locked
+    out because the call passes the moneyline anchors
+
+        ml_prob_home / ml_lr_prob_home / ml_nn_prob_home
+
+    that RunLineModel.predict() accepts but WNBASpreadModel.predict() did not
+    (its signature was just (feature_vec, game, weights)).  Passing them to the
+    WNBA model would raise TypeError, so the guard simply skipped it -> WNBA
+    spread predictions never ran on rerun (rl_pred stayed None).
+
+    Two latent knock-on bugs in the same function compounded it for WNBA:
+      * Serialization always used _serialize (the MLB serializer) regardless of
+        sport.  _serialize reads MLB run-line keys (home_cover_prob,
+        run_line_point, ...) and emits MLB-shaped rows; the WNBA spread head
+        lives under "spread_pred" and must go through _serialize_wnba.
+      * Bankroll / personal-starting-bankroll were always read from
+        data/ledger.json + _analysis_state (MLB), never the WNBA ledger/state.
+
+    Net effect: a WNBA game that changed odds in the rerun window had its row
+    overwritten with an MLB-shaped, spread-less, totals-less serialization --
+    silently dropping the spread and totals picks until the next full analysis.
+
+Fix:
+  app/src/wnba_spread_model.py  (WNBASpreadModel.predict)
+    + Added optional ml_prob_home / ml_lr_prob_home / ml_nn_prob_home kwargs to
+      match RunLineModel.predict()'s signature exactly.  They are accepted and
+      intentionally IGNORED: the WNBA model predicts point margin directly (no
+      conditional P(cover | win) hurdle to anchor to the moneyline head), so
+      there is nothing to recover from them.  Docstring explains why.
+
+  app/scheduler.py  (_rerun_single_game)
+    * Dropped the `sport == "mlb"` guards on both the spread/run-line predict
+      and the totals predict -- a single unified call site now drives both
+      sports (signatures match).
+    * ledger_path / bankroll / personal-starting-bankroll now derive from the
+      sport (data/wnba_ledger.json + _wnba_analysis_state for WNBA).
+    * Serializer routing by sport: WNBA -> _serialize_wnba with the head under
+      "spread_pred"; MLB -> _serialize with the head under "rl_pred".  MLB path
+      is byte-for-byte equivalent to before (same ledger, state, serializer).
+
+Verification:
+  ✓ python3 -m py_compile on wnba_spread_model.py and scheduler.py.
+  ✓ AST signature diff: WNBASpreadModel.predict and RunLineModel.predict now
+      expose identical arg lists
+      [self, feature_vec, game, weights, ml_prob_home, ml_lr_prob_home,
+       ml_nn_prob_home].
+  ✓ Runtime: WNBASpreadModel.predict() now accepts the ml_*_prob_home kwargs
+      without TypeError (previously raised); the legacy 3-arg call still works.
+  ✓ End-to-end: a model fit on synthetic data -> predict() with the kwargs ->
+      _serialize_wnba() produces a "spread_pick" block with no KeyError,
+      sport == "wnba".
