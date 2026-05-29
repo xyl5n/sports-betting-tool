@@ -2963,11 +2963,6 @@ def get_ledger():
     # WNBA "bet_type" uses: "single" (ML), "spread",         "totals"
     _all_model_hist = ledger.data["history"] + wledger.data["history"]
 
-    # Combined model W/L record and P&L across ALL 15 daily picks (both sports)
-    model_wins_all   = sum(1 for h in _all_model_hist if h["result"] == "win")
-    model_losses_all = sum(1 for h in _all_model_hist if h["result"] == "loss")
-    model_pnl_all    = round(sum(h.get("model_pnl", 0) for h in _all_model_hist), 2)
-
     # ── Merge WNBA confirmed bets into the unified My Bets view ──────────────
     # open_bets: all MLB open bets + all WNBA open bets (deduped)
     all_open = ledger.data["open_bets"] + [
@@ -5210,7 +5205,6 @@ def confirm_bet(game_id: str):
         odds = int(g.get("h2h_away_odds") or -110)
         model_p, edge = 1 - hp, -he
 
-    pred_full = raw["prediction"]
     # Tier from the picked-outcome probability (model_p), not model agreement.
     ml_conf = confidence_tier_from_prob(model_p)
     model_amt, conf_amt = ledger.kelly_amounts(model_p, odds)
