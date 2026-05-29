@@ -1461,10 +1461,11 @@ body {
 @media (max-width: 600px) {
   .news-grid { grid-template-columns: 1fr; }
 }
+
 /* ── Phase 3b: server-rendered home extras ──────────────────────────── */
 .stat-chips {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
-  margin: 4px 0 4px;
+  margin: 4px 0;
 }
 .stat-chip {
   background: var(--bg-elev); border: 1px solid var(--border-soft);
@@ -1724,25 +1725,6 @@ body {
         </div>
         <div class="slate-list" id="slate-cards"></div>
       </section>
-
-      {% if home_v2 and model_perf %}
-      <!-- Model Performance row (server-rendered, bottom of home) -->
-      <section class="section" id="section-model-perf">
-        <div class="section-hdr">
-          <h2>MODEL PERFORMANCE</h2>
-        </div>
-        <div class="model-perf-row">
-          <div class="model-perf-cell">
-            <span class="model-perf-val {{ model_perf.tone }}">{{ model_perf.pct_str if model_perf.settled else '—' }}</span>
-            <span class="model-perf-lbl">WIN %</span>
-          </div>
-          <div class="model-perf-cell">
-            <span class="model-perf-val">{{ model_perf.record }}</span>
-            <span class="model-perf-lbl">RECORD</span>
-          </div>
-        </div>
-      </section>
-      {% endif %}
 
     </section>
 
