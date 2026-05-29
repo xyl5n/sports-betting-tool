@@ -1826,3 +1826,77 @@ DECISION: ship the SPORTS hotfix alone (this PR), and address the 6
 scheduler.py undefined names in a dedicated follow-up PR (#291) with full
 per-name import-source + leaf/cycle verification.  Recorded here so the
 follow-up has the complete inventory.
+
+============================================================================
+PR #292 — scheduler.py latent-NameError sweep (closes the PR #291 finding)
+============================================================================
+
+Branch: claude/scheduler-namefix-292
+Base:   origin/main @ 1a1c8c1  (post PR #291 SPORTS-hotfix merge)
+
+Closes the 6-bug finding documented under PR #291.  Import-fixes only --
+no code movement, no rewrites.
+
+Background: a proactive sweep during PR #291 found SPORTS was 1 of 7
+same-class latent NameErrors in scheduler.py.  SPORTS was fixed in #291;
+this PR fixes the remaining 6.  All were bare references in functions
+moved into scheduler.py during the pre-try-aware PRs, never imported
+here, raising NameError at runtime (swallowed by `except Exception`
+handlers -> silent degradation of those scheduler functions).
+
+Step 0 -- per-name source audit:
+  | Name           | Used at (scheduler.py)      | Owner                          | Covered? | Fix
+  | _serialize     | 2221                        | serializer.py __all__          | no       | from serializer import *
+  | Path           | 1976                        | stdlib (pathlib)               | no       | from pathlib import Path
+  | Ledger         | 674,1153,2188,2217          | src.ledger (leaf)              | no       | from src.ledger import Ledger
+  | OddsClient     | 1083,2317                   | src.odds_client (leaf)         | no       | from src.odds_client import OddsClient
+  | GameStore      | 2041                        | src.game_store (leaf)          | no       | from src.game_store import GameStore
+  | ensemble_store | 1800                        | src.ensemble_store (leaf)      | no       | import src.ensemble_store as ensemble_store
+
+  NB: the PR #291 background said scheduler imported serializer -- it did
+  NOT (only state + utils).  That was precisely why _serialize was
+  undefined.  Corrected here.
+
+Step 1 -- cycle check (new edges only):
+  scheduler -> serializer:  serializer.py imports only state/utils/
+    src.kelly (+ inline src.park_factors); it has NO scheduler import
+    (only comment/docstring mentions).  CYCLE-FREE.  Moreover serializer's
+    own docstring (PR #283) already declares "scheduler.py -> serializer.py
+    (one-way down)" -- this edge was anticipated; the fix realizes the
+    intended direction.  NOT an inversion.
+  scheduler -> src.{ledger,odds_client,game_store,ensemble_store}:  all 4
+    verified leaves (no state/app/satellite imports).  CYCLE-FREE.
+  Path: stdlib, no edge.
+
+Step 2 -- two-gate pre-flight:
+  GATE 1 (reassignment): no module-scope binding of any of the 6 names in
+    scheduler.py -> the new imports cannot be shadowed.  PASS.
+    (Pre-existing aliased inline imports `Ledger as _BudgetLedger`,
+    `Path as _Path/_P` are different names and unaffected.)
+  GATE 2 (RHS cycle, try/if/with-aware): covered by the Step-1 leaf +
+    no-cycle verification above.  PASS.
+
+Step 3 -- import lines added to scheduler.py (no code moved):
+    from pathlib import Path
+    from src.ledger import Ledger
+    from src.odds_client import OddsClient
+    from src.game_store import GameStore
+    import src.ensemble_store as ensemble_store
+    from serializer import *
+  +16 lines total (imports + explanatory comments).
+
+Verification:
+  ✓ py_compile clean on scheduler.py.
+  ✓ Runtime: all 6 names now RESOLVED in scheduler's namespace
+    (hasattr(scheduler, name) == True for all six; previously all False).
+  ✓ Re-ran the full try/if/with-aware latent-name sweep on scheduler.py:
+    ZERO remaining unresolved names.
+  ✓ serializer.py confirmed to NOT import scheduler (no cycle).
+  ✓ All satellite modules import cleanly; `import app` clears every
+    satellite import incl. the new scheduler->serializer edge, dying only
+    at the sandbox Flask import.
+
+RESULT: the 7-name latent-NameError class (SPORTS + these 6), introduced
+across PRs #276-#285 by the pre-try-aware audits and surfaced by the
+post-#287 try/if/with-aware sweep, is now FULLY CLOSED.  All satellite
+modules pass the unresolved-name sweep with zero findings.
