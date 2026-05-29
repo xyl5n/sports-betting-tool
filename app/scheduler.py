@@ -27,10 +27,22 @@ import time
 import traceback
 import urllib.request as _urlreq
 from datetime import datetime, timedelta, timezone
+from pathlib import Path  # PR #292: bare Path used by _write_daily_snapshot
 
 # Credential redactor used by _eprint to keep API keys out of Railway
 # logs even when an exception message embeds `?apiKey=...`.
 from src.redact import redact as _redact
+
+# PR #292 -- latent-NameError fixes.  These names were referenced (bare) by
+# functions moved into scheduler.py during the pre-try-aware PRs (#279/#280/
+# #281/#284/#285) but never imported here, so every call raised NameError
+# at runtime, silently swallowed by the functions' `except Exception`
+# handlers (same class of bug as the SPORTS hotfix, PR #291).  All four
+# src.* modules are verified leaves (no state/app/satellite imports).
+from src.ledger import Ledger              # _void_postponed_mlb_bets, _run_auto_settlement_job, _rerun_single_game
+from src.odds_client import OddsClient     # _run_auto_settlement_job, _detect_game_changes
+from src.game_store import GameStore       # _ensure_no_odds_predictor
+import src.ensemble_store as ensemble_store  # _run_job2_full_clear
 
 # State + utils star-imports: the cluster appended below in PR #278a
 # (hydrate_state, _read_daily_snapshot, etc.) references _analysis_state,
@@ -39,6 +51,10 @@ from src.redact import redact as _redact
 # one-way down: scheduler.py -> state.py / utils.py / src.*.
 from state import *  # noqa: F401,F403
 from utils import *  # noqa: F401,F403
+# PR #292: _rerun_single_game references bare _serialize (owned by
+# serializer.py).  scheduler -> serializer is a cycle-free downward edge
+# (serializer imports only state/utils/src.kelly, never scheduler).
+from serializer import *  # noqa: F401,F403
 
 # Parallel reference to the same logger app.py owns.  Python's logging
 # module is a process-wide registry keyed by name, so getLogger("sports_betting")
