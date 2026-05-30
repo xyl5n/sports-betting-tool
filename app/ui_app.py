@@ -110,6 +110,7 @@ bets.register(backend)
 from nicegui import app as _ng_app                                       # noqa: E402
 from starlette.responses import Response as _StarletteResponse           # noqa: E402
 from starlette.requests import Request as _StarletteRequest              # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware                 # noqa: E402
 
 _flask_client = backend.app.test_client()
 
@@ -124,20 +125,31 @@ def _props_flask_page():
     )
 
 
-@_ng_app.get("/")
-def _home_flask_page():
-    # Bridge / to the Flask home page (Phase-1 Tailwind port, PR #324).
-    # Without this, NiceGUI's FastAPI server has no handler for "/" and the
-    # request never reaches Flask's WSGI layer -- producing the blank-page
-    # symptom while /props (which has its own bridge above) renders fine.
-    # Same in-process test-client passthrough as /props -- no extra logic.
-    print("[HOME-BRIDGE] /", flush=True, file=sys.stderr)
-    rv = _flask_client.get("/")
-    return _StarletteResponse(
-        content=rv.get_data(),
-        status_code=rv.status_code,
-        media_type=rv.headers.get("Content-Type", "text/html"),
-    )
+# ── Bridge "/" to Flask via middleware (NOT a route) ────────────────────────
+# NiceGUI registers its own APIRoute at "/" during `from nicegui import app`
+# (see routes audit: index 2 in _ng_app.routes is GET /).  An @_ng_app.get("/")
+# decorator added in this file lands AFTER NiceGUI's route, and Starlette is
+# first-match-wins, so the @get bridge never matches and the request hits
+# NiceGUI's blank index instead of Flask's home view.
+#
+# Middleware runs BEFORE route matching, so it bypasses the ordering problem.
+# We intercept exactly "/", forward to the in-process Flask test client (same
+# pattern as the /props bridge above), and pass everything else through to
+# NiceGUI's normal routing via call_next.
+class _RootBridgeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/":
+            print("[HOME-BRIDGE] /", flush=True, file=sys.stderr)
+            rv = _flask_client.get("/")
+            return _StarletteResponse(
+                content=rv.get_data(),
+                status_code=rv.status_code,
+                media_type=rv.headers.get("Content-Type", "text/html"),
+            )
+        return await call_next(request)
+
+
+_ng_app.add_middleware(_RootBridgeMiddleware)
 
 
 @_ng_app.get("/static/{path:path}")
