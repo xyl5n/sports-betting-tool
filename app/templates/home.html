@@ -75,6 +75,62 @@
       border-radius: 10px; padding: 20px; text-align: center;
     }
 
+    /* ── News ── */
+    .news-cards {
+      display: grid; gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+    @media (max-width: 640px) {
+      .news-cards {
+        display: flex; gap: 12px;
+        overflow-x: auto; scroll-snap-type: x mandatory;
+        grid-template-columns: none;
+        scrollbar-width: none;
+      }
+      .news-cards::-webkit-scrollbar { display: none; }
+      .news-card { flex: 0 0 80%; scroll-snap-align: start; }
+    }
+    .news-card {
+      background: #1a1f2e; border: 1px solid #2a3040;
+      border-radius: 10px; overflow: hidden;
+      text-decoration: none; color: #e2e8f0;
+      display: flex; flex-direction: column;
+      transition: border-color .15s;
+    }
+    .news-card:hover { border-color: #4f6ef7; }
+    .news-thumb {
+      position: relative;
+      width: 100%; aspect-ratio: 16/9;
+      background-size: cover; background-position: center;
+      background-color: #2a3040;
+    }
+    .news-badge {
+      position: absolute; bottom: 8px; left: 8px;
+      font-size: 9.5px; font-weight: 800; letter-spacing: .4px;
+      padding: 3px 7px; border-radius: 999px;
+    }
+    .news-badge-mlb  { background: #1a2e4a; color: #60a5fa; }
+    .news-badge-wnba { background: #1f1a00; color: #f59e0b; }
+    .news-body  { padding: 10px 12px; }
+    .news-title {
+      font-size: 12.5px; font-weight: 600; color: #e2e8f0;
+      line-height: 1.35;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .news-time {
+      margin-top: 6px;
+      font-size: 10.5px; color: #64748b; font-family: monospace;
+    }
+
+    /* ── Model Performance ── */
+    .perf-row { display: flex; flex-wrap: nowrap; gap: 10px; align-items: stretch; }
+    .perf-stat {
+      flex: 1 1 0; min-width: 0; overflow: hidden;
+      background: #1a1f2e; border: 1px solid #2a3040;
+      border-radius: 10px; padding: 14px 16px;
+    }
+
     /* ── AI banner ── */
     .ai-banner {
       display: flex; align-items: center; width: 100%;
@@ -233,7 +289,35 @@
       {% endif %}
     </div>
 
-    {# ── 5. Season Heatmap (Phase 2a) ── #}
+    {# ── 5. News (Phase 2b) ── #}
+    <div class="flex flex-col gap-3">
+      <div class="flex items-center gap-2">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">NEWS</span>
+        {% if news_count %}
+        <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ news_count }}</span>
+        {% endif %}
+        <span class="ml-auto text-[10.5px] c-dim">via ESPN · {{ news_tag_label }}</span>
+      </div>
+      {% if news_items %}
+      <div class="news-cards">
+        {% for item in news_items %}
+        <a class="news-card" href="{{ item.link }}" target="_blank" rel="noopener noreferrer">
+          <div class="news-thumb"{% if item.image %} style="background-image: url('{{ item.image|e }}');"{% endif %}>
+            <span class="news-badge news-badge-{{ news_sport }}">{{ news_tag_label }}</span>
+          </div>
+          <div class="news-body">
+            <div class="news-title">{{ item.title|safe }}</div>
+            {% if item.time_ago %}<div class="news-time">{{ item.time_ago }}</div>{% endif %}
+          </div>
+        </a>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty-state">Headlines unavailable — check back shortly.</div>
+      {% endif %}
+    </div>
+
+    {# ── 6. Season Heatmap (Phase 2a) ── #}
     <div class="flex flex-col gap-3">
       <div class="flex items-center gap-2">
         <span class="text-[13px] font-extrabold tracking-widest text-white">SEASON HEATMAP</span>
@@ -273,7 +357,7 @@
       {% endif %}
     </div>
 
-    {# ── 6. AI banner (Phase 2a) ── #}
+    {# ── 7. AI banner (Phase 2a) ── #}
     <a href="/ai" class="ai-banner">
       <div class="flex-1 flex flex-col gap-1">
         <span class="text-[14px] font-bold text-white">AI Breakdown</span>
@@ -281,6 +365,24 @@
       </div>
       <span class="text-[18px] c-primary shrink-0">→</span>
     </a>
+
+    {# ── 8. Model Performance (Phase 2b) ── #}
+    <div class="flex flex-col gap-3">
+      <div class="flex items-center gap-2">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">MODEL PERFORMANCE</span>
+        <span class="text-[11px] c-dim">MLB combined · finished picks</span>
+      </div>
+      <div class="perf-row">
+        <div class="perf-stat">
+          <div class="text-[10px] font-extrabold tracking-widest c-dim mb-1">WIN %</div>
+          <div class="text-xl font-extrabold font-mono c-{{ perf_color }}">{{ perf_pct_str }}</div>
+        </div>
+        <div class="perf-stat">
+          <div class="text-[10px] font-extrabold tracking-widest c-dim mb-1">RECORD</div>
+          <div class="text-xl font-extrabold font-mono text-white">{{ perf_record }}</div>
+        </div>
+      </div>
+    </div>
 
   </main>
 
