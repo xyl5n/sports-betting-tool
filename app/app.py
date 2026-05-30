@@ -7800,6 +7800,20 @@ def _run_ai_analysis_job(force: bool = False) -> None:
                 _ai_run_state["failed"] += 1
             _ai_run_state["done"] += 1
 
+        # Phase 0 — pre-populate ai_game_bets_* rows (mirrors what
+        # _generate_games does in the 15-min cycle).  Without this the admin
+        # button only wrote summary rows, so a manual "Run AI Analysis" could
+        # never fix a "AI analysis unavailable" game-detail page.  Reuses the
+        # already-built game_results (and the already-imported ai_summaries);
+        # _generate_games' own `if not db.cache_get(_bets_key)` guard keeps it
+        # idempotent, so this is cheap when the rows already exist.
+        _ai_run_state["phase"] = "bets analysis"
+        try:
+            if game_results:
+                ai_summaries._generate_games(game_results)
+        except Exception as exc:                                          # noqa: BLE001
+            _eprint(f"ADMIN bets pre-pop error: {type(exc).__name__}: {exc}")
+
         # Phase 1 — game summaries
         _ai_run_state["phase"] = "game summaries"
         for sport, g in game_results:

@@ -660,10 +660,10 @@ def _section_ai_analysis(backend) -> None:
     run is in progress (can't double-click)."""
     with _card(
         "AI ANALYSIS",
-        "Run AI Analysis generates Groq summaries for every game pick, prop "
+        "Run AI Analysis generates AI summaries for every game pick, prop "
         "pick, and player breakdown that isn't cached yet (highest-confidence "
         "props first).  Force AI Refresh re-runs every one regardless of "
-        "cache.  Sequential with a 150 ms gap between calls.",
+        "cache.",
     ):
         with ui.row().classes("w-full").style("gap: 8px; flex-wrap: wrap;"):
             btn = ui.button("Run AI Analysis").props(

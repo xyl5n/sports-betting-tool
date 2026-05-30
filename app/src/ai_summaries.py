@@ -1021,7 +1021,7 @@ def get_game_bet_analysis(sport: str, g: dict) -> dict:
                         return d["analysis"]
         except Exception:                                                 # noqa: BLE001
             pass
-    text, _ver = _gen(_game_bets_prompt(sport, g), prefer="V1", max_tokens=400)
+    text, _ver = _gen(_game_bets_prompt(sport, g), prefer="V4", max_tokens=400)
     if not text:
         return {}
     out = _parse_bet_analysis(text)
