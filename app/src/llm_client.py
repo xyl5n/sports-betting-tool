@@ -5,9 +5,9 @@ Local-first LLM client for the sports-betting app.
 
 Two-pass pipeline
 -----------------
-  Pass 1 (fast):  Ollama qwen3.6 with think=False -- a quick JSON verdict for
+  Pass 1 (fast):  Ollama qwen3:8b with think=False -- a quick JSON verdict for
                   every prop.  See ``fast_verdict``.
-  Pass 2 (deep):  Ollama qwen3.6 with think=True -- deeper analysis, run after
+  Pass 2 (deep):  Ollama qwen3:8b with think=True -- deeper analysis, run after
                   Pass 1, highest verdict tier first (see ``sort_by_tier``).
                   See ``deep_analysis``.
   Fallback:       Groq (the existing budget-aware multi-model client) -- a
@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL    = "qwen3.6"
+OLLAMA_MODEL    = "qwen3:8b"
 OLLAMA_TIMEOUT  = 120          # seconds, per HTTP attempt
 RETRY_INTERVAL  = 600          # seconds (10 min) between retry attempts
 
@@ -54,7 +54,7 @@ def _call_ollama(system: str, user: str, max_tokens: int = 900,
     """One POST to Ollama's /api/chat endpoint.  Returns the assistant's raw
     text, or None on any failure (connection refused, timeout, bad response).
 
-    *think* toggles the model's reasoning mode (qwen3.6 supports it); *max_tokens*
+    *think* toggles the model's reasoning mode (qwen3:8b supports it); *max_tokens*
     maps to Ollama's ``options.num_predict``.
     """
     url = f"{OLLAMA_BASE_URL}/api/chat"
