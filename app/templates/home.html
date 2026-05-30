@@ -170,6 +170,67 @@
       background: #1a1f2e; border: 1px solid #2a3040;
       border-radius: 10px; padding: 14px 16px;
     }
+
+    /* ── Games table (Phase 2c) ── */
+    .games-card {
+      background: #1a1f2e; border: 1px solid #2a3040;
+      border-radius: 10px; overflow: hidden; width: 100%;
+    }
+    .games-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 9px 16px; width: 100%; min-width: 0;
+      box-sizing: border-box; overflow: hidden;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+    }
+    .games-row:last-child { border-bottom: 0; }
+    .games-row .g-mid {
+      display: flex; align-items: center; gap: 8px;
+      flex: 1 1 auto; min-width: 0; overflow: hidden;
+    }
+    .games-badge {
+      background: #2a3040; color: #94a3b8;
+      font-size: 9px; font-weight: 800; letter-spacing: .4px;
+      padding: 2px 6px; border-radius: 999px;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .games-badge-final {
+      background: #2a3040; color: #94a3b8;
+      font-size: 8.5px; font-weight: 800; letter-spacing: .4px;
+      padding: 2px 6px; border-radius: 999px;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .games-badge-slot { display: inline-block; width: 54px; flex-shrink: 0; }
+    .g-abbr   { color: #e2e8f0; font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .g-muted  { color: #94a3b8; font-size: 11px; font-family: monospace; white-space: nowrap; }
+    .g-sep    { color: #94a3b8; font-size: 11px; padding: 0 2px; }
+    .g-time   { font-size: 10.5px; color: #94a3b8; font-family: monospace;
+                white-space: nowrap; flex-shrink: 0; }
+    .g-team-w { color: #e2e8f0; font-size: 13px; font-weight: 700; white-space: nowrap; }
+    .g-team-l { color: #64748b; font-size: 13px; font-weight: 400; white-space: nowrap; }
+    .g-score-w {
+      color: #e2e8f0; font-size: 16px; font-weight: 800; font-family: monospace;
+      min-width: 26px; text-align: right; display: inline-block;
+    }
+    .g-score-l {
+      color: #94a3b8; font-size: 16px; font-weight: 400; font-family: monospace;
+      min-width: 26px; text-align: right; display: inline-block;
+    }
+
+    /* sport toggle pills */
+    .g-pills    { display: flex; gap: 3px; flex-shrink: 0; }
+    .g-pill {
+      background: #2a3040; color: #94a3b8;
+      font-size: 10.5px; font-weight: 700;
+      padding: 4px 10px; border-radius: 999px;
+      border: 0; cursor: pointer; line-height: 1;
+    }
+    .g-pill.active { background: #4f6ef7; color: #0f1117; }
+
+    .games-empty {
+      color: #94a3b8; font-size: 12px; text-align: center;
+      background: #1a1f2e; border: 1px dashed #2a3040;
+      border-radius: 10px; padding: 16px; width: 100%;
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -317,7 +378,83 @@
       {% endif %}
     </div>
 
-    {# ── 6. Season Heatmap (Phase 2a) ── #}
+    {# ── 6. Games table (Phase 2c) ── #}
+    {# Both sports are pre-rendered; the [MLB | WNBA] pills toggle visibility
+       client-side.  Server picks the default_sport (WNBA when MLB has no
+       analysis results and WNBA does, otherwise MLB). #}
+    {% for sk, sl in [('mlb', 'MLB'), ('wnba', 'WNBA')] %}
+    <div id="games-{{ sk }}" class="flex flex-col gap-3"
+         {% if sk != games.default_sport %}style="display:none;"{% endif %}>
+
+      {# ── Upcoming header + sport toggle ── #}
+      <div class="flex items-center gap-2 w-full">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">UPCOMING</span>
+        <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ games[sk].upcoming | length }}</span>
+        <div class="flex-1 min-w-[4px]"></div>
+        <div class="g-pills">
+          {% for tk, tl in [('mlb', 'MLB'), ('wnba', 'WNBA')] %}
+          <button type="button"
+                  class="g-pill{% if tk == sk %} active{% endif %}"
+                  onclick="showGames('{{ tk }}')">{{ tl }}</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      {# ── Upcoming rows ── #}
+      {% if games[sk].upcoming %}
+      <div class="games-card">
+        {% for g in games[sk].upcoming %}
+        <div class="games-row">
+          {% if g.total_str %}
+          <span class="games-badge">{{ g.total_str }}</span>
+          {% else %}
+          <span class="games-badge-slot"></span>
+          {% endif %}
+          <div class="g-mid">
+            <span class="g-abbr">{{ g.away_abbr }}</span>
+            {% if g.away_ml %}<span class="g-muted">{{ g.away_ml }}</span>{% endif %}
+            {% if g.away_spread %}<span class="g-muted">{{ g.away_spread }}</span>{% endif %}
+            <span class="g-sep">vs</span>
+            <span class="g-abbr">{{ g.home_abbr }}</span>
+            {% if g.home_ml %}<span class="g-muted">{{ g.home_ml }}</span>{% endif %}
+            {% if g.home_spread %}<span class="g-muted">{{ g.home_spread }}</span>{% endif %}
+          </div>
+          {% if g.time_str %}<span class="g-time">{{ g.time_str }}</span>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="games-empty">No upcoming games today.</div>
+      {% endif %}
+
+      {# ── Final header ── #}
+      <div class="flex items-center gap-2 w-full pt-1">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">FINAL</span>
+        <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ games[sk].final | length }}</span>
+      </div>
+
+      {# ── Final rows ── #}
+      {% if games[sk].final %}
+      <div class="games-card">
+        {% for g in games[sk].final %}
+        <div class="games-row">
+          <span class="games-badge-final">FINAL</span>
+          <span class="{{ 'g-team-w' if g.away_wins else 'g-team-l' }}">{{ g.away_abbr }}</span>
+          <span class="{{ 'g-score-w' if g.away_wins else 'g-score-l' }}">{{ g.away_score }}</span>
+          <span class="g-sep">at</span>
+          <span class="{{ 'g-team-w' if g.home_wins else 'g-team-l' }}">{{ g.home_abbr }}</span>
+          <span class="{{ 'g-score-w' if g.home_wins else 'g-score-l' }}">{{ g.home_score }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="games-empty">No completed games yet.</div>
+      {% endif %}
+
+    </div>
+    {% endfor %}
+
+    {# ── 7. Season Heatmap (Phase 2a) ── #}
     <div class="flex flex-col gap-3">
       <div class="flex items-center gap-2">
         <span class="text-[13px] font-extrabold tracking-widest text-white">SEASON HEATMAP</span>
@@ -357,7 +494,7 @@
       {% endif %}
     </div>
 
-    {# ── 7. AI banner (Phase 2a) ── #}
+    {# ── 8. AI banner (Phase 2a) ── #}
     <a href="/ai" class="ai-banner">
       <div class="flex-1 flex flex-col gap-1">
         <span class="text-[14px] font-bold text-white">AI Breakdown</span>
@@ -366,7 +503,7 @@
       <span class="text-[18px] c-primary shrink-0">→</span>
     </a>
 
-    {# ── 8. Model Performance (Phase 2b) ── #}
+    {# ── 9. Model Performance (Phase 2b) ── #}
     <div class="flex flex-col gap-3">
       <div class="flex items-center gap-2">
         <span class="text-[13px] font-extrabold tracking-widest text-white">MODEL PERFORMANCE</span>
@@ -393,6 +530,13 @@
       const card = el.querySelector('.ev-card, .conf-card');
       const w = card ? card.offsetWidth + 8 : 216;
       el.scrollBy({ left: dir === 'left' ? -w : w, behavior: 'smooth' });
+    }
+
+    function showGames(sport) {
+      ['mlb', 'wnba'].forEach(function(s) {
+        const el = document.getElementById('games-' + s);
+        if (el) el.style.display = (s === sport) ? '' : 'none';
+      });
     }
   </script>
 
