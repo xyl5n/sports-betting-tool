@@ -228,6 +228,31 @@ def deep_analysis(system: str, user: str,
     return None, "parse_error"
 
 
+# ── Shape-compatible adapter for groq_models.generate ────────────────────────
+# Lets ai_summaries._gen flip its import without changing its (text, label)
+# contract.  Routes prefer="V1" -> think=True (deep), everything else -> fast.
+
+def generate(prompt: str, *, prefer: str = "V4",
+             max_tokens: int = 900) -> tuple[Optional[str], str]:
+    """Drop-in replacement for ``groq_models.generate``: returns
+    ``(raw_text, source_label)`` so callers can keep their own ``_parse_*``
+    helpers.  Empty Ollama response falls back to ``groq_models.generate``."""
+    think = (prefer == "V1")
+    text = _call_ollama_with_retry("", prompt, max_tokens=max_tokens, think=think)
+    if text:
+        text = _THINK_RE.sub("", text).strip() or None
+    if text:
+        return text, ("ollama_deep" if think else "ollama_fast")
+    try:
+        from .groq_models import generate as _groq
+        gtext, gver = _groq(prompt, prefer=prefer, max_tokens=max_tokens)
+        return gtext, (gver or "groq_fallback")
+    except Exception as exc:                                              # noqa: BLE001
+        log.warning("generate: Groq fallback failed: %s: %s",
+                    type(exc).__name__, exc)
+        return None, "error"
+
+
 # ── Tier ordering (Pass 2 runs highest tier first) ────────────────────────────
 
 def sort_by_tier(props: list[dict]) -> list[dict]:

@@ -411,10 +411,13 @@ def _parse_game_summary(text: str | None) -> dict | None:
 
 
 def _gen(prompt: str, *, prefer: str, max_tokens: int) -> tuple:
-    """Budget-aware generate -> (text, version_label).  groq_models enforces
-    per-model spacing + the daily-budget cascade, so callers don't sleep."""
+    """Generate text via the local-first llm_client adapter -> (text,
+    source_label).  Routes prefer="V1" -> deep (Ollama think=True); other
+    prefers -> fast (think=False).  Falls back to Groq inside llm_client when
+    Ollama returns nothing, preserving the budget-aware behaviour callers
+    depended on (no caller-side sleeps)."""
     try:
-        from .groq_models import generate
+        from .llm_client import generate
         return generate(prompt, prefer=prefer, max_tokens=max_tokens)
     except Exception as exc:                                              # noqa: BLE001
         _log(f"_gen failed: {type(exc).__name__}: {exc}")
@@ -571,12 +574,35 @@ def _prop_prompt(r: dict) -> str:
 def _generate_games(game_results: list[tuple]) -> dict:
     """game_results: list of (sport, serialized_game_dict).  Returns counts."""
     store = _load("game", force=True)
+    today = _today_et()
     done = generated = cached = 0
     total = len(game_results)
     for sport, g in game_results:
         gid = _game_id(g)
         if not gid or not g.get("pick_team"):
             continue
+        # ── Pre-populate ai_game_bets_{sport}_{gid} so the game-detail page's
+        #    AI Analysis section never has to generate on-demand (which was
+        #    failing silently with "AI analysis unavailable for this game").
+        #    Runs BEFORE the cached-summary skip below, so cached-summary games
+        #    still get their bets row written.  Idempotent: the existing row
+        #    is left alone.
+        try:
+            from . import db as _db
+            _bets_key = f"ai_game_bets_{sport}_{gid}"
+            if not _db.cache_get(_bets_key):
+                _btext, _bver = _gen(_game_bets_prompt(sport, g),
+                                     prefer="V4", max_tokens=400)
+                _bparsed = _parse_bet_analysis(_btext) if _btext else {}
+                if _bparsed:
+                    _db.cache_set(_bets_key, sport, today, {
+                        "date":          today,
+                        "analysis":      _bparsed,
+                        "model_version": _bver or "",
+                    })
+        except Exception as _bexc:                                        # noqa: BLE001
+            _log(f"bets pre-populate failed for {sport}:{gid}: "
+                 f"{type(_bexc).__name__}: {_bexc}")
         key = f"{sport}:{gid}"
         fp  = _game_fp(g)
         old = store.get(key)
