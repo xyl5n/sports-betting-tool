@@ -124,22 +124,6 @@ def _props_flask_page():
     )
 
 
-@_ng_app.get("/home-v2")
-def _home_v2_flask_page(request: _StarletteRequest):
-    # Bridge the server-rendered Flask /home-v2 page (NiceGUI → HTML
-    # migration, Phase 1) onto NiceGUI's FastAPI server, same in-process
-    # test-client passthrough as /props.  The query string is forwarded so
-    # ?sport=wnba reaches the Flask route.
-    qs   = request.url.query
-    path = "/home-v2" + (f"?{qs}" if qs else "")
-    rv   = _flask_client.get(path)
-    return _StarletteResponse(
-        content=rv.get_data(),
-        status_code=rv.status_code,
-        media_type=rv.headers.get("Content-Type", "text/html"),
-    )
-
-
 @_ng_app.get("/static/{path:path}")
 def _props_static(path: str):
     rv = _flask_client.get("/static/" + path)

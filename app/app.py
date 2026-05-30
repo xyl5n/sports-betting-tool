@@ -841,14 +841,6 @@ def health():
 
 
 # ── Home page ("/" + "/home-v2") — server-rendered (NiceGUI → HTML migration) ─
-# The home page logic lives in routes/home_v2.py.  The route is wired up at the
-# BOTTOM of this file (see _home_v2_routes.register(...) at module end), once the
-# snapshot helpers it needs (_read_daily_snapshot / _snapshot_is_today, defined
-# late in this file) actually exist.  Importing the module here is safe — it runs
-# no code at import — but the register() CALL must run after those defs.
-from routes import home_v2 as _home_v2_routes  # noqa: E402
-
-
 # ── Player-props page (Flask + Tailwind, PR #304) ───────────────────────────
 # Replaces the NiceGUI props page (now at /props-legacy) with a static
 # Tailwind template.  Pure rendering layer: it reads the SAME scored-props
@@ -1313,11 +1305,20 @@ def home():
     """Phase-1 Flask home page.  Mirrors pages/home.py's chip + EV-scan +
     confidence-carousel sections via templates/home.html.  Graceful fallback
     on any view-model error so the page always renders."""
+    import sys, traceback
+    print("[HOME] route hit", flush=True, file=sys.stderr)
     try:
         vm = _home_view_model()
+        print(
+            f"[HOME] vm ok -- chips={len(vm.get('chips', []))} "
+            f"stubs={len(vm.get('stubs', []))} "
+            f"ev_rows={len(vm.get('ev_rows', []))} "
+            f"conf_rows={len(vm.get('conf_rows', []))} "
+            f"ev_empty={vm.get('ev_empty_reason')!r}",
+            flush=True, file=sys.stderr,
+        )
     except Exception:                                                      # noqa: BLE001
-        import traceback
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stderr)
         vm = {"chips": [], "stubs": [], "ev_rows": [], "ev_min_pct": "3%",
               "ev_count": 0, "ev_empty_reason": "Error loading data.",
               "conf_rows": [], "conf_empty_reason": "Error loading data."}
