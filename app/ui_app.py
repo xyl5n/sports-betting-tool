@@ -124,6 +124,22 @@ def _props_flask_page():
     )
 
 
+@_ng_app.get("/")
+def _home_flask_page():
+    # Bridge / to the Flask home page (Phase-1 Tailwind port, PR #324).
+    # Without this, NiceGUI's FastAPI server has no handler for "/" and the
+    # request never reaches Flask's WSGI layer -- producing the blank-page
+    # symptom while /props (which has its own bridge above) renders fine.
+    # Same in-process test-client passthrough as /props -- no extra logic.
+    print("[HOME-BRIDGE] /", flush=True, file=sys.stderr)
+    rv = _flask_client.get("/")
+    return _StarletteResponse(
+        content=rv.get_data(),
+        status_code=rv.status_code,
+        media_type=rv.headers.get("Content-Type", "text/html"),
+    )
+
+
 @_ng_app.get("/static/{path:path}")
 def _props_static(path: str):
     rv = _flask_client.get("/static/" + path)
