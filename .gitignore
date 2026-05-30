@@ -61,3 +61,19 @@ env/
 # of the repo so a committed balance can never repopulate again.
 **/data/ledger.json
 **/data/wnba_ledger.json
+
+# Odds API response cache -- 15-min TTL files rewritten by the consolidated
+# refresh cycle on every tick.  Were tracked historically; runtime mutation
+# made every diagnostic run flag uncommitted "deletions" in the working tree.
+# Keep them out of the repo so the working tree stays clean across boots.
+**/.cache/odds_*.json
+
+# Daily snapshot -- the locked pre-game state for today, rewritten by the
+# 8 AM analysis pipeline and the consolidated 15-min cycle.  Same reasoning
+# as the odds cache above: runtime artifact, not source.
+**/data/daily_snapshot.json
+
+# Today's ensemble picks -- regenerated on every analyze run (8 AM, noon,
+# admin manual).  Tracking it meant Railway re-cloned a stale committed copy
+# on every redeploy.  Same pattern as the ledger files above.
+**/data/ensemble_picks_today.json
