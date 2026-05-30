@@ -226,7 +226,12 @@ def _game_fp(g: dict) -> dict:
 
 def _sp_fact(sp: dict, label: str, *, is_home: bool) -> str | None:
     """One starting-pitcher fact line -- season rate stats + recent form +
-    arsenal + home/away ERA split -- including only what's actually present."""
+    arsenal + home/away ERA split -- including only what's actually present.
+
+    NOTE: is_home is keyword-only and REQUIRED (selects the home/away ERA
+    split for this start's venue).  Every call site must pass it -- omitting
+    it raises TypeError at prompt-build time (has bitten the _game_bets_prompt
+    loop twice now)."""
     name = (sp or {}).get("full_name")
     if not name:
         return None
@@ -953,8 +958,9 @@ def _game_bets_prompt(sport: str, g: dict) -> str:
             f"{(tot.get('direction') or '').title() or 'n/a'})."
         )
     if (sport or "").lower() == "mlb":
-        for sp, lbl in ((g.get("away_sp") or {}, away), (g.get("home_sp") or {}, home)):
-            fact = _sp_fact(sp, lbl)
+        for sp, lbl, is_home in ((g.get("away_sp") or {}, away, False),
+                                 (g.get("home_sp") or {}, home, True)):
+            fact = _sp_fact(sp, lbl, is_home=is_home)
             if fact:
                 facts.append(fact)
         try:
