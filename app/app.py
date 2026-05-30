@@ -1137,6 +1137,38 @@ def _home_fmt_game_time(iso) -> str:
         return "TBD"
 
 
+def _home_heatmap_rows(sport: str = "mlb", metric: str = "ml") -> list[dict]:
+    """Season Heatmap rows for the home page -- shape pages/home.py's
+    _heatmap_table_html into a list the Jinja template can iterate.
+    Phase-2a ships default (MLB + ML); metric/sport toggles deferred."""
+    try:
+        from src.team_rotation_cache import get_rotation_data as _grd
+        raw = _grd(sport=sport, metric=metric) or []
+    except Exception:                                                      # noqa: BLE001
+        return []
+    points = sorted(
+        [p for p in raw
+         if int(p.get("szn_w") or 0) + int(p.get("szn_l") or 0) > 0],
+        key=lambda p: -float(p.get("y") or 0),
+    )
+    def _color(pct100: float) -> str:
+        if pct100 >= 60: return "pos"
+        if pct100 >= 50: return "warn"
+        return "neg"
+    out: list[dict] = []
+    for rank, pt in enumerate(points, start=1):
+        pct100 = float(pt.get("y") or 0) * 100
+        out.append({
+            "rank":      rank,
+            "name":      pt.get("name") or "",
+            "wl":        f"{int(pt.get('szn_w') or 0)}-{int(pt.get('szn_l') or 0)}",
+            "pct_str":   f"{pct100:.1f}%",
+            "bar_color": _color(pct100),
+            "bar_width": f"{min(pct100, 100):.1f}%",
+        })
+    return out
+
+
 def _home_view_model() -> dict:
     """Shape all data for templates/home.html.  Returns a single dict that
     render_template unpacks directly -- no logic in the template."""
@@ -1288,6 +1320,9 @@ def _home_view_model() -> dict:
 
     conf_rows = [_shape_card(r) for r in conf_rows_raw]
 
+    # ── Season Heatmap (Phase-2a: default MLB + ML, no toggles) ─────────────
+    heatmap_rows = _home_heatmap_rows(sport="mlb", metric="ml")
+
     return {
         "chips":              chips,
         "stubs":              stubs,
@@ -1297,6 +1332,8 @@ def _home_view_model() -> dict:
         "ev_empty_reason":    ev_empty_reason,
         "conf_rows":          conf_rows,
         "conf_empty_reason":  conf_empty_reason,
+        "heatmap_rows":       heatmap_rows,
+        "heatmap_count":      len(heatmap_rows),
     }
 
 
@@ -1321,7 +1358,8 @@ def home():
         traceback.print_exc(file=sys.stderr)
         vm = {"chips": [], "stubs": [], "ev_rows": [], "ev_min_pct": "3%",
               "ev_count": 0, "ev_empty_reason": "Error loading data.",
-              "conf_rows": [], "conf_empty_reason": "Error loading data."}
+              "conf_rows": [], "conf_empty_reason": "Error loading data.",
+              "heatmap_rows": [], "heatmap_count": 0}
     return render_template("home.html", **vm)
 
 
