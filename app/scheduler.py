@@ -2582,9 +2582,17 @@ def _run_consolidated_refresh_cycle() -> dict:
             for player, market, _reasons in pc["significant"]:
                 if ai_summaries.invalidate_prop(player, market):
                     groq_queued += 1
+            # Pass the FULL slate (not just rerun_serialized) so the bets
+            # pre-pop in _generate_games fires for every game, not only ones
+            # that re-ran this cycle.  The `if not db.cache_get(...)` guard
+            # inside the pre-pop makes this idempotent -- Ollama is only
+            # called for games still missing their bets row, so steady-state
+            # cost is N cheap cache lookups per cycle.
+            full_slate = [("mlb",  r) for r in (_analysis_state.get("results")      or [])] \
+                       + [("wnba", r) for r in (_wnba_analysis_state.get("results") or [])]
             ai_summaries.launch_summary_queue(
-                game_results=rerun_serialized,
-                do_games=bool(rerun_serialized), do_props=True,
+                game_results=full_slate,
+                do_games=True, do_props=True,
             )
         except Exception as exc:                                          # noqa: BLE001
             _eprint(f"CYCLE groq invalidate/queue error: {type(exc).__name__}: {exc}")
