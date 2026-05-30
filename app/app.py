@@ -1361,6 +1361,213 @@ def _home_games_block() -> dict:
     }
 
 
+# ── Team Rotation chart (Phase 2d) ──────────────────────────────────────────
+# Mechanical port of pages/home.py _rotation_chart_opts.  Builds the ECharts
+# scatter-plot options dict the front-end echarts.init() consumes.  Colors are
+# remapped to the Flask palette (#22c55e/#ef4444/#f59e0b/#94a3b8/#2a3040 ...)
+# so the chart looks coherent with the rest of the new home page.
+
+_HOME_ROT_AXIS_NAMES = {
+    "ml":  "Win %",
+    "ats": "ATS Cover % (run-line proxy)",
+    "ou":  "Over %",
+}
+_HOME_ROT_METRIC_SHORT = {"ml": "ML", "ats": "ATS", "ou": "O/U"}
+
+
+def _home_rotation_opts(points: list[dict], metric: str, sport: str) -> dict:
+    """Build ECharts scatter-plot opts.  Pure-Python — returned dict goes out
+    as JSON and is consumed by chart.setOption(opts, true) on the client."""
+    wnba_proxy = (
+        sport == "wnba" and metric in ("ats", "ou")
+        and any(pt.get("ml_proxy") for pt in points)
+    )
+    axis = _HOME_ROT_AXIS_NAMES["ml" if wnba_proxy else metric]
+    suffix = " (ML proxy)" if wnba_proxy else ""
+    x_name = f"Recent 14d — {axis}{suffix}"
+    y_name = f"Season — {axis}{suffix}"
+    ml_lbl = _HOME_ROT_METRIC_SHORT["ml" if wnba_proxy else metric]
+
+    scatter_data: list[dict] = []
+    for pt in points:
+        x100 = round(pt["x"] * 100, 1)
+        y100 = round(pt["y"] * 100, 1)
+
+        # Quadrant colour (Flask palette: c-pos / c-neg / c-warn / blue)
+        if x100 >= 50 and y100 >= 50:
+            color = "#22c55e"          # Leading — emerald
+        elif x100 < 50 and y100 >= 50:
+            color = "#3b82f6"          # Improving — blue
+        elif x100 >= 50 and y100 < 50:
+            color = "#f59e0b"          # Weakening — amber
+        else:
+            color = "#ef4444"          # Lagging — rose
+
+        szn_g = pt["szn_w"] + pt["szn_l"]
+        rec_g = pt["rec_w"] + pt["rec_l"]
+        tooltip_html = (
+            f"<b style='font-size:13px'>{pt['name']}</b><br/>"
+            f"Season {ml_lbl}: {pt['szn_w']}-{pt['szn_l']}"
+            + (f" ({round(y100)}%)" if szn_g else "")
+            + f"<br/>Recent L14: {pt['rec_w']}-{pt['rec_l']}"
+            + (f" ({round(x100)}%)" if rec_g else "")
+        )
+
+        scatter_data.append({
+            "value":     [x100, y100],
+            "name":      pt["abbr"],
+            "itemStyle": {
+                "color":       color,
+                "borderColor": "rgba(0,0,0,0.2)",
+                "borderWidth": 1,
+            },
+            "tooltip":   {"formatter": tooltip_html},
+        })
+
+    _zones = [
+        [
+            {"name": "Leading",   "xAxis": 50, "yAxis": 50,
+             "itemStyle": {"color": "rgba(34,197,94,0.09)"},
+             "label": {"position": "insideTopRight",
+                       "color": "rgba(34,197,94,0.45)",
+                       "fontSize": 11, "fontWeight": "700", "fontStyle": "italic"}},
+            {"xAxis": 100, "yAxis": 100},
+        ],
+        [
+            {"name": "Improving", "xAxis": 0, "yAxis": 50,
+             "itemStyle": {"color": "rgba(59,130,246,0.07)"},
+             "label": {"position": "insideTopLeft",
+                       "color": "rgba(59,130,246,0.45)",
+                       "fontSize": 11, "fontWeight": "700", "fontStyle": "italic"}},
+            {"xAxis": 50, "yAxis": 100},
+        ],
+        [
+            {"name": "Weakening", "xAxis": 50, "yAxis": 0,
+             "itemStyle": {"color": "rgba(245,158,11,0.08)"},
+             "label": {"position": "insideBottomRight",
+                       "color": "rgba(245,158,11,0.45)",
+                       "fontSize": 11, "fontWeight": "700", "fontStyle": "italic"}},
+            {"xAxis": 100, "yAxis": 50},
+        ],
+        [
+            {"name": "Lagging",   "xAxis": 0, "yAxis": 0,
+             "itemStyle": {"color": "rgba(239,68,68,0.08)"},
+             "label": {"position": "insideBottomLeft",
+                       "color": "rgba(239,68,68,0.45)",
+                       "fontSize": 11, "fontWeight": "700", "fontStyle": "italic"}},
+            {"xAxis": 50, "yAxis": 50},
+        ],
+    ]
+
+    _axis_common = {
+        "type": "value",
+        "min": 0, "max": 100,
+        "splitLine": {"show": False},
+        "axisLine":  {"lineStyle": {"color": "#2a3040"}},
+        "axisTick":  {"show": False},
+        "axisLabel": {"color": "#94a3b8", "fontSize": 9,
+                      "formatter": "{value}%"},
+    }
+
+    return {
+        "backgroundColor": "transparent",
+        "grid": {"left": "54px", "right": "24px", "top": "20px", "bottom": "48px"},
+        "xAxis": {
+            **_axis_common,
+            "name": x_name, "nameLocation": "middle", "nameGap": 28,
+            "nameTextStyle": {"color": "#94a3b8", "fontSize": 10},
+        },
+        "yAxis": {
+            **_axis_common,
+            "name": y_name, "nameLocation": "middle", "nameGap": 42,
+            "nameTextStyle": {"color": "#94a3b8", "fontSize": 10},
+        },
+        "tooltip": {
+            "trigger":         "item",
+            "backgroundColor": "#1e2436",
+            "borderColor":     "#2a3040",
+            "textStyle":       {"color": "#e2e8f0", "fontSize": 12},
+            "padding":         [8, 12],
+        },
+        "series": [
+            {
+                "type":   "scatter",
+                "data":   [],
+                "silent": True,
+                "markArea": {"silent": True, "label": {"show": True}, "data": _zones},
+                "markLine": {
+                    "silent": True, "symbol": "none",
+                    "lineStyle": {"color": "#2a3040", "width": 1, "type": "solid"},
+                    "label": {"show": False},
+                    "data": [
+                        [{"xAxis": 50, "yAxis": 0}, {"xAxis": 50, "yAxis": 100}],
+                        [{"xAxis": 0, "yAxis": 50}, {"xAxis": 100, "yAxis": 50}],
+                    ],
+                },
+            },
+            {
+                "type":       "scatter",
+                "symbolSize": 28,
+                "data":       scatter_data,
+                "label": {
+                    "show": True, "position": "inside", "formatter": "{b}",
+                    "color": "#ffffff", "fontSize": 8, "fontWeight": "700",
+                    "textShadowBlur": 3,
+                    "textShadowColor": "rgba(0,0,0,0.9)",
+                },
+                "emphasis": {
+                    "scale": True,
+                    "itemStyle": {"shadowBlur": 10,
+                                  "shadowColor": "rgba(0,0,0,0.4)"},
+                },
+            },
+        ],
+    }
+
+
+def _home_rotation_data(sport: str = "mlb", metric: str = "ml") -> dict:
+    """Fetch quadrant points and shape the ECharts opts for one sport+metric.
+
+    Returns {"sport", "metric", "count", "opts", "empty"} so the same dict
+    type covers both the inline initial render and the /api/home/rotation
+    JSON response.  team_rotation_cache already TTL-caches the underlying
+    network fetch (1 hr); we don't wrap it again here."""
+    sport  = (sport  or "mlb").lower()
+    metric = (metric or "ml").lower()
+    if sport  not in ("mlb", "wnba"):
+        sport = "mlb"
+    if metric not in ("ml", "ats", "ou"):
+        metric = "ml"
+
+    try:
+        from src.team_rotation_cache import get_rotation_data
+        points = get_rotation_data(sport=sport, metric=metric) or []
+    except Exception:                                                      # noqa: BLE001
+        points = []
+
+    opts = _home_rotation_opts(points, metric, sport) if points else None
+    return {
+        "sport":  sport,
+        "metric": metric,
+        "count":  len(points),
+        "opts":   opts,
+        "empty":  not points,
+    }
+
+
+def _home_rotation_block() -> dict:
+    """Initial-render combo for the rotation section.  Defaults to MLB+ML;
+    falls back to WNBA when MLB has no analysis results and WNBA does (same
+    auto-default rule the News and Games sections use)."""
+    try:
+        wnba_active = bool((_wnba_analysis_state or {}).get("results"))
+        mlb_active  = bool((_analysis_state       or {}).get("results"))
+    except Exception:                                                      # noqa: BLE001
+        wnba_active = mlb_active = False
+    default_sport = "wnba" if (wnba_active and not mlb_active) else "mlb"
+    return _home_rotation_data(sport=default_sport, metric="ml")
+
+
 def _home_heatmap_rows(sport: str = "mlb", metric: str = "ml") -> list[dict]:
     """Season Heatmap rows for the home page -- shape pages/home.py's
     _heatmap_table_html into a list the Jinja template can iterate.
@@ -1556,6 +1763,13 @@ def _home_view_model() -> dict:
                  "mlb":  {"upcoming": [], "final": []},
                  "wnba": {"upcoming": [], "final": []}}
 
+    # ── Team Rotation (Phase-2d: default combo inline, toggles via /api) ────
+    try:
+        rotation = _home_rotation_block()
+    except Exception:                                                      # noqa: BLE001
+        rotation = {"sport": "mlb", "metric": "ml", "count": 0,
+                    "opts": None, "empty": True}
+
     # ── Season Heatmap (Phase-2a: default MLB + ML, no toggles) ─────────────
     heatmap_rows = _home_heatmap_rows(sport="mlb", metric="ml")
 
@@ -1589,6 +1803,7 @@ def _home_view_model() -> dict:
         "perf_record":        perf_record,
         "perf_color":         perf_color,
         "games":              games,
+        "rotation":           rotation,
     }
 
 
@@ -1620,10 +1835,22 @@ def home():
               "perf_pct_str": "—", "perf_record": "0-0", "perf_color": "dim",
               "games": {"default_sport": "mlb",
                         "mlb":  {"upcoming": [], "final": []},
-                        "wnba": {"upcoming": [], "final": []}}}
+                        "wnba": {"upcoming": [], "final": []}},
+              "rotation": {"sport": "mlb", "metric": "ml", "count": 0,
+                           "opts": None, "empty": True}}
     return render_template("home.html", **vm)
 
 
+@app.route("/api/home/rotation", methods=["GET"])
+def api_home_rotation():
+    """JSON endpoint for the home Team Rotation chart's sport/metric toggle.
+
+    Returns the same shape as _home_rotation_block() so the client just calls
+    chart.setOption(payload.opts, true) on success, or swaps in the empty
+    state when payload.empty is true."""
+    sport  = (request.args.get("sport")  or "mlb").lower()
+    metric = (request.args.get("metric") or "ml").lower()
+    return jsonify(_home_rotation_data(sport=sport, metric=metric))
 
 
 @app.route("/api/mlb/schedule", methods=["GET"])

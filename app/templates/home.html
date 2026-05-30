@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>XylanPicks — Home</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
     body { background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif; }
 
@@ -231,6 +232,29 @@
       background: #1a1f2e; border: 1px dashed #2a3040;
       border-radius: 10px; padding: 16px; width: 100%;
     }
+
+    /* ── Team Rotation chart (Phase 2d) ── */
+    .rot-wrap {
+      background: #1a1f2e; border: 1px solid #2a3040;
+      border-radius: 10px; padding: 12px 8px 8px;
+      width: 100%; box-sizing: border-box;
+    }
+    .rot-chart { width: 100%; height: 400px; }
+    /* Sport toggle: subtle outline (distinct from filled metric pills) */
+    .rot-pill-sport {
+      background: #2a3040; color: #64748b;
+      font-size: 10.5px; font-weight: 700;
+      padding: 4px 10px; border-radius: 999px;
+      border: 0; cursor: pointer; line-height: 1;
+    }
+    .rot-pill-sport.active {
+      background: rgba(79,110,247,0.15); color: #4f6ef7;
+    }
+    .rot-empty {
+      color: #94a3b8; font-size: 13px; text-align: center;
+      background: #1a1f2e; border: 1px solid #2a3040;
+      border-radius: 10px; padding: 48px 20px; width: 100%;
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -454,7 +478,48 @@
     </div>
     {% endfor %}
 
-    {# ── 7. Season Heatmap (Phase 2a) ── #}
+    {# ── 7. Team Rotation chart (Phase 2d) ── #}
+    {# Inline-renders the default (sport+ML).  Sport / metric pill clicks fire
+       a fetch to /api/home/rotation; chart.setOption(opts, true) swaps the
+       data without rebuilding the ECharts instance. #}
+    <div class="flex flex-col gap-3">
+      <div class="flex flex-wrap items-center gap-2 w-full">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">TEAM ROTATION</span>
+        <span id="rot-count" class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ rotation.count }}</span>
+        <div class="flex-1 min-w-[4px]"></div>
+
+        {# Sport toggle — subtle outline #}
+        <div class="g-pills">
+          {% for sk, sl in [('mlb', 'MLB'), ('wnba', 'WNBA')] %}
+          <button type="button"
+                  class="rot-pill-sport{% if sk == rotation.sport %} active{% endif %}"
+                  data-rot-sport="{{ sk }}"
+                  onclick="rotationSetSport('{{ sk }}')">{{ sl }}</button>
+          {% endfor %}
+        </div>
+
+        {# Metric toggle — filled primary pills #}
+        <div class="g-pills">
+          {% for mk, ml in [('ml', 'ML'), ('ats', 'ATS'), ('ou', 'O/U')] %}
+          <button type="button"
+                  class="g-pill{% if mk == rotation.metric %} active{% endif %}"
+                  data-rot-metric="{{ mk }}"
+                  onclick="rotationSetMetric('{{ mk }}')">{{ ml }}</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div id="rot-empty" class="rot-empty"
+           {% if not rotation.empty %}style="display:none;"{% endif %}>
+        No team data available yet — check back later.
+      </div>
+      <div id="rot-wrap" class="rot-wrap"
+           {% if rotation.empty %}style="display:none;"{% endif %}>
+        <div id="rot-chart" class="rot-chart"></div>
+      </div>
+    </div>
+
+    {# ── 8. Season Heatmap (Phase 2a) ── #}
     <div class="flex flex-col gap-3">
       <div class="flex items-center gap-2">
         <span class="text-[13px] font-extrabold tracking-widest text-white">SEASON HEATMAP</span>
@@ -494,7 +559,7 @@
       {% endif %}
     </div>
 
-    {# ── 8. AI banner (Phase 2a) ── #}
+    {# ── 9. AI banner (Phase 2a) ── #}
     <a href="/ai" class="ai-banner">
       <div class="flex-1 flex flex-col gap-1">
         <span class="text-[14px] font-bold text-white">AI Breakdown</span>
@@ -503,7 +568,7 @@
       <span class="text-[18px] c-primary shrink-0">→</span>
     </a>
 
-    {# ── 9. Model Performance (Phase 2b) ── #}
+    {# ── 10. Model Performance (Phase 2b) ── #}
     <div class="flex flex-col gap-3">
       <div class="flex items-center gap-2">
         <span class="text-[13px] font-extrabold tracking-widest text-white">MODEL PERFORMANCE</span>
@@ -523,6 +588,9 @@
 
   </main>
 
+  {# ── Rotation: inline initial opts so the chart paints on first frame ── #}
+  <script id="rot-initial" type="application/json">{{ rotation | tojson }}</script>
+
   <script>
     function scrollCarousel(id, dir) {
       const el = document.getElementById(id);
@@ -537,6 +605,78 @@
         const el = document.getElementById('games-' + s);
         if (el) el.style.display = (s === sport) ? '' : 'none';
       });
+    }
+
+    /* ── Team Rotation chart ─────────────────────────────────────────────── */
+    var rotChart = null;
+    var rotState = (function() {
+      try { return JSON.parse(document.getElementById('rot-initial').textContent); }
+      catch (e) { return { sport: 'mlb', metric: 'ml', empty: true, opts: null, count: 0 }; }
+    })();
+
+    function rotationInit() {
+      if (rotState.empty || !rotState.opts) return;
+      var el = document.getElementById('rot-chart');
+      if (!el || typeof echarts === 'undefined') return;
+      rotChart = echarts.init(el, null, { renderer: 'canvas' });
+      rotChart.setOption(rotState.opts);
+      window.addEventListener('resize', function() {
+        if (rotChart) rotChart.resize();
+      });
+    }
+
+    function rotationApplyPayload(payload) {
+      var emptyEl = document.getElementById('rot-empty');
+      var wrapEl  = document.getElementById('rot-wrap');
+      var countEl = document.getElementById('rot-count');
+      if (countEl) countEl.textContent = payload.count;
+      rotState.sport  = payload.sport;
+      rotState.metric = payload.metric;
+      rotState.empty  = payload.empty;
+      rotState.opts   = payload.opts;
+      if (payload.empty || !payload.opts) {
+        if (wrapEl)  wrapEl.style.display  = 'none';
+        if (emptyEl) emptyEl.style.display = '';
+        if (rotChart) { rotChart.dispose(); rotChart = null; }
+        return;
+      }
+      if (emptyEl) emptyEl.style.display = 'none';
+      if (wrapEl)  wrapEl.style.display  = '';
+      if (!rotChart) rotationInit();
+      else rotChart.setOption(payload.opts, true);
+    }
+
+    function rotationFetch() {
+      var q = '?sport=' + encodeURIComponent(rotState.sport) +
+              '&metric=' + encodeURIComponent(rotState.metric);
+      fetch('/api/home/rotation' + q, { headers: { 'Accept': 'application/json' } })
+        .then(function(r) { return r.json(); })
+        .then(rotationApplyPayload)
+        .catch(function(err) { console.warn('rotation fetch failed:', err); });
+    }
+
+    function rotationSetSport(sport) {
+      if (sport === rotState.sport) return;
+      document.querySelectorAll('[data-rot-sport]').forEach(function(b) {
+        b.classList.toggle('active', b.getAttribute('data-rot-sport') === sport);
+      });
+      rotState.sport = sport;
+      rotationFetch();
+    }
+
+    function rotationSetMetric(metric) {
+      if (metric === rotState.metric) return;
+      document.querySelectorAll('[data-rot-metric]').forEach(function(b) {
+        b.classList.toggle('active', b.getAttribute('data-rot-metric') === metric);
+      });
+      rotState.metric = metric;
+      rotationFetch();
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', rotationInit);
+    } else {
+      rotationInit();
     }
   </script>
 
