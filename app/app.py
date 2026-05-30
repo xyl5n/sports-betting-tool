@@ -1137,6 +1137,26 @@ def _home_fmt_game_time(iso) -> str:
         return "TBD"
 
 
+def _home_news_items() -> tuple[list[dict], str]:
+    """ESPN news headlines for the home page.  Picks the dominant active
+    sport (MLB primary, WNBA fallback only when MLB has no results and
+    WNBA does), then calls news_feed.fetch (5-min in-process cache).
+    Returns ``(items, sport)`` -- sport drives the badge color/label
+    in the template."""
+    try:
+        wnba_active = bool((_wnba_analysis_state or {}).get("results"))
+        mlb_active  = bool((_analysis_state or {}).get("results"))
+    except Exception:                                                      # noqa: BLE001
+        wnba_active = mlb_active = False
+    sport = "wnba" if (wnba_active and not mlb_active) else "mlb"
+    try:
+        from src.news_feed import fetch as _nf_fetch
+        items = _nf_fetch(sport, max_items=10) or []
+    except Exception:                                                      # noqa: BLE001
+        items = []
+    return items, sport
+
+
 def _home_heatmap_rows(sport: str = "mlb", metric: str = "ml") -> list[dict]:
     """Season Heatmap rows for the home page -- shape pages/home.py's
     _heatmap_table_html into a list the Jinja template can iterate.
@@ -1320,8 +1340,23 @@ def _home_view_model() -> dict:
 
     conf_rows = [_shape_card(r) for r in conf_rows_raw]
 
+    # ── News (Phase-2b: MLB primary, WNBA only when MLB inactive) ───────────
+    news_items, news_sport = _home_news_items()
+    news_tag_label = {"mlb": "MLB", "wnba": "WNBA"}.get(news_sport, news_sport.upper())
+
     # ── Season Heatmap (Phase-2a: default MLB + ML, no toggles) ─────────────
     heatmap_rows = _home_heatmap_rows(sport="mlb", metric="ml")
+
+    # ── Model Performance (Phase-2b: ensemble combined, finished picks) ─────
+    try:
+        import pages.home_stats as _hs_mp
+        perf = _hs_mp.model_performance(None)
+    except Exception:                                                      # noqa: BLE001
+        perf = {"wins": 0, "losses": 0, "pct": None}
+    perf_pct      = perf.get("pct")
+    perf_pct_str  = f"{perf_pct * 100:.1f}%" if perf_pct is not None else "—"
+    perf_color    = _color(perf_pct)
+    perf_record   = f"{perf.get('wins', 0)}-{perf.get('losses', 0)}"
 
     return {
         "chips":              chips,
@@ -1332,8 +1367,15 @@ def _home_view_model() -> dict:
         "ev_empty_reason":    ev_empty_reason,
         "conf_rows":          conf_rows,
         "conf_empty_reason":  conf_empty_reason,
+        "news_items":         news_items,
+        "news_sport":         news_sport,
+        "news_tag_label":     news_tag_label,
+        "news_count":         len(news_items),
         "heatmap_rows":       heatmap_rows,
         "heatmap_count":      len(heatmap_rows),
+        "perf_pct_str":       perf_pct_str,
+        "perf_record":        perf_record,
+        "perf_color":         perf_color,
     }
 
 
@@ -1359,7 +1401,10 @@ def home():
         vm = {"chips": [], "stubs": [], "ev_rows": [], "ev_min_pct": "3%",
               "ev_count": 0, "ev_empty_reason": "Error loading data.",
               "conf_rows": [], "conf_empty_reason": "Error loading data.",
-              "heatmap_rows": [], "heatmap_count": 0}
+              "news_items": [], "news_sport": "mlb", "news_tag_label": "MLB",
+              "news_count": 0,
+              "heatmap_rows": [], "heatmap_count": 0,
+              "perf_pct_str": "—", "perf_record": "0-0", "perf_color": "dim"}
     return render_template("home.html", **vm)
 
 
