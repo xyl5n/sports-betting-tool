@@ -24,12 +24,15 @@ project import is a lazy ``from .groq_models import generate`` inside
 """
 from __future__ import annotations
 
+import heapq
+import itertools
 import json
 import logging
 import os
 import re
+import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -236,3 +239,161 @@ def sort_by_tier(props: list[dict]) -> list[dict]:
     rank = {tier: i for i, tier in enumerate(TIER_PRIORITY)}
     end = len(TIER_PRIORITY)
     return sorted(props, key=lambda p: rank.get((p or {}).get("verdict_tier"), end))
+
+
+# ── Pass-2 scheduling queue ──────────────────────────────────────────────────-
+# A single shared priority queue feeds Pass 2 (deep analysis).  On every 15-min
+# pull, Pass 1 runs the new picks (fast) and pushes them onto this heap; the
+# Pass-2 loop pops the best-ranked pick each iteration.  Because it's a heap,
+# a fresh high-confidence pick lands at the front the moment Pass 2 reaches for
+# its next item -- but Pass 2 is only ever interrupted BETWEEN picks: it always
+# finishes the analysis in flight before re-checking the queue.
+#
+# Priority order (smaller == earlier out of the heap):
+#   1. verdict tier rank, reusing TIER_PRIORITY (the module's single source of
+#      truth; "Slight Lean" and unknown tiers handled the same as sort_by_tier);
+#   2. then higher confidence first (re-sort by confidence within a tier);
+#   3. then a monotonic sequence number -- stable FIFO tie-break that also keeps
+#      heapq from ever having to compare the (unorderable) pick dicts.
+
+_pass2_queue: list = []                 # heap of (rank, -confidence, seq, pick)
+_queue_lock = threading.Lock()          # guards _pass2_queue
+_queue_seq = itertools.count()          # monotonic tie-break counter
+_pass2_stop = threading.Event()         # set -> Pass-2 loop exits between picks
+
+# Worker hooks: callables that actually run an analysis for ONE pick.  Injected
+# by the orchestrator (e.g. player_ai_breakdown) so this module stays decoupled
+# from prompt-building -- no import cycle.  A worker takes the pick dict and
+# does the work (calling fast_verdict / deep_analysis with the right prompts).
+_pass1_worker: Optional[Callable] = None
+_pass2_worker: Optional[Callable] = None
+
+# Thread handle for the background Pass-2 loop (start_pass2_worker).
+_pass2_thread: Optional[threading.Thread] = None
+_pass2_thread_lock = threading.Lock()   # guards _pass2_thread (not the queue)
+
+
+def set_workers(pass1: Optional[Callable] = None,
+                pass2: Optional[Callable] = None) -> None:
+    """Register the default per-pick worker callables.  pass1(pick) runs the
+    fast verdict; pass2(pick) runs the deep analysis.  Either can also be passed
+    per-call to run_pass1 / run_pass2_loop / on_api_pull to override these."""
+    global _pass1_worker, _pass2_worker
+    if pass1 is not None:
+        _pass1_worker = pass1
+    if pass2 is not None:
+        _pass2_worker = pass2
+
+
+def _pick_tier(pick: dict) -> Optional[str]:
+    """The verdict tier on a pick, tolerating either key the pipeline uses."""
+    if not isinstance(pick, dict):
+        return None
+    return pick.get("tier") or pick.get("verdict_tier")
+
+
+def _tier_rank(tier: Optional[str]) -> int:
+    """Heap rank for *tier* from TIER_PRIORITY; unknown/missing -> end."""
+    try:
+        return TIER_PRIORITY.index(tier)
+    except ValueError:
+        return len(TIER_PRIORITY)
+
+
+def _pick_confidence(pick: dict) -> float:
+    try:
+        return float((pick or {}).get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def add_to_pass2_queue(picks: list[dict]) -> None:
+    """Push picks onto the shared Pass-2 heap.  The heap re-sorts on every push,
+    so merging new picks mid-run naturally re-prioritises by tier then
+    confidence -- the next pop reflects the merged order."""
+    with _queue_lock:
+        for pick in picks or []:
+            rank = _tier_rank(_pick_tier(pick))
+            conf = _pick_confidence(pick)
+            heapq.heappush(_pass2_queue, (rank, -conf, next(_queue_seq), pick))
+
+
+def pass2_queue_size() -> int:
+    with _queue_lock:
+        return len(_pass2_queue)
+
+
+def run_pass1(new_picks: list[dict],
+              worker: Optional[Callable] = None) -> list[dict]:
+    """Pass 1: run the fast verdict for each new pick (synchronously), then add
+    the completed picks to the Pass-2 queue.  Returns the completed picks.
+    *worker* defaults to the one registered via set_workers."""
+    worker = worker or _pass1_worker
+    completed: list[dict] = []
+    for pick in new_picks or []:
+        if worker is not None:
+            try:
+                worker(pick)
+            except Exception as exc:                                      # noqa: BLE001
+                log.warning("pass1 worker failed for pick %s: %s: %s",
+                            (pick or {}).get("id"), type(exc).__name__, exc)
+        completed.append(pick)
+    add_to_pass2_queue(completed)
+    log.info("pass1: ran %d pick(s); pass2 queue size now %d",
+             len(completed), pass2_queue_size())
+    return completed
+
+
+def run_pass2_loop(worker: Optional[Callable] = None) -> None:
+    """Pass 2: drain the shared queue, deep-analysing the best-ranked pick each
+    iteration.  Interruptible ONLY between picks -- the current analysis always
+    finishes before the queue is re-checked.  Exits when the queue is empty or
+    _pass2_stop is set.  *worker* defaults to the one registered via
+    set_workers."""
+    worker = worker or _pass2_worker
+    while not _pass2_stop.is_set():
+        with _queue_lock:
+            if not _pass2_queue:
+                break
+            _, _, _, pick = heapq.heappop(_pass2_queue)
+        # Outside the lock: this is the only point Pass 2 can be "interrupted"
+        # (between picks).  run_deep_analysis runs to completion here.
+        if worker is not None:
+            try:
+                worker(pick)
+            except Exception as exc:                                      # noqa: BLE001
+                log.warning("pass2 worker failed for pick %s: %s: %s",
+                            (pick or {}).get("id"), type(exc).__name__, exc)
+
+
+def start_pass2_worker(worker: Optional[Callable] = None) -> threading.Thread:
+    """Ensure the Pass-2 loop is running in a background daemon thread.  If it's
+    already alive this is a no-op (returns the existing thread); if it drained
+    and exited, a new one is started so a later pull's picks get processed."""
+    global _pass2_thread
+    with _pass2_thread_lock:
+        if _pass2_thread is not None and _pass2_thread.is_alive():
+            return _pass2_thread
+        _pass2_stop.clear()
+        _pass2_thread = threading.Thread(
+            target=run_pass2_loop, kwargs={"worker": worker},
+            name="pass2-loop", daemon=True,
+        )
+        _pass2_thread.start()
+        return _pass2_thread
+
+
+def stop_pass2_worker() -> None:
+    """Signal the background Pass-2 loop to exit after its current pick."""
+    _pass2_stop.set()
+
+
+def on_api_pull(new_picks: list[dict],
+                pass1_worker: Optional[Callable] = None,
+                pass2_worker: Optional[Callable] = None) -> None:
+    """Entry point for each 15-min pull.  Pass 1 runs first (synchronous) so the
+    new picks are scored and merged into the Pass-2 queue (re-sorted by tier
+    then confidence); then the background Pass-2 loop is (re)started so it picks
+    them up -- resuming from the top of the queue on its next iteration."""
+    run_pass1(new_picks, worker=pass1_worker)
+    start_pass2_worker(worker=pass2_worker)
