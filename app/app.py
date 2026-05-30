@@ -1012,6 +1012,318 @@ def props_page():
     )
 
 
+# ── Home-page helpers (Phase-1 Flask port of pages/home.py) ──────────────────
+# Mirrors the NiceGUI home page's chip / EV-scan / confidence-carousel sections
+# only.  Games table, news, rotation, heatmap, model-performance are deferred
+# to a Phase-2 follow-up.
+
+from zoneinfo import ZoneInfo as _ZoneInfo
+_ET = _ZoneInfo("America/New_York")
+
+_HOME_EV_MIN_EDGE    = 0.03
+_HOME_CONFIDENCE_MIN = 0.0001
+_HOME_STARTED_TOKENS: frozenset[str] = frozenset(
+    s.lower() for s in (
+        "Final", "Live", "In Progress", "In_Progress",
+        "Game Over", "Postponed", "Suspended", "Completed Early",
+        "Final: Tied", "Manager Challenge", "Delayed",
+        "Suspended: Rain", "Suspended Rain",
+    )
+)
+
+
+def _home_has_started(g: dict) -> bool:
+    """True when a serialized game row should be excluded from forward-looking lists."""
+    status = (g.get("status") or g.get("game_status") or "").lower().strip()
+    if status in _HOME_STARTED_TOKENS:
+        return True
+    ct = g.get("commence_time") or g.get("game_time") or ""
+    if not ct:
+        return False
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
+        return dt.astimezone(_ET) <= datetime.now(_ET)
+    except Exception:                                                      # noqa: BLE001
+        return False
+
+
+def _home_filter_upcoming(games: list[dict]) -> list[dict]:
+    """Keep only games that haven't started yet."""
+    return [g for g in games if not _home_has_started(g)]
+
+
+def _home_all_serialized_games() -> list[dict]:
+    """Pull + flatten both sport caches into one list of serialized dicts.
+    Mirrors _all_serialized_games in pages/home.py -- same passthrough guard,
+    same _sport stamp, same per-row exception isolation."""
+    out: list[dict] = []
+
+    # MLB
+    try:
+        bankroll = float(_analysis_state.get("bankroll") or 250)
+        mlb_ledger = None
+        for r in (_analysis_state.get("results") or []):
+            try:
+                if "home_team" in r and "away_team" in r:
+                    g = dict(r)
+                else:
+                    if mlb_ledger is None:
+                        mlb_ledger = Ledger(
+                            path="data/ledger.json",
+                            starting_bankroll=bankroll,
+                        )
+                    s_bank = mlb_ledger.data.get("personal_starting_bankroll", bankroll)
+                    g = _serialize(r, bankroll, "mlb", s_bank)
+                g["_sport"] = "mlb"
+                out.append(g)
+            except Exception:                                              # noqa: BLE001
+                continue
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    # WNBA
+    try:
+        bankroll = float(_wnba_analysis_state.get("bankroll") or 1000)
+        wnba_results = _wnba_analysis_state.get("results") or []
+        if wnba_results:
+            wnba_ledger = None
+            for r in wnba_results:
+                try:
+                    if "home_team" in r and "away_team" in r:
+                        g = dict(r)
+                    else:
+                        if wnba_ledger is None:
+                            wnba_ledger = Ledger(
+                                path="data/wnba_ledger.json",
+                                starting_bankroll=bankroll,
+                            )
+                        s_bank = wnba_ledger.data.get("personal_starting_bankroll", bankroll)
+                        g = _serialize_wnba(r, bankroll, s_bank)
+                    g["_sport"] = "wnba"
+                    out.append(g)
+                except Exception:                                          # noqa: BLE001
+                    continue
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    return out
+
+
+def _home_stub_games() -> list[dict]:
+    """Today's schedule stubs (no analysis yet).  Returns [] if either sport
+    already has analysis results -- the carousels cover the slate."""
+    try:
+        mlb_results  = _analysis_state.get("results") or []
+        wnba_results = _wnba_analysis_state.get("results") or []
+    except Exception:                                                      # noqa: BLE001
+        mlb_results = wnba_results = []
+    if mlb_results or wnba_results:
+        return []
+
+    games: list[dict] = []
+    try:
+        games += list(get_todays_schedule("mlb"))
+    except Exception:                                                      # noqa: BLE001
+        pass
+    try:
+        games += list(get_todays_schedule("wnba"))
+    except Exception:                                                      # noqa: BLE001
+        pass
+    return games
+
+
+def _home_fmt_game_time(iso) -> str:
+    """ISO commence_time -> '7:05 PM ET'.  Returns 'TBD' on failure."""
+    if not iso:
+        return "TBD"
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.astimezone(_ET).strftime("%-I:%M %p ET")
+    except Exception:                                                      # noqa: BLE001
+        return "TBD"
+
+
+def _home_view_model() -> dict:
+    """Shape all data for templates/home.html.  Returns a single dict that
+    render_template unpacks directly -- no logic in the template."""
+    import pages.home_stats as hs
+
+    # ── Chips ────────────────────────────────────────────────────────────────
+    try:
+        settings = _load_model_settings()
+    except Exception:                                                      # noqa: BLE001
+        settings = {}
+    show_overall = bool(settings.get("show_overall_chip", True))
+
+    try:
+        overall = hs.overall_record(None)
+    except Exception:                                                      # noqa: BLE001
+        overall = {"wins": 0, "losses": 0, "pct": None}
+    try:
+        props = hs.props_record(None)
+    except Exception:                                                      # noqa: BLE001
+        props = {"wins": 0, "losses": 0, "pct": None}
+    try:
+        best_model = hs.best_classifier(None)
+    except Exception:                                                      # noqa: BLE001
+        best_model = None
+    try:
+        best_bet = hs.best_bet_type(None)
+    except Exception:                                                      # noqa: BLE001
+        best_bet = None
+
+    def _pct_s(d: dict | None) -> str:
+        if not d:
+            return "—"
+        p = d.get("pct")
+        return f"{p * 100:.0f}%" if p is not None else "—"
+
+    def _color(pct) -> str:
+        if pct is None:
+            return "dim"
+        p = float(pct) * 100
+        if p > 55:
+            return "pos"
+        if p < 45:
+            return "neg"
+        return "warn"
+
+    chips = []
+    if show_overall:
+        chips.append({
+            "label":  "GAME MODELS",
+            "main":   f"{overall['wins']}-{overall['losses']}",
+            "suffix": _pct_s(overall),
+            "color":  _color(overall.get("pct")),
+        })
+    chips.append({
+        "label":  "PROPS MODELS",
+        "main":   f"{props.get('wins', 0)}-{props.get('losses', 0)}",
+        "suffix": _pct_s(props),
+        "color":  _color(props.get("pct")),
+    })
+    if best_model:
+        chips.append({
+            "label":  "BEST GAME MODEL",
+            "main":   best_model["model"],
+            "suffix": f"{best_model['pct'] * 100:.0f}%",
+            "color":  _color(best_model["pct"]),
+        })
+    else:
+        chips.append({"label": "BEST GAME MODEL", "main": "—",
+                      "suffix": "Insufficient data", "color": "dim"})
+    if best_bet:
+        chips.append({
+            "label":  "BEST PROP MODEL",
+            "main":   best_bet["label"],
+            "suffix": f"{best_bet['wins']}-{best_bet['losses']}  {best_bet['pct'] * 100:.0f}%",
+            "color":  _color(best_bet["pct"]),
+        })
+    else:
+        chips.append({"label": "BEST PROP MODEL", "main": "—",
+                      "suffix": "Insufficient data", "color": "dim"})
+
+    # ── Today's games stub ───────────────────────────────────────────────────
+    stubs = []
+    for g in _home_stub_games():
+        away = (g.get("away_team") or "").strip() or "TBD"
+        home = (g.get("home_team") or "").strip() or "TBD"
+        is_live = bool(
+            g.get("is_live")
+            or g.get("status") == "Live"
+            or (g.get("coded_status") or "") == "I"
+        )
+        stubs.append({
+            "away":       away,
+            "home":       home,
+            "is_live":    is_live,
+            "away_score": g.get("away_score"),
+            "home_score": g.get("home_score"),
+            "game_time":  _home_fmt_game_time(g.get("commence_time")),
+        })
+
+    # ── EV scan ──────────────────────────────────────────────────────────────
+    ev_min       = float(getattr(sys.modules[__name__], "EV_MIN_EDGE", _HOME_EV_MIN_EDGE))
+    all_games    = _home_all_serialized_games()
+    upcoming     = _home_filter_upcoming(all_games)
+    all_value    = hs.enumerate_value_picks(upcoming, min_edge=0.0)
+    ev_rows_raw  = [r for r in all_value if float(r.get("edge") or 0) >= ev_min]
+    ev_rows_raw.sort(key=lambda r: float(r.get("edge") or 0), reverse=True)
+
+    ev_empty_reason = None
+    if not ev_rows_raw:
+        if not all_games:
+            ev_empty_reason = "Analysis pipeline hasn't run yet today — visit Admin to trigger a run."
+        elif not upcoming:
+            ev_empty_reason = "Today's games have already started — picks will refresh tonight."
+        elif all_value:
+            ev_empty_reason = (f"{len(all_value)} value pick(s) today, but none reach the "
+                               f"edge ≥ {ev_min:.0%} cutoff.")
+        else:
+            ev_empty_reason = f"No picks with edge ≥ {ev_min:.0%} found in today's slate."
+
+    def _shape_card(r: dict) -> dict:
+        edge_pct = float(r.get("edge") or 0) * 100
+        return {
+            "matchup":   r["matchup"],
+            "pick":      r["pick"],
+            "edge_s":    f"+{edge_pct:.1f}% Edge",
+            "edge_pct":  edge_pct,
+            "prob_pct":  float(r.get("prob") or 0) * 100,
+            "sport":     r.get("sport", "mlb"),
+            "game_id":   r.get("game_id"),
+            "away_full": r.get("away_full", ""),
+            "home_full": r.get("home_full", ""),
+        }
+
+    ev_rows = [_shape_card(r) for r in ev_rows_raw]
+
+    # ── Confidence carousel ──────────────────────────────────────────────────
+    conf_rows_raw = hs.enumerate_value_picks(upcoming, min_edge=_HOME_CONFIDENCE_MIN)
+    conf_rows_raw.sort(key=lambda r: float(r.get("prob") or 0), reverse=True)
+    conf_rows_raw = conf_rows_raw[:10]
+
+    conf_empty_reason = None
+    if not conf_rows_raw:
+        if not all_games:
+            conf_empty_reason = "Analysis pipeline hasn't run yet today."
+        elif not upcoming:
+            conf_empty_reason = "Today's games have already started."
+        else:
+            conf_empty_reason = "No positive-edge picks yet."
+
+    conf_rows = [_shape_card(r) for r in conf_rows_raw]
+
+    return {
+        "chips":              chips,
+        "stubs":              stubs,
+        "ev_rows":            ev_rows,
+        "ev_min_pct":         f"{ev_min:.0%}",
+        "ev_count":           len(ev_rows),
+        "ev_empty_reason":    ev_empty_reason,
+        "conf_rows":          conf_rows,
+        "conf_empty_reason":  conf_empty_reason,
+    }
+
+
+@app.route("/")
+def home():
+    """Phase-1 Flask home page.  Mirrors pages/home.py's chip + EV-scan +
+    confidence-carousel sections via templates/home.html.  Graceful fallback
+    on any view-model error so the page always renders."""
+    try:
+        vm = _home_view_model()
+    except Exception:                                                      # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        vm = {"chips": [], "stubs": [], "ev_rows": [], "ev_min_pct": "3%",
+              "ev_count": 0, "ev_empty_reason": "Error loading data.",
+              "conf_rows": [], "conf_empty_reason": "Error loading data."}
+    return render_template("home.html", **vm)
+
+
 
 
 @app.route("/api/mlb/schedule", methods=["GET"])

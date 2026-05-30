@@ -67,7 +67,13 @@ def _dbg(msg: str) -> None:
 
 
 def register(backend) -> None:
-    @ui.page("/")
+    # NiceGUI home page disabled -- '/' is now owned by the Flask route in
+    # app.py (templates/home.html).  Function body kept importable so other
+    # modules can still use pages.home's helpers (_all_serialized_games,
+    # _section_chips, etc.) without a broken import.  To restore the
+    # NiceGUI home page, uncomment the @ui.page line below and remove the
+    # app.py '/' route.
+    # @ui.page("/")
     def home_page():
         _dbg("home_page ENTER")
         # Wrap the entire render in a try/except that prints the full

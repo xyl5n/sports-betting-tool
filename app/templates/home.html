@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XylanPicks — Home</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif; }
+
+    /* ── Chip row ── */
+    .chip-row { display: flex; flex-wrap: nowrap; gap: 10px; }
+    .chip     { flex: 1 1 0; min-width: 0; overflow: hidden;
+                background: #1a1f2e; border: 1px solid #2a3040;
+                border-radius: 10px; padding: 14px 16px; }
+
+    /* ── Carousel shared ── */
+    .carousel-wrap   { position: relative; width: 100%; }
+    .carousel-scroll {
+      display: flex; gap: 8px; padding: 4px 2px;
+      overflow-x: auto; overflow-y: hidden;
+      scroll-snap-type: x mandatory; flex-wrap: nowrap;
+      scrollbar-width: none;
+    }
+    .carousel-scroll::-webkit-scrollbar { display: none; }
+
+    /* ── EV cards: 3 visible desktop, 2 mobile ── */
+    .ev-card {
+      flex-shrink: 0; scroll-snap-align: start;
+      width: calc((100% - 16px) / 3);
+      background: #1a1f2e; border: 1px solid #2a3040;
+      border-radius: 10px; padding: 12px 14px;
+      cursor: pointer; transition: border-color .15s;
+    }
+    .ev-card:hover { border-color: #4f6ef7; }
+    @media (max-width: 768px) {
+      .ev-card { width: calc((100% - 8px) / 2); }
+    }
+
+    /* ── Confidence cards: fixed 200px ── */
+    .conf-card {
+      flex-shrink: 0; scroll-snap-align: start;
+      min-width: 200px; max-width: 200px;
+      background: #1e2436; border: 1px solid #2a3040;
+      border-radius: 10px; padding: 12px 14px;
+      cursor: pointer; transition: border-color .15s;
+    }
+    .conf-card:hover { border-color: #4f6ef7; }
+
+    /* ── Arrow buttons ── */
+    .carousel-arrow {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      background: #1a1f2e; border: 1px solid #2a3040;
+      color: #94a3b8; border-radius: 50%;
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 10; font-size: 13px;
+      transition: background .15s;
+    }
+    .carousel-arrow:hover { background: #2a3040; }
+    .carousel-arrow.left  { left: -14px; }
+    .carousel-arrow.right { right: -14px; }
+
+    /* ── Color tokens ── */
+    .c-pos  { color: #22c55e; }
+    .c-neg  { color: #ef4444; }
+    .c-warn { color: #f59e0b; }
+    .c-dim  { color: #64748b; }
+    .c-primary { color: #4f6ef7; }
+
+    /* ── Empty state ── */
+    .empty-state {
+      color: #64748b; font-size: 13px; font-style: italic;
+      background: #1a1f2e; border: 1px dashed #2a3040;
+      border-radius: 10px; padding: 20px; text-align: center;
+    }
+
+    /* ── Stub card ── */
+    .stub-card {
+      background: #1a1f2e; border: 1px solid #2a3040;
+      border-radius: 10px; padding: 14px 16px;
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+
+  {# ── Nav ── #}
+  <nav class="sticky top-0 z-50 border-b border-slate-800 bg-[#0f1117]/90 backdrop-blur">
+    <div class="mx-auto flex max-w-5xl items-center gap-6 px-4 py-3">
+      <a href="/" class="text-sm font-extrabold tracking-widest text-white">XYLAN<span class="c-primary">PICKS</span></a>
+      <a href="/"      class="text-xs font-semibold text-white">Home</a>
+      <a href="/props" class="text-xs font-semibold text-slate-400 hover:text-white transition-colors">Props</a>
+      <a href="/sports" class="text-xs font-semibold text-slate-400 hover:text-white transition-colors">Sports</a>
+      <a href="/schedule" class="text-xs font-semibold text-slate-400 hover:text-white transition-colors">Schedule</a>
+      <a href="/admin" class="ml-auto text-xs font-semibold text-slate-400 hover:text-white transition-colors">Admin</a>
+    </div>
+  </nav>
+
+  {# ── Main content ── #}
+  <main class="mx-auto max-w-5xl px-4 py-6 flex flex-col gap-6">
+
+    {# ── 1. Chips ── #}
+    <div class="chip-row">
+      {% for chip in chips %}
+      <div class="chip">
+        <div class="text-[10px] font-extrabold tracking-widest c-dim truncate mb-1">{{ chip.label }}</div>
+        <div class="text-lg font-extrabold font-mono truncate c-{{ chip.color }}">{{ chip.main }}</div>
+        <div class="text-[11px] font-semibold font-mono truncate c-{{ chip.color }}">{{ chip.suffix }}</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    {# ── 2. Today's games stub (only shown when no analysis yet) ── #}
+    {% if stubs %}
+    <div class="flex flex-col gap-3">
+      <div class="flex items-center gap-2">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">TODAY'S GAMES</span>
+        <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[10.5px] font-bold c-warn">Analysis pending</span>
+      </div>
+      <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {% for g in stubs %}
+        <div class="stub-card flex flex-col gap-2">
+          <div class="flex items-center gap-2">
+            <span class="flex-1 truncate text-sm font-extrabold text-white">{{ g.away }} @ {{ g.home }}</span>
+            {% if g.is_live %}
+            <span class="flex shrink-0 items-center gap-1 text-[11px] font-extrabold c-neg">
+              <span class="inline-block h-2 w-2 rounded-full bg-red-500 shadow-[0_0_6px_#ef4444]"></span>LIVE
+            </span>
+            {% else %}
+            <span class="shrink-0 font-mono text-[11.5px] font-bold c-dim">{{ g.game_time }}</span>
+            {% endif %}
+          </div>
+          {% if g.is_live %}
+          <span class="font-mono text-[13px] font-extrabold c-pos">
+            {{ g.away }} {{ g.away_score or 0 }} — {{ g.home }} {{ g.home_score or 0 }}
+          </span>
+          {% else %}
+          <span class="self-start rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold c-warn">Analysis pending</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {# ── 3. EV Scan ── #}
+    <div class="flex flex-col gap-3">
+      <div class="flex items-center gap-2">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">EV SCAN</span>
+        <span class="text-[11px] c-dim">edge ≥ {{ ev_min_pct }}</span>
+        <span class="ml-auto rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ ev_count }}</span>
+      </div>
+
+      {% if ev_empty_reason %}
+      <div class="empty-state">{{ ev_empty_reason }}</div>
+      {% else %}
+      <div class="carousel-wrap">
+        <div class="carousel-scroll" id="ev-scroller">
+          {% for r in ev_rows %}
+          <div class="ev-card flex flex-col gap-1"
+               onclick="window.location='/matchup/{{ r.sport }}/{{ r.game_id }}'">
+            <div class="text-[11px] c-dim truncate">{{ r.matchup }}</div>
+            <div class="truncate text-sm font-bold text-white">{{ r.pick }}</div>
+            <div class="font-mono text-[12.5px] font-extrabold c-pos">{{ r.edge_s }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        <button class="carousel-arrow left"  onclick="scrollCarousel('ev-scroller','left')">&#8249;</button>
+        <button class="carousel-arrow right" onclick="scrollCarousel('ev-scroller','right')">&#8250;</button>
+      </div>
+      {% endif %}
+    </div>
+
+    {# ── 4. Highest Confidence ── #}
+    <div class="flex flex-col gap-3">
+      <div class="flex items-center gap-2">
+        <span class="text-[13px] font-extrabold tracking-widest text-white">HIGHEST CONFIDENCE</span>
+        <span class="text-[11px] c-dim">by model confidence</span>
+      </div>
+
+      {% if conf_empty_reason %}
+      <div class="empty-state">{{ conf_empty_reason }}</div>
+      {% else %}
+      <div class="carousel-wrap">
+        <div class="carousel-scroll" id="conf-scroller">
+          {% for r in conf_rows %}
+          <div class="conf-card flex flex-col gap-1"
+               onclick="window.location='/matchup/{{ r.sport }}/{{ r.game_id }}'">
+            <div class="text-[10px] c-dim truncate">{{ r.matchup }}</div>
+            <div class="truncate text-sm font-bold text-white">{{ r.pick }}</div>
+            <div class="font-mono text-4xl font-extrabold c-primary leading-none mt-1">{{ r.prob_pct | int }}%</div>
+            <div class="font-mono text-[10.5px] font-semibold c-pos">+{{ "%.1f"|format(r.edge_pct) }}% edge</div>
+          </div>
+          {% endfor %}
+        </div>
+        <button class="carousel-arrow left"  onclick="scrollCarousel('conf-scroller','left')">&#8249;</button>
+        <button class="carousel-arrow right" onclick="scrollCarousel('conf-scroller','right')">&#8250;</button>
+      </div>
+      {% endif %}
+    </div>
+
+  </main>
+
+  <script>
+    function scrollCarousel(id, dir) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const card = el.querySelector('.ev-card, .conf-card');
+      const w = card ? card.offsetWidth + 8 : 216;
+      el.scrollBy({ left: dir === 'left' ? -w : w, behavior: 'smooth' });
+    }
+  </script>
+
+</body>
+</html>
