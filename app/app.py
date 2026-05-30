@@ -1157,6 +1157,210 @@ def _home_news_items() -> tuple[list[dict], str]:
     return items, sport
 
 
+# ── Games table (Phase 2c) ──────────────────────────────────────────────────
+# Ported from pages/home.py's _section_games + helpers.  All formatting happens
+# server-side so the template stays logic-free; sport toggle is client-side
+# show/hide because both sports' data is already in memory (no extra fetch).
+
+_HOME_MLB_ABBR: dict[str, str] = {
+    "Arizona Diamondbacks": "ARI",  "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL",     "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC",          "Chicago White Sox": "CWS",
+    "Cincinnati Reds": "CIN",       "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL",      "Detroit Tigers": "DET",
+    "Houston Astros": "HOU",        "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA",    "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA",         "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN",       "New York Mets": "NYM",
+    "New York Yankees": "NYY",      "Oakland Athletics": "OAK",
+    "Athletics": "ATH",             "Philadelphia Phillies": "PHI",
+    "Pittsburgh Pirates": "PIT",    "San Diego Padres": "SD",
+    "San Francisco Giants": "SF",   "Seattle Mariners": "SEA",
+    "St. Louis Cardinals": "STL",   "Tampa Bay Rays": "TB",
+    "Texas Rangers": "TEX",         "Toronto Blue Jays": "TOR",
+    "Washington Nationals": "WSH",
+}
+_HOME_WNBA_ABBR: dict[str, str] = {
+    "Atlanta Dream": "ATL",         "Chicago Sky": "CHI",
+    "Connecticut Sun": "CONN",      "Dallas Wings": "DAL",
+    "Indiana Fever": "IND",         "Las Vegas Aces": "LV",
+    "Los Angeles Sparks": "LA",     "Minnesota Lynx": "MIN",
+    "New York Liberty": "NY",       "Phoenix Mercury": "PHX",
+    "Seattle Storm": "SEA",         "Washington Mystics": "WSH",
+    "Golden State Valkyries": "GSV",
+}
+
+# 5-min in-process cache, keyed sport_YYYY-MM-DD (mirrors pages/home.py's
+# _GAMES_CACHE so a hot page reload pays only one schedule fetch per TTL).
+_HOME_GAMES_CACHE: dict[str, dict] = {}
+_HOME_GAMES_CACHE_TTL = 300
+
+
+def _g_abbr(name: str, sport: str) -> str:
+    """Short team abbrev from the lookup tables; falls back to last word."""
+    table = _HOME_MLB_ABBR if sport == "mlb" else _HOME_WNBA_ABBR
+    abbr  = table.get((name or "").strip())
+    if abbr:
+        return abbr
+    parts = (name or "").strip().split()
+    return parts[-1][:4].upper() if parts else (name or "")[:4].upper()
+
+
+def _g_ml(odds) -> str:
+    """American moneyline odds -> '+130' / '-145' / ''."""
+    if odds is None:
+        return ""
+    try:
+        n = int(odds)
+        return f"+{n}" if n > 0 else str(n)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _g_spread(spread, for_home: bool) -> str:
+    """Spread -> '+1.5' / '-1.5'.  spread is the home team's line."""
+    if spread is None:
+        return ""
+    try:
+        v = float(spread)
+        v = v if for_home else -v
+        return f"{v:+.1f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _g_time(commence_time: str) -> str:
+    """ISO UTC commence time -> 'H:MM AM/PM' (no zero-padded hour)."""
+    if not commence_time:
+        return ""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        et = dt.astimezone(_ET)
+        h  = et.hour % 12 or 12
+        p  = "PM" if et.hour >= 12 else "AM"
+        return f"{h}:{et.minute:02d} {p}"
+    except Exception:                                                      # noqa: BLE001
+        return ""
+
+
+def _g_total(g: dict):
+    """Extract O/U line from wherever it lives in a serialized game."""
+    for getter in (
+        lambda d: d.get("total_line"),
+        lambda d: (d.get("totals") or {}).get("total_line"),
+        lambda d: (d.get("totals") or {}).get("line"),
+    ):
+        try:
+            v = getter(g)
+            if v is not None:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _home_games_data(sport: str) -> dict:
+    """Merge today's schedule (status + scores) with serialized odds; shape
+    each row for the template.  Returns {"upcoming": [...], "final": [...]}
+    with all formatted strings ready to render.  Cached 5 min per sport."""
+    import time as _t
+    from datetime import datetime
+    today     = datetime.now(_ET).date().isoformat()
+    cache_key = f"{sport}_{today}"
+    entry     = _HOME_GAMES_CACHE.get(cache_key)
+    if entry and (_t.monotonic() - entry["ts"]) < _HOME_GAMES_CACHE_TTL:
+        return entry["data"]
+
+    try:
+        schedule: list[dict] = list(get_todays_schedule(sport) or [])
+    except Exception:                                                      # noqa: BLE001
+        schedule = []
+
+    odds_map: dict[tuple, dict] = {}
+    try:
+        for g in _home_all_serialized_games():
+            if (g.get("_sport") or "").lower() == sport.lower():
+                key = ((g.get("home_team") or "").strip(),
+                       (g.get("away_team") or "").strip())
+                odds_map[key] = g
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    upcoming: list[dict] = []
+    final:    list[dict] = []
+
+    for game in schedule:
+        home   = (game.get("home_team") or "").strip()
+        away   = (game.get("away_team") or "").strip()
+        status = (game.get("status")       or "Preview").strip()
+        coded  = (game.get("coded_status") or "").upper()
+        odds   = odds_map.get((home, away), {})
+
+        # Pre-format everything so the template is logic-free.
+        away_ml_s = _g_ml(odds.get("away_odds"))
+        home_ml_s = _g_ml(odds.get("home_odds"))
+        away_sp_s = _g_spread(odds.get("spread"), for_home=False)
+        home_sp_s = _g_spread(odds.get("spread"), for_home=True)
+        time_str  = _g_time(game.get("commence_time", ""))
+        total     = _g_total(odds)
+        total_str = f"O/U {total:.1f}" if total is not None else ""
+
+        home_sc = game.get("home_score")
+        away_sc = game.get("away_score")
+        is_final = (
+            coded in ("F", "O")
+            or status.lower() in ("final", "game over", "completed")
+        )
+
+        if is_final and home_sc is not None:
+            final.append({
+                "home_abbr":  _g_abbr(home, sport),
+                "away_abbr":  _g_abbr(away, sport),
+                "home_score": home_sc,
+                "away_score": away_sc if away_sc is not None else 0,
+                "home_wins":  (away_sc is not None and home_sc > away_sc),
+                "away_wins":  (away_sc is not None and away_sc > home_sc),
+                "commence_time": game.get("commence_time", ""),
+            })
+        else:
+            upcoming.append({
+                "home_abbr":  _g_abbr(home, sport),
+                "away_abbr":  _g_abbr(away, sport),
+                "home_ml":    home_ml_s,
+                "away_ml":    away_ml_s,
+                "home_spread": home_sp_s,
+                "away_spread": away_sp_s,
+                "time_str":   time_str,
+                "total_str":  total_str,
+                "commence_time": game.get("commence_time", ""),
+            })
+
+    upcoming.sort(key=lambda g: g.get("commence_time") or "")
+    final.sort(key=lambda g: g.get("commence_time") or "", reverse=True)
+
+    data = {"upcoming": upcoming, "final": final}
+    _HOME_GAMES_CACHE[cache_key] = {"ts": _t.monotonic(), "data": data}
+    return data
+
+
+def _home_games_block() -> dict:
+    """Both sports + default-sport pick (MLB primary, WNBA fallback when
+    MLB has no analysis results and WNBA does -- same logic as the News
+    section).  Template renders both, JS toggle shows the active one."""
+    try:
+        wnba_active = bool((_wnba_analysis_state or {}).get("results"))
+        mlb_active  = bool((_analysis_state or {}).get("results"))
+    except Exception:                                                      # noqa: BLE001
+        wnba_active = mlb_active = False
+    default_sport = "wnba" if (wnba_active and not mlb_active) else "mlb"
+    return {
+        "default_sport": default_sport,
+        "mlb":           _home_games_data("mlb"),
+        "wnba":          _home_games_data("wnba"),
+    }
+
+
 def _home_heatmap_rows(sport: str = "mlb", metric: str = "ml") -> list[dict]:
     """Season Heatmap rows for the home page -- shape pages/home.py's
     _heatmap_table_html into a list the Jinja template can iterate.
@@ -1344,6 +1548,14 @@ def _home_view_model() -> dict:
     news_items, news_sport = _home_news_items()
     news_tag_label = {"mlb": "MLB", "wnba": "WNBA"}.get(news_sport, news_sport.upper())
 
+    # ── Games table (Phase-2c: both sports pre-rendered + client toggle) ────
+    try:
+        games = _home_games_block()
+    except Exception:                                                      # noqa: BLE001
+        games = {"default_sport": "mlb",
+                 "mlb":  {"upcoming": [], "final": []},
+                 "wnba": {"upcoming": [], "final": []}}
+
     # ── Season Heatmap (Phase-2a: default MLB + ML, no toggles) ─────────────
     heatmap_rows = _home_heatmap_rows(sport="mlb", metric="ml")
 
@@ -1376,6 +1588,7 @@ def _home_view_model() -> dict:
         "perf_pct_str":       perf_pct_str,
         "perf_record":        perf_record,
         "perf_color":         perf_color,
+        "games":              games,
     }
 
 
@@ -1404,7 +1617,10 @@ def home():
               "news_items": [], "news_sport": "mlb", "news_tag_label": "MLB",
               "news_count": 0,
               "heatmap_rows": [], "heatmap_count": 0,
-              "perf_pct_str": "—", "perf_record": "0-0", "perf_color": "dim"}
+              "perf_pct_str": "—", "perf_record": "0-0", "perf_color": "dim",
+              "games": {"default_sport": "mlb",
+                        "mlb":  {"upcoming": [], "final": []},
+                        "wnba": {"upcoming": [], "final": []}}}
     return render_template("home.html", **vm)
 
 
