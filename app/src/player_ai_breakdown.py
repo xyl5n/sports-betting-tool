@@ -2,8 +2,10 @@
 AI-powered player matchup breakdown for the player profile page.
 
 Generates a four-section breakdown (Matchup, Trends, Arsenal/Approach or
-Plate Discipline, Game Script) with Groq (llama-3.1-8b-instant) via the
-shared src/groq_client.py, fed only data already computed in the app:
+Plate Discipline, Game Script) through the local-first two-pass src/llm_client
+(Pass 1 fast_verdict on Ollama think=False; Pass 2 deep_analysis on Ollama
+think=True; silent Groq fallback when an Ollama response can't be parsed), fed
+only data already computed in the app:
 rolling snapshot windows (r7/r14/r30/season), today's line + model
 prediction, opponent rank vs the prop type, H2H game log, L5/L10/L20/season
 hit rates, park factor, home/away splits, and pitcher handedness (batters).
@@ -337,20 +339,64 @@ def _system_prompt(is_pitcher: bool, pick_side: str = "Over",
     )
 
 
-def _call_groq(system: str, user: str, max_tokens: int = 900,
-               prefer: str = "V4") -> tuple:
-    """Generate the breakdown via the budget-aware multi-model client.
-    Returns (text, version_label) -- the version is the model that actually
-    produced it (after any cascade).  None text on any failure."""
+# Source label (returned by llm_client) -> short model_version badge text
+# stored on the breakdown.  Groq/Ollama-version attribution replaces the old
+# "V1".."V4" Groq labels now that generation is local-first.
+_SOURCE_LABEL = {
+    "ollama_fast":   "Ollama (fast)",
+    "ollama_deep":   "Ollama (deep)",
+    "groq_fallback": "Groq (fallback)",
+    "parse_error":   "",
+}
+
+
+def _generate_sections(system: str, user: str, *, deep: bool,
+                       max_tokens: int) -> tuple:
+    """Generate a breakdown through the local-first two-pass llm_client and
+    normalise it into canonical sections.
+
+      deep=False -> Pass 1: llm_client.fast_verdict (Ollama think=False)
+      deep=True  -> Pass 2: llm_client.deep_analysis (Ollama think=True)
+
+    Both fall back to Groq inside llm_client when an Ollama response can't be
+    parsed.  Returns (sections_or_None, source_label) where source_label is one
+    of ollama_fast / ollama_deep / groq_fallback / parse_error."""
     try:
-        from .groq_models import generate
-        return generate(f"{system}\n\n{user}", prefer=prefer, max_tokens=max_tokens)
+        from . import llm_client
+        if deep:
+            obj, source = llm_client.deep_analysis(system, user, max_tokens=max_tokens)
+        else:
+            obj, source = llm_client.fast_verdict(system, user, max_tokens=max_tokens)
     except Exception as exc:                                                # noqa: BLE001
-        _log(f"groq call failed: {type(exc).__name__}: {exc}")
-        return None, None
+        _log(f"llm_client call failed: {type(exc).__name__}: {exc}")
+        return None, "parse_error"
+    return _sections_from_obj(obj), source
+
+
+def _sections_from_obj(obj) -> dict | None:
+    """Normalise an already-parsed breakdown dict into the canonical section
+    shape (the JSON keys in _SECTION_KEYS + a validated verdict_tier).
+    Returns None when *obj* isn't a usable breakdown (no narrative section)."""
+    if not isinstance(obj, dict):
+        return None
+    out = {k: (str(obj.get(k)).strip() if obj.get(k) else "") for k in _SECTION_KEYS}
+    # Normalise verdict_tier to one of the five canonical labels (case/space
+    # tolerant); blank it if the model returned something off-menu so the
+    # renderer falls back cleanly rather than badging a bogus tier.
+    tier_raw = (out.get("verdict_tier") or "").strip().lower()
+    out["verdict_tier"] = next(
+        (t for t in _VERDICT_TIERS if t.lower() == tier_raw), "")
+    # Need at least one non-empty narrative section to be worth showing.
+    if not any(out.get(k) for k in _SECTION_KEYS if k != "verdict_tier"):
+        return None
+    return out
 
 
 def _parse_sections(text: str | None) -> dict | None:
+    """Parse a raw LLM text response into canonical sections (tolerant of a
+    fenced ```json block).  Retained for any raw-text path; the two-pass
+    llm_client path returns an already-parsed dict handled by
+    _sections_from_obj directly."""
     if not text:
         return None
     raw = text.strip()
@@ -365,17 +411,7 @@ def _parse_sections(text: str | None) -> dict | None:
         obj = json.loads(raw[start:end])
     except (ValueError, json.JSONDecodeError):
         return None
-    out = {k: (str(obj.get(k)).strip() if obj.get(k) else "") for k in _SECTION_KEYS}
-    # Normalise verdict_tier to one of the five canonical labels (case/space
-    # tolerant); blank it if the model returned something off-menu so the
-    # renderer falls back cleanly rather than badging a bogus tier.
-    tier_raw = (out.get("verdict_tier") or "").strip().lower()
-    out["verdict_tier"] = next(
-        (t for t in _VERDICT_TIERS if t.lower() == tier_raw), "")
-    # Need at least one non-empty narrative section to be worth showing.
-    if not any(out.get(k) for k in _SECTION_KEYS if k != "verdict_tier"):
-        return None
-    return out
+    return _sections_from_obj(obj)
 
 
 def tier_color(tier: str) -> str:
@@ -571,15 +607,18 @@ def get_breakdown(info, games, is_pitcher, prop, market, line_f,
             mlabel = (market or "").replace("_", " ")
         user = ("Generate the breakdown for this prop. Data JSON:\n"
                 + json.dumps(ctx, default=str))
-        text, version = _call_groq(
+        # prefer carries the pass: V1/70B == Pass 2 (deep), everything else ==
+        # Pass 1 (fast volume).  Routed through the local-first llm_client.
+        deep = (prefer == "V1")
+        sections, source = _generate_sections(
             _system_prompt(is_pitcher, pick_side=(prop.get("side") or "Over"),
                            line=line_f, market_label=mlabel),
-            user, prefer=prefer,
+            user, deep=deep, max_tokens=(1200 if deep else 900),
         )
-        sections = _parse_sections(text)
         if sections is None:
             return None
-        sections["model_version"] = version or ""   # which model produced it
+        # Record what produced it (ollama_fast / ollama_deep / groq_fallback).
+        sections["model_version"] = _SOURCE_LABEL.get(source, source)
         _cache_write(player_id, market, sections)
         return sections
     except Exception as exc:                                                # noqa: BLE001
