@@ -1,493 +1,442 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Admin</title>
+{% extends "base.html" %}
+{% set active_page = "admin" %}
+{% block title %}Admin{% endblock %}
 
-  <script src="https://cdn.tailwindcss.com"></script>
+{% block extra_head %}
+<style>
+  body.modal-open { overflow: hidden; }
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  /* ── Toast stack (same shape as /props + /mybets) ── */
+  .toast-stack {
+    position: fixed; bottom: 20px; right: 20px;
+    display: flex; flex-direction: column-reverse; gap: 8px;
+    z-index: 80; pointer-events: none;
+    max-width: calc(100vw - 40px);
+  }
+  .toast {
+    pointer-events: auto;
+    background: #1a1a1a; color: #e5e7eb;
+    border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
+    border-radius: 8px; padding: 10px 14px;
+    font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+    min-width: 220px; max-width: 360px;
+    transform: translateX(20px); opacity: 0;
+    transition: transform .18s ease, opacity .18s ease;
+  }
+  .toast.show     { transform: translateX(0); opacity: 1; }
+  .toast.positive { border-left-color: #22c55e; }
+  .toast.negative { border-left-color: #ef4444; }
+  .toast.info     { border-left-color: #7C3AED; }
 
-  <script>
-    /* Same palette as /props + /mybets so cross-page nav stays flush. */
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            bg:     "#000000",
-            card:   "#1a1a1a",
-            cardhi: "#222222",
-            border: "#2a2a2a",
-            accent: "#7C3AED",
-            accenthi: "#9F67FF",
-            pos:    "#22c55e",
-            neg:    "#ef4444",
-            warn:   "#eab308",
-          },
-          fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] },
-        },
-      },
-    };
-  </script>
+  /* ── Confirm / input modal overlay (same pattern as mybets wizard) ── */
+  .ad-modal-backdrop {
+    position: fixed; inset: 0; z-index: 70;
+    background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+  }
+  .ad-modal-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 10px; padding: 18px;
+    width: 440px; max-width: 94vw;
+    max-height: calc(100vh - 32px); overflow-y: auto;
+    display: flex; flex-direction: column; gap: 14px;
+  }
 
-  <style>
-    html, body { background: #000; }
-    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
-    body.modal-open { overflow: hidden; }
+  /* ── Buttons ── */
+  .ad-btn {
+    font-weight: 800; font-size: 12px; letter-spacing: .3px;
+    padding: 8px 14px; border-radius: 6px;
+    border: 0; cursor: pointer; line-height: 1.1;
+  }
+  .ad-btn:disabled { opacity: .55; cursor: default; }
+  .ad-btn-primary { background: #7C3AED; color: #000; }
+  .ad-btn-primary:hover:not(:disabled) { background: #9F67FF; }
+  .ad-btn-warn    { background: #eab308; color: #000; }
+  .ad-btn-danger  { background: #ef4444; color: #fff; }
+  .ad-btn-default { background: #222222; color: #e5e7eb; border: 1px solid #2a2a2a; }
+  .ad-btn-default:hover:not(:disabled) { background: #2a2a2a; }
+  .ad-btn.is-pending { opacity: .6; cursor: progress; }
 
-    /* ── Toast stack (same shape as /props + /mybets) ── */
-    .toast-stack {
-      position: fixed; bottom: 20px; right: 20px;
-      display: flex; flex-direction: column-reverse; gap: 8px;
-      z-index: 80; pointer-events: none;
-      max-width: calc(100vw - 40px);
-    }
-    .toast {
-      pointer-events: auto;
-      background: #1a1a1a; color: #e5e7eb;
-      border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
-      border-radius: 8px; padding: 10px 14px;
-      font-size: 12.5px; font-weight: 600;
-      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
-      min-width: 220px; max-width: 360px;
-      transform: translateX(20px); opacity: 0;
-      transition: transform .18s ease, opacity .18s ease;
-    }
-    .toast.show     { transform: translateX(0); opacity: 1; }
-    .toast.positive { border-left-color: #22c55e; }
-    .toast.negative { border-left-color: #ef4444; }
-    .toast.info     { border-left-color: #7C3AED; }
+  /* ── Cards / sections ── */
+  .ad-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 12px; padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .ad-card-title {
+    font-size: 13px; font-weight: 800; letter-spacing: .8px; color: #ffffff;
+  }
+  .ad-card-sub { font-size: 11.5px; color: #9ca3af; line-height: 1.5; }
+  .ad-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ad-sublabel {
+    font-size: 10px; font-weight: 800; letter-spacing: .8px;
+    color: #6b7280; margin-top: 6px;
+  }
 
-    /* ── Confirm / input modal overlay (same pattern as mybets wizard) ── */
-    .ad-modal-backdrop {
-      position: fixed; inset: 0; z-index: 70;
-      background: rgba(0,0,0,0.7);
-      display: flex; align-items: center; justify-content: center;
-      padding: 16px;
-    }
-    .ad-modal-card {
-      background: #1a1a1a; border: 1px solid #2a2a2a;
-      border-radius: 10px; padding: 18px;
-      width: 440px; max-width: 94vw;
-      max-height: calc(100vh - 32px); overflow-y: auto;
-      display: flex; flex-direction: column; gap: 14px;
-    }
+  /* ── Status pills ── */
+  .ad-pill {
+    font-size: 11.5px; font-weight: 700; font-family: ui-monospace, monospace;
+    background: #222222; padding: 2px 8px; border-radius: 999px;
+  }
+  .ad-pos  { color: #22c55e; }
+  .ad-neg  { color: #ef4444; }
+  .ad-warn { color: #eab308; }
+  .ad-dim  { color: #9ca3af; }
+  .ad-info { color: #60a5fa; }
 
-    /* ── Buttons ── */
-    .ad-btn {
-      font-weight: 800; font-size: 12px; letter-spacing: .3px;
-      padding: 8px 14px; border-radius: 6px;
-      border: 0; cursor: pointer; line-height: 1.1;
-    }
-    .ad-btn:disabled { opacity: .55; cursor: default; }
-    .ad-btn-primary { background: #7C3AED; color: #000; }
-    .ad-btn-primary:hover:not(:disabled) { background: #9F67FF; }
-    .ad-btn-warn    { background: #eab308; color: #000; }
-    .ad-btn-danger  { background: #ef4444; color: #fff; }
-    .ad-btn-default { background: #222222; color: #e5e7eb; border: 1px solid #2a2a2a; }
-    .ad-btn-default:hover:not(:disabled) { background: #2a2a2a; }
-    .ad-btn.is-pending { opacity: .6; cursor: progress; }
+  /* ── Status / meta rows ── */
+  .ad-meta-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 4px 0; border-bottom: 1px solid #161616;
+  }
+  .ad-meta-label { color: #9ca3af; font-size: 12px; }
+  .ad-meta-value { color: #fff; font-size: 12px; font-family: ui-monospace, monospace; }
 
-    /* ── Cards / sections ── */
-    .ad-card {
-      background: #1a1a1a; border: 1px solid #2a2a2a;
-      border-radius: 12px; padding: 16px;
-      display: flex; flex-direction: column; gap: 12px;
-    }
-    .ad-card-title {
-      font-size: 13px; font-weight: 800; letter-spacing: .8px; color: #ffffff;
-    }
-    .ad-card-sub { font-size: 11.5px; color: #9ca3af; line-height: 1.5; }
-    .ad-row { display: flex; flex-wrap: wrap; gap: 8px; }
-    .ad-sublabel {
-      font-size: 10px; font-weight: 800; letter-spacing: .8px;
-      color: #6b7280; margin-top: 6px;
-    }
+  /* ── Toggle rows ── */
+  .ad-toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 8px 0; border-bottom: 1px solid #161616;
+  }
+  .ad-toggle-label { color: #fff; font-size: 13px; font-weight: 600; }
+  .ad-toggle-sub   { color: #9ca3af; font-size: 11px; }
+  .ad-switch { position: relative; width: 38px; height: 22px; flex-shrink: 0; }
+  .ad-switch input { opacity: 0; width: 0; height: 0; }
+  .ad-switch .slider {
+    position: absolute; inset: 0; cursor: pointer;
+    background: #2a2a2a; border-radius: 999px; transition: background .15s;
+  }
+  .ad-switch .slider::before {
+    content: ""; position: absolute; width: 16px; height: 16px;
+    left: 3px; top: 3px; background: #d1d5db; border-radius: 50%;
+    transition: transform .15s, background .15s;
+  }
+  .ad-switch input:checked + .slider { background: #22c55e; }
+  .ad-switch input:checked + .slider::before { transform: translateX(16px); background: #000; }
+  .ad-num {
+    width: 96px; background: #222; border: 1px solid #2a2a2a; color: #fff;
+    font-size: 13px; padding: 6px 8px; border-radius: 6px; text-align: right;
+  }
+  .ad-num:focus { outline: none; border-color: #7C3AED; }
 
-    /* ── Status pills ── */
-    .ad-pill {
-      font-size: 11.5px; font-weight: 700; font-family: ui-monospace, monospace;
-      background: #222222; padding: 2px 8px; border-radius: 999px;
-    }
-    .ad-pos  { color: #22c55e; }
-    .ad-neg  { color: #ef4444; }
-    .ad-warn { color: #eab308; }
-    .ad-dim  { color: #9ca3af; }
-    .ad-info { color: #60a5fa; }
+  /* ── Filter pills (model performance) ── */
+  .ad-fpill {
+    background: #222; color: #9ca3af; border: 1px solid #2a2a2a;
+    font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px;
+    cursor: pointer; line-height: 1;
+  }
+  .ad-fpill.active { background: #7C3AED; color: #000; border-color: #7C3AED; }
 
-    /* ── Status / meta rows ── */
-    .ad-meta-row {
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 8px; padding: 4px 0; border-bottom: 1px solid #161616;
-    }
-    .ad-meta-label { color: #9ca3af; font-size: 12px; }
-    .ad-meta-value { color: #fff; font-size: 12px; font-family: ui-monospace, monospace; }
+  /* ── Tables ── */
+  .ad-table { width: 100%; border-collapse: collapse; }
+  .ad-table th {
+    font-size: 10px; font-weight: 800; letter-spacing: .4px; color: #6b7280;
+    padding: 6px 8px; text-align: right; border-bottom: 1px solid #2a2a2a;
+    white-space: nowrap;
+  }
+  .ad-table th.l { text-align: left; }
+  .ad-table td {
+    font-size: 12px; font-family: ui-monospace, monospace; padding: 6px 8px;
+    text-align: right; color: #e5e7eb; border-bottom: 1px solid #161616;
+    white-space: nowrap;
+  }
+  .ad-table td.l { text-align: left; }
+  .ad-table tr.clickable { cursor: pointer; }
+  .ad-table tr.clickable:hover td { background: rgba(124,58,237,0.06); }
 
-    /* ── Toggle rows ── */
-    .ad-toggle-row {
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 10px; padding: 8px 0; border-bottom: 1px solid #161616;
-    }
-    .ad-toggle-label { color: #fff; font-size: 13px; font-weight: 600; }
-    .ad-toggle-sub   { color: #9ca3af; font-size: 11px; }
-    .ad-switch { position: relative; width: 38px; height: 22px; flex-shrink: 0; }
-    .ad-switch input { opacity: 0; width: 0; height: 0; }
-    .ad-switch .slider {
-      position: absolute; inset: 0; cursor: pointer;
-      background: #2a2a2a; border-radius: 999px; transition: background .15s;
-    }
-    .ad-switch .slider::before {
-      content: ""; position: absolute; width: 16px; height: 16px;
-      left: 3px; top: 3px; background: #d1d5db; border-radius: 50%;
-      transition: transform .15s, background .15s;
-    }
-    .ad-switch input:checked + .slider { background: #22c55e; }
-    .ad-switch input:checked + .slider::before { transform: translateX(16px); background: #000; }
-    .ad-num {
-      width: 96px; background: #222; border: 1px solid #2a2a2a; color: #fff;
-      font-size: 13px; padding: 6px 8px; border-radius: 6px; text-align: right;
-    }
-    .ad-num:focus { outline: none; border-color: #7C3AED; }
+  /* ── Accordion (explorer) ── */
+  .ad-acc {
+    border: 1px solid #2a2a2a; border-radius: 8px; overflow: hidden;
+    background: #161616;
+  }
+  .ad-acc-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; cursor: pointer; user-select: none;
+    font-size: 13px; font-weight: 700; color: #fff;
+  }
+  .ad-acc-head:hover { background: #1f1f1f; }
+  .ad-acc-chev { color: #9ca3af; transition: transform .15s; }
+  .ad-acc-chev.open { transform: rotate(90deg); }
+  .ad-acc-body { padding: 10px 12px; border-top: 1px solid #2a2a2a; }
+  .ad-acc-body.hidden { display: none; }
 
-    /* ── Filter pills (model performance) ── */
-    .ad-fpill {
-      background: #222; color: #9ca3af; border: 1px solid #2a2a2a;
-      font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px;
-      cursor: pointer; line-height: 1;
-    }
-    .ad-fpill.active { background: #7C3AED; color: #000; border-color: #7C3AED; }
+  .ad-input {
+    width: 100%; background: #222; border: 1px solid #2a2a2a; color: #e5e7eb;
+    font-size: 12.5px; padding: 6px 8px; border-radius: 6px;
+  }
+  .ad-input:focus { outline: none; border-color: #7C3AED; }
+  .ad-textarea {
+    width: 100%; min-height: 160px; background: #222; border: 1px solid #2a2a2a;
+    color: #e5e7eb; font-family: ui-monospace, monospace; font-size: 12px;
+    padding: 8px; border-radius: 6px; resize: vertical;
+  }
+  .ad-textarea:focus { outline: none; border-color: #7C3AED; }
 
-    /* ── Tables ── */
-    .ad-table { width: 100%; border-collapse: collapse; }
-    .ad-table th {
-      font-size: 10px; font-weight: 800; letter-spacing: .4px; color: #6b7280;
-      padding: 6px 8px; text-align: right; border-bottom: 1px solid #2a2a2a;
-      white-space: nowrap;
-    }
-    .ad-table th.l { text-align: left; }
-    .ad-table td {
-      font-size: 12px; font-family: ui-monospace, monospace; padding: 6px 8px;
-      text-align: right; color: #e5e7eb; border-bottom: 1px solid #161616;
-      white-space: nowrap;
-    }
-    .ad-table td.l { text-align: left; }
-    .ad-table tr.clickable { cursor: pointer; }
-    .ad-table tr.clickable:hover td { background: rgba(124,58,237,0.06); }
+  /* ── Diagnostics rows ── */
+  .ad-diag-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 6px 0; border-bottom: 1px solid #161616;
+  }
+  .ad-diag-icon { flex-shrink: 0; font-weight: 800; width: 16px; text-align: center; }
+  .ad-diag-label { font-size: 12px; font-weight: 700; color: #fff; min-width: 0; }
+  .ad-diag-detail {
+    font-size: 11px; color: #9ca3af; font-family: ui-monospace, monospace;
+    word-break: break-word;
+  }
 
-    /* ── Accordion (explorer) ── */
-    .ad-acc {
-      border: 1px solid #2a2a2a; border-radius: 8px; overflow: hidden;
-      background: #161616;
-    }
-    .ad-acc-head {
-      display: flex; align-items: center; gap: 8px;
-      padding: 10px 12px; cursor: pointer; user-select: none;
-      font-size: 13px; font-weight: 700; color: #fff;
-    }
-    .ad-acc-head:hover { background: #1f1f1f; }
-    .ad-acc-chev { color: #9ca3af; transition: transform .15s; }
-    .ad-acc-chev.open { transform: rotate(90deg); }
-    .ad-acc-body { padding: 10px 12px; border-top: 1px solid #2a2a2a; }
-    .ad-acc-body.hidden { display: none; }
+  .ad-mini-btn {
+    font-size: 10.5px; font-weight: 800; padding: 3px 8px; border-radius: 5px;
+    border: 0; cursor: pointer; line-height: 1.1;
+  }
+</style>
+{% endblock %}
 
-    .ad-input {
-      width: 100%; background: #222; border: 1px solid #2a2a2a; color: #e5e7eb;
-      font-size: 12.5px; padding: 6px 8px; border-radius: 6px;
-    }
-    .ad-input:focus { outline: none; border-color: #7C3AED; }
-    .ad-textarea {
-      width: 100%; min-height: 160px; background: #222; border: 1px solid #2a2a2a;
-      color: #e5e7eb; font-family: ui-monospace, monospace; font-size: 12px;
-      padding: 8px; border-radius: 6px; resize: vertical;
-    }
-    .ad-textarea:focus { outline: none; border-color: #7C3AED; }
+{% block content %}
+<main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-5">
+  <h1 class="text-[22px] font-extrabold tracking-tight">ADMIN</h1>
 
-    /* ── Diagnostics rows ── */
-    .ad-diag-row {
-      display: flex; align-items: flex-start; gap: 8px;
-      padding: 6px 0; border-bottom: 1px solid #161616;
-    }
-    .ad-diag-icon { flex-shrink: 0; font-weight: 800; width: 16px; text-align: center; }
-    .ad-diag-label { font-size: 12px; font-weight: 700; color: #fff; min-width: 0; }
-    .ad-diag-detail {
-      font-size: 11px; color: #9ca3af; font-family: ui-monospace, monospace;
-      word-break: break-word;
-    }
+  {# ── 1. Status (read-only) ── #}
+  <div class="ad-card">
+    <div class="ad-card-title">STATUS</div>
+    <div id="ad-status-rows" class="flex flex-col"></div>
+  </div>
 
-    .ad-mini-btn {
-      font-size: 10.5px; font-weight: 800; padding: 3px 8px; border-radius: 5px;
-      border: 0; cursor: pointer; line-height: 1.1;
-    }
-  </style>
-</head>
-
-<body class="bg-bg text-white min-h-screen">
-
-  <!-- ── Sticky top nav (mirrors /props + /mybets) ── -->
-  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
-      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
-        <span class="text-accent">●</span> Sports Analysis
-      </a>
-      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
-        <a href="/" class="hover:text-white transition">Home</a>
-        <a href="/sports/mlb" class="hover:text-white transition">Sports</a>
-        <a href="/props" class="hover:text-white transition">Props</a>
-        <a href="/modelbets" class="hover:text-white transition">Model Bets</a>
-        <a href="/mybets" class="hover:text-white transition">My Bets</a>
-        <a href="/top-picks" class="hover:text-white transition">Top Picks</a>
-        <a href="/research" class="hover:text-white transition">Research</a>
-        <a href="/admin" class="text-white font-semibold">Admin</a>
-      </div>
+  {# ── 2. Analysis ── #}
+  <div class="ad-card">
+    <div class="ad-card-title">ANALYSIS</div>
+    <div class="ad-card-sub">Cache-aware Run. Within 15 minutes of the last live fetch,
+      Run reuses cached odds (zero quota). After 15 min it confirms before pulling fresh.
+      Daily cap 500; Approve Additional grants +50.</div>
+    <div id="ad-quota" class="flex flex-col gap-1"></div>
+    <div id="ad-cache-info" class="ad-row items-center"></div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-warn" id="ad-approve-odds">Approve Additional Odds Pull (+50)</button>
     </div>
-  </nav>
-
-  <main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-5">
-    <h1 class="text-[22px] font-extrabold tracking-tight">ADMIN</h1>
-
-    {# ── 1. Status (read-only) ── #}
-    <div class="ad-card">
-      <div class="ad-card-title">STATUS</div>
-      <div id="ad-status-rows" class="flex flex-col"></div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-primary" id="ad-run-mlb">Run MLB Analysis</button>
+      <button class="ad-btn ad-btn-primary" id="ad-run-wnba">Run WNBA Analysis</button>
+      <button class="ad-btn ad-btn-primary" id="ad-run-both">Run All Models</button>
     </div>
+  </div>
 
-    {# ── 2. Analysis ── #}
-    <div class="ad-card">
-      <div class="ad-card-title">ANALYSIS</div>
-      <div class="ad-card-sub">Cache-aware Run. Within 15 minutes of the last live fetch,
-        Run reuses cached odds (zero quota). After 15 min it confirms before pulling fresh.
-        Daily cap 500; Approve Additional grants +50.</div>
-      <div id="ad-quota" class="flex flex-col gap-1"></div>
-      <div id="ad-cache-info" class="ad-row items-center"></div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-warn" id="ad-approve-odds">Approve Additional Odds Pull (+50)</button>
-      </div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-primary" id="ad-run-mlb">Run MLB Analysis</button>
-        <button class="ad-btn ad-btn-primary" id="ad-run-wnba">Run WNBA Analysis</button>
-        <button class="ad-btn ad-btn-primary" id="ad-run-both">Run All Models</button>
-      </div>
+  {# ── 3. Props ── #}
+  <div class="ad-card">
+    <div class="ad-card-title">PROPS</div>
+    <div class="ad-card-sub">Refresh Props Now re-runs the merge + scoring pass.
+      MLB Props does a full fresh re-pull of all 11 markets.</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-default" id="ad-props-refresh">Refresh Props Now</button>
+      <button class="ad-btn ad-btn-primary" id="ad-props-repull">MLB Props</button>
+    </div>
+  </div>
+
+  {# ── 4. AI Analysis ── #}
+  <div class="ad-card">
+    <div class="ad-card-title">AI ANALYSIS</div>
+    <div class="ad-card-sub">Run AI Analysis generates summaries for uncached picks.
+      Force AI Refresh re-runs every one regardless of cache.</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-primary" id="ad-ai-run">Run AI Analysis</button>
+      <button class="ad-btn ad-btn-warn" id="ad-ai-force">Force AI Refresh</button>
+    </div>
+    <div id="ad-ai-progress" class="text-[12.5px] font-semibold"></div>
+  </div>
+
+  {# ── 5. Models ── #}
+  <div class="ad-card">
+    <div class="ad-card-title">MODELS</div>
+    <div class="ad-card-sub">Re-run predictions against cached odds; clear today's snapshot.</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-default" id="ad-refresh-models">Refresh Models (cached odds)</button>
+      <button class="ad-btn ad-btn-warn" id="ad-clear-mlb">Clear MLB Snapshot</button>
+      <button class="ad-btn ad-btn-warn" id="ad-clear-wnba">Clear WNBA Snapshot</button>
     </div>
 
-    {# ── 3. Props ── #}
-    <div class="ad-card">
-      <div class="ad-card-title">PROPS</div>
-      <div class="ad-card-sub">Refresh Props Now re-runs the merge + scoring pass.
-        MLB Props does a full fresh re-pull of all 11 markets.</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-default" id="ad-props-refresh">Refresh Props Now</button>
-        <button class="ad-btn ad-btn-primary" id="ad-props-repull">MLB Props</button>
-      </div>
-    </div>
-
-    {# ── 4. AI Analysis ── #}
-    <div class="ad-card">
-      <div class="ad-card-title">AI ANALYSIS</div>
-      <div class="ad-card-sub">Run AI Analysis generates summaries for uncached picks.
-        Force AI Refresh re-runs every one regardless of cache.</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-primary" id="ad-ai-run">Run AI Analysis</button>
-        <button class="ad-btn ad-btn-warn" id="ad-ai-force">Force AI Refresh</button>
-      </div>
-      <div id="ad-ai-progress" class="text-[12.5px] font-semibold"></div>
-    </div>
-
-    {# ── 5. Models ── #}
-    <div class="ad-card">
-      <div class="ad-card-title">MODELS</div>
-      <div class="ad-card-sub">Re-run predictions against cached odds; clear today's snapshot.</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-default" id="ad-refresh-models">Refresh Models (cached odds)</button>
-        <button class="ad-btn ad-btn-warn" id="ad-clear-mlb">Clear MLB Snapshot</button>
-        <button class="ad-btn ad-btn-warn" id="ad-clear-wnba">Clear WNBA Snapshot</button>
-      </div>
-
-      <div class="ad-sublabel">MODEL BETS</div>
-      <div id="ad-toggles" class="flex flex-col">
-        <div class="ad-toggle-row">
-          <div class="flex flex-col gap-[2px]">
-            <span class="ad-toggle-label">MLB auto-picks</span>
-            <span class="ad-toggle-sub">Include MLB in the model's auto-picks</span>
-          </div>
-          <label class="ad-switch">
-            <input type="checkbox" id="ad-tg-mlb_enabled" data-setting="mlb_enabled">
-            <span class="slider"></span>
-          </label>
+    <div class="ad-sublabel">MODEL BETS</div>
+    <div id="ad-toggles" class="flex flex-col">
+      <div class="ad-toggle-row">
+        <div class="flex flex-col gap-[2px]">
+          <span class="ad-toggle-label">MLB auto-picks</span>
+          <span class="ad-toggle-sub">Include MLB in the model's auto-picks</span>
         </div>
-        <div class="ad-toggle-row">
-          <div class="flex flex-col gap-[2px]">
-            <span class="ad-toggle-label">WNBA auto-picks</span>
-            <span class="ad-toggle-sub">Include WNBA in the model's auto-picks</span>
-          </div>
-          <label class="ad-switch">
-            <input type="checkbox" id="ad-tg-wnba_enabled" data-setting="wnba_enabled">
-            <span class="slider"></span>
-          </label>
+        <label class="ad-switch">
+          <input type="checkbox" id="ad-tg-mlb_enabled" data-setting="mlb_enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="ad-toggle-row">
+        <div class="flex flex-col gap-[2px]">
+          <span class="ad-toggle-label">WNBA auto-picks</span>
+          <span class="ad-toggle-sub">Include WNBA in the model's auto-picks</span>
         </div>
-        <div class="ad-toggle-row">
-          <div class="flex flex-col gap-[2px]">
-            <span class="ad-toggle-label">Home: 'Overall' chip</span>
-            <span class="ad-toggle-sub">Show the overall W-L chip at the top of the home page</span>
-          </div>
-          <label class="ad-switch">
-            <input type="checkbox" id="ad-tg-show_overall_chip" data-setting="show_overall_chip">
-            <span class="slider"></span>
-          </label>
+        <label class="ad-switch">
+          <input type="checkbox" id="ad-tg-wnba_enabled" data-setting="wnba_enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="ad-toggle-row">
+        <div class="flex flex-col gap-[2px]">
+          <span class="ad-toggle-label">Home: 'Overall' chip</span>
+          <span class="ad-toggle-sub">Show the overall W-L chip at the top of the home page</span>
         </div>
-        <div class="ad-toggle-row">
-          <div class="flex flex-col gap-[2px] min-w-0 flex-1">
-            <span class="ad-toggle-label">AI chat: daily limit</span>
-            <span class="ad-toggle-sub">Max Anthropic API calls per day from the AI Breakdown chat</span>
-          </div>
-          <input type="number" min="1" max="500" step="1" class="ad-num"
-                 id="ad-ai-daily-limit">
+        <label class="ad-switch">
+          <input type="checkbox" id="ad-tg-show_overall_chip" data-setting="show_overall_chip">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="ad-toggle-row">
+        <div class="flex flex-col gap-[2px] min-w-0 flex-1">
+          <span class="ad-toggle-label">AI chat: daily limit</span>
+          <span class="ad-toggle-sub">Max Anthropic API calls per day from the AI Breakdown chat</span>
         </div>
-      </div>
-
-      <div class="ad-sublabel">Re-pick</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-primary" id="ad-repick-both">Re-pick Both</button>
-        <button class="ad-btn ad-btn-default" id="ad-repick-mlb">Re-pick MLB</button>
-        <button class="ad-btn ad-btn-default" id="ad-repick-wnba">Re-pick WNBA</button>
-      </div>
-
-      <div class="ad-sublabel">Reset today's picks</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-warn"   id="ad-reset-picks-mlb">Reset MLB</button>
-        <button class="ad-btn ad-btn-warn"   id="ad-reset-picks-wnba">Reset WNBA</button>
-        <button class="ad-btn ad-btn-danger" id="ad-reset-picks-both">Reset Both</button>
-      </div>
-
-      <div class="ad-sublabel">Bankroll & settlement</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-default" id="ad-reset-model-bankroll">Reset Model Bankroll…</button>
-        <button class="ad-btn ad-btn-default" id="ad-settle-now">Force Settlement</button>
-      </div>
-
-      <div class="ad-sublabel">MODEL PERFORMANCE</div>
-      <div class="ad-card-sub">Per-model record from every logged pick. Sorted by win% desc.
-        Click a row to browse that model's picks.</div>
-      <div id="ad-perf-pills" class="ad-row items-center">
-        <button class="ad-fpill active" data-preset="all">All-time</button>
-        <button class="ad-fpill" data-preset="today">Today</button>
-        <button class="ad-fpill" data-preset="yesterday">Yesterday</button>
-        <button class="ad-fpill" data-preset="7d">Last 7</button>
-        <button class="ad-fpill" data-preset="30d">Last 30</button>
-        <button class="ad-fpill" data-preset="custom">Custom</button>
-        <input type="date" id="ad-perf-date" class="ad-input hidden" style="width:160px;">
-      </div>
-      <div id="ad-perf-meta" class="text-[11px] text-gray-500"></div>
-      <div id="ad-perf-table" class="overflow-x-auto w-full"></div>
-    </div>
-
-    {# ── 6. My Bets Admin ── #}
-    <div class="ad-card">
-      <div class="ad-card-title">MY BETS</div>
-      <div class="ad-card-sub">Wipe your tracked bets and set bankrolls. Bets are unified across MLB + WNBA.</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-warn"   id="ad-wipe-mlb">Wipe MLB Bets</button>
-        <button class="ad-btn ad-btn-warn"   id="ad-wipe-wnba">Wipe WNBA Bets</button>
-        <button class="ad-btn ad-btn-danger" id="ad-wipe-both">Wipe Both Sports</button>
-      </div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-default" id="ad-set-personal-bankroll">Set My Bankroll…</button>
-        <button class="ad-btn ad-btn-default" id="ad-set-model-bankroll">Set Model Bankroll…</button>
+        <input type="number" min="1" max="500" step="1" class="ad-num"
+               id="ad-ai-daily-limit">
       </div>
     </div>
 
-    {# ── 7. Data Resets (all gated behind confirm modal) ── #}
-    <div class="ad-card" style="border-color:#3a1a1a;">
-      <div class="flex items-center gap-2">
-        <span class="ad-neg text-[18px]">⚠</span>
-        <span class="ad-card-title ad-neg">DATA RESET ACTIONS — Cannot Be Undone</span>
-      </div>
-      <div class="ad-card-sub">Each button permanently deletes one slice of saved data.
-        Every action requires explicit confirmation. Bankrolls survive the history resets;
-        history survives the bankroll reset.</div>
-      <div class="ad-sublabel">Model side</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-danger" id="ad-reset-model-record">Reset Model Record</button>
-        <button class="ad-btn ad-btn-danger" id="ad-reset-model-bankroll-2">Reset Model Bankroll</button>
-      </div>
-      <div class="ad-sublabel">Other</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-danger" id="ad-reset-confidence">Reset Confidence Record</button>
-        <button class="ad-btn ad-btn-danger" id="ad-reset-mybets-record">Reset My Bets Record</button>
-      </div>
+    <div class="ad-sublabel">Re-pick</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-primary" id="ad-repick-both">Re-pick Both</button>
+      <button class="ad-btn ad-btn-default" id="ad-repick-mlb">Re-pick MLB</button>
+      <button class="ad-btn ad-btn-default" id="ad-repick-wnba">Re-pick WNBA</button>
     </div>
 
-    {# ── 8. Supabase Explorer ── #}
-    <div class="ad-card">
-      <div class="flex items-center justify-between gap-2">
-        <div class="ad-card-title">SUPABASE DATA EXPLORER</div>
-        <button class="ad-mini-btn ad-btn-primary" id="ad-explorer-refresh">↻ Refresh All</button>
-      </div>
-      <div class="ad-card-sub">Live view of what's stored in Supabase. Expand a category to load it.</div>
+    <div class="ad-sublabel">Reset today's picks</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-warn"   id="ad-reset-picks-mlb">Reset MLB</button>
+      <button class="ad-btn ad-btn-warn"   id="ad-reset-picks-wnba">Reset WNBA</button>
+      <button class="ad-btn ad-btn-danger" id="ad-reset-picks-both">Reset Both</button>
+    </div>
 
-      <div class="flex flex-col gap-2" id="ad-explorer">
-        <div class="ad-acc" data-panel="models" data-path="/api/admin/explorer/models">
-          <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Models</div>
-          <div class="ad-acc-body hidden"></div>
-        </div>
-        <div class="ad-acc" data-panel="props_cache" data-path="/api/admin/explorer/props_cache">
-          <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Props Cache</div>
-          <div class="ad-acc-body hidden"></div>
-        </div>
-        <div class="ad-acc" data-panel="picks" data-path="/api/admin/explorer/picks">
-          <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Picks &amp; Ledger</div>
-          <div class="ad-acc-body hidden"></div>
-        </div>
-        <div class="ad-acc" data-panel="timestamps" data-path="/api/admin/explorer/timestamps">
-          <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Timestamps</div>
-          <div class="ad-acc-body hidden"></div>
-        </div>
-        <div class="ad-acc" data-panel="cache_keys" data-path="/api/admin/explorer/cache_keys">
-          <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> App Cache Keys</div>
-          <div class="ad-acc-body hidden"></div>
-        </div>
-        <div class="ad-acc" data-panel="raw">
-          <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Raw Editor</div>
-          <div class="ad-acc-body hidden">
-            <div class="flex flex-col gap-2">
-              <input class="ad-input" id="ad-raw-key" placeholder="app_cache key (e.g. analysis_timestamps)">
-              <textarea class="ad-textarea" id="ad-raw-value" placeholder="JSON value — load a key, edit, then Save"></textarea>
-              <div class="ad-row">
-                <button class="ad-mini-btn ad-btn-primary" id="ad-raw-load">Load</button>
-                <button class="ad-mini-btn ad-btn-warn"    id="ad-raw-save">Save</button>
-              </div>
+    <div class="ad-sublabel">Bankroll & settlement</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-default" id="ad-reset-model-bankroll">Reset Model Bankroll…</button>
+      <button class="ad-btn ad-btn-default" id="ad-settle-now">Force Settlement</button>
+    </div>
+
+    <div class="ad-sublabel">MODEL PERFORMANCE</div>
+    <div class="ad-card-sub">Per-model record from every logged pick. Sorted by win% desc.
+      Click a row to browse that model's picks.</div>
+    <div id="ad-perf-pills" class="ad-row items-center">
+      <button class="ad-fpill active" data-preset="all">All-time</button>
+      <button class="ad-fpill" data-preset="today">Today</button>
+      <button class="ad-fpill" data-preset="yesterday">Yesterday</button>
+      <button class="ad-fpill" data-preset="7d">Last 7</button>
+      <button class="ad-fpill" data-preset="30d">Last 30</button>
+      <button class="ad-fpill" data-preset="custom">Custom</button>
+      <input type="date" id="ad-perf-date" class="ad-input hidden" style="width:160px;">
+    </div>
+    <div id="ad-perf-meta" class="text-[11px] text-gray-500"></div>
+    <div id="ad-perf-table" class="overflow-x-auto w-full"></div>
+  </div>
+
+  {# ── 6. My Bets Admin ── #}
+  <div class="ad-card">
+    <div class="ad-card-title">MY BETS</div>
+    <div class="ad-card-sub">Wipe your tracked bets and set bankrolls. Bets are unified across MLB + WNBA.</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-warn"   id="ad-wipe-mlb">Wipe MLB Bets</button>
+      <button class="ad-btn ad-btn-warn"   id="ad-wipe-wnba">Wipe WNBA Bets</button>
+      <button class="ad-btn ad-btn-danger" id="ad-wipe-both">Wipe Both Sports</button>
+    </div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-default" id="ad-set-personal-bankroll">Set My Bankroll…</button>
+      <button class="ad-btn ad-btn-default" id="ad-set-model-bankroll">Set Model Bankroll…</button>
+    </div>
+  </div>
+
+  {# ── 7. Data Resets (all gated behind confirm modal) ── #}
+  <div class="ad-card" style="border-color:#3a1a1a;">
+    <div class="flex items-center gap-2">
+      <span class="ad-neg text-[18px]">⚠</span>
+      <span class="ad-card-title ad-neg">DATA RESET ACTIONS — Cannot Be Undone</span>
+    </div>
+    <div class="ad-card-sub">Each button permanently deletes one slice of saved data.
+      Every action requires explicit confirmation. Bankrolls survive the history resets;
+      history survives the bankroll reset.</div>
+    <div class="ad-sublabel">Model side</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-danger" id="ad-reset-model-record">Reset Model Record</button>
+      <button class="ad-btn ad-btn-danger" id="ad-reset-model-bankroll-2">Reset Model Bankroll</button>
+    </div>
+    <div class="ad-sublabel">Other</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-danger" id="ad-reset-confidence">Reset Confidence Record</button>
+      <button class="ad-btn ad-btn-danger" id="ad-reset-mybets-record">Reset My Bets Record</button>
+    </div>
+  </div>
+
+  {# ── 8. Supabase Explorer ── #}
+  <div class="ad-card">
+    <div class="flex items-center justify-between gap-2">
+      <div class="ad-card-title">SUPABASE DATA EXPLORER</div>
+      <button class="ad-mini-btn ad-btn-primary" id="ad-explorer-refresh">↻ Refresh All</button>
+    </div>
+    <div class="ad-card-sub">Live view of what's stored in Supabase. Expand a category to load it.</div>
+
+    <div class="flex flex-col gap-2" id="ad-explorer">
+      <div class="ad-acc" data-panel="models" data-path="/api/admin/explorer/models">
+        <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Models</div>
+        <div class="ad-acc-body hidden"></div>
+      </div>
+      <div class="ad-acc" data-panel="props_cache" data-path="/api/admin/explorer/props_cache">
+        <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Props Cache</div>
+        <div class="ad-acc-body hidden"></div>
+      </div>
+      <div class="ad-acc" data-panel="picks" data-path="/api/admin/explorer/picks">
+        <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Picks &amp; Ledger</div>
+        <div class="ad-acc-body hidden"></div>
+      </div>
+      <div class="ad-acc" data-panel="timestamps" data-path="/api/admin/explorer/timestamps">
+        <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Timestamps</div>
+        <div class="ad-acc-body hidden"></div>
+      </div>
+      <div class="ad-acc" data-panel="cache_keys" data-path="/api/admin/explorer/cache_keys">
+        <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> App Cache Keys</div>
+        <div class="ad-acc-body hidden"></div>
+      </div>
+      <div class="ad-acc" data-panel="raw">
+        <div class="ad-acc-head"><span class="ad-acc-chev">▶</span> Raw Editor</div>
+        <div class="ad-acc-body hidden">
+          <div class="flex flex-col gap-2">
+            <input class="ad-input" id="ad-raw-key" placeholder="app_cache key (e.g. analysis_timestamps)">
+            <textarea class="ad-textarea" id="ad-raw-value" placeholder="JSON value — load a key, edit, then Save"></textarea>
+            <div class="ad-row">
+              <button class="ad-mini-btn ad-btn-primary" id="ad-raw-load">Load</button>
+              <button class="ad-mini-btn ad-btn-warn"    id="ad-raw-save">Save</button>
             </div>
           </div>
         </div>
       </div>
     </div>
+  </div>
 
-    {# ── 9. Diagnostics ── #}
-    <div class="ad-card">
-      <div class="ad-card-title">DIAGNOSTICS</div>
-      <div class="ad-card-sub">Probe every data source: in-memory state, snapshot files, daily
-        picks, Supabase, Odds API key, ledgers. Read-only, no quota burn.</div>
-      <div class="ad-row">
-        <button class="ad-btn ad-btn-primary" id="ad-run-diag">Run Diagnostics</button>
-        <button class="ad-btn ad-btn-default" id="ad-probe-sharp">Probe SharpAPI</button>
-      </div>
-      <div id="ad-diag-results" class="flex flex-col"></div>
+  {# ── 9. Diagnostics ── #}
+  <div class="ad-card">
+    <div class="ad-card-title">DIAGNOSTICS</div>
+    <div class="ad-card-sub">Probe every data source: in-memory state, snapshot files, daily
+      picks, Supabase, Odds API key, ledgers. Read-only, no quota burn.</div>
+    <div class="ad-row">
+      <button class="ad-btn ad-btn-primary" id="ad-run-diag">Run Diagnostics</button>
+      <button class="ad-btn ad-btn-default" id="ad-probe-sharp">Probe SharpAPI</button>
     </div>
+    <div id="ad-diag-results" class="flex flex-col"></div>
+  </div>
 
-  </main>
+</main>
 
-  {# ── Confirm / input modal scaffold (populated by admin.js) ── #}
-  <div id="ad-modal-root" class="hidden"></div>
+{# ── Confirm / input modal scaffold (populated by admin.js) ── #}
+<div id="ad-modal-root" class="hidden"></div>
 
-  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+<div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+{% endblock %}
 
-  {# JSON data island: settings + status pre-rendered. #}
-  <script id="admin-init" type="application/json">{{ init_data | tojson }}</script>
+{% block extra_scripts %}
+{# JSON data island: settings + status pre-rendered. #}
+<script id="admin-init" type="application/json">{{ init_data | tojson }}</script>
 
-  <!-- lib.js MUST load before admin.js (defines window.SBT.{toast,apiPost}). -->
-  <script src="/static/js/lib.js" defer></script>
-  <script src="/static/js/admin.js" defer></script>
-</body>
-</html>
+<!-- lib.js MUST load before admin.js (defines window.SBT.{toast,apiPost}). -->
+<script src="/static/js/lib.js" defer></script>
+<script src="/static/js/admin.js" defer></script>
+{% endblock %}
