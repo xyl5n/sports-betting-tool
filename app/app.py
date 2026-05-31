@@ -924,6 +924,28 @@ def _props_game_time(commence_time):
         return ""
 
 
+def _props_grade_composite(pick):
+    """0..1 matchup-grade composite -- mirrors pages/props.py _prop_grade_composite
+    so the filter-panel slider matches NiceGUI exactly (no data re-derivation,
+    same weights: 0.50 confidence + 0.30 opp_rank + 0.20 ev_pct)."""
+    try:
+        conf = float(pick.get("confidence") or 0.5)
+    except (TypeError, ValueError):
+        conf = 0.5
+    conf_score = max(0.0, min(1.0, (conf - 0.50) / 0.45))
+    try:
+        rank = int(pick.get("opp_rank") or 15)
+    except (TypeError, ValueError):
+        rank = 15
+    rank_score = max(0.0, min(1.0, (31 - rank) / 30.0))
+    try:
+        ev = float(pick.get("ev_pct") or 0.0)
+    except (TypeError, ValueError):
+        ev = 0.0
+    ev_score = max(0.0, min(1.0, ev / 30.0))
+    return 0.5 * conf_score + 0.3 * rank_score + 0.2 * ev_score
+
+
 def _props_view_model(pick):
     """Flatten one scored-props pick into the flat dict the Tailwind card +
     client-side filters consume.  Every value is JSON-serialisable."""
@@ -949,6 +971,26 @@ def _props_view_model(pick):
     side = (pick.get("recommendation") or pick.get("side") or "Over")
     side = str(side).title()
 
+    # ── Phase-2b filter fields ─────────────────────────────────────────────
+    # All sourced from the raw pick dict the scored cache already produces;
+    # no new data fetches.
+    try:
+        l10_hits = int((summary.get("last_10_hits") or 0))
+    except (TypeError, ValueError):
+        l10_hits = 0
+    line_type = (pick.get("line_type") or "main").lower()
+    home_team = (pick.get("home_team") or "").strip()
+    away_team = (pick.get("away_team") or "").strip()
+    event_id  = pick.get("event_id")
+    if event_id:
+        game_key = str(event_id)
+    elif home_team or away_team:
+        game_key = f"{away_team or '?'}@{home_team or '?'}"
+    else:
+        game_key = ""
+    game_label = (f"{away_team or '?'} @ {home_team or '?'}"
+                  if (home_team or away_team) else "")
+
     return {
         "sport":          str(pick.get("sport") or "MLB").upper(),
         "player":         pick.get("player") or "",
@@ -970,6 +1012,12 @@ def _props_view_model(pick):
         "model":          pick.get("source") or "model",
         "game_time":      _props_game_time(pick.get("commence_time")),
         "commence_time":  pick.get("commence_time") or "",
+        # ── filter-panel fields ──────────────────────────────────────────
+        "l10_hits":       l10_hits,
+        "line_type":      line_type,
+        "game_key":       game_key,
+        "game_label":     game_label,
+        "prop_grade":     round(_props_grade_composite(pick), 4),
     }
 
 
@@ -995,10 +1043,31 @@ def props_page():
         if p["stat_label"] and p["stat_label"] not in seen:
             seen.append(p["stat_label"])
 
+    # Phase-2b filter-panel option sets, derived from today's slate.
+    market_options: list[dict] = []
+    market_seen: set = set()
+    for p in props:
+        m = p["market"]
+        if m and m not in market_seen:
+            market_seen.add(m)
+            market_options.append({"key": m, "label": p["stat_label"] or m})
+    market_options.sort(key=lambda d: d["label"])
+
+    game_options: list[dict] = []
+    game_seen: set = set()
+    for p in props:
+        gk = p["game_key"]
+        if gk and gk not in game_seen:
+            game_seen.add(gk)
+            game_options.append({"key": gk, "label": p["game_label"] or gk})
+    game_options.sort(key=lambda d: d["label"])
+
     return render_template(
         "props.html",
         props=props,
         stat_labels=seen,
+        market_options=market_options,
+        game_options=game_options,
         generated_at=cache.get("generated_at"),
         prop_date=cache.get("date"),
     )
