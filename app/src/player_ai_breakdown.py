@@ -43,6 +43,31 @@ _MARKET_STAT = {
     "batter_strikeouts":    "SO",
 }
 
+
+def _short_market(market: str) -> str:
+    """Human-readable label for a prop market key.
+
+    Relocated from the retired NiceGUI pages/props.py (PR retiring the
+    legacy front-end) -- this module is its only remaining caller."""
+    mapping = {
+        "pitcher_strikeouts":   "Strikeouts",
+        "pitcher_outs":         "Outs Recorded",
+        "pitcher_hits_allowed": "Hits Allowed",
+        "pitcher_walks":        "Walks Allowed",
+        "pitcher_earned_runs":  "Earned Runs",
+        "pitcher_record_a_win": "Win",
+        "batter_hits":          "Hits",
+        "batter_total_bases":   "Total Bases",
+        "batter_home_runs":     "Home Runs",
+        "batter_rbis":          "RBIs",
+        "batter_runs_scored":   "Runs",
+        "batter_walks":         "Walks",
+        "batter_strikeouts":    "Strikeouts",
+        "batter_stolen_bases":  "Stolen Bases",
+    }
+    return mapping.get(market, market.replace("_", " ").title())
+
+
 _SECTION_KEYS = ("verdict_tier", "verdict", "matchup", "trends", "approach", "game_script")
 
 # The five badge tiers, in agree -> disagree order.  The AI returns one as
@@ -601,8 +626,7 @@ def get_breakdown(info, games, is_pitcher, prop, market, line_f,
         ctx = _collect_context(info, games, is_pitcher, prop, market, line_f,
                                summary, opp_abbrev)
         try:
-            from pages.props import _short_market as _sm
-            mlabel = _sm(market)
+            mlabel = _short_market(market)
         except Exception:                                                 # noqa: BLE001
             mlabel = (market or "").replace("_", " ")
         user = ("Generate the breakdown for this prop. Data JSON:\n"
