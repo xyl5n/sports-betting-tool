@@ -212,6 +212,150 @@
     @media (min-width: 640px) { .gg-body { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (min-width: 1024px) { .gg-body { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (min-width: 1280px) { .gg-body { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+    /* ── X-Ray data table (Phase 2e) ── */
+    .xr-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      width: 100%;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      background: #111111;
+    }
+    /* Header row + data rows share these flex specs so columns line up. */
+    .xr-row {
+      display: flex; flex-direction: row; align-items: center;
+      min-width: 900px;
+    }
+    .xr-header {
+      background: #1a1a1a;
+      border-bottom: 2px solid #2a2a2a;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .xr-data {
+      height: 44px; background: #111111;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .xr-data.xr-alt { background: rgba(255,255,255,0.025); }
+    .xr-data:hover  { background: rgba(124,58,237,0.06); }
+    .xr-data:last-child { border-bottom: 0; }
+
+    .xr-cell {
+      display: flex; align-items: center;
+      padding: 0 12px;
+    }
+    .xr-cell.center { justify-content: center; }
+    .xr-cell.right  { justify-content: flex-end; }
+    .xr-cell.col-stack {
+      flex-direction: column; gap: 1px; justify-content: center;
+    }
+
+    /* Column flex-basis -- matches NiceGUI _XRAY_COLS to the pixel */
+    .xr-col-player { flex: 1 1 180px; min-width: 160px; overflow: hidden; }
+    .xr-col-line   { flex: 0 0 80px; }
+    .xr-col-odds   { flex: 0 0 72px; }
+    .xr-col-conf   { flex: 0 0 72px; }
+    .xr-col-ev     { flex: 0 0 90px; }
+    .xr-col-l5     { flex: 0 0 110px; }
+    .xr-col-l10    { flex: 0 0 110px; }
+    .xr-col-szn    { flex: 0 0 72px; }
+    .xr-col-track  { flex: 0 0 90px; }
+
+    /* Header cell text */
+    .xr-h {
+      height: 36px;
+      font-size: 9px; font-weight: 800; letter-spacing: .6px;
+      color: #6b7280; white-space: nowrap; user-select: none;
+    }
+    .xr-h.sortable { cursor: pointer; }
+    .xr-h.sortable:hover { color: #d1d5db; }
+    .xr-h.is-active { color: #ffffff; }
+
+    /* Player cell */
+    .xr-avatar {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: #222222; border: 1px solid #2a2a2a;
+      display: flex; align-items: center; justify-content: center;
+      object-fit: cover; flex-shrink: 0; font-size: 14px;
+    }
+    .xr-player-name {
+      font-size: 12px; font-weight: 700; color: #ffffff;
+      text-decoration: none;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      display: block; max-width: 140px;
+    }
+    .xr-player-name:hover { text-decoration: underline; }
+    .xr-player-sub {
+      font-size: 8px; font-weight: 800; letter-spacing: .4px;
+      color: #6b7280; text-transform: uppercase; white-space: nowrap;
+    }
+
+    /* LINE pill */
+    .xr-line-pill {
+      font-family: ui-monospace, monospace;
+      font-size: 11px; font-weight: 800; letter-spacing: .3px;
+      padding: 2px 8px; border-radius: 6px; white-space: nowrap;
+      color: #000;
+    }
+    .xr-line-pill.over  { background: #22c55e; }
+    .xr-line-pill.under { background: #ef4444; color: #ffffff; }
+
+    /* ODDS */
+    .xr-odds {
+      font-size: 12px; font-weight: 700;
+      font-family: ui-monospace, monospace; color: #d1d5db;
+    }
+
+    /* CONF percentage (threshold colour) */
+    .xr-conf {
+      font-size: 13px; font-weight: 800;
+      font-family: ui-monospace, monospace;
+    }
+    .xr-conf-good { color: #22c55e; }
+    .xr-conf-mid  { color: #f59e0b; }
+    .xr-conf-dim  { color: #9ca3af; }
+
+    /* EV badge (small chip) */
+    .xr-ev-chip {
+      background: #1a1a1a;
+      font-size: 10px; font-weight: 800; letter-spacing: .3px;
+      padding: 2px 6px; border-radius: 999px;
+      font-family: ui-monospace, monospace; white-space: nowrap;
+    }
+    .xr-ev-pos { color: #22c55e; }
+    .xr-ev-neg { color: #ef4444; }
+    .xr-ev-dim { color: #6b7280; }
+
+    /* Hit-rate cell ("hits/total · pct%") + ROI sub-text */
+    .xr-hr-pill {
+      font-size: 10.5px; font-weight: 800; color: #ffffff;
+      font-family: ui-monospace, monospace; white-space: nowrap;
+      padding: 2px 7px; border-radius: 999px;
+    }
+    .xr-hr-plain {
+      font-size: 10.5px; color: #ffffff;
+      font-family: ui-monospace, monospace; white-space: nowrap;
+    }
+    .xr-hr-dash {
+      font-family: ui-monospace, monospace; color: #6b7280;
+    }
+    .xr-roi {
+      font-size: 8px; font-weight: 800;
+      font-family: ui-monospace, monospace; letter-spacing: .2px;
+    }
+    .xr-roi-pos { color: #22c55e; }
+    .xr-roi-neg { color: #ef4444; }
+    .xr-roi-dim { color: #6b7280; }
+
+    /* SZN average */
+    .xr-szn {
+      font-size: 12px; color: #d1d5db;
+      font-family: ui-monospace, monospace;
+    }
+
+    /* Track button inside x-ray rows: shrink to fit the 90px col */
+    .xr-cell .track-btn { padding: 4px 10px; font-size: 10.5px; }
+    .xr-cell .track-btn.is-tracked { padding: 3px 9px; }
   </style>
 </head>
 
@@ -257,7 +401,7 @@
             Reset
           </button>
 
-          <!-- View mode toggle (Phase 2d): List | By Game -->
+          <!-- View mode toggle (Phase 2d + 2e): List | By Game | X-Ray -->
           <div id="view-pills" class="flex items-center gap-1 ml-1"
                role="tablist" aria-label="View mode">
             <button type="button"
@@ -268,6 +412,10 @@
                     data-view="game"
                     class="view-pill"
                     role="tab" aria-selected="false">By Game</button>
+            <button type="button"
+                    data-view="xray"
+                    class="view-pill"
+                    role="tab" aria-selected="false">X-Ray</button>
           </div>
 
           <label for="sort-select" class="text-xs text-gray-500 hidden sm:inline">Sort</label>
@@ -387,6 +535,9 @@
     </div>
     <div id="game-groups" class="hidden flex flex-col gap-2">
       <!-- collapsible game groups injected by props.js (by-game view) -->
+    </div>
+    <div id="xray-table" class="hidden">
+      <!-- sortable data table injected by props.js (x-ray view) -->
     </div>
   </main>
 

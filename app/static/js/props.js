@@ -50,13 +50,42 @@
   function loadPersistedViewMode() {
     try {
       var v = window.localStorage.getItem(VIEW_MODE_LS_KEY);
-      if (v === "list" || v === "game") state.viewMode = v;
+      if (v === "list" || v === "game" || v === "xray") state.viewMode = v;
     } catch (e) { /* ignore */ }
   }
 
   function persistViewMode() {
     try { window.localStorage.setItem(VIEW_MODE_LS_KEY, state.viewMode); }
     catch (e) { /* ignore */ }
+  }
+
+  // ── X-Ray sort state (Phase 2e) ───────────────────────────────────────
+  // Persisted under its own localStorage key so a user who toggles into
+  // X-Ray once sees the same column sorted on the next visit.  Defaults
+  // match NiceGUI's _xray_sort closure: col=conf, asc=False.
+  state.xraySort = { col: "conf", asc: false };
+  var XRAY_SORT_LS_KEY = "propsXraySort";
+  var XRAY_SORT_COLS = ["player","line","odds","conf","ev","l5","l10","szn"];
+
+  function loadPersistedXraySort() {
+    try {
+      var raw = window.localStorage.getItem(XRAY_SORT_LS_KEY);
+      if (!raw) return;
+      var blob = JSON.parse(raw);
+      if (blob && XRAY_SORT_COLS.indexOf(blob.col) !== -1) {
+        state.xraySort.col = blob.col;
+        state.xraySort.asc = !!blob.asc;
+      }
+    } catch (e) { /* corrupted blob -> defaults */ }
+  }
+
+  function persistXraySort() {
+    try {
+      window.localStorage.setItem(
+        XRAY_SORT_LS_KEY,
+        JSON.stringify({ col: state.xraySort.col, asc: state.xraySort.asc })
+      );
+    } catch (e) { /* ignore */ }
   }
 
   function defaultPanel() {
@@ -293,13 +322,17 @@
   function render() {
     var grid   = document.getElementById("card-grid");
     var groups = document.getElementById("game-groups");
+    var xray   = document.getElementById("xray-table");
     var empty  = document.getElementById("empty-state");
     var rows   = applyFilters();
 
     if (!rows.length) {
-      grid.innerHTML = ""; if (groups) groups.innerHTML = "";
+      grid.innerHTML = "";
+      if (groups) groups.innerHTML = "";
+      if (xray)   xray.innerHTML = "";
       grid.classList.add("hidden");
       if (groups) groups.classList.add("hidden");
+      if (xray)   xray.classList.add("hidden");
       empty.classList.remove("hidden");
       return;
     }
@@ -307,10 +340,17 @@
 
     if (state.viewMode === "game" && groups) {
       grid.classList.add("hidden");
+      if (xray) xray.classList.add("hidden");
       groups.classList.remove("hidden");
       groups.innerHTML = renderByGameHTML(rows);
+    } else if (state.viewMode === "xray" && xray) {
+      grid.classList.add("hidden");
+      if (groups) groups.classList.add("hidden");
+      xray.classList.remove("hidden");
+      xray.innerHTML = renderXrayHTML(rows);
     } else {
       if (groups) groups.classList.add("hidden");
+      if (xray)   xray.classList.add("hidden");
       grid.classList.remove("hidden");
       grid.innerHTML = rows.map(function (r) { return cardHTML(r.p, r.i); }).join("");
     }
@@ -371,6 +411,257 @@
           cards +
         '</div>' +
       '</div>';
+  }
+
+  // ── X-Ray data table (Phase 2e) ────────────────────────────────────────
+  // Condensed, sortable, one-prop-per-row.  Reads from the same applyFilters()
+  // output the list / by-game views use; sort is its own dimension layered on
+  // top so the user's primary "sort dropdown" doesn't fight the column sort.
+
+  // Column defs: [header label, sort key (null = no sort), is-right-align, css class]
+  var XRAY_COLS = [
+    ["PLAYER", "player", false, "xr-col-player"],
+    ["LINE",   "line",   true,  "xr-col-line"],
+    ["ODDS",   "odds",   true,  "xr-col-odds"],
+    ["CONF",   "conf",   true,  "xr-col-conf"],
+    ["EV",     "ev",     true,  "xr-col-ev"],
+    ["L5",     "l5",     true,  "xr-col-l5"],
+    ["L10",    "l10",    true,  "xr-col-l10"],
+    ["SZN",    "szn",    true,  "xr-col-szn"],
+    ["TRACK",  null,     true,  "xr-col-track"],
+  ];
+
+  function xraySortRows(rows) {
+    var col = state.xraySort.col || "conf";
+    var asc = !!state.xraySort.asc;
+    var keyFn = xraySortKey(col);
+    var copy = rows.slice();
+    copy.sort(function (a, b) {
+      var ka = keyFn(a.p), kb = keyFn(b.p);
+      if (ka < kb) return asc ? -1 :  1;
+      if (ka > kb) return asc ?  1 : -1;
+      return 0;
+    });
+    return copy;
+  }
+
+  function xraySortKey(col) {
+    // Numeric columns return Number; player returns string lower-case.
+    // Missing values sort to the bottom in desc order (matches NiceGUI's
+    // -inf / -1 sentinels).
+    if (col === "player") {
+      return function (p) { return (p.player || "").toLowerCase(); };
+    }
+    if (col === "line") {
+      return function (p) { var v = Number(p.line); return isFinite(v) ? v : 0; };
+    }
+    if (col === "odds") {
+      return function (p) {
+        var v = Number(p.best_odds); return isFinite(v) ? v : -9999;
+      };
+    }
+    if (col === "conf") {
+      return function (p) { return Number(p.confidence) || 0; };
+    }
+    if (col === "ev") {
+      return function (p) {
+        var v = p.ev_pct;
+        if (v === null || v === undefined) return -Infinity;
+        var n = Number(v); return isFinite(n) ? n : -Infinity;
+      };
+    }
+    if (col === "l5") {
+      return function (p) {
+        if (!p.l5_games) return -1;
+        return Number(p.l5_hits) / Number(p.l5_games);
+      };
+    }
+    if (col === "l10") {
+      return function (p) {
+        if (!p.l10_games) return -1;
+        return Number(p.l10_hits) / Number(p.l10_games);
+      };
+    }
+    if (col === "szn") {
+      return function (p) {
+        var v = p.season_avg;
+        if (v === null || v === undefined) return -1;
+        var n = Number(v); return isFinite(n) ? n : -1;
+      };
+    }
+    return function () { return 0; };
+  }
+
+  function xrayHeaderHTML() {
+    var asc      = !!state.xraySort.asc;
+    var activeCl = state.xraySort.col || "conf";
+    var cells = XRAY_COLS.map(function (col) {
+      var label = col[0], key = col[1], right = col[2], cls = col[3];
+      var isActive = !!(key && key === activeCl);
+      var arrow = isActive ? (asc ? " ▲" : " ▼") : "";
+      var hClass = "xr-cell xr-h " + cls +
+                   (right ? " right" : "") +
+                   (key ? " sortable" : "") +
+                   (isActive ? " is-active" : "");
+      var attrs = key ? (' data-xr-sort="' + key + '"') : "";
+      return '<div class="' + hClass + '"' + attrs + '>' +
+             esc(label) + esc(arrow) + '</div>';
+    }).join("");
+    return '<div class="xr-row xr-header">' + cells + '</div>';
+  }
+
+  function renderXrayHTML(rows) {
+    var sorted = xraySortRows(rows);
+    var headerHTML = xrayHeaderHTML();
+    var body = sorted.map(function (r, i) {
+      return xrayRowHTML(r.p, r.i, i % 2 === 1);
+    }).join("");
+    return '<div class="xr-wrap">' + headerHTML + body + '</div>';
+  }
+
+  // Per-cell formatters (kept inline because they're only used here).
+  function oddsStr(o) {
+    if (o == null) return "—";
+    var n = Number(o);
+    if (!isFinite(n)) return String(o);
+    n = Math.trunc(n);
+    return (n > 0 ? "+" : "") + n;
+  }
+
+  function confColorClass(conf) {
+    var c = Number(conf) || 0;
+    if (c >= 0.65) return "xr-conf-good";
+    if (c >= 0.55) return "xr-conf-mid";
+    return "xr-conf-dim";
+  }
+
+  function evLabel(ev) {
+    if (ev == null) return { text: "— EV", cls: "xr-ev-dim" };
+    var v = Number(ev);
+    if (!isFinite(v)) return { text: "— EV", cls: "xr-ev-dim" };
+    var sign = v > 0 ? "+" : (v < 0 ? "-" : "");
+    var text = sign + Math.abs(v).toFixed(1) + "% EV";
+    var cls  = v > 0 ? "xr-ev-pos" : (v < 0 ? "xr-ev-neg" : "xr-ev-dim");
+    return { text: text, cls: cls };
+  }
+
+  // Hit-rate cell background -- thresholds match NiceGUI _hr_cell_bg.
+  function hrCellStyle(pct) {
+    if (pct >= 0.70) return { bg: "#22c55e", colored: true };
+    if (pct >= 0.55) return { bg: "#84cc16", colored: true };
+    if (pct >= 0.40) return { bg: "",        colored: false };
+    return { bg: "#ef4444", colored: true };
+  }
+
+  function roiColorClass(roiStr) {
+    if (!roiStr) return "xr-roi-dim";
+    var n = parseFloat(String(roiStr).replace("%", ""));
+    if (!isFinite(n)) return "xr-roi-dim";
+    return n > 0 ? "xr-roi-pos" : (n < 0 ? "xr-roi-neg" : "xr-roi-dim");
+  }
+
+  function avatarHTML(p) {
+    if (p.headshot) {
+      return '<img src="' + esc(p.headshot) +
+        '" alt="" class="xr-avatar" loading="lazy"' +
+        ' onerror="this.outerHTML=\'<div class=&quot;xr-avatar&quot;>⚾</div>\';">';
+    }
+    return '<div class="xr-avatar">⚾</div>';
+  }
+
+  function hrCellHTML(hits, games, roiStr) {
+    if (!games) {
+      return '<span class="xr-hr-dash">—</span>';
+    }
+    var pct = hits / games;
+    var sty = hrCellStyle(pct);
+    var lbl = hits + "/" + games + " · " + Math.round(pct * 100) + "%";
+    var pillHTML = sty.colored
+      ? '<span class="xr-hr-pill" style="background:' + sty.bg + '">' + esc(lbl) + '</span>'
+      : '<span class="xr-hr-plain">' + esc(lbl) + '</span>';
+    var roiHTML = roiStr
+      ? '<span class="xr-roi ' + roiColorClass(roiStr) + '">' + esc(roiStr) + '</span>'
+      : '';
+    return pillHTML + roiHTML;
+  }
+
+  function xrayRowHTML(p, idx, alt) {
+    var side    = sideOverride[idx] || p.side || "Over";
+    var isOver  = side === "Over";
+    var slug    = (p.player || "").toLowerCase().replace(/ /g, "-");
+    var sport   = (p.sport || "mlb").toLowerCase();
+
+    // PLAYER
+    var playerCell =
+      '<div class="xr-cell xr-col-player">' +
+        avatarHTML(p) +
+        '<div style="display:flex;flex-direction:column;min-width:0;margin-left:8px;">' +
+          '<a class="xr-player-name" href="/player/' + esc(sport) + '/' + esc(slug) + '">' +
+            esc(p.player || "—") +
+          '</a>' +
+          '<span class="xr-player-sub">' + esc((p.stat_label || "").toUpperCase()) + '</span>' +
+        '</div>' +
+      '</div>';
+
+    // LINE
+    var lineCell =
+      '<div class="xr-cell xr-col-line center">' +
+        '<span class="xr-line-pill ' + (isOver ? "over" : "under") + '">' +
+          (isOver ? "O " : "U ") + esc(p.line == null ? "—" : p.line) +
+        '</span>' +
+      '</div>';
+
+    // ODDS
+    var oddsCell =
+      '<div class="xr-cell xr-col-odds center">' +
+        '<span class="xr-odds">' + esc(oddsStr(p.best_odds)) + '</span>' +
+      '</div>';
+
+    // CONF
+    var confPct = Math.round((Number(p.confidence) || 0) * 100);
+    var confCell =
+      '<div class="xr-cell xr-col-conf center">' +
+        '<span class="xr-conf ' + confColorClass(p.confidence) + '">' + confPct + '%</span>' +
+      '</div>';
+
+    // EV
+    var ev = evLabel(p.ev_pct);
+    var evCell =
+      '<div class="xr-cell xr-col-ev center">' +
+        '<span class="xr-ev-chip ' + ev.cls + '">' + esc(ev.text) + '</span>' +
+      '</div>';
+
+    // L5 + L10
+    var l5Cell =
+      '<div class="xr-cell xr-col-l5 col-stack">' +
+        hrCellHTML(p.l5_hits, p.l5_games, p.l5_roi) +
+      '</div>';
+    var l10Cell =
+      '<div class="xr-cell xr-col-l10 col-stack">' +
+        hrCellHTML(p.l10_hits, p.l10_games, p.l10_roi) +
+      '</div>';
+
+    // SZN
+    var szn = (p.season_avg == null) ? "—" : Number(p.season_avg).toFixed(2);
+    var sznCell =
+      '<div class="xr-cell xr-col-szn col-stack">' +
+        '<span class="xr-szn">' + esc(szn) + '</span>' +
+        (p.szn_roi
+          ? '<span class="xr-roi ' + roiColorClass(p.szn_roi) + '">' + esc(p.szn_roi) + '</span>'
+          : '') +
+      '</div>';
+
+    // TRACK -- reuse the same button + click delegation as the list/grouped views
+    var trackCell =
+      '<div class="xr-cell xr-col-track right">' +
+        trackButtonHTML(p, idx) +
+      '</div>';
+
+    var cls = "xr-row xr-data" + (alt ? " xr-alt" : "");
+    return '<div class="' + cls + '">' +
+      playerCell + lineCell + oddsCell + confCell + evCell +
+      l5Cell + l10Cell + sznCell + trackCell +
+    '</div>';
   }
 
   // ISO UTC -> "7:05 PM ET" (matches NiceGUI _game_time_et).
@@ -450,6 +741,20 @@
         cardContainerClick(e);
       });
     }
+    var xrayRoot = document.getElementById("xray-table");
+    if (xrayRoot) {
+      xrayRoot.addEventListener("click", function (e) {
+        // Sortable header click -- handled first so the row-level Track
+        // delegation can't accidentally swallow header clicks if a Track
+        // button ever lands in a header (it doesn't today, but be safe).
+        var sortHdr = e.target.closest("[data-xr-sort]");
+        if (sortHdr) {
+          onXraySortClick(sortHdr.getAttribute("data-xr-sort"));
+          return;
+        }
+        cardContainerClick(e);
+      });
+    }
 
     // ── Filter panel (Phase 2b) ───────────────────────────────────────
     initFilterPanel();
@@ -491,6 +796,7 @@
 
   function initViewToggle() {
     loadPersistedViewMode();
+    loadPersistedXraySort();
     syncViewPills();
     var row = document.getElementById("view-pills");
     if (!row) return;
@@ -498,13 +804,27 @@
       var btn = e.target.closest("[data-view]");
       if (!btn) return;
       var v = btn.getAttribute("data-view");
-      if (v !== "list" && v !== "game") return;
+      if (v !== "list" && v !== "game" && v !== "xray") return;
       if (v === state.viewMode) return;
       state.viewMode = v;
       persistViewMode();
       syncViewPills();
       render();
     });
+  }
+
+  function onXraySortClick(col) {
+    if (XRAY_SORT_COLS.indexOf(col) === -1) return;
+    var s = state.xraySort;
+    if (s.col === col) {
+      s.asc = !s.asc;
+    } else {
+      s.col = col;
+      // Player → ascending by default (A–Z); numeric columns → descending.
+      s.asc = (col === "player");
+    }
+    persistXraySort();
+    render();
   }
 
   function syncViewPills() {
