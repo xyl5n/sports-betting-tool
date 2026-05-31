@@ -169,6 +169,7 @@
 
   // ── 2. Analysis: quota + cache info (read via plain GET, like a snapshot) ──
   function loadQuota() {
+    // GET read — SBT.apiPost is POST-only; raw fetch is correct here
     fetch("/api/odds/usage", {headers: {"Accept": "application/json"}})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
@@ -190,6 +191,7 @@
   }
 
   function loadCacheInfo() {
+    // GET read — SBT.apiPost is POST-only; raw fetch is correct here
     fetch("/api/odds/cache_status?sport=both", {headers: {"Accept": "application/json"}})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
@@ -229,6 +231,7 @@
     }
   }
   function aiPollOnce() {
+    // GET read — SBT.apiPost is POST-only; raw fetch is correct here
     fetch("/api/admin/ai_analysis/status", {headers: {"Accept": "application/json"}})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
@@ -717,6 +720,7 @@
   function runDiagnostics() {
     var host = el("ad-diag-results");
     if (host) host.innerHTML = '<div class="ad-dim text-[12px] italic">Running probes…</div>';
+    // GET read — SBT.apiPost is POST-only; raw fetch is correct here
     fetch("/api/admin/diagnostics", {headers: {"Accept": "application/json"}})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) { renderDiag(d ? d.results : []); })
