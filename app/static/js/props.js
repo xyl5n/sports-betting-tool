@@ -1234,13 +1234,19 @@
   //   2. swipe-right gesture / ✓ button   -- swipe mode (passes afterAttempt)
   //   3. anywhere else that needs to track a prop programmatically
   //
+  // The fetch + 409-dedup + revert-on-error state machine lives in
+  // /static/js/lib.js's SBT.apiPost; this function is the thin wrapper
+  // that supplies the track-specific payload, success toast text, and
+  // page-local state (trackedOverride / trackInflight per-index maps).
+  //
   // opts:
-  //   btnEl        -- if provided, the button gets the optimistic .is-tracked
-  //                   + .is-pending classes (visible feedback on the card);
-  //                   on real failure the button is reverted via revertTrack
-  //   afterAttempt -- callback fired in the `finally` block regardless of
-  //                   outcome; swipe mode uses this to advance to the next
-  //                   card after either success, dedup, or failure
+  //   btnEl        -- if provided, the button gets the optimistic
+  //                   .is-tracked + .is-pending classes (visible feedback
+  //                   on the card); on real failure the button is
+  //                   reverted via revertTrack
+  //   afterAttempt -- callback fired regardless of outcome; swipe mode
+  //                   uses this to advance to the next card after either
+  //                   success, dedup, or failure
   function trackProp(p, idx, opts) {
     opts = opts || {};
     if (trackInflight[idx]) {
@@ -1253,11 +1259,7 @@
     trackedOverride[idx] = true;
     trackInflight[idx]   = true;
     var btn = opts.btnEl;
-    if (btn) {
-      btn.classList.add("is-tracked", "is-pending");
-      btn.disabled = true;
-      btn.textContent = "Tracked ✓";
-    }
+    if (btn) btn.classList.add("is-tracked");
 
     var payload = {
       player:          p.player || "",
@@ -1271,38 +1273,35 @@
       event_id:        p.event_id,
       commence_time:   p.commence_time || null,
     };
+    var sideTxt = payload.side;
+    var lineTxt = (p.line == null ? "" : p.line);
 
-    fetch("/api/props/track", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body:    JSON.stringify(payload),
-    }).then(function (resp) {
-      return resp.json().then(function (data) { return { resp: resp, data: data }; });
-    }).then(function (r) {
-      if (btn) btn.classList.remove("is-pending");
-      var data = r.data || {};
-      if (r.resp.ok && data.success) {
+    SBT.apiPost("/api/props/track", payload, {
+      btn:          btn,
+      pendingClass: "is-pending",
+      pendingLabel: "Tracked ✓",
+      onSuccess: function (data) {
         var amt = (typeof data.amount === "number")
           ? " ($" + data.amount.toFixed(2) + ")" : "";
-        toast("Tracked: " + (p.player || "") + " " +
-              (payload.side || "") + " " + (p.line == null ? "" : p.line) + amt,
-              "positive");
-      } else if (r.resp.status === 409 ||
-                 (data.error && /already tracked/i.test(data.error))) {
-        toast("Already tracked.", "info");
-      } else {
+        SBT.toast(
+          "Tracked: " + (p.player || "") + " " + sideTxt + " " + lineTxt + amt,
+          "positive"
+        );
+      },
+      onDedup: function () {
+        SBT.toast("Already tracked.", "info");
+      },
+      onError: function (err, data, status) {
         revertTrack(idx, btn);
-        toast("Track failed: " + (data.error || ("HTTP " + r.resp.status)),
-              "negative");
-      }
-    }).catch(function (err) {
-      if (btn) btn.classList.remove("is-pending");
-      revertTrack(idx, btn);
-      toast("Track failed: " + (err && err.message ? err.message : "network error"),
-            "negative");
-    }).finally(function () {
-      trackInflight[idx] = false;
-      if (opts.afterAttempt) opts.afterAttempt();
+        var msg = (data && data.error)
+          || (err && err.message)
+          || (status ? ("HTTP " + status) : "network error");
+        SBT.toast("Track failed: " + msg, "negative");
+      },
+      afterAttempt: function () {
+        trackInflight[idx] = false;
+        if (opts.afterAttempt) opts.afterAttempt();
+      },
     });
   }
 
@@ -1313,25 +1312,6 @@
       btn.disabled = false;
       btn.textContent = "Track";
     }
-  }
-
-  // Toast: simple bottom-right stack.  4s auto-dismiss; positive/info/negative
-  // pick the left-border color.  No deps -- vanilla DOM.
-  function toast(msg, kind) {
-    var stack = document.getElementById("toast-stack");
-    if (!stack) return;
-    var el = document.createElement("div");
-    el.className = "toast " + (kind || "info");
-    el.textContent = String(msg == null ? "" : msg);
-    stack.appendChild(el);
-    // Trigger CSS transition on next frame so the slide-in plays.
-    requestAnimationFrame(function () { el.classList.add("show"); });
-    setTimeout(function () {
-      el.classList.remove("show");
-      setTimeout(function () {
-        if (el.parentNode) el.parentNode.removeChild(el);
-      }, 220);
-    }, 4000);
   }
 
   if (document.readyState === "loading") {
