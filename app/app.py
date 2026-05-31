@@ -7068,6 +7068,623 @@ def mybets_add():
     return jsonify({"success": True, "id": new_id, "stake": stake})
 
 
+# ── /mybets Flask port (PR #339) ────────────────────────────────────────────
+# Helpers + view model + GET routes for the Tailwind My Bets page.  Backend
+# endpoints (/api/mybets/add_options, /add, /edit, /remove) above this block
+# are already wired and consumed by mybets.js -- no new POST routes here.
+
+_MB_MARKET_LABEL: dict[str, str] = {
+    "pitcher_strikeouts":   "Ks",
+    "pitcher_outs":         "Outs",
+    "pitcher_hits_allowed": "H Allow",
+    "pitcher_walks":        "BB Allow",
+    "pitcher_earned_runs":  "ER",
+    "batter_hits":          "Hits",
+    "batter_total_bases":   "Total Bases",
+    "batter_home_runs":     "Home Runs",
+    "batter_rbis":          "RBIs",
+    "batter_runs_scored":   "Runs",
+    "batter_walks":         "Walks",
+    "batter_strikeouts":    "Strikeouts",
+}
+
+_MB_TYPE_LABEL: dict[str, str] = {
+    "single":   "Moneyline",
+    "run_line": "Run Line",
+    "spread":   "Spread",
+    "totals":   "Total",
+}
+
+_MB_TYPE_SHORT: dict[str, str] = {
+    "single": "ML", "run_line": "RL", "spread": "SPD", "totals": "TOT",
+}
+
+
+def _mb_odds_str(o) -> str:
+    if not isinstance(o, (int, float)):
+        return "—"
+    n = int(o)
+    return f"+{n}" if n > 0 else str(n)
+
+
+def _mb_bet_line_value(b: dict):
+    """Bettor-facing line for a game bet (None for ML).  Run line/spread are
+    stored negated (settlement threshold); totals stored as-is."""
+    bt = (b.get("bet_type") or "single").lower()
+    pl = b.get("prop_line")
+    if pl is None:
+        return None
+    try:
+        return -float(pl) if bt in ("run_line", "spread") else float(pl)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mb_bet_line_str(b: dict) -> str:
+    """Signed handicap for RL / spread display (empty for ML / totals)."""
+    bt = (b.get("bet_type") or "single").lower()
+    if bt not in ("run_line", "spread"):
+        return ""
+    v = _mb_bet_line_value(b)
+    if v is None:
+        return ""
+    return f"{v:+g}"
+
+
+def _mb_confidence_pct(b: dict):
+    p = b.get("model_prob")
+    if not isinstance(p, (int, float)):
+        return None
+    return int(round(float(p) * 100))
+
+
+def _mb_placed_date(b: dict) -> str:
+    iso = b.get("placed_at") or b.get("commence_time") or ""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.strftime("%b %-d")
+    except Exception:                                                      # noqa: BLE001
+        return ""
+
+
+def _mb_game_datetime_str(b: dict) -> str:
+    """Game date + start time in ET, e.g. 'May 25 · 6:11 PM ET'."""
+    iso = b.get("commence_time")
+    if iso:
+        try:
+            from datetime import datetime
+            dt = (datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+                  .astimezone(_ET))
+            return dt.strftime("%b %-d · %-I:%M %p ET")
+        except Exception:                                                  # noqa: BLE001
+            pass
+    return _mb_placed_date(b)
+
+
+def _mb_matchup_str(b: dict) -> str:
+    away = b.get("away_team") or ""
+    home = b.get("home_team") or ""
+    if away and home:
+        return f"{away} @ {home}"
+    return b.get("game") or ""
+
+
+def _mb_shape_game_bet(b: dict, sport: str, settled: bool) -> dict:
+    """Pre-format one game bet (open or settled) for the unified list.
+    Mirrors pages/mybets.py _game_bet_row's render logic."""
+    bet_type = (b.get("bet_type") or "single").lower()
+    team     = b.get("bet_team") or b.get("parlay_name") or "—"
+    line_s   = _mb_bet_line_str(b)
+    odds_s   = _mb_odds_str(b.get("american_odds"))
+    conf     = _mb_confidence_pct(b)
+    amount   = float(b.get("confirmed_amount") or 0)
+    pnl      = float(b.get("confirmed_pnl")    or 0) if settled else 0.0
+    result   = (b.get("result") or "").lower()
+
+    short = _MB_TYPE_SHORT.get(bet_type, "")
+    badge = f"{sport.upper()} · {short}" if short else sport.upper()
+
+    if bet_type == "single":
+        pick = f"{team} ML"
+    elif bet_type in ("run_line", "spread") and line_s:
+        pick = f"{team} {line_s}"
+    else:
+        pick = team
+
+    sub_parts: list[str] = []
+    matchup = _mb_matchup_str(b)
+    if matchup:
+        sub_parts.append(matchup)
+    if conf is not None:
+        sub_parts.append(f"{conf}% confidence")
+    if odds_s != "—":
+        sub_parts.append(odds_s)
+
+    # Money + result colour mirrors NiceGUI's branching.
+    if settled and result == "win":
+        money_text, money_color, pick_color = f"+${pnl:.2f}", "pos", "pos"
+    elif settled and result == "loss":
+        money_text, money_color, pick_color = f"-${amount:.2f}", "neg", "neg"
+    elif settled and result == "push":
+        money_text, money_color, pick_color = "$0.00", "dim", "text"
+    else:
+        money_text, money_color, pick_color = f"${amount:.2f}", "text", "text"
+    status_text  = result.upper() if settled and result else "PENDING"
+    status_color = {"win": "pos", "loss": "neg", "push": "warn",
+                    "void": "dim"}.get(result, "dim")
+    border_color = (status_color if settled and result in ("win", "loss", "push")
+                    else "border")
+
+    return {
+        "kind":            "game",
+        "sport":           sport,
+        "id":              b.get("id"),
+        "bet_type":        bet_type,
+        "badge":           badge,
+        "pick":            pick,
+        "pick_color":      pick_color,
+        "sub_line":        "  ·  ".join(sub_parts),
+        "game_dt":         _mb_game_datetime_str(b),
+        "money_text":      money_text,
+        "money_color":     money_color,
+        "status_text":     status_text,
+        "status_color":    status_color,
+        "border_color":    border_color,
+        "settled":         settled,
+        # Raw fields needed by the edit panel:
+        "odds":            b.get("american_odds"),
+        "line":            _mb_bet_line_value(b),
+        "has_line":        bet_type != "single",
+        "amount":          amount,
+        "actual_payout":   b.get("actual_payout"),
+        "confidence_pct":  conf,
+        # Sort keys (used by the snapshot poll; not surfaced to the template):
+        "commence_time":   b.get("commence_time") or "",
+        "settled_at":      b.get("settled_at") or "",
+    }
+
+
+def _mb_shape_prop_bet(b: dict, settled: bool) -> dict:
+    """Pre-format one prop bet (open or settled) for the unified list.
+    Mirrors pages/mybets.py _prop_bet_row."""
+    side    = (b.get("side") or "Over").strip().title()
+    player  = b.get("player") or "—"
+    raw_mkt = b.get("market", "")
+    market  = _MB_MARKET_LABEL.get(raw_mkt, (raw_mkt or "").replace("_", " ").title())
+    line    = b.get("line")
+    line_s  = f"{float(line):.1f}" if line is not None else "—"
+    conf    = b.get("confidence")
+    pv      = b.get("predicted_value")
+    odds    = b.get("odds")
+    odds_s  = (f"+{odds}" if (isinstance(odds, int) and odds > 0) else
+               (str(odds) if isinstance(odds, int) else None))
+    matchup = b.get("game") or b.get("team") or ""
+    game_dt = _mb_game_datetime_str(b)
+    result  = (b.get("result") or "").lower()
+
+    pick_line = " ".join(s for s in (player, side, line_s, market) if s).strip()
+    l2 = [x for x in (
+        matchup,
+        (f"{conf * 100:.0f}% confidence" if isinstance(conf, (int, float)) else None),
+        (f"{float(pv):.1f} projected" if pv is not None else None),
+    ) if x]
+    l3 = [x for x in (odds_s, game_dt) if x]
+
+    # Money: pending shows stake + potential, settled shows pnl.
+    money_lines: list[dict] = []
+    try:
+        from src.props_picks_tracker import _FLAT_STAKE, _payout_multiplier
+        stake     = float(_FLAT_STAKE)
+        potential = round(_FLAT_STAKE * _payout_multiplier(odds), 2)
+        mpnl      = float(b.get("model_pnl") or 0.0)
+        if settled and result in ("won", "win"):
+            money_lines = [{"text": f"+${mpnl:.2f}",       "color": "pos"}]
+        elif settled and result in ("lost", "loss"):
+            money_lines = [{"text": f"-${abs(mpnl):.2f}",  "color": "neg"}]
+        elif settled and result == "void":
+            money_lines = [{"text": "$0.00",               "color": "dim"}]
+        else:
+            money_lines = [
+                {"text": f"${stake:.2f}",                  "color": "text"},
+                {"text": f"to win ${potential:.2f}",       "color": "dim"},
+            ]
+    except Exception:                                                      # noqa: BLE001
+        money_lines = []
+
+    if settled and result in ("won", "win"):
+        pick_color, status_color = "pos", "pos"
+    elif settled and result in ("lost", "loss"):
+        pick_color, status_color = "neg", "neg"
+    elif settled and result == "void":
+        pick_color, status_color = "text", "warn"
+    else:
+        pick_color, status_color = "text", "dim"
+    status_text  = result.upper() if settled and result else "PENDING"
+    border_color = (status_color
+                    if settled and result in ("won", "win", "lost", "loss", "void")
+                    else "border")
+
+    return {
+        "kind":           "prop",
+        "sport":          "mlb",
+        "id":             b.get("id"),
+        "market":         raw_mkt,
+        "badge":          "MLB · PROP",
+        "pick":           pick_line,
+        "pick_color":     pick_color,
+        "sub_line":       "  ·  ".join(l2),
+        "extra_line":     "  ·  ".join(l3),
+        "money_lines":    money_lines,
+        "status_text":    status_text,
+        "status_color":   status_color,
+        "border_color":   border_color,
+        "settled":        settled,
+        "odds":           b.get("odds"),
+        "line":           b.get("line"),
+        "has_line":       True,
+        "confidence_pct": (int(round(float(conf) * 100))
+                           if isinstance(conf, (int, float)) else None),
+        "actual_payout":  b.get("actual_payout"),
+        "commence_time":  b.get("commence_time") or "",
+        "settled_at":     b.get("settled_at") or b.get("recorded_at") or "",
+    }
+
+
+def _mb_bankroll_block() -> dict:
+    """START / CURRENT / P/L / AT RISK + Today's Budget.  Source of truth is
+    src.supa_ledger.personal() when available; falls back to the local Ledger
+    files (same logic as pages/mybets.py _personal_bankroll)."""
+    start = current = pnl = at_risk = 0.0
+    budget_total = max_per_bet = remaining = 0.0
+    mlb = wnba = None
+    supa = None
+
+    try:
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            supa = _sl.personal()
+    except Exception:                                                      # noqa: BLE001
+        supa = None
+
+    if supa is not None:
+        try:
+            start   = float(supa.starting())
+            current = float(supa.bankroll())
+            pnl     = current - start
+            at_risk = float(sum(float(b.get("stake") or 0) for b in supa.active_bets()))
+            limit   = supa.daily_limit() or {}
+            budget_total = float(limit.get("total")        or 0.0)
+            max_per_bet  = float(limit.get("max_per_bet")  or 0.0)
+            remaining    = float(limit.get("remaining")    or 0.0)
+        except Exception:                                                  # noqa: BLE001
+            supa = None
+
+    if supa is None:
+        try:
+            mlb  = Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
+            wnba = Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
+            s = mlb.get_summary()
+            start   = float(s.get("personal_starting_bankroll", 1000))
+            current = float(s.get("personal_bankroll", start))
+            pnl     = current - start
+            open_confirmed = (
+                [b for b in (mlb.data.get("open_bets")  or []) if b.get("confirmed")]
+                + [b for b in (wnba.data.get("open_bets") or []) if b.get("confirmed")]
+            )
+            at_risk = sum(float(b.get("confirmed_amount") or 0) for b in open_confirmed)
+            from src.ledger import compute_daily_budget
+            budget = compute_daily_budget(current) or {}
+            budget_total = float(budget.get("total")       or 0.0)
+            max_per_bet  = float(budget.get("max_per_bet") or 0.0)
+            try:
+                today_et = datetime.now(_ET).date().isoformat()
+                spent = (mlb._daily_exposure(today_et, confirmed_only=True)
+                         + wnba._daily_exposure(today_et, confirmed_only=True))
+            except Exception:                                              # noqa: BLE001
+                spent = 0.0
+            remaining = max(0.0, budget_total - float(spent))
+        except Exception:                                                  # noqa: BLE001
+            start = current = 1000.0
+            pnl = at_risk = budget_total = max_per_bet = remaining = 0.0
+
+    return {
+        "start":           start,
+        "current":         current,
+        "pnl":             pnl,
+        "pnl_sign":        "+" if pnl >= 0 else "−",
+        "pnl_abs":         abs(pnl),
+        "pnl_color":       "pos" if pnl >= 0 else "neg",
+        "at_risk":         at_risk,
+        "budget_total":    budget_total,
+        "budget_max":      max_per_bet,
+        "budget_remaining": remaining,
+        "remaining_color": "pos" if remaining > 0 else "neg",
+    }
+
+
+def _mb_unified_bets() -> tuple[list[dict], list[dict]]:
+    """All confirmed game bets (MLB + WNBA) + all prop bets, shaped for the
+    unified list.  Open bets sorted soonest-first; settled most-recent first.
+    History capped at 50 prop bets like NiceGUI."""
+    open_items: list[dict] = []
+    settled_items: list[dict] = []
+
+    for sport in ("mlb", "wnba"):
+        try:
+            path = "data/wnba_ledger.json" if sport == "wnba" else "data/ledger.json"
+            ledger = Ledger(path=path, starting_bankroll=1000.0)
+        except Exception:                                                  # noqa: BLE001
+            continue
+        for b in (ledger.data.get("open_bets") or []):
+            if not b.get("confirmed"):
+                continue
+            open_items.append(_mb_shape_game_bet(b, sport, settled=False))
+        for b in (ledger.data.get("history") or []):
+            if not b.get("confirmed"):
+                continue
+            settled_items.append(_mb_shape_game_bet(b, sport, settled=True))
+
+    try:
+        from src import props_picks_tracker as _ppt
+        _ppt.reload()
+        p_open  = _ppt.get_open()    or []
+        p_hist  = _ppt.get_history() or []
+    except Exception:                                                      # noqa: BLE001
+        p_open, p_hist = [], []
+
+    for b in p_open:
+        open_items.append(_mb_shape_prop_bet(b, settled=False))
+    for b in p_hist[:50]:
+        settled_items.append(_mb_shape_prop_bet(b, settled=True))
+
+    open_items.sort(key=lambda it: it.get("commence_time") or "9999-99-99")
+    settled_items.sort(key=lambda it: it.get("settled_at") or "", reverse=True)
+    return open_items, settled_items
+
+
+def _mb_recommendations() -> tuple[list[dict], list[dict]]:
+    """Today's untracked model picks (game + prop), sorted by confidence DESC.
+    Mirrors pages/mybets.py _build_recommendations + _build_prop_recommendations."""
+    try:
+        hydrate_state()
+    except Exception:                                                      # noqa: BLE001
+        pass
+    from components import track_button as _tb
+    from components import live_score as _ls
+    _backend = sys.modules[__name__]
+
+    game_recs: list[dict] = []
+    for sport, state in (("mlb", _analysis_state), ("wnba", _wnba_analysis_state)):
+        for g in (state.get("results") or []):
+            if g.get("_no_model") or g.get("_no_odds"):
+                continue
+            gid = g.get("id") or g.get("game_id")
+            if not gid:
+                continue
+            try:
+                started = _ls.game_has_started(
+                    _backend,
+                    commence_time=g.get("commence_time"),
+                    home_team=g.get("home_team"),
+                    away_team=g.get("away_team"),
+                    sport=sport,
+                )
+            except Exception:                                              # noqa: BLE001
+                started = False
+            if started:
+                continue
+            try:
+                tracked = _tb.tracked_bet_types(_backend, gid, sport)
+            except Exception:                                              # noqa: BLE001
+                tracked = set()
+            matchup = (f"{g.get('away_team', '')} @ "
+                       f"{g.get('home_team', '')}").strip(" @")
+
+            # Moneyline (both sports).
+            if g.get("pick_team") and "single" not in tracked:
+                game_recs.append(_mb_shape_game_rec(
+                    sport=sport, gid=gid, bet_type="ml",
+                    team=g.get("pick_team"), line="",
+                    odds=g.get("pick_odds"), conf=g.get("pick_prob"),
+                    matchup=matchup, type_label="Moneyline",
+                ))
+            if sport != "mlb":
+                continue   # RL / totals tracking is MLB-only
+            rl = g.get("run_line") or {}
+            if rl.get("pick_team") and "run_line" not in tracked:
+                pt = rl.get("run_line_point")
+                line_s = f"{float(pt):+g}" if isinstance(pt, (int, float)) else ""
+                game_recs.append(_mb_shape_game_rec(
+                    sport=sport, gid=gid, bet_type="rl",
+                    team=rl.get("pick_team"), line=line_s,
+                    odds=rl.get("pick_odds"), conf=rl.get("pick_prob"),
+                    matchup=matchup, type_label="Run Line",
+                ))
+            tot = g.get("totals") or {}
+            if tot.get("total_line") and "totals" not in tracked:
+                direction = (tot.get("direction") or "over").title()
+                game_recs.append(_mb_shape_game_rec(
+                    sport=sport, gid=gid, bet_type="total",
+                    team=f"{direction} {tot.get('total_line')}", line="",
+                    odds=tot.get("pick_odds"), conf=tot.get("pick_prob"),
+                    matchup=matchup, type_label="Total",
+                ))
+    game_recs.sort(key=lambda p: -float(p.get("conf_raw") or 0.0))
+
+    prop_recs: list[dict] = []
+    try:
+        from src.props_scored_cache import load_scored_props
+        from src import props_picks_tracker as _ppt
+        picks = (load_scored_props() or {}).get("picks") or []
+
+        def _key(d):
+            return (
+                d.get("player"),
+                d.get("market"),
+                round(float(d.get("line") or 0), 2),
+                (d.get("side") or "").strip().title(),
+            )
+        try:
+            open_keys = {_key(p) for p in _ppt.get_open()}
+        except Exception:                                                  # noqa: BLE001
+            open_keys = set()
+
+        for r in picks:
+            if _key(r) in open_keys:
+                continue
+            try:
+                started = _ls.game_has_started(
+                    _backend,
+                    commence_time=r.get("commence_time"),
+                    home_team=r.get("home_team"),
+                    away_team=r.get("away_team"),
+                    sport="mlb",
+                )
+            except Exception:                                              # noqa: BLE001
+                started = False
+            if started:
+                continue
+            prop_recs.append(_mb_shape_prop_rec(r))
+    except Exception:                                                      # noqa: BLE001
+        pass
+    prop_recs.sort(key=lambda p: -float(p.get("conf_raw") or 0.0))
+    return game_recs, prop_recs
+
+
+def _mb_shape_game_rec(*, sport, gid, bet_type, team, line, odds, conf,
+                       matchup, type_label) -> dict:
+    """One game-pick recommendation row.  Pre-builds the track URL + body so
+    mybets.js doesn't need per-bet-type branching at click time (matches the
+    /props page's pattern of server-side payload shaping)."""
+    conf_s = (f"{int(round(float(conf) * 100))}%"
+              if isinstance(conf, (int, float)) else "—")
+    odds_s = _mb_odds_str(odds)
+    detail = type_label + (f" {line}" if line else "")
+    if odds_s != "—":
+        detail += f" ({odds_s})"
+    if bet_type == "ml":
+        path = (f"/api/ledger/confirm/{gid}" if sport == "mlb"
+                else f"/api/wnba/ledger/confirm/{gid}")
+        body = {}                       # bankroll added client-side
+    else:
+        path = "/api/ledger/track_prop"
+        body = {
+            "game_id":  gid,
+            "bet_type": "run_line" if bet_type == "rl" else "totals",
+        }
+    return {
+        "kind":       "game",
+        "sport":      sport,
+        "game_id":    gid,
+        "bet_type":   bet_type,
+        "team":       team or "—",
+        "type_label": type_label,
+        "detail":     detail,
+        "conf_str":   conf_s,
+        "conf_raw":   conf,
+        "matchup":    matchup,
+        "track_url":  path,
+        "track_body": body,
+    }
+
+
+def _mb_shape_prop_rec(r: dict) -> dict:
+    """One prop-pick recommendation row.  Pre-built /api/props/track payload
+    so the client just forwards it via SBT.apiPost."""
+    conf = r.get("confidence")
+    conf_s = (f"{int(round(float(conf) * 100))}%"
+              if isinstance(conf, (int, float)) else "—")
+    odds_s = _mb_odds_str(r.get("best_odds"))
+    market = (r.get("market") or "").replace("_", " ").title()
+    side   = (r.get("side") or "").title()
+    line   = r.get("line")
+    detail = f"{side} {line} {market}".strip()
+    if odds_s != "—":
+        detail += f" ({odds_s})"
+    matchup = (f"{r.get('away_team', '')} @ "
+               f"{r.get('home_team', '')}").strip(" @")
+    return {
+        "kind":       "prop",
+        "player":     r.get("player") or "—",
+        "detail":     detail,
+        "conf_str":   conf_s,
+        "conf_raw":   conf,
+        "matchup":    matchup,
+        "track_url":  "/api/props/track",
+        "track_body": {
+            "player":          r.get("player", ""),
+            "market":          r.get("market", ""),
+            "line":            r.get("line"),
+            "side":            r.get("side", "Over"),
+            "odds":            r.get("best_odds"),
+            "confidence":      r.get("confidence"),
+            "predicted_value": r.get("predicted_value"),
+            "team":            r.get("team", ""),
+            "event_id":        r.get("event_id"),
+            "commence_time":   r.get("commence_time"),
+        },
+    }
+
+
+def _mybets_view_model() -> dict:
+    """Single dict consumed by both the initial /mybets render and the 60 s
+    snapshot poll.  Every shape decision happens here so mybets.html stays
+    logic-free and mybets.js just renders strings/numbers it receives."""
+    bankroll = _mb_bankroll_block()
+    open_bets, settled_bets = _mb_unified_bets()
+    rec_games, rec_props = _mb_recommendations()
+    return {
+        "bankroll":            bankroll,
+        "open_bets":           open_bets,
+        "settled_bets":        settled_bets,
+        "open_count":          len(open_bets),
+        "settled_count":       len(settled_bets),
+        "rec_games":           rec_games,
+        "rec_props":           rec_props,
+        "rec_total":           len(rec_games) + len(rec_props),
+    }
+
+
+@app.route("/mybets")
+def mybets_page():
+    """Tailwind My Bets page.  Hydrates from a JSON island; 60 s
+    SBT.apiPost('/api/mybets/snapshot') keeps the bankroll + lists fresh
+    as the background settle job lands results."""
+    import traceback as _tb
+    print("[MYBETS] route hit", flush=True, file=sys.stderr)
+    try:
+        vm = _mybets_view_model()
+        print(
+            f"[MYBETS] vm ok -- open={vm.get('open_count')} "
+            f"settled={vm.get('settled_count')} recs={vm.get('rec_total')}",
+            flush=True, file=sys.stderr,
+        )
+    except Exception:                                                      # noqa: BLE001
+        _tb.print_exc(file=sys.stderr)
+        vm = {
+            "bankroll": {"start": 0, "current": 0, "pnl": 0, "pnl_sign": "+",
+                         "pnl_abs": 0, "pnl_color": "dim", "at_risk": 0,
+                         "budget_total": 0, "budget_max": 0,
+                         "budget_remaining": 0, "remaining_color": "dim"},
+            "open_bets": [], "settled_bets": [],
+            "open_count": 0, "settled_count": 0,
+            "rec_games": [], "rec_props": [], "rec_total": 0,
+        }
+    return render_template("mybets.html", **vm)
+
+
+@app.route("/api/mybets/snapshot", methods=["GET"])
+def mybets_snapshot():
+    """Same view-model dict the /mybets route renders, returned as JSON for
+    the page's 60 s poll.  Smaller wire payload than re-rendering HTML and
+    avoids template diffing on the client."""
+    try:
+        return jsonify(_py(_mybets_view_model()))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"MYBETS-SNAPSHOT: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
 
 
 def _load_explain_cache() -> dict:
