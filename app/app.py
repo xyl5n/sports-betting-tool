@@ -7805,6 +7805,313 @@ def mybets_snapshot():
         return jsonify({"error": str(exc)}), 500
 
 
+# ── /modelbets Flask port (read-only model dashboard) ───────────────────────
+# Mirrors pages/model.py: model bankroll hero, record-by-bet-type, today's
+# model picks (game + prop), per-classifier accuracy.  Read-only -- no
+# mutations, so no SBT.apiPost; the page just renders the view model + polls
+# /api/modelbets/snapshot every 60 s (same cadence as NiceGUI's ui.timer).
+
+_MB_CATS = (
+    ("moneyline",       "Moneyline"),
+    ("run_line_spread", "Run Line / Spread"),
+    ("totals",          "Totals"),
+)
+
+
+def _modelbets_bankroll() -> dict:
+    """Model bankroll hero: start / current / P&L + record + at-risk.
+    Source-of-truth ladder matches pages/model.py _bankroll_card."""
+    start = current = at_risk = 0.0
+    supa = None
+    try:
+        from src import supa_ledger as _sl
+        if _sl.db.is_supabase():
+            supa = _sl.model()
+    except Exception:                                                      # noqa: BLE001
+        supa = None
+
+    if supa is not None:
+        try:
+            start   = float(supa.starting())
+            current = float(supa.bankroll())
+            at_risk = float(sum(float(b.get("stake") or 0) for b in supa.active_bets()))
+        except Exception:                                                  # noqa: BLE001
+            supa = None
+    if supa is None:
+        try:
+            mlb  = Ledger(path="data/ledger.json",      starting_bankroll=1000.0)
+            wnba = Ledger(path="data/wnba_ledger.json", starting_bankroll=1000.0)
+            start   = float(mlb.data.get("model_starting_bankroll", 1000.0))
+            current = float(mlb.data.get("model_bankroll", start))
+            at_risk = sum(
+                float(b.get("model_amount") or 0)
+                for ld in (mlb, wnba)
+                for b in (ld.data.get("open_bets") or [])
+                if not b.get("confirmed") and not b.get("limit_reached")
+            )
+        except Exception:                                                  # noqa: BLE001
+            start = current = 1000.0
+            at_risk = 0.0
+
+    pnl = current - start
+    # W/L from the model_picks combined store (same source as the home GAME
+    # MODELS chip), not the ledger -- keeps the numbers agreeing.
+    w = l = 0
+    try:
+        from pages import home_stats as hs
+        ov = hs.tracker_records()["overall"]
+        w = int(ov.get("wins") or 0)
+        l = int(ov.get("losses") or 0)
+    except Exception:                                                      # noqa: BLE001
+        pass
+    total = w + l
+    record_pct = f"{(w / total * 100):.1f}%" if total else "—"
+
+    return {
+        "start":      start,
+        "current":    current,
+        "pnl":        pnl,
+        "pnl_sign":   "+" if pnl >= 0 else "−",
+        "pnl_abs":    abs(pnl),
+        "pnl_color":  "pos" if pnl >= 0 else "neg",
+        "at_risk":    at_risk,
+        "record_w":   w,
+        "record_l":   l,
+        "record_pct": record_pct,
+    }
+
+
+def _modelbets_type_records() -> list[dict]:
+    """Per-bet-type W/L from home_stats.tracker_records()['by_bet_type']."""
+    rows: list[dict] = []
+    try:
+        from pages import home_stats as hs
+        by_cat = hs.tracker_records()["by_bet_type"]
+    except Exception:                                                      # noqa: BLE001
+        by_cat = {}
+    for key, label in _MB_CATS:
+        c = by_cat.get(key) or {"wins": 0, "losses": 0}
+        w = int(c.get("wins") or 0)
+        l = int(c.get("losses") or 0)
+        total = w + l
+        rows.append({
+            "label": label, "wins": w, "losses": l,
+            "pct": f"{(w / total * 100):.1f}%" if total else "—",
+        })
+    return rows
+
+
+def _modelbets_result_index() -> dict:
+    """{(game_id, bet_type): history_row} across both ledgers, so each daily
+    pick can show its settled result + P&L.  Mirrors model.py
+    _build_result_index."""
+    out: dict = {}
+    for path in ("data/ledger.json", "data/wnba_ledger.json"):
+        try:
+            led = Ledger(path=path, starting_bankroll=1000.0)
+        except Exception:                                                  # noqa: BLE001
+            continue
+        for h in (led.data.get("history") or []):
+            gid = h.get("game_id")
+            bt  = h.get("bet_type") or "single"
+            if gid:
+                out[(str(gid), str(bt))] = h
+    return out
+
+
+def _modelbets_shape_game_pick(p: dict, result_index: dict) -> dict:
+    """Shape one daily game pick into a ready-to-render row, coloured by its
+    settled result.  Mirrors pages/model.py _pick_row."""
+    bt = (p.get("bet_type") or "single").lower()
+    if bt in ("run_line", "spread"):
+        cat_key, aliases = "run_line_spread", ("run_line", "spread")
+    elif bt == "totals":
+        cat_key, aliases = "totals", ("totals",)
+    else:
+        cat_key, aliases = "moneyline", ("single",)
+
+    line = p.get("prop_line")
+    line_s = ""
+    if cat_key == "run_line_spread" and line is not None:
+        try:
+            line_s = f" {float(line):+g}"
+        except Exception:                                                  # noqa: BLE001
+            line_s = ""
+
+    gid  = str(p.get("game_id") or p.get("id") or "")
+    hist = None
+    if gid and result_index:
+        for a in aliases:
+            hist = result_index.get((gid, a))
+            if hist is not None:
+                break
+    result = ((hist or {}).get("result") or "").lower() if hist else ""
+
+    amt   = p.get("model_amount")
+    stake = float((hist.get("model_amount") if hist else (amt or 0)) or 0.0)
+    pnl   = float((hist or {}).get("model_pnl") or 0)
+    if result == "win":
+        team_color, amount_color, amount_text = "pos", "pos", f"+${pnl:.2f}"
+    elif result == "loss":
+        team_color, amount_color, amount_text = "neg", "neg", f"-${stake:.2f}"
+    elif result == "push":
+        team_color, amount_color, amount_text = "text", "dim", "$0.00"
+    else:
+        team_color, amount_color = "text", "text"
+        amount_text = f"${float(amt):.0f}" if amt is not None else "—"
+
+    odds = p.get("odds")
+    odds_s = (f"+{int(odds)}" if isinstance(odds, (int, float)) and odds > 0
+              else (f"{int(odds)}" if isinstance(odds, (int, float)) else "—"))
+    return {
+        "rank":         p.get("rank", "·"),
+        "team":         (p.get("team") or "—") + line_s,
+        "sport":        (p.get("sport_label") or p.get("sport") or "").upper(),
+        "prob":         round(float(p.get("pick_prob") or 0) * 100),
+        "odds_s":       odds_s,
+        "amount_text":  amount_text,
+        "team_color":   team_color,
+        "amount_color": amount_color,
+        "below_threshold": bool(p.get("below_threshold")),
+    }
+
+
+def _modelbets_shape_prop_pick(p: dict) -> dict:
+    """Shape one daily prop pick.  Mirrors pages/model.py _prop_pick_row."""
+    line = p.get("line")
+    try:
+        line_s = f"{float(line):g}"
+    except (TypeError, ValueError):
+        line_s = "—"
+    pv = p.get("predicted_value")
+    try:
+        pv_s = f"{float(pv):.2f}"
+    except (TypeError, ValueError):
+        pv_s = "—"
+    odds = p.get("best_odds")
+    odds_s = (f"+{int(odds)}" if isinstance(odds, (int, float)) and odds > 0
+              else (f"{int(odds)}" if isinstance(odds, (int, float)) else ""))
+    side = (p.get("side") or "Over").strip().title()
+    return {
+        "rank":       p.get("rank", "·"),
+        "player":     p.get("player") or "—",
+        "market":     (p.get("market") or "").replace("_", " ").title(),
+        "side":       side,
+        "side_color": "primary" if side == "Over" else "dim",
+        "line_s":     line_s,
+        "pv_s":       pv_s,
+        "conf":       round(float(p.get("confidence") or 0) * 100),
+        "odds_s":     odds_s,
+    }
+
+
+def _modelbets_picks() -> dict:
+    """Today's model picks: game + prop, shaped + result-coloured."""
+    try:
+        daily = load_daily_picks() or {}
+        picks = daily.get("picks") or {}
+    except Exception:                                                      # noqa: BLE001
+        picks = {}
+    ridx = _modelbets_result_index()
+    game = [_modelbets_shape_game_pick(p, ridx) for p in (picks.get("game_picks") or [])]
+    prop = [_modelbets_shape_prop_pick(p) for p in (picks.get("prop_picks") or [])]
+    return {"game_picks": game, "prop_picks": prop,
+            "game_count": len(game), "prop_count": len(prop)}
+
+
+def _modelbets_classifiers() -> list[dict]:
+    """Per-classifier (xgb/lr/nn) accuracy with best/worst tinting.
+    Mirrors pages/model.py _classifier_card."""
+    labels = {"xgb": "XGBoost", "lr": "Logistic Regression", "nn": "Neural Net"}
+    models = ("xgb", "lr", "nn")
+    try:
+        from pages import home_stats as hs
+        tallies = hs.classifier_accuracy_from_trackers()
+    except Exception:                                                      # noqa: BLE001
+        tallies = {m: {"overall": [0, 0]} for m in models}
+
+    overall = {m: (tallies.get(m, {}).get("overall") or [0, 0]) for m in models}
+    qualified = [(m, overall[m][0] / overall[m][1]) for m in models
+                 if overall[m][1] >= 10]
+    best  = max(qualified, key=lambda r: r[1])[0] if qualified else None
+    worst = (min(qualified, key=lambda r: r[1])[0]
+             if len(qualified) >= 2 else None)
+
+    out: list[dict] = []
+    for m in models:
+        correct, total = overall[m][0], overall[m][1]
+        pct = (correct / total * 100) if total else None
+        by_cat = []
+        for key, label in _MB_CATS:
+            cc = (tallies.get(m, {}).get(key) or [0, 0])
+            ct, tt = cc[0], cc[1]
+            by_cat.append({
+                "label": label, "correct": ct, "total": tt,
+                "pct": f"{(ct / tt * 100):.0f}%" if tt else "—",
+            })
+        out.append({
+            "model":    m,
+            "label":    labels[m],
+            "correct":  correct,
+            "total":    total,
+            "pct":      "—" if pct is None else f"{pct:.1f}%",
+            "is_best":  m == best,
+            "is_worst": m == worst,
+            "by_cat":   by_cat,
+        })
+    return out
+
+
+def _modelbets_view_model() -> dict:
+    """Single dict for both the /modelbets render and the 60 s snapshot poll.
+    Read-only -- every card is computed server-side from the model ledger +
+    model_picks trackers + daily picks file."""
+    return {
+        "bankroll":     _modelbets_bankroll(),
+        "type_records": _modelbets_type_records(),
+        "picks":        _modelbets_picks(),
+        "classifiers":  _modelbets_classifiers(),
+    }
+
+
+def _modelbets_fallback_vm() -> dict:
+    return {
+        "bankroll": {"start": 0, "current": 0, "pnl": 0, "pnl_sign": "+",
+                     "pnl_abs": 0, "pnl_color": "dim", "at_risk": 0,
+                     "record_w": 0, "record_l": 0, "record_pct": "—"},
+        "type_records": [], "picks": {"game_picks": [], "prop_picks": [],
+                                      "game_count": 0, "prop_count": 0},
+        "classifiers": [],
+    }
+
+
+@app.route("/modelbets")
+def modelbets_page():
+    """Tailwind Model Bets page -- read-only dashboard mirroring pages/model.py.
+    Hydrates from a JSON island; 60 s /api/modelbets/snapshot poll keeps the
+    bankroll + records fresh as the settle job lands results."""
+    import traceback as _tb
+    print("[MODELBETS] route hit", flush=True, file=sys.stderr)
+    try:
+        vm = _modelbets_view_model()
+    except Exception:                                                      # noqa: BLE001
+        _tb.print_exc(file=sys.stderr)
+        vm = _modelbets_fallback_vm()
+    return render_template("modelbets.html", init_data=vm)
+
+
+@app.route("/api/modelbets/snapshot", methods=["GET"])
+def modelbets_snapshot():
+    """Same view-model dict the /modelbets route renders, as JSON for the
+    60 s poll."""
+    try:
+        return jsonify(_py(_modelbets_view_model()))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"MODELBETS-SNAPSHOT: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify(_py(_modelbets_fallback_vm())), 500
+
+
 def _load_explain_cache() -> dict:
     if _EXPLAIN_CACHE_FILE.exists():
         try:
