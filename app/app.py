@@ -946,6 +946,35 @@ def _props_grade_composite(pick):
     return 0.5 * conf_score + 0.3 * rank_score + 0.2 * ev_score
 
 
+def _props_roi_str(roi):
+    """Format a ROI% value as '+14.2%' / '-3.1%', or None when absent.
+    Mirrors pages/props.py _roi_str so the X-Ray table's ROI sub-text
+    is byte-identical between the NiceGUI and Tailwind views."""
+    if roi is None:
+        return None
+    try:
+        return "{:+.1f}%".format(float(roi))
+    except (TypeError, ValueError):
+        return None
+
+
+def _props_window_hits_games(summary, window):
+    """Raw (hits, games) for a summary window key like 'last_5' / 'last_10'.
+    Returns (None, None) when the cache row doesn't carry that window."""
+    if not isinstance(summary, dict):
+        return None, None
+    hits  = summary.get("{}_hits".format(window))
+    games = summary.get("{}_games".format(window))
+    try:
+        hits_i  = int(hits  or 0)
+        games_i = int(games or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if games_i <= 0:
+        return None, None
+    return hits_i, games_i
+
+
 def _props_view_model(pick):
     """Flatten one scored-props pick into the flat dict the Tailwind card +
     client-side filters consume.  Every value is JSON-serialisable."""
@@ -1036,6 +1065,21 @@ def _props_view_model(pick):
         "event_id":       event_id,
         "best_odds":      pick.get("best_odds"),
         "predicted_value": pick.get("predicted_value"),
+        # ── X-Ray fields (Phase 2e) ───────────────────────────────────────
+        # All from the raw pick / summary -- no new data, no recompute.  The
+        # X-Ray table reads these directly; the list / by-game card views
+        # ignore them.
+        "ev_pct":         pick.get("ev_pct"),
+        "l5_hits":        (lambda hg=_props_window_hits_games(summary, "last_5"):
+                           hg[0])(),
+        "l5_games":       (lambda hg=_props_window_hits_games(summary, "last_5"):
+                           hg[1])(),
+        "l5_roi":         _props_roi_str(summary.get("l5_roi")),
+        "l10_games":      (lambda hg=_props_window_hits_games(summary, "last_10"):
+                           hg[1])(),
+        "l10_roi":        _props_roi_str(summary.get("l10_roi")),
+        "season_avg":     summary.get("season_avg"),
+        "szn_roi":        _props_roi_str(summary.get("szn_roi")),
     }
 
 
