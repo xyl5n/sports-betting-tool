@@ -8653,6 +8653,180 @@ def player_ai(sport, slug):
         return jsonify({"error": str(exc)}), 500
 
 
+# ── /player Overview + Matchup tabs (PR #2/2 lazy endpoints) ────────────────
+# Consolidates 8 NiceGUI _lazy() sections into 2 endpoints (one per tab) --
+# fewer round-trips, simpler client.  Each sub-section in the response
+# carries {available: bool, ...} so the template handles per-section
+# unavailability cleanly (same pattern as game_detail's lazy endpoints).
+#
+# Why endpoints instead of baking into the view model: every call here is
+# external (Statcast pybaseball, weather API, opposing pitcher lookups) and
+# can be slow / fail / be rate-limited.  Lazy keeps first-paint snappy and
+# matches the NiceGUI behaviour exactly.
+
+def _player_safe(label, fn):
+    """Run a player_matchup / statcast / client fn; swallow exceptions and
+    return {available: False, note: msg}.  Mirrors _lazy()'s try/except
+    behaviour so a single broken section never tanks the whole response."""
+    try:
+        data = fn()
+        if data is None:
+            return {"available": False, "note": f"{label} unavailable."}
+        if isinstance(data, dict) and data.get("available") is False:
+            return data
+        return data
+    except Exception as exc:                                               # noqa: BLE001
+        _eprint(f"PLAYER-LAZY {label}: {type(exc).__name__}: {exc}")
+        return {"available": False, "note": f"{label} unavailable."}
+
+
+@app.route("/api/player/<sport>/<slug>/overview", methods=["GET"])
+def player_overview(sport, slug):
+    """Overview tab: season averages (batters only) + Statcast percentiles.
+    Both lazy in NiceGUI (_tab_overview lines 784-812); consolidated here."""
+    try:
+        from src.player_profile_client import (
+            resolve_player_id, get_player_info, get_season_stats,
+        )
+        pid = resolve_player_id(slug)
+        if pid is None:
+            return jsonify({"error": "player not found"}), 404
+        info = get_player_info(pid) or {}
+        is_pitcher = (info.get("position_code") or "") == "1"
+
+        season_avgs = None
+        if not is_pitcher:
+            season_avgs = _player_safe("Season averages",
+                                       lambda: get_season_stats(pid, is_pitcher=False))
+
+        def _load_pct():
+            from src import statcast_client as _sc
+            fn = (_sc.get_pitcher_percentiles if is_pitcher
+                  else _sc.get_batter_percentiles)
+            return fn(pid)
+        percentiles = _player_safe("Statcast percentiles", _load_pct)
+
+        return jsonify(_py({
+            "is_pitcher":  is_pitcher,
+            "season_avgs": season_avgs,
+            "percentiles": percentiles,
+        }))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"PLAYER-OVERVIEW: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/player/<sport>/<slug>/matchup", methods=["GET"])
+def player_matchup_tab(sport, slug):
+    """Matchup tab: grade + weather + park + (opposing lineup OR starter +
+    H2H + BvP) + (arsenal, batters only).  Carries 6-7 sub-sections that
+    each lazy-load in NiceGUI; consolidated here.
+
+    Reads the player's headline upcoming prop (highest-confidence, game not
+    yet started) -- same selection rule as _player_view_model so the
+    Matchup tab grades the same prop the Pick tab shows."""
+    try:
+        from src.player_profile_client import (
+            resolve_player_id, get_player_info,
+            get_today_props_for_player, get_today_prop,
+        )
+        from components import live_score as _ls
+        pid = resolve_player_id(slug)
+        if pid is None:
+            return jsonify({"error": "player not found"}), 404
+        info = get_player_info(pid) or {}
+        is_pitcher = (info.get("position_code") or "") == "1"
+        name = info.get("name") or ""
+        _backend = sys.modules[__name__]
+
+        # Same headline-prop resolution as the page view model.
+        today_props_raw = get_today_props_for_player(name) or []
+        today_props_all = [
+            p for p in today_props_raw
+            if not _ls.game_has_started(
+                _backend, commence_time=p.get("commence_time"),
+                home_team=p.get("home_team"), away_team=p.get("away_team"),
+                sport="mlb")
+        ]
+        prop = today_props_all[0] if today_props_all else get_today_prop(name)
+        if not prop:
+            return jsonify(_py({
+                "is_pitcher": is_pitcher,
+                "has_prop": False,
+                "note": "No upcoming game to grade.",
+            }))
+
+        from src.player_profile_client import get_player_gamelog, _CURRENT_SEASON
+        games = get_player_gamelog(pid, _CURRENT_SEASON,
+                                   is_pitcher=is_pitcher) or []
+        if is_pitcher:
+            games = [g for g in games if g.get("games_started", 0) > 0]
+
+        home_team = prop.get("home_team") or ""
+        commence  = prop.get("commence_time")
+
+        out: dict = {
+            "is_pitcher": is_pitcher, "has_prop": True,
+            "grade":   _player_safe("Matchup grade",
+                lambda: _import_pm().get_matchup_grade(info, prop, games, is_pitcher)),
+            "weather": _player_safe("Weather",
+                lambda: _import_pm().get_weather(home_team, commence)) if home_team
+                else {"available": False, "note": "No game venue resolved."},
+            "park":    _player_safe("Park",
+                lambda: _import_pm().get_park(home_team)) if home_team
+                else {"available": False, "note": "No game venue resolved."},
+        }
+
+        if is_pitcher:
+            from src.player_profile_client import get_opposing_lineup_basic
+            pitcher_hand = info.get("throws") or ""
+            out["opposing_lineup"] = _player_safe(
+                "Opposing lineup",
+                lambda: get_opposing_lineup_basic(prop, name, pitcher_hand))
+        else:
+            out["starter"] = _player_safe("Opposing starter",
+                lambda: _import_pm().get_opposing_starter(prop, name))
+            from src.player_profile_client import (
+                get_batter_vs_pitcher, get_today_opposing_pitcher,
+            )
+            out["h2h"] = _player_safe("Career H2H",
+                lambda: get_batter_vs_pitcher(prop, name))
+
+            def _load_bvp():
+                pit = get_today_opposing_pitcher(prop, name)
+                if not pit or not pit.get("id"):
+                    return {"available": False,
+                            "note": "No opposing starter announced yet."}
+                from src import statcast_client as _sc
+                return _sc.get_batter_vs_pitch_types(pid, pit["id"])
+            out["bvp"] = _player_safe("Pitch-type splits", _load_bvp)
+
+            def _load_arsenal():
+                pit = get_today_opposing_pitcher(prop, name)
+                if not pit or not pit.get("id"):
+                    return {"available": False,
+                            "note": "No opposing starter announced yet."}
+                from src import statcast_client as _sc
+                if hasattr(_sc, "get_pitch_arsenal"):
+                    return _sc.get_pitch_arsenal(pit["id"])
+                return {"available": False, "note": "Arsenal unavailable."}
+            out["arsenal"] = _player_safe("Pitcher arsenal", _load_arsenal)
+
+        return jsonify(_py(out))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"PLAYER-MATCHUP: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
+def _import_pm():
+    """Lazy import of src.player_matchup (deferred so the route handlers
+    don't pay the import cost when the matchup tab isn't used)."""
+    from src import player_matchup as _pm
+    return _pm
+
+
 # ── /matchup (game_detail) Flask port ───────────────────────────────────────
 # Ports pages/game_detail.py (1,555 lines NiceGUI) to Flask + Tailwind.  The
 # 3-strategy game resolver lives in src/game_detail_data.py (extracted so the
