@@ -5322,6 +5322,112 @@ def admin_status():
         return jsonify({"success": False, "error": _redact(str(exc))}), 500
 
 
+# ── /admin Flask port (diagnostics + perf + sharpapi + page) ────────────────
+
+@app.route("/api/admin/diagnostics", methods=["GET"])
+def admin_diagnostics():
+    """Read-only probe of every data source the UI depends on.  Wraps
+    src.admin_diagnostics.run_diagnostics; returns {results: [{label,
+    status, detail}, ...]} where status is ok|warn|err|info.  No mutations,
+    no quota burn (the Odds API probe uses the free /v4/sports endpoint)."""
+    try:
+        from src import admin_diagnostics as _diag
+        return jsonify({"results": _diag.run_diagnostics(sys.modules[__name__])})
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"ADMIN-DIAG: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": _redact(str(exc)), "results": []}), 500
+
+
+@app.route("/api/admin/probe_sharpapi", methods=["POST"])
+def admin_probe_sharpapi():
+    """One-shot SharpAPI endpoint + auth-style probe.  Same {results: [...]}
+    shape as /api/admin/diagnostics so the front-end renders both into one
+    panel.  Gated on SHARPAPI_KEY inside the helper."""
+    try:
+        from src import admin_diagnostics as _diag
+        return jsonify({"results": _diag.probe_sharpapi()})
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"ADMIN-SHARPAPI: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": _redact(str(exc)), "results": []}), 500
+
+
+@app.route("/api/admin/model/performance", methods=["POST"])
+def admin_model_performance():
+    """Per-model W/L table for the admin Model Performance section.
+
+    Body: {preset: "all"|"today"|"yesterday"|"7d"|"30d"} OR
+          {since: "YYYY-MM-DD", until: "YYYY-MM-DD"} for a custom range.
+    Returns {rows: [...], updated_at} from src.model_picks.performance."""
+    try:
+        from src import model_picks as _mp
+        body  = request.get_json(silent=True) or {}
+        since = body.get("since")
+        until = body.get("until")
+        if not (since or until):
+            preset = (body.get("preset") or "all").lower()
+            if preset != "all":
+                since, until = _mp.date_range(preset)
+        data = _mp.performance(since, until)
+        return jsonify(_py(data))
+    except Exception as exc:                                              # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"ADMIN-PERF: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": _redact(str(exc)), "rows": [], "updated_at": ""}), 500
+
+
+def _admin_view_model() -> dict:
+    """Pre-fetch only what the JSON island needs: current settings (for the
+    toggles + AI limit input) and the status row (last analyzed + DB mode).
+    Everything else on the page is fetched on user action, so the view model
+    stays tiny -- same approach as _mybets_view_model."""
+    try:
+        settings = _load_model_settings()
+    except Exception:                                                      # noqa: BLE001
+        settings = dict(_MODEL_SETTINGS_DEFAULT)
+
+    status: dict = {"mlb_analyzed_at": None, "wnba_analyzed_at": None,
+                    "db": {"mode": "json"}}
+    try:
+        rv = app.test_client().get("/api/admin/status")
+        if rv.status_code < 400:
+            status = rv.get_json(force=True, silent=True) or status
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    return {
+        "settings": {
+            "mlb_enabled":       bool(settings.get("mlb_enabled", True)),
+            "wnba_enabled":      bool(settings.get("wnba_enabled", False)),
+            "show_overall_chip": bool(settings.get("show_overall_chip", True)),
+            "ai_daily_limit":    int(settings.get("ai_daily_limit", 20) or 20),
+        },
+        "status": status,
+    }
+
+
+@app.route("/admin")
+def admin_page():
+    """Tailwind Admin page.  Hydrates settings + status from a JSON island;
+    everything else (analysis runs, resets, explorer, diagnostics) is fetched
+    on user action via SBT.apiPost.  No page-level poll -- only AI analysis
+    has a per-action 2 s poll, handled client-side."""
+    import traceback as _tb
+    print("[ADMIN] route hit", flush=True, file=sys.stderr)
+    try:
+        vm = _admin_view_model()
+    except Exception:                                                      # noqa: BLE001
+        _tb.print_exc(file=sys.stderr)
+        vm = {
+            "settings": {"mlb_enabled": True, "wnba_enabled": False,
+                         "show_overall_chip": True, "ai_daily_limit": 20},
+            "status": {"mlb_analyzed_at": None, "wnba_analyzed_at": None,
+                       "db": {"mode": "json"}},
+        }
+    return render_template("admin.html", init_data=vm)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 #  Model-bets admin endpoints
 #  These power the MODEL BETS section in the Admin sub-page.  All four
@@ -5340,13 +5446,25 @@ def admin_model_settings_get():
 
 @app.route("/api/admin/model/settings", methods=["POST"])
 def admin_model_settings_post():
-    """Update per-sport auto-pick toggles.  Body: {mlb_enabled, wnba_enabled}."""
+    """Update model-bets settings.  Body may carry any subset of the known
+    settings keys (mlb_enabled, wnba_enabled, show_overall_chip,
+    ai_daily_limit); each provided key is merged and persisted with the
+    correct type coercion handled by _save_model_settings.
+
+    Previously this only merged mlb_enabled / wnba_enabled, silently
+    dropping show_overall_chip and ai_daily_limit even though the defaults
+    + save path support them -- so the Home 'Overall' chip toggle and the
+    AI daily-limit input appeared to save but never persisted.  Generalised
+    to merge any key present in the settings defaults (no signature change,
+    same response shape)."""
     try:
         body = request.json or {}
-        # Merge so the caller can send a single field at a time
         current = _load_model_settings()
-        if "mlb_enabled"  in body: current["mlb_enabled"]  = bool(body["mlb_enabled"])
-        if "wnba_enabled" in body: current["wnba_enabled"] = bool(body["wnba_enabled"])
+        # Merge any recognised settings key the caller sent.  _save_model_settings
+        # coerces bool/int per the default's type, so we just pass values through.
+        for key in _MODEL_SETTINGS_DEFAULT:
+            if key in body:
+                current[key] = body[key]
         saved = _save_model_settings(current)
         return jsonify({"success": True, "settings": saved})
     except Exception as exc:                                              # noqa: BLE001
