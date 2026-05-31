@@ -157,6 +157,61 @@
     .toast.positive { border-left-color: #22c55e; }
     .toast.negative { border-left-color: #ef4444; }
     .toast.info     { border-left-color: #7C3AED; }
+
+    /* ── View mode toggle + By-Game grouping (Phase 2d) ── */
+    .view-pill {
+      background: #1a1a1a; color: #9ca3af;
+      border: 1px solid #2a2a2a;
+      font-size: 11.5px; font-weight: 700;
+      padding: 4px 10px; border-radius: 999px;
+      cursor: pointer; line-height: 1; letter-spacing: .3px;
+      transition: background .12s ease, color .12s ease, border-color .12s ease;
+    }
+    .view-pill:hover { color: #e5e7eb; }
+    .view-pill-active {
+      background: #7C3AED; color: #ffffff; border-color: #7C3AED;
+    }
+    .view-pill-active:hover { color: #ffffff; }
+
+    /* Group header (clickable row) */
+    .gg-header {
+      display: flex; align-items: center; gap: 10px;
+      background: #1a1a1a; border: 1px solid #2a2a2a;
+      border-radius: 10px; padding: 10px 12px;
+      cursor: pointer; min-width: 0;
+      transition: background .12s ease, border-color .12s ease;
+    }
+    .gg-header:hover { background: #222222; border-color: #3a3a3a; }
+    .gg-abbr   { font-size: 12.5px; font-weight: 800; color: #ffffff; white-space: nowrap; }
+    .gg-at     { font-size: 11px;   color: #6b7280; }
+    .gg-spacer { flex: 1; min-width: 4px; }
+    .gg-time {
+      font-size: 11px; color: #6b7280;
+      font-family: ui-monospace, monospace; white-space: nowrap; flex-shrink: 0;
+    }
+    .gg-count {
+      background: #222222; color: #d1d5db;
+      font-size: 10.5px; font-weight: 700;
+      padding: 2px 8px; border-radius: 999px;
+      flex-shrink: 0; white-space: nowrap;
+    }
+    .gg-chev {
+      color: #9ca3af; transform: rotate(0deg);
+      transition: transform .15s ease; flex-shrink: 0;
+      width: 16px; height: 16px; display: inline-block;
+    }
+    .gg-chev.is-open { transform: rotate(90deg); }
+
+    /* Group body: same prop-card grid, left-bordered to show nesting */
+    .gg-body {
+      margin: 6px 0 4px 0; padding-left: 10px;
+      border-left: 2px solid #2a2a2a;
+      display: grid; grid-template-columns: repeat(1, minmax(0, 1fr));
+      gap: 1rem;
+    }
+    @media (min-width: 640px) { .gg-body { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (min-width: 1024px) { .gg-body { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (min-width: 1280px) { .gg-body { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
   </style>
 </head>
 
@@ -201,6 +256,20 @@
                   class="hidden text-xs text-gray-400 hover:text-white font-semibold px-2 py-1">
             Reset
           </button>
+
+          <!-- View mode toggle (Phase 2d): List | By Game -->
+          <div id="view-pills" class="flex items-center gap-1 ml-1"
+               role="tablist" aria-label="View mode">
+            <button type="button"
+                    data-view="list"
+                    class="view-pill view-pill-active"
+                    role="tab" aria-selected="true">List</button>
+            <button type="button"
+                    data-view="game"
+                    class="view-pill"
+                    role="tab" aria-selected="false">By Game</button>
+          </div>
+
           <label for="sort-select" class="text-xs text-gray-500 hidden sm:inline">Sort</label>
           <select id="sort-select"
                   class="bg-card border border-border text-sm rounded-lg px-2.5 py-1.5 text-gray-200 focus:outline-none focus:border-accent">
@@ -314,7 +383,10 @@
     </div>
     <div id="card-grid"
          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-      <!-- cards injected by props.js -->
+      <!-- cards injected by props.js (list view) -->
+    </div>
+    <div id="game-groups" class="hidden flex flex-col gap-2">
+      <!-- collapsible game groups injected by props.js (by-game view) -->
     </div>
   </main>
 
