@@ -8112,6 +8112,156 @@ def modelbets_snapshot():
         return jsonify(_py(_modelbets_fallback_vm())), 500
 
 
+# ── /model-history Flask port (single-model pick history, read-only) ────────
+# Mirrors pages/model_history.py: date-browsable pick list + W-L-V record for
+# one (sport, model) store from the Supabase model_picks table.  Read-only --
+# no mutations, no auto-poll (user-driven via preset pills + date input).
+# Closes the inbound links from the /modelbets (#341) and /admin (#340)
+# Model Performance tables, which both point rows at /model-history/{sport}/{model}.
+
+_MH_PRESETS = (("today", "Today"), ("yesterday", "Yesterday"),
+               ("7d", "Last 7 Days"), ("30d", "Last 30 Days"))
+
+
+def _mh_fmt_dt(iso) -> str:
+    """ISO UTC -> 'MM-DD HH:MM' ET.  Mirrors model_history._fmt_dt."""
+    if not iso:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_ET).strftime("%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return str(iso)[:16]
+
+
+def _mh_shape_pick(p: dict) -> dict:
+    """Shape one pick row.  Pending picks marked Pending (dim); finished rows
+    coloured win=pos / loss=neg / void=warn / else dim -- carries the NiceGUI
+    coloring exactly, including voids living in the picks list as finished
+    rows with result='void'."""
+    status = (p.get("status") or "pending").lower()
+    result = (p.get("result") or "").lower()
+    if status != "finished":
+        result_text, result_color = "Pending", "dim"
+    else:
+        result_color = {"win": "pos", "loss": "neg", "void": "warn"}.get(result, "dim")
+        result_text  = result.upper() or "—"
+    conf = p.get("confidence")
+    conf_s = f"{float(conf) * 100:.0f}%" if isinstance(conf, (int, float)) else "—"
+    line = p.get("line")
+    line_s = f"{float(line):g}" if isinstance(line, (int, float)) else "—"
+    return {
+        "made":         _mh_fmt_dt(p.get("created_at")),
+        "who":          p.get("player_name") or p.get("game_id") or "—",
+        "bet":          p.get("bet_type") or "",
+        "side":         p.get("pick_side") or "—",
+        "line_s":       line_s,
+        "conf_s":       conf_s,
+        "status":       status,
+        "result_text":  result_text,
+        "result_color": result_color,
+    }
+
+
+def _model_history_view_model(sport: str, model: str,
+                              preset: str | None = None,
+                              date: str | None = None) -> dict:
+    """Shape one (sport, model) history view for a timeframe.  Either `date`
+    (single ET day) or `preset` drives the range; default preset 'today'.
+    Read-only -- reads src.model_picks.history."""
+    from src import model_picks as mp
+    sport = (sport or "mlb").lower()
+    model = (model or "combined").lower()
+
+    if date:
+        start = end = date
+        label = date
+        active = {"mode": "date", "date": date, "preset": None}
+    else:
+        preset = (preset or "today").lower()
+        if preset not in dict(_MH_PRESETS):
+            preset = "today"
+        start, end = mp.date_range(preset)
+        label = dict(_MH_PRESETS)[preset]
+        active = {"mode": "preset", "preset": preset, "date": None}
+
+    try:
+        data = mp.history(sport, model, start, end)
+    except Exception as exc:                                               # noqa: BLE001
+        _eprint(f"MODEL-HISTORY history() failed: {type(exc).__name__}: {exc}")
+        data = {"record": {}, "picks": []}
+
+    rec   = data.get("record") or {}
+    picks = data.get("picks") or []
+    w = int(rec.get("wins") or 0)
+    l = int(rec.get("losses") or 0)
+    v = int(rec.get("voids") or 0)
+    pct = rec.get("pct")
+    pct_s = f"{pct * 100:.1f}%" if isinstance(pct, (int, float)) else "—"
+    rec_color = ("pos" if (pct or 0) >= 0.55 else
+                 "neg" if (isinstance(pct, (int, float)) and pct < 0.50) else "dim")
+    total = len(picks)
+    # NiceGUI count-line semantics carried over verbatim: "finished" = W/L
+    # only (voids excluded), pending = total - (w + l + v).
+    finished_wl = w + l
+    pending = total - (w + l + v)
+
+    return {
+        "sport":       sport,
+        "model":       model,
+        "label":       label,
+        "active":      active,
+        "presets":     [{"key": k, "label": lbl} for k, lbl in _MH_PRESETS],
+        "record": {
+            "wins": w, "losses": l, "voids": v,
+            "pct_s": pct_s, "rec_color": rec_color,
+            "void_s": f" · {v}V" if v else "",
+        },
+        "counts": {"total": total, "finished": finished_wl, "pending": pending},
+        "picks":  [_mh_shape_pick(p) for p in picks],
+    }
+
+
+@app.route("/model-history/<sport>/<model>")
+def model_history_page(sport, model):
+    """Tailwind single-model pick-history page -- read-only, date-browsable.
+    Initial render defaults to Today; preset/date changes re-fetch
+    /api/model-history/<sport>/<model> client-side."""
+    import traceback as _tb
+    print(f"[MODEL-HISTORY] route hit sport={sport} model={model}",
+          flush=True, file=sys.stderr)
+    try:
+        vm = _model_history_view_model(sport, model, preset="today")
+    except Exception:                                                      # noqa: BLE001
+        _tb.print_exc(file=sys.stderr)
+        vm = {"sport": (sport or "mlb").lower(), "model": (model or "combined").lower(),
+              "label": "Today", "active": {"mode": "preset", "preset": "today", "date": None},
+              "presets": [{"key": k, "label": l} for k, l in _MH_PRESETS],
+              "record": {"wins": 0, "losses": 0, "voids": 0, "pct_s": "—",
+                         "rec_color": "dim", "void_s": ""},
+              "counts": {"total": 0, "finished": 0, "pending": 0}, "picks": []}
+    return render_template("model_history.html", init_data=vm)
+
+
+@app.route("/api/model-history/<sport>/<model>", methods=["GET"])
+def model_history_data(sport, model):
+    """JSON view model for a timeframe change.  Query: ?preset=<key> OR
+    ?date=YYYY-MM-DD.  GET because it's a pure read keyed by path + query
+    (bookmarkable: a specific model + day is a meaningful URL)."""
+    try:
+        preset = request.args.get("preset")
+        date   = request.args.get("date")
+        return jsonify(_py(_model_history_view_model(sport, model,
+                                                     preset=preset, date=date)))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"MODEL-HISTORY-DATA: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc), "picks": [],
+                        "record": {}, "counts": {}}), 500
+
+
 def _load_explain_cache() -> dict:
     if _EXPLAIN_CACHE_FILE.exists():
         try:
