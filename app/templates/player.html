@@ -120,8 +120,10 @@
     </div>
 
     {# ── Top-level tabs ──────────────────────────────────────────── #}
-    <div class="flex gap-1 border-b border-border">
+    <div class="flex gap-1 border-b border-border overflow-x-auto">
       <button class="pl-tab active" data-tab="pick">Pick</button>
+      <button class="pl-tab" data-tab="overview">Overview</button>
+      <button class="pl-tab" data-tab="matchup">Matchup</button>
       <button class="pl-tab" data-tab="log">Game Log</button>
     </div>
 
@@ -177,6 +179,16 @@
       {% else %}
       <div class="pl-empty">No game-log history available for this player yet.</div>
       {% endif %}
+    </div>
+
+    {# ── TAB: Overview (lazy GET /overview) ──────────────────────── #}
+    <div id="pl-tab-overview" class="hidden flex flex-col gap-4">
+      <div id="pl-overview-host" class="pl-skeleton">Loading overview…</div>
+    </div>
+
+    {# ── TAB: Matchup (lazy GET /matchup) ────────────────────────── #}
+    <div id="pl-tab-matchup" class="hidden flex flex-col gap-4">
+      <div id="pl-matchup-host" class="pl-skeleton">Loading matchup…</div>
     </div>
 
     {# ── TAB: Game Log ───────────────────────────────────────────── #}
