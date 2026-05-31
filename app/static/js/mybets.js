@@ -609,20 +609,35 @@
 
   // ½-Kelly: matches src/kelly.tracked_bet_kelly behaviour client-side
   // (the server still authoritatively sizes on POST; this is the
-  // display-only number in step 6).
+  // display-only number in step 6).  Must match the server to the dollar
+  // for NiceGUI parity -- that means replicating BOTH:
+  //   * bet_size_bounds: floor = max($1, round(1% bk)),
+  //                      ceiling = max(floor, round(5% bk))
+  //   * the clamp of the half-Kelly result to [floor, ceiling]
+  // Earlier this returned the raw half-Kelly dollars uncapped, so a
+  // high-edge bet would DISPLAY a number above the 5% ceiling while the
+  // server recorded the clamped stake -- a visible mismatch.  Now clamped.
   function kellyHalfStake(conf, oddsAmerican, bankroll) {
-    if (!(conf > 0 && conf < 1) || !oddsAmerican || !bankroll) {
-      return {dollars: 0, flag: "invalid"};
+    var bk = Number(bankroll);
+    if (!isFinite(bk) || bk <= 0) return {dollars: 0, flag: "invalid"};
+
+    var floor   = Math.max(1, Math.round(bk * 0.01));
+    var ceiling = Math.max(floor, Math.round(bk * 0.05));
+
+    var p    = Number(conf);
+    var odds = parseInt(oddsAmerican, 10);
+    var kellyDollars = null;
+    if (isFinite(p) && p > 0 && p < 1 && isFinite(odds) && odds !== 0) {
+      var dec = (odds > 0) ? (odds / 100) + 1 : (100 / Math.abs(odds)) + 1;
+      var b = dec - 1;
+      if (b > 0) {
+        var half = ((b * p - (1 - p)) / b) / 2;
+        if (half > 0) kellyDollars = half * bk;
+      }
     }
-    var dec = (oddsAmerican > 0)
-      ? (oddsAmerican / 100) + 1
-      : (100 / Math.abs(oddsAmerican)) + 1;
-    var b = dec - 1;
-    var kelly = ((b * conf) - (1 - conf)) / b;
-    if (kelly <= 0) {
-      return {dollars: Math.round(bankroll * 0.01), flag: "flat"};
-    }
-    return {dollars: Math.round(bankroll * (kelly * 0.5)), flag: "kelly"};
+    if (kellyDollars === null) return {dollars: floor, flag: "flat"};
+    var clamped = Math.min(ceiling, Math.max(floor, kellyDollars));
+    return {dollars: Math.round(clamped), flag: "kelly"};
   }
 
   // ── Modal render ──────────────────────────────────────────────────
@@ -852,9 +867,15 @@
           esc(confPct) +
           '" data-mb-input="confidence_pct" />';
     }
-    var oddsI = Number(s.odds);
+    // Gate matches NiceGUI step 6: only size once BOTH confidence and a
+    // parseable odds are present; otherwise show "Enter confidence + odds
+    // to size" (the "invalid" flag) -- don't fall through to the flat
+    // fallback, which would misleadingly show a $ figure before input.
+    var oddsI = parseInt(s.odds, 10);
     var conf  = (s.confidence != null) ? Number(s.confidence) : null;
-    var kelly = kellyHalfStake(conf, isFinite(oddsI) ? oddsI : null, state.bankroll);
+    var kelly = (!conf || !isFinite(oddsI))
+      ? {dollars: 0, flag: "invalid"}
+      : kellyHalfStake(conf, oddsI, state.bankroll);
     var kellyText = (kelly.flag === "invalid")
       ? '<span class="text-gray-400 text-[13px]">Enter confidence + odds to size</span>'
       : '<span class="mb-kelly-value">$' + kelly.dollars.toLocaleString() +
@@ -898,6 +919,11 @@
 
     var backBtn = e.target.closest("[data-mb-step-back]");
     if (backBtn) {
+      // Capture the current step's free-text inputs (step 5 line/odds,
+      // step 6 manual confidence) BEFORE navigating away, so stepping
+      // back then forward restores what the user typed.  Forward-nav
+      // already did this; the Back path was the gap.
+      captureStepInputs(s);
       if (s.step > 1) s.step -= 1;
       renderModal();
       return;
