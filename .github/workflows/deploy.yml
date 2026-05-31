@@ -26,4 +26,4 @@ jobs:
             cd /root/app
             git pull origin main
             /root/app/venv/bin/pip install -r requirements.txt
-            systemctl restart xylanbets
+            systemctl restart xylanpicks
