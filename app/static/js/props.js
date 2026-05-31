@@ -20,6 +20,15 @@
   // preserve the user's choice. Defaults to the model's recommended side.
   var sideOverride = {};
 
+  // Per-card track state, keyed by index. Values:
+  //   undefined -> use the server's initial p.tracked flag
+  //   true      -> tracked (success or 409-dedup)
+  //   false     -> explicit revert (network / 5xx error)
+  // Pending POSTs flip the DOM class .is-pending but don't write here until
+  // the response lands.
+  var trackedOverride = {};
+  var trackInflight   = {};       // idx -> bool (avoid double-fire)
+
   // ── Filter state ──────────────────────────────────────────────────────
   // The first three fields drive the always-visible top bar (sport / stat
   // pills + sort dropdown).  The `panel` sub-object mirrors the NiceGUI
@@ -204,11 +213,27 @@
           statCell("Season", fmtRate(p.season_hit_rate)) +
         '</div>' +
 
-        // AI model tag
-        '<div class="px-4 pb-3 pt-1 mt-auto">' +
-          '<span class="text-[10px] text-gray-600">Model: ' + esc(p.model || "model") + '</span>' +
+        // AI model tag + Track button
+        '<div class="px-4 pb-3 pt-1 mt-auto flex items-center justify-between gap-2">' +
+          '<span class="text-[10px] text-gray-600 truncate">Model: ' + esc(p.model || "model") + '</span>' +
+          trackButtonHTML(p, idx) +
         '</div>' +
       '</div>';
+  }
+
+  function isTracked(p, idx) {
+    return (trackedOverride[idx] !== undefined)
+      ? !!trackedOverride[idx]
+      : !!p.tracked;
+  }
+
+  function trackButtonHTML(p, idx) {
+    var tracked = isTracked(p, idx);
+    var cls = "track-btn" + (tracked ? " is-tracked" : "");
+    var label = tracked ? "Tracked ✓" : "Track";
+    var dis = tracked ? " disabled" : "";
+    return '<button class="' + cls + '" data-track-idx="' + idx +
+      '"' + dis + '>' + label + '</button>';
   }
 
   function statCell(label, value) {
@@ -299,13 +324,21 @@
       render();
     });
 
-    // Over/Under toggle (event delegation on the grid since cards re-render).
+    // Card click delegation: handles both Over/Under toggle and Track button.
+    // One listener avoids the double-bind footgun when the grid re-renders.
     document.getElementById("card-grid").addEventListener("click", function (e) {
-      var btn = e.target.closest(".ou-btn");
-      if (!btn) return;
-      var idx = btn.getAttribute("data-idx");
-      sideOverride[idx] = btn.getAttribute("data-side");
-      render();
+      var ouBtn = e.target.closest(".ou-btn");
+      if (ouBtn) {
+        var idx = ouBtn.getAttribute("data-idx");
+        sideOverride[idx] = ouBtn.getAttribute("data-side");
+        render();
+        return;
+      }
+      var trackBtn = e.target.closest(".track-btn");
+      if (trackBtn && !trackBtn.disabled) {
+        onTrackClick(trackBtn);
+        return;
+      }
     });
 
     // ── Filter panel (Phase 2b) ───────────────────────────────────────
@@ -425,6 +458,100 @@
       btn.classList.toggle("active");
       onPanelChange();
     });
+  }
+
+  // ── Track button (Phase 2c) ───────────────────────────────────────────
+  // Optimistic flip: button reads as "Tracked ✓" immediately on click; the
+  // POST runs in the background.  On success or 409 ("already tracked") we
+  // keep the flipped state.  On any other failure we revert and toast the
+  // error.  Uses the same /api/props/track endpoint + payload shape as the
+  // NiceGUI props page so MyBets + ledger see picks identically.
+  function onTrackClick(btn) {
+    var idx = btn.getAttribute("data-track-idx");
+    if (!idx || trackInflight[idx]) return;
+    var p = ALL[Number(idx)];
+    if (!p) return;
+
+    // Optimistic flip
+    trackedOverride[idx] = true;
+    trackInflight[idx]   = true;
+    btn.classList.add("is-tracked", "is-pending");
+    btn.disabled = true;
+    btn.textContent = "Tracked ✓";
+
+    var payload = {
+      player:          p.player || "",
+      market:          p.market || "",
+      line:            p.line,
+      side:            sideOverride[idx] || p.side || "Over",
+      odds:            p.best_odds,
+      confidence:      p.confidence,
+      predicted_value: p.predicted_value,
+      team:            p.team || "",
+      event_id:        p.event_id,
+      commence_time:   p.commence_time || null,
+    };
+
+    fetch("/api/props/track", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body:    JSON.stringify(payload),
+    }).then(function (resp) {
+      return resp.json().then(function (data) { return { resp: resp, data: data }; });
+    }).then(function (r) {
+      btn.classList.remove("is-pending");
+      var data = r.data || {};
+      if (r.resp.ok && data.success) {
+        // Success -- show stake in the toast like the NiceGUI version does.
+        var amt = (typeof data.amount === "number")
+          ? " ($" + data.amount.toFixed(2) + ")" : "";
+        toast("Tracked: " + (p.player || "") + " " +
+              (payload.side || "") + " " + (p.line == null ? "" : p.line) + amt,
+              "positive");
+      } else if (r.resp.status === 409 ||
+                 (data.error && /already tracked/i.test(data.error))) {
+        // Server-side dedup -- keep the tracked state, info toast.
+        toast("Already tracked.", "info");
+      } else {
+        // Real failure -- revert and surface the error.
+        revertTrack(idx, btn);
+        toast("Track failed: " + (data.error || ("HTTP " + r.resp.status)),
+              "negative");
+      }
+    }).catch(function (err) {
+      btn.classList.remove("is-pending");
+      revertTrack(idx, btn);
+      toast("Track failed: " + (err && err.message ? err.message : "network error"),
+            "negative");
+    }).finally(function () {
+      trackInflight[idx] = false;
+    });
+  }
+
+  function revertTrack(idx, btn) {
+    trackedOverride[idx] = false;
+    btn.classList.remove("is-tracked");
+    btn.disabled = false;
+    btn.textContent = "Track";
+  }
+
+  // Toast: simple bottom-right stack.  4s auto-dismiss; positive/info/negative
+  // pick the left-border color.  No deps -- vanilla DOM.
+  function toast(msg, kind) {
+    var stack = document.getElementById("toast-stack");
+    if (!stack) return;
+    var el = document.createElement("div");
+    el.className = "toast " + (kind || "info");
+    el.textContent = String(msg == null ? "" : msg);
+    stack.appendChild(el);
+    // Trigger CSS transition on next frame so the slide-in plays.
+    requestAnimationFrame(function () { el.classList.add("show"); });
+    setTimeout(function () {
+      el.classList.remove("show");
+      setTimeout(function () {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      }, 220);
+    }, 4000);
   }
 
   if (document.readyState === "loading") {
