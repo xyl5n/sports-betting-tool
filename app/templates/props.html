@@ -45,6 +45,76 @@
     .prop-card { transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease; }
     .prop-card:hover { transform: translateY(-3px); box-shadow: 0 10px 30px -10px rgba(124,58,237,.55); }
     .dimmed { opacity: .6; }
+
+    /* ── Filter panel (Phase 2b) ── */
+    .fp-chip {
+      cursor: pointer;
+      border: 1px solid #2a2a2a;
+      background: #1a1a1a;
+      color: #d1d5db;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 999px;
+      white-space: nowrap;
+      line-height: 1.2;
+    }
+    .fp-chip.active {
+      background: rgba(34,197,94,0.15);
+      border-color: #22c55e;
+      color: #22c55e;
+    }
+    .fp-select {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      color: #e5e7eb;
+      font-size: 12.5px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      width: 100%;
+      min-width: 0;
+    }
+    .fp-select:focus { outline: none; border-color: #7C3AED; }
+    .fp-label {
+      display: block;
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: .4px;
+      color: #6b7280;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    /* Filter button when filters are active (green-tinted pill). */
+    #filter-toggle.has-active {
+      background: #22c55e !important;
+      color: #000 !important;
+      border-color: #22c55e !important;
+    }
+    /* Switch (alt-lines toggle). */
+    .fp-switch {
+      position: relative;
+      display: inline-block;
+      width: 34px; height: 18px;
+      flex-shrink: 0;
+    }
+    .fp-switch input { opacity: 0; width: 0; height: 0; }
+    .fp-switch .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background: #2a2a2a; border-radius: 999px;
+      transition: background .15s ease;
+    }
+    .fp-switch .slider::before {
+      content: "";
+      position: absolute;
+      width: 14px; height: 14px;
+      left: 2px; top: 2px;
+      background: #d1d5db; border-radius: 50%;
+      transition: transform .15s ease, background .15s ease;
+    }
+    .fp-switch input:checked + .slider { background: #22c55e; }
+    .fp-switch input:checked + .slider::before {
+      transform: translateX(16px); background: #000;
+    }
   </style>
 </head>
 
@@ -77,6 +147,18 @@
         </div>
 
         <div class="flex items-center gap-2 shrink-0">
+          <button id="filter-toggle"
+                  type="button"
+                  aria-expanded="false"
+                  aria-controls="filter-panel"
+                  class="bg-card border border-border text-gray-300 text-xs font-bold rounded-full px-3 py-1.5 transition">
+            <span>Filters</span><span id="filter-count" class="hidden ml-1"></span>
+          </button>
+          <button id="filter-reset"
+                  type="button"
+                  class="hidden text-xs text-gray-400 hover:text-white font-semibold px-2 py-1">
+            Reset
+          </button>
           <label for="sort-select" class="text-xs text-gray-500 hidden sm:inline">Sort</label>
           <select id="sort-select"
                   class="bg-card border border-border text-sm rounded-lg px-2.5 py-1.5 text-gray-200 focus:outline-none focus:border-accent">
@@ -87,7 +169,7 @@
         </div>
       </div>
 
-      <!-- Row 2: stat-type pills (horizontal scroll) -->
+      <!-- Row 2: stat-type pills (horizontal scroll, quick filter) -->
       <div id="stat-pills" class="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-1 px-1">
         <button data-stat="all"
                 class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-accent text-white bg-accent/20">All</button>
@@ -95,6 +177,89 @@
         <button data-stat="{{ label }}"
                 class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-border text-gray-300 bg-card">{{ label }}</button>
         {% endfor %}
+      </div>
+
+      <!-- Row 3: collapsible filter panel (Phase 2b) -->
+      <!-- Hidden by default; #filter-toggle opens.  All controls write into
+           the global state via props.js and re-render the grid. -->
+      <div id="filter-panel"
+           class="hidden bg-card border border-border rounded-xl p-3 space-y-3">
+
+        <!-- Single-value selects: hit rate, confidence, grade -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <span class="fp-label">Min last-10 hit rate</span>
+            <select id="f-min-l10" class="fp-select">
+              <option value="0">Any</option>
+              <option value="5">5+/10</option>
+              <option value="6">6+/10</option>
+              <option value="7">7+/10</option>
+              <option value="8">8+/10</option>
+              <option value="9">9+/10</option>
+            </select>
+          </div>
+          <div>
+            <span class="fp-label">Min model confidence</span>
+            <select id="f-min-conf" class="fp-select">
+              <option value="0">Any</option>
+              <option value="0.55">55%+</option>
+              <option value="0.60">60%+</option>
+              <option value="0.65">65%+</option>
+              <option value="0.70">70%+</option>
+              <option value="0.75">75%+</option>
+            </select>
+          </div>
+          <div>
+            <span class="fp-label">Min matchup grade</span>
+            <select id="f-min-grade" class="fp-select">
+              <option value="0">Any</option>
+              <option value="0.52">B- or better</option>
+              <option value="0.60">B or better</option>
+              <option value="0.68">B+ or better</option>
+              <option value="0.76">A- or better</option>
+              <option value="0.84">A or better</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Multi-select chip groups: prop type, game -->
+        <div>
+          <span class="fp-label">Prop type</span>
+          <div id="f-markets" class="flex flex-wrap gap-2">
+            {% for m in market_options %}
+            <button type="button"
+                    class="fp-chip"
+                    data-market-key="{{ m.key }}">{{ m.label }}</button>
+            {% endfor %}
+            {% if not market_options %}
+            <span class="text-xs text-gray-600 italic">No props loaded yet.</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <div>
+          <span class="fp-label">Game</span>
+          <div id="f-games" class="flex flex-wrap gap-2">
+            {% for g in game_options %}
+            <button type="button"
+                    class="fp-chip"
+                    data-game-key="{{ g.key }}">{{ g.label }}</button>
+            {% endfor %}
+            {% if not game_options %}
+            <span class="text-xs text-gray-600 italic">No games loaded yet.</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <!-- Alt lines toggle -->
+        <label class="flex items-center gap-2.5 pt-1 select-none cursor-pointer">
+          <span class="fp-switch">
+            <input type="checkbox" id="f-show-alt">
+            <span class="slider"></span>
+          </span>
+          <span class="text-xs font-semibold text-gray-300">Show alternative lines</span>
+        </label>
+
       </div>
     </div>
   </div>
