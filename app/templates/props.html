@@ -356,6 +356,91 @@
     /* Track button inside x-ray rows: shrink to fit the 90px col */
     .xr-cell .track-btn { padding: 4px 10px; font-size: 10.5px; }
     .xr-cell .track-btn.is-tracked { padding: 3px 9px; }
+
+    /* ── Swipe mode (Phase 2f) ── */
+    .sw-counter {
+      font-size: 11px; color: #6b7280; text-align: center;
+      font-family: ui-monospace, monospace;
+      width: 100%; padding: 2px 0 8px;
+      user-select: none;
+    }
+    .sw-stage {
+      position: relative;
+      width: 100%; max-width: 480px; margin: 0 auto;
+    }
+    /* Translucent ✓ / ✗ overlay that fades in during drag */
+    .sw-hint {
+      position: absolute; top: 50%; left: 50%; z-index: 20;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      font-size: 72px; font-weight: 900;
+      opacity: 0;
+      transition: opacity 0.08s linear;
+      will-change: opacity;
+    }
+    /* The swipeable wrapper -- gestures apply translate + rotate here. */
+    .sw-card-wrap {
+      cursor: grab;
+      touch-action: none;             /* let pointermove fire on touch */
+      will-change: transform, opacity;
+      transform-origin: center 80%;
+      transition: transform 0.3s ease, opacity 0.3s ease;
+    }
+    .sw-card-wrap.is-dragging {
+      transition: none;               /* follow the finger 1:1 */
+      cursor: grabbing;
+    }
+    .sw-card-wrap > .prop-card {
+      transform: none !important;
+      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+    }
+    .sw-card-wrap > .prop-card:hover {
+      transform: none !important;
+      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+    }
+    /* Action buttons row below the card */
+    .sw-buttons {
+      display: flex; justify-content: center;
+      gap: 32px; padding: 18px 0 8px;
+    }
+    .sw-btn {
+      width: 60px; height: 60px;
+      border-radius: 50%;
+      font-size: 24px; font-weight: 900;
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center; justify-content: center;
+      background: transparent;
+      transition: background .15s ease, transform .12s ease;
+    }
+    .sw-btn:active { transform: scale(0.94); }
+    .sw-btn-dismiss {
+      background: rgba(239, 68, 68, 0.12);
+      color: #ef4444; border: 2px solid #ef4444;
+    }
+    .sw-btn-dismiss:hover { background: rgba(239, 68, 68, 0.22); }
+    .sw-btn-track {
+      background: rgba(34, 197, 94, 0.12);
+      color: #22c55e; border: 2px solid #22c55e;
+    }
+    .sw-btn-track:hover { background: rgba(34, 197, 94, 0.22); }
+    /* Empty state ("All caught up!") */
+    .sw-empty {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 14px; padding: 48px 20px;
+      text-align: center;
+    }
+    .sw-empty-icon { font-size: 48px; color: #22c55e; line-height: 1; }
+    .sw-empty-title { font-size: 18px; font-weight: 800; color: #ffffff; }
+    .sw-empty-body  { font-size: 13px; color: #9ca3af; max-width: 320px; }
+    .sw-reset-btn {
+      margin-top: 4px;
+      background: #1a1a1a; color: #d1d5db;
+      border: 1px solid #2a2a2a;
+      font-size: 11.5px; font-weight: 700; letter-spacing: .3px;
+      padding: 6px 14px; border-radius: 999px;
+      cursor: pointer;
+    }
+    .sw-reset-btn:hover { background: #222222; color: #ffffff; }
   </style>
 </head>
 
@@ -416,6 +501,10 @@
                     data-view="xray"
                     class="view-pill"
                     role="tab" aria-selected="false">X-Ray</button>
+            <button type="button"
+                    data-view="swipe"
+                    class="view-pill"
+                    role="tab" aria-selected="false">Swipe</button>
           </div>
 
           <label for="sort-select" class="text-xs text-gray-500 hidden sm:inline">Sort</label>
@@ -538,6 +627,9 @@
     </div>
     <div id="xray-table" class="hidden">
       <!-- sortable data table injected by props.js (x-ray view) -->
+    </div>
+    <div id="swipe-stage" class="hidden">
+      <!-- single-card swipe deck injected by props.js (swipe view) -->
     </div>
   </main>
 

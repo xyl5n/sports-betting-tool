@@ -45,12 +45,25 @@
   // NiceGUI doesn't persist these either; default = all collapsed).
   var expandedGames = {};
 
+  // Swipe-mode dismissed set (in-memory; matches NiceGUI's closure-local
+  // `dismissed: set`).  Both right-swipe (track + dismiss) and left-swipe
+  // (dismiss-only) add the prop's key here so it's hidden from the deck for
+  // the rest of the session.  Resets on page reload.
+  var dismissedSwipe = {};
+
+  function propSwipeKey(p) {
+    return (p.player || "") + "|" + (p.market || "") + "|" +
+           (p.line == null ? "" : p.line) + "|" + (p.side || "");
+  }
+
   var VIEW_MODE_LS_KEY = "propsViewMode";
 
   function loadPersistedViewMode() {
     try {
       var v = window.localStorage.getItem(VIEW_MODE_LS_KEY);
-      if (v === "list" || v === "game" || v === "xray") state.viewMode = v;
+      if (v === "list" || v === "game" || v === "xray" || v === "swipe") {
+        state.viewMode = v;
+      }
     } catch (e) { /* ignore */ }
   }
 
@@ -323,16 +336,22 @@
     var grid   = document.getElementById("card-grid");
     var groups = document.getElementById("game-groups");
     var xray   = document.getElementById("xray-table");
+    var swipe  = document.getElementById("swipe-stage");
     var empty  = document.getElementById("empty-state");
     var rows   = applyFilters();
 
-    if (!rows.length) {
+    // Swipe mode always renders (even when the filtered list is empty) so
+    // the user can see the "All caught up!" state.  Other view modes hide
+    // the grid + show the no-filter-matches empty state.
+    if (!rows.length && state.viewMode !== "swipe") {
       grid.innerHTML = "";
       if (groups) groups.innerHTML = "";
       if (xray)   xray.innerHTML = "";
+      if (swipe)  swipe.innerHTML = "";
       grid.classList.add("hidden");
       if (groups) groups.classList.add("hidden");
       if (xray)   xray.classList.add("hidden");
+      if (swipe)  swipe.classList.add("hidden");
       empty.classList.remove("hidden");
       return;
     }
@@ -340,17 +359,27 @@
 
     if (state.viewMode === "game" && groups) {
       grid.classList.add("hidden");
-      if (xray) xray.classList.add("hidden");
+      if (xray)  xray.classList.add("hidden");
+      if (swipe) swipe.classList.add("hidden");
       groups.classList.remove("hidden");
       groups.innerHTML = renderByGameHTML(rows);
     } else if (state.viewMode === "xray" && xray) {
       grid.classList.add("hidden");
       if (groups) groups.classList.add("hidden");
+      if (swipe)  swipe.classList.add("hidden");
       xray.classList.remove("hidden");
       xray.innerHTML = renderXrayHTML(rows);
+    } else if (state.viewMode === "swipe" && swipe) {
+      grid.classList.add("hidden");
+      if (groups) groups.classList.add("hidden");
+      if (xray)   xray.classList.add("hidden");
+      swipe.classList.remove("hidden");
+      swipe.innerHTML = renderSwipeHTML(rows);
+      attachSwipeGestures();
     } else {
       if (groups) groups.classList.add("hidden");
       if (xray)   xray.classList.add("hidden");
+      if (swipe)  swipe.classList.add("hidden");
       grid.classList.remove("hidden");
       grid.innerHTML = rows.map(function (r) { return cardHTML(r.p, r.i); }).join("");
     }
@@ -664,6 +693,210 @@
     '</div>';
   }
 
+  // ── Swipe mode (Phase 2f) ─────────────────────────────────────────────
+  // One card at a time, drag-to-track / drag-to-dismiss.  Reuses the same
+  // prop card HTML the list view renders -- the card's own Track button
+  // stays visible inside the swipe wrap.  Three input paths converge on
+  // the same outcome:
+  //   right swipe (≥80 px)  → trackProp(p, idx, {afterAttempt: advance})
+  //   big ✓ button          → trackProp(p, idx, {afterAttempt: advance})
+  //   left swipe (≥80 px)   → advance only (no POST)
+  //   big ✗ button          → advance only (no POST)
+  //   card's own Track btn  → trackProp(p, idx, {btnEl}) -- no advance
+  //
+  // Dismissed set is in-memory (matches NiceGUI) so a reload resets the
+  // deck.  Gesture math: ±15° rotation at 480 px, opacity floor 0.6,
+  // 80 px threshold for commit, 300 ms fly-out before the after-action.
+
+  function visibleSwipeRows() {
+    // applyFilters() output minus already-dismissed picks.  Source of
+    // truth for "what card is on top" and the X reviewed / Y remaining
+    // counter.
+    return applyFilters().filter(function (r) {
+      return !dismissedSwipe[propSwipeKey(r.p)];
+    });
+  }
+
+  function renderSwipeHTML(allRows) {
+    // allRows is the raw applyFilters() result; for the counter we want
+    // the *post-dismiss* deck.  The list passed into render() can be
+    // empty for swipe mode (filters knocked everything out) -- that path
+    // is handled by render() before we get here, so allRows.length > 0.
+    var deck = allRows.filter(function (r) {
+      return !dismissedSwipe[propSwipeKey(r.p)];
+    });
+    if (!deck.length) {
+      // Empty state: either the user has reviewed everything, or filters
+      // killed the slate.  We can tell the difference by checking allRows.
+      var reviewed = allRows.length;
+      var msg = reviewed
+        ? "You've reviewed all " + reviewed + " prop" +
+          (reviewed === 1 ? "" : "s") + " in the current filter."
+        : "No props match the current filter.";
+      return '' +
+        '<div class="sw-empty">' +
+          '<div class="sw-empty-icon">✓</div>' +
+          '<div class="sw-empty-title">All caught up!</div>' +
+          '<div class="sw-empty-body">' + esc(msg) + '</div>' +
+          (reviewed
+            ? '<button type="button" class="sw-reset-btn" data-sw-reset="1">Reset deck</button>'
+            : '') +
+        '</div>';
+    }
+
+    var head      = deck[0];
+    var reviewed  = allRows.length - deck.length;
+    var remaining = deck.length;
+    var card      = cardHTML(head.p, head.i);
+
+    return '' +
+      '<div class="sw-counter">' +
+        reviewed + ' reviewed · ' + remaining + ' remaining' +
+      '</div>' +
+      '<div class="sw-stage" data-sw-key="' + esc(propSwipeKey(head.p)) +
+                                              '" data-sw-idx="' + head.i + '">' +
+        '<div class="sw-hint"></div>' +
+        '<div class="sw-card-wrap">' +
+          card +
+        '</div>' +
+      '</div>' +
+      '<div class="sw-buttons">' +
+        '<button type="button" class="sw-btn sw-btn-dismiss"' +
+          ' aria-label="Dismiss">✗</button>' +
+        '<button type="button" class="sw-btn sw-btn-track"' +
+          ' aria-label="Track">✓</button>' +
+      '</div>';
+  }
+
+  function swipeAdvance(swKey) {
+    dismissedSwipe[swKey] = true;
+    render();
+  }
+
+  function swipeResetDeck() {
+    dismissedSwipe = {};
+    render();
+  }
+
+  // Resolve the prop currently on top of the deck from the rendered DOM
+  // (single source of truth -- avoids drift between render() and click /
+  // gesture handlers).
+  function currentSwipeCard() {
+    var stage = document.querySelector("#swipe-stage .sw-stage");
+    if (!stage) return null;
+    var key = stage.getAttribute("data-sw-key");
+    var idx = Number(stage.getAttribute("data-sw-idx"));
+    if (!isFinite(idx)) return null;
+    return { p: ALL[idx], i: idx, swKey: key };
+  }
+
+  // ── Gesture handler ─────────────────────────────────────────────────────
+  // Pointer Events unify mouse + touch + pen; setPointerCapture keeps the
+  // drag live even if the finger leaves the card.  We pull the threshold,
+  // rotation, and fade-out constants up here so they're easy to tune.
+  var SW_THRESHOLD = 80;           // px to commit a swipe
+  var SW_MAX_ROTATE = 15;          // degrees at full drag
+  var SW_ROT_RANGE  = 480;         // px that maps to SW_MAX_ROTATE
+  var SW_FADE_RANGE = 200;         // px that maps to opacity floor
+  var SW_FADE_FLOOR = 0.6;
+  var SW_FLY_MS     = 300;         // fly-out animation duration
+
+  function attachSwipeGestures() {
+    var wrap = document.querySelector("#swipe-stage .sw-card-wrap");
+    var hint = document.querySelector("#swipe-stage .sw-hint");
+    if (!wrap) return;
+
+    var dragging = false, pointerId = null, startX = 0, dx = 0, committed = false;
+
+    function setHint(delta) {
+      if (!hint) return;
+      var abs = Math.abs(delta);
+      var ratio = Math.min(abs / SW_THRESHOLD, 1);
+      hint.style.opacity = String(ratio * 0.9);
+      if (delta > 0) {
+        hint.textContent = "✓";
+        hint.style.color = "#22c55e";
+      } else if (delta < 0) {
+        hint.textContent = "✗";
+        hint.style.color = "#ef4444";
+      } else {
+        hint.textContent = "";
+      }
+    }
+
+    function applyDrag(delta) {
+      var deg = (delta / SW_ROT_RANGE) * SW_MAX_ROTATE;
+      var op  = 1 - Math.min(Math.abs(delta) / SW_FADE_RANGE,
+                             1 - SW_FADE_FLOOR);
+      wrap.style.transform = "translate(" + delta + "px, 0) rotate(" + deg + "deg)";
+      wrap.style.opacity   = String(op);
+      setHint(delta);
+    }
+
+    function resetVisuals() {
+      wrap.style.transform = "";
+      wrap.style.opacity   = "";
+      if (hint) hint.style.opacity = "0";
+    }
+
+    wrap.addEventListener("pointerdown", function (e) {
+      if (dragging || committed) return;
+      // Don't start a drag from a button click -- the card's own Track
+      // button and the OU pills need to receive their own clicks.
+      if (e.target.closest("button, a")) return;
+      dragging  = true;
+      pointerId = e.pointerId;
+      startX    = e.clientX;
+      dx        = 0;
+      wrap.classList.add("is-dragging");
+      try { wrap.setPointerCapture(pointerId); } catch (_) {}
+    });
+
+    wrap.addEventListener("pointermove", function (e) {
+      if (!dragging || e.pointerId !== pointerId) return;
+      dx = e.clientX - startX;
+      applyDrag(dx);
+    });
+
+    function finishDrag(commit) {
+      if (!dragging) return;
+      dragging = false;
+      wrap.classList.remove("is-dragging");
+      try { wrap.releasePointerCapture(pointerId); } catch (_) {}
+      if (!commit || Math.abs(dx) < SW_THRESHOLD) {
+        resetVisuals();
+        return;
+      }
+      // Commit: fly out, then trigger track/dismiss + advance.
+      committed = true;
+      var dir = dx > 0 ? 1 : -1;
+      var endX = dir * Math.max(window.innerWidth, 600);
+      var endDeg = dir * (SW_MAX_ROTATE + 10);
+      wrap.style.transform = "translate(" + endX + "px, 0) rotate(" + endDeg + "deg)";
+      wrap.style.opacity   = "0";
+      var cur = currentSwipeCard();
+      setTimeout(function () {
+        if (!cur) return;
+        if (dir > 0) {
+          trackProp(cur.p, cur.i, {
+            afterAttempt: function () { swipeAdvance(cur.swKey); },
+          });
+        } else {
+          swipeAdvance(cur.swKey);
+        }
+      }, SW_FLY_MS);
+    }
+
+    wrap.addEventListener("pointerup",     function (e) {
+      if (!dragging || e.pointerId !== pointerId) return;
+      finishDrag(true);
+    });
+    wrap.addEventListener("pointercancel", function (e) {
+      if (!dragging || e.pointerId !== pointerId) return;
+      finishDrag(false);
+    });
+  }
+
   // ISO UTC -> "7:05 PM ET" (matches NiceGUI _game_time_et).
   function etTime(iso) {
     if (!iso) return "";
@@ -755,6 +988,32 @@
         cardContainerClick(e);
       });
     }
+    var swipeRoot = document.getElementById("swipe-stage");
+    if (swipeRoot) {
+      swipeRoot.addEventListener("click", function (e) {
+        // Big ✓ (track + advance) and ✗ (dismiss + advance) buttons.
+        if (e.target.closest(".sw-btn-track")) {
+          var cur = currentSwipeCard();
+          if (!cur) return;
+          trackProp(cur.p, cur.i, {
+            afterAttempt: function () { swipeAdvance(cur.swKey); },
+          });
+          return;
+        }
+        if (e.target.closest(".sw-btn-dismiss")) {
+          var cur2 = currentSwipeCard();
+          if (cur2) swipeAdvance(cur2.swKey);
+          return;
+        }
+        if (e.target.closest("[data-sw-reset]")) {
+          swipeResetDeck();
+          return;
+        }
+        // Any other click (the card's own Track btn, OU pills) falls
+        // through to the shared card delegation.
+        cardContainerClick(e);
+      });
+    }
 
     // ── Filter panel (Phase 2b) ───────────────────────────────────────
     initFilterPanel();
@@ -804,7 +1063,7 @@
       var btn = e.target.closest("[data-view]");
       if (!btn) return;
       var v = btn.getAttribute("data-view");
-      if (v !== "list" && v !== "game" && v !== "xray") return;
+      if (v !== "list" && v !== "game" && v !== "xray" && v !== "swipe") return;
       if (v === state.viewMode) return;
       state.viewMode = v;
       persistViewMode();
@@ -956,18 +1215,49 @@
   // keep the flipped state.  On any other failure we revert and toast the
   // error.  Uses the same /api/props/track endpoint + payload shape as the
   // NiceGUI props page so MyBets + ledger see picks identically.
+  // DOM-resolver wrapper: pulls p + idx from the clicked button element,
+  // then hands off to the shared trackProp() body.  Used by the standard
+  // Track button in list / by-game / x-ray views (no afterAttempt callback;
+  // the button's own optimistic flip provides the user feedback).
   function onTrackClick(btn) {
     var idx = btn.getAttribute("data-track-idx");
-    if (!idx || trackInflight[idx]) return;
-    var p = ALL[Number(idx)];
+    if (idx == null) return;
+    var i = Number(idx);
+    if (!isFinite(i)) return;
+    var p = ALL[i];
     if (!p) return;
+    trackProp(p, i, { btnEl: btn });
+  }
 
-    // Optimistic flip
+  // Shared POST + toast + revert body.  Used by:
+  //   1. onTrackClick(btn)                -- standard Track button (passes btnEl)
+  //   2. swipe-right gesture / ✓ button   -- swipe mode (passes afterAttempt)
+  //   3. anywhere else that needs to track a prop programmatically
+  //
+  // opts:
+  //   btnEl        -- if provided, the button gets the optimistic .is-tracked
+  //                   + .is-pending classes (visible feedback on the card);
+  //                   on real failure the button is reverted via revertTrack
+  //   afterAttempt -- callback fired in the `finally` block regardless of
+  //                   outcome; swipe mode uses this to advance to the next
+  //                   card after either success, dedup, or failure
+  function trackProp(p, idx, opts) {
+    opts = opts || {};
+    if (trackInflight[idx]) {
+      if (opts.afterAttempt) opts.afterAttempt();
+      return;
+    }
+    // Optimistic state flip -- always update the override so re-renders in
+    // any view show the tracked state; the visible-button flip is opt-in
+    // because swipe mode's card flies away anyway.
     trackedOverride[idx] = true;
     trackInflight[idx]   = true;
-    btn.classList.add("is-tracked", "is-pending");
-    btn.disabled = true;
-    btn.textContent = "Tracked ✓";
+    var btn = opts.btnEl;
+    if (btn) {
+      btn.classList.add("is-tracked", "is-pending");
+      btn.disabled = true;
+      btn.textContent = "Tracked ✓";
+    }
 
     var payload = {
       player:          p.player || "",
@@ -989,10 +1279,9 @@
     }).then(function (resp) {
       return resp.json().then(function (data) { return { resp: resp, data: data }; });
     }).then(function (r) {
-      btn.classList.remove("is-pending");
+      if (btn) btn.classList.remove("is-pending");
       var data = r.data || {};
       if (r.resp.ok && data.success) {
-        // Success -- show stake in the toast like the NiceGUI version does.
         var amt = (typeof data.amount === "number")
           ? " ($" + data.amount.toFixed(2) + ")" : "";
         toast("Tracked: " + (p.player || "") + " " +
@@ -1000,29 +1289,30 @@
               "positive");
       } else if (r.resp.status === 409 ||
                  (data.error && /already tracked/i.test(data.error))) {
-        // Server-side dedup -- keep the tracked state, info toast.
         toast("Already tracked.", "info");
       } else {
-        // Real failure -- revert and surface the error.
         revertTrack(idx, btn);
         toast("Track failed: " + (data.error || ("HTTP " + r.resp.status)),
               "negative");
       }
     }).catch(function (err) {
-      btn.classList.remove("is-pending");
+      if (btn) btn.classList.remove("is-pending");
       revertTrack(idx, btn);
       toast("Track failed: " + (err && err.message ? err.message : "network error"),
             "negative");
     }).finally(function () {
       trackInflight[idx] = false;
+      if (opts.afterAttempt) opts.afterAttempt();
     });
   }
 
   function revertTrack(idx, btn) {
     trackedOverride[idx] = false;
-    btn.classList.remove("is-tracked");
-    btn.disabled = false;
-    btn.textContent = "Track";
+    if (btn) {
+      btn.classList.remove("is-tracked");
+      btn.disabled = false;
+      btn.textContent = "Track";
+    }
   }
 
   // Toast: simple bottom-right stack.  4s auto-dismiss; positive/info/negative
