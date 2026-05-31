@@ -9302,6 +9302,348 @@ def sports_snapshot(sport: str):
         return jsonify({"error": str(exc), "cards": []}), 500
 
 
+# ── /research Flask port ────────────────────────────────────────────────────
+# Ports pages/research.py (582 lines NiceGUI) -- the model-performance
+# analytics dashboard.  Filter bar (MODEL × AI REVIEW × SPORT × BET TYPE ×
+# WINDOW) drives a single research_store.aggregate() query, rendered as
+# four KPI cards + a sortable leaderboard grouped by (model, prop_type).
+# Read-only: all aggregation lives in src/research_store.  No polling --
+# filter / sort changes drive a URL navigation, the server re-renders.
+
+from src import research_store as _rs                                      # noqa: E402
+
+# Filter option sets ported verbatim from pages/research.py so the values
+# match research_store row keys directly (model names are stored exactly
+# as the AI reviewer wrote them; market keys are the store's market keys).
+_RES_PRED_OPTIONS = {
+    "all":          "All",
+    "xgb_mlb":      "XGBoost (MLB)",
+    "nn_mlb":       "Neural Net (MLB)",
+    "pitcher_mlb":  "Pitcher Model (MLB)",
+    "xgb_wnba":     "XGBoost (WNBA)",
+    "nn_wnba":      "Neural Net (WNBA)",
+    "pitcher_wnba": "Pitcher Model (WNBA)",
+    "batter":       "Batter Model",
+}
+_RES_PRED_PREFIX = {
+    "pitcher_mlb":  "pitcher_",
+    "pitcher_wnba": "pitcher_",
+    "batter":       "batter_",
+}
+# XGBoost / Neural Net carry no market mapping in the current store, so
+# selecting them shows the muted note rather than narrowing rows.
+_RES_PRED_SHOW_ALL = {"xgb_mlb", "nn_mlb", "xgb_wnba", "nn_wnba"}
+
+_RES_OLLAMA_SENTINEL = "__ollama__"
+_RES_REVIEW_OPTIONS = {
+    "all":                      "All",
+    "llama-3.3-70b-versatile":  "Llama-3.3-70b",
+    "compound-beta":            "Compound-Beta",
+    "qwen/qwen3-32b":           "Qwen3",
+    _RES_OLLAMA_SENTINEL:       "Ollama (soon)",
+}
+
+_RES_SPORT_OPTIONS = {"all": "All", "mlb": "MLB", "wnba": "WNBA"}
+
+_RES_WINDOW_OPTIONS = {
+    "7d":     "Last 7 Days",
+    "30d":    "Last 30 Days",
+    "season": "This Season",
+    "all":    "All Time",
+}
+
+_RES_BET_TYPE_OPTIONS = {
+    "all":                  "All",
+    "moneyline":            "Moneyline",
+    "run_line":             "Run Line",
+    "total":                "Total",
+    "batter_hits":          "Hits",
+    "strikeouts":           "Strikeouts",
+    "batter_rbis":          "RBIs",
+    "batter_runs_scored":   "Runs",
+    "walks":                "Walks",
+    "batter_total_bases":   "Total Bases",
+    "pitcher_earned_runs":  "Earned Runs",
+    "pitcher_outs":         "Outs",
+    "pitcher_hits_allowed": "Hits Allowed",
+}
+_RES_BET_TYPE_MARKETS = {
+    "moneyline":            {"moneyline"},
+    "run_line":             {"run_line"},
+    "total":                {"total"},
+    "batter_hits":          {"batter_hits"},
+    "strikeouts":           {"pitcher_strikeouts", "batter_strikeouts"},
+    "batter_rbis":          {"batter_rbis"},
+    "batter_runs_scored":   {"batter_runs_scored"},
+    "walks":                {"pitcher_walks", "batter_walks"},
+    "batter_total_bases":   {"batter_total_bases"},
+    "pitcher_earned_runs":  {"pitcher_earned_runs"},
+    "pitcher_outs":         {"pitcher_outs"},
+    "pitcher_hits_allowed": {"pitcher_hits_allowed"},
+}
+# Returned by _res_effective_prop_types when a Pitcher-vs-batter style filter
+# combination resolves to "match nothing" -- aggregate() then returns an empty
+# table instead of silently widening back to everything.
+_RES_NO_MATCH = "__no_match__"
+
+_RES_PROP_LABELS = {
+    "pitcher_strikeouts":   "Strikeouts (K)",
+    "pitcher_outs":         "Outs",
+    "pitcher_earned_runs":  "Earned Runs",
+    "pitcher_hits_allowed": "Hits Allowed",
+    "pitcher_walks":        "Walks",
+    "batter_home_runs":     "Home Runs",
+    "batter_hits":          "Hits",
+    "batter_rbis":          "RBI",
+    "batter_total_bases":   "Total Bases",
+    "batter_runs_scored":   "Runs",
+    "batter_walks":         "Walks",
+    "batter_strikeouts":    "Strikeouts",
+    "points":               "Points",
+    "rebounds":             "Rebounds",
+    "assists":              "Assists",
+}
+
+# (label, row_key, numeric?) -- the leaderboard's sortable columns.  Keys
+# match research_store.aggregate's table-row keys plus the local "streak".
+_RES_COLUMNS = (
+    ("Model",      "model",     False),
+    ("Prop Type",  "prop_type", False),
+    ("Picks",      "picks",     True),
+    ("Wins",       "wins",      True),
+    ("Win %",      "win_pct",   True),
+    ("Avg Edge %", "avg_edge",  True),
+    ("ROI %",      "roi",       True),
+    ("Hot Streak", "streak",    True),
+)
+_RES_SORT_KEYS = {ckey for _, ckey, _ in _RES_COLUMNS}
+
+
+def _res_prop_label(market: str) -> str:
+    """Pretty label for a store market key ('batter_hits' -> 'Hits')."""
+    if not market or market == "all":
+        return "All"
+    return _RES_PROP_LABELS.get(market) or market.replace("_", " ").title()
+
+
+def _res_short_model(name: str) -> str:
+    """Compact display label for a Groq AI-reviewer model id."""
+    n = (name or "").split("/")[-1]
+    return (n.replace("-versatile", "").replace("-instant", "")
+             .replace("llama-", "Llama-").replace("qwen", "Qwen")
+             .replace("compound-beta", "Compound-Beta"))
+
+
+def _res_parse_multi(raw, options: dict) -> set:
+    """Parse a comma-separated multi-select query param into a set of valid
+    option values.  Falls back to {"all"} when empty / all-unknown.  Drops
+    the "all" sentinel when concrete picks coexist (matches NiceGUI's
+    _set_multi exclusive-all behaviour)."""
+    if not raw:
+        return {"all"}
+    vals = {v.strip() for v in str(raw).split(",") if v.strip()}
+    vals = {v for v in vals if v in options}
+    if len(vals) > 1:
+        vals.discard("all")
+    return vals or {"all"}
+
+
+def _res_effective_models(review_set: set):
+    """AI-review selection -> the models list research_store expects.
+    Drops the "all" + Ollama sentinels; returns None (= no restriction)
+    when nothing concrete is selected."""
+    sel = {m for m in review_set if m not in ("all", _RES_OLLAMA_SENTINEL)}
+    return sorted(sel) if sel else None
+
+
+def _res_effective_prop_types(pred_set: set, bet_set: set):
+    """Combine BET TYPE (multi) and prediction-MODEL (prefix) into one
+    market allow-list for research_store.aggregate.  Mirrors NiceGUI's
+    _effective_prop_types:
+      * None              -> no restriction
+      * set of markets    -> only those markets
+      * {_RES_NO_MATCH}   -> the combination excludes every market"""
+    if "all" in bet_set or not bet_set:
+        bt = None
+    else:
+        bt = set()
+        for b in bet_set:
+            bt |= _RES_BET_TYPE_MARKETS.get(b, {b})
+    prefixes = {_RES_PRED_PREFIX[p] for p in pred_set if p in _RES_PRED_PREFIX}
+    if prefixes:
+        try:
+            universe = set(_rs.distinct_prop_types())
+        except Exception:                                                  # noqa: BLE001
+            universe = set()
+        pm = {k for k in universe if any(k.startswith(pf) for pf in prefixes)}
+    else:
+        pm = None
+    if bt is None and pm is None:
+        return None
+    if bt is None:
+        eff = pm
+    elif pm is None:
+        eff = bt
+    else:
+        eff = bt & pm
+    return eff if eff else {_RES_NO_MATCH}
+
+
+def _research_view_model(args) -> dict:
+    """Build the /research render payload from query-param filter state.
+    All filter / sort state is in the URL so the page is stateless and
+    every filter combination is shareable as a link."""
+    # Filter parsing (every value falls back to a safe default; no 500s
+    # from a hand-edited URL).
+    review = _res_parse_multi(args.get("review"), _RES_REVIEW_OPTIONS)
+    pred   = _res_parse_multi(args.get("pred"),   _RES_PRED_OPTIONS)
+    bets   = _res_parse_multi(args.get("bets"),   _RES_BET_TYPE_OPTIONS)
+    sport  = (args.get("sport") or "all").strip().lower()
+    if sport not in _RES_SPORT_OPTIONS:
+        sport = "all"
+    window = (args.get("window") or "all").strip().lower()
+    if window not in _RES_WINDOW_OPTIONS:
+        window = "all"
+    sort_key = (args.get("sort_key") or "win_pct").strip()
+    if sort_key not in _RES_SORT_KEYS:
+        sort_key = "win_pct"
+    sort_dir = (args.get("sort_dir") or "desc").strip().lower()
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "desc"
+
+    models     = _res_effective_models(review)
+    prop_types = _res_effective_prop_types(pred, bets)
+    if isinstance(prop_types, set):
+        prop_types_arg = sorted(prop_types)
+    else:
+        prop_types_arg = prop_types
+
+    try:
+        agg = _rs.aggregate(
+            models=models,
+            sport=sport,
+            prop_types=prop_types_arg,
+            window=window,
+        )
+    except Exception as exc:                                               # noqa: BLE001
+        _eprint(f"RESEARCH aggregate: {type(exc).__name__}: {exc}")
+        agg = {"kpis": _res_empty_kpis(), "table": [], "n_settled": 0}
+
+    kpis  = agg.get("kpis") or _res_empty_kpis()
+    table = agg.get("table") or []
+
+    rows_sorted = sorted(
+        table,
+        key=lambda r: (r.get(sort_key)
+                       if isinstance(r.get(sort_key), (int, float))
+                       else str(r.get(sort_key) or "").lower()),
+        reverse=(sort_dir == "desc"),
+    )
+
+    rows_out: list[dict] = []
+    for r in rows_sorted:
+        decided = (int(r.get("wins") or 0) + int(r.get("losses") or 0)) > 0
+        win_pct  = float(r.get("win_pct")  or 0.0)
+        avg_edge = float(r.get("avg_edge") or 0.0)
+        roi      = float(r.get("roi")      or 0.0)
+        streak   = int(r.get("streak") or 0)
+        if not decided:
+            tint = "none"
+        elif win_pct > 60:
+            tint = "pos"
+        elif win_pct < 40:
+            tint = "neg"
+        else:
+            tint = "none"
+        rows_out.append({
+            "model":          _res_short_model(r.get("model") or "—"),
+            "prop_type":      _res_prop_label(r.get("prop_type") or ""),
+            "picks":          str(int(r.get("picks") or 0)),
+            "wins":           str(int(r.get("wins")  or 0)),
+            "win_pct":        f"{win_pct:.1f}%",
+            "win_pct_color":  "pos" if win_pct > 60 else "neg" if win_pct < 40 else "text",
+            "avg_edge":       f"{avg_edge:+.1f}%",
+            "avg_edge_color": "pos" if avg_edge > 0 else "neg",
+            "roi":            f"{roi:+.1f}%",
+            "roi_color":      "pos" if roi > 0 else "neg",
+            "streak":         (f"🔥 {streak}" if streak >= 3 else str(streak)),
+            "row_tint":       tint,
+        })
+
+    decided_total = (int(kpis.get("wins") or 0) + int(kpis.get("losses") or 0))
+    picks_total   = int(kpis.get("picks") or 0)
+    win_pct       = float(kpis.get("win_pct")  or 0.0)
+    avg_edge      = float(kpis.get("avg_edge") or 0.0)
+    roi           = float(kpis.get("roi")      or 0.0)
+
+    return {
+        "filters": {
+            "review":   sorted(review),
+            "pred":     sorted(pred),
+            "bets":     sorted(bets),
+            "sport":    sport,
+            "window":   window,
+            "sort_key": sort_key,
+            "sort_dir": sort_dir,
+        },
+        "options": {
+            "pred":   [{"value": k, "label": v, "active": k in pred}
+                       for k, v in _RES_PRED_OPTIONS.items()],
+            "review": [{"value": k, "label": v, "active": k in review}
+                       for k, v in _RES_REVIEW_OPTIONS.items()],
+            "sport":  [{"value": k, "label": v, "active": k == sport}
+                       for k, v in _RES_SPORT_OPTIONS.items()],
+            "bets":   [{"value": k, "label": v, "active": k in bets}
+                       for k, v in _RES_BET_TYPE_OPTIONS.items()],
+            "window": [{"value": k, "label": v, "active": k == window}
+                       for k, v in _RES_WINDOW_OPTIONS.items()],
+        },
+        "pred_note": any(p in _RES_PRED_SHOW_ALL for p in pred),
+        "kpis": {
+            "win_pct":    f"{win_pct:.1f}%"  if decided_total else "—",
+            "win_color":  ("pos" if win_pct >= 50 else "neg") if decided_total else "text",
+            "picks":      str(picks_total),
+            "avg_edge":   f"{avg_edge:+.1f}%" if picks_total else "—",
+            "edge_color": ("pos" if avg_edge > 0 else "neg") if picks_total else "text",
+            "roi":        f"{roi:+.1f}%"     if decided_total else "—",
+            "roi_color":  ("pos" if roi > 0 else "neg") if decided_total else "text",
+        },
+        "columns": [{
+            "label":   l,
+            "key":     k,
+            "numeric": n,
+            "active":  k == sort_key,
+            "arrow":   ((" ▼" if sort_dir == "desc" else " ▲")
+                        if k == sort_key else ""),
+        } for l, k, n in _RES_COLUMNS],
+        "rows":      rows_out,
+        "n_settled": int(agg.get("n_settled") or 0),
+    }
+
+
+def _res_empty_kpis() -> dict:
+    """Zeroed KPI block used when research_store.aggregate raises -- keeps
+    the template renderable instead of bubbling to a 500."""
+    return {"picks": 0, "wins": 0, "losses": 0, "voids": 0,
+            "win_pct": 0.0, "avg_edge": 0.0, "roi": 0.0, "net_units": 0.0}
+
+
+@app.route("/research")
+def research_page():
+    """Tailwind /research model-analytics dashboard.  Filter pills + sort
+    headers post their state to the URL; the server re-renders.  No JS
+    polling -- the dataset is settled history that doesn't move until the
+    nightly settle job runs."""
+    try:
+        vm = _research_view_model(request.args)
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"RESEARCH render: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        # Empty-args fallback so a bad query param can't 500 the page.
+        vm = _research_view_model({})
+    return render_template("research.html", init_data=vm)
+
+
 # ── /matchup (game_detail) Flask port ───────────────────────────────────────
 # Ports pages/game_detail.py (1,555 lines NiceGUI) to Flask + Tailwind.  The
 # 3-strategy game resolver lives in src/game_detail_data.py (extracted so the
