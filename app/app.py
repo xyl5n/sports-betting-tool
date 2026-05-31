@@ -68,7 +68,7 @@ except Exception as _e:
     load_dotenv = lambda: None  # noqa: E731
 
 try:
-    from flask import Flask, jsonify, render_template, request
+    from flask import Flask, jsonify, redirect, render_template, request
     print("STARTUP [3/6]: Flask OK", flush=True, file=sys.stderr)
 except Exception as _e:
     print(f"STARTUP FATAL: Flask import failed: {_e}", flush=True, file=sys.stderr)
@@ -9015,6 +9015,291 @@ def top_picks_snapshot():
         _eprint(f"TOP-PICKS-SNAPSHOT: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
         return jsonify({"error": str(exc), "rows": [], "scorecard": {},
                         "filters": []}), 500
+
+
+# ── /sports Flask port ──────────────────────────────────────────────────────
+# Ports pages/sport.py (742 lines NiceGUI) -- the per-sport slate.  Compact
+# card per game (matchup + status/score + one-line model pick + Track) with a
+# View Details link to /matchup/<sport>/<gid>; full bet boxes stay on the
+# detail page so the slate scans fast.  Mirrors NiceGUI's 60s live-score
+# poll via the /api/sports/<sport>/snapshot JSON endpoint.
+
+def _sports_pretty_date(date_str: str, today_str: str) -> str:
+    """Format the date label: 'Tuesday May 21' (current year) or
+    'Tuesday May 21, 2025' across a year boundary.  Mirrors
+    pages/sport.py:_pretty_date."""
+    from datetime import date as _date
+    try:
+        d = _date.fromisoformat(date_str)
+        td = _date.fromisoformat(today_str)
+    except Exception:                                                      # noqa: BLE001
+        return date_str
+    if d.year == td.year:
+        return d.strftime("%A %B %-d")
+    return d.strftime("%A %B %-d, %Y")
+
+
+def _sports_live_state(g: dict) -> str:
+    """Live state for a slate row using only the _sched fields stamped by
+    /api/schedule.  Mirrors live_score.state_from_schedule: 'final' on F /
+    final, 'live' on coded I or abstract Live (not P pre-game), else
+    'scheduled'.  No live-score cache lookup -- the cache only exists in
+    the NiceGUI process and is unnecessary for the compact slate."""
+    sched = g.get("_sched") or {}
+    abstract = (sched.get("status") or "").strip().lower()
+    coded    = (sched.get("coded_status") or "").strip().upper()
+    if abstract == "final" or coded == "F":
+        return "final"
+    if coded == "I" or (abstract == "live" and coded != "P"):
+        return "live"
+    return "scheduled"
+
+
+def _sports_when_label(commence_time: str) -> str:
+    """Format commence_time as a short ET time label ('7:05 PM ET').
+    Empty string on parse failure so the meta row collapses gracefully."""
+    if not commence_time:
+        return ""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p ET")
+    except Exception:                                                      # noqa: BLE001
+        return ""
+
+
+def _sports_score_label(g: dict, state: str) -> str:
+    """Score line for live/final rows.  Live uses _sched.{home,away}_score,
+    final prefers _final_score (set by /api/schedule on past games) and
+    falls back to _sched scores.  Returns '' for pre-game or when scores
+    aren't available."""
+    if state == "final":
+        fs = g.get("_final_score") or {}
+        h = fs.get("home")
+        a = fs.get("away")
+        if h is None or a is None:
+            sched = g.get("_sched") or {}
+            h = sched.get("home_score")
+            a = sched.get("away_score")
+        if h is not None and a is not None:
+            return f"{g.get('away_team', '')} {a} — {g.get('home_team', '')} {h}"
+    elif state == "live":
+        sched = g.get("_sched") or {}
+        h = sched.get("home_score")
+        a = sched.get("away_score")
+        if h is not None and a is not None:
+            inning = sched.get("inning_ordinal") or ""
+            tag = f" · {inning}" if inning else ""
+            return f"{g.get('away_team', '')} {a} — {g.get('home_team', '')} {h}{tag}"
+    return ""
+
+
+def _sports_pick_line(g: dict) -> tuple[str, str]:
+    """Return (summary, color_token) for the one-line pick blurb on each
+    card.  Five branches:
+      - no-model     -> 'No model pick available' / warn
+      - no-odds + pred -> 'No odds yet · Predicted: TEAM 58%' / dim
+      - no-odds      -> 'No odds yet' / dim
+      - pick + edge>0 -> 'Model: TEAM ML -150 · +3.2% edge' / pos
+      - pick + edge<=0 -> same shape / dim
+    """
+    if g.get("_no_model"):
+        return ("No model pick available", "warn")
+
+    if g.get("_no_odds"):
+        pred = g.get("_model_prediction") or {}
+        try:
+            home_p = float(pred.get("ml_prob_home") or 0) * 100
+            away_p = float(pred.get("ml_prob_away") or 0) * 100
+        except (TypeError, ValueError):
+            home_p = away_p = 0.0
+        if home_p > 0 or away_p > 0:
+            winner = g.get("home_team", "") if home_p >= away_p else g.get("away_team", "")
+            return (f"No odds yet · Predicted: {winner} {max(home_p, away_p):.0f}%", "dim")
+        return ("No odds yet", "dim")
+
+    pick_team = g.get("pick_team")
+    if not pick_team:
+        return ("No model pick", "dim")
+
+    odds_str = ""
+    pick_odds = g.get("pick_odds")
+    if pick_odds is not None:
+        try:
+            odds_str = f" {int(pick_odds):+d}"
+        except (TypeError, ValueError):
+            pass
+
+    edge_str = ""
+    color = "dim"
+    edge = g.get("pick_edge")
+    if edge is not None:
+        try:
+            edge_pct = float(edge) * 100
+            edge_str = f" · {edge_pct:+.1f}% edge"
+            color = "pos" if edge_pct > 0 else "dim"
+        except (TypeError, ValueError):
+            pass
+
+    return (f"Model: {pick_team} ML{odds_str}{edge_str}", color)
+
+
+def _sports_shape_card(g: dict, sport: str) -> dict:
+    """Pre-shape one slate row into a flat presentational dict for the
+    template / snapshot JSON.  Mirrors the compact NiceGUI card: matchup
+    + state badge + score (live/final) + one-line model pick + Track URL
+    + Matchup link.  Full bet boxes live on /matchup/<sport>/<gid>."""
+    gid = g.get("game_id") or g.get("id") or ""
+    state = _sports_live_state(g)
+    pick_summary, pick_color = _sports_pick_line(g)
+
+    # Track URL: ML confirm endpoint, only when a real pick exists.
+    track_url = None
+    track_body = None
+    if gid and g.get("pick_team") and not g.get("_no_odds") and not g.get("_no_model"):
+        track_url = (f"/api/ledger/confirm/{gid}" if sport == "mlb"
+                     else f"/api/wnba/ledger/confirm/{gid}")
+        track_body = {}     # bankroll added client-side
+
+    return {
+        "game_id":      str(gid),
+        "home_team":    g.get("home_team") or "",
+        "away_team":    g.get("away_team") or "",
+        "when_label":   _sports_when_label(g.get("commence_time") or ""),
+        "state":        state,
+        "score_label":  _sports_score_label(g, state),
+        "pick_summary": pick_summary,
+        "pick_color":   pick_color,
+        "track_url":    track_url,
+        "track_body":   track_body,
+        "track_label":  f"{g.get('away_team', '')} @ {g.get('home_team', '')}",
+        "matchup_url":  f"/matchup/{sport}/{gid}" if gid else None,
+    }
+
+
+def _sports_view_model(sport: str, date_str: str) -> dict:
+    """Full /sports/<sport>?date=YYYY-MM-DD payload: header pills + date
+    nav + odds quota banner + ordered cards.  Schedule comes from the
+    existing /api/schedule/<sport> endpoint via the in-process Flask test
+    client (same source the NiceGUI page uses)."""
+    today_str = _today_et()
+
+    games: list[dict] = []
+    try:
+        client = app.test_client()
+        rv = client.get(f"/api/schedule/{sport}?date={date_str}")
+        data = rv.get_json(force=True, silent=True) or {}
+        games = data.get("games") or []
+    except Exception as exc:                                              # noqa: BLE001
+        _eprint(f"SPORTS view_model schedule fetch failed: "
+                f"{type(exc).__name__}: {exc}")
+
+    # Sort: not-finished first by commence_time, finished last (matches
+    # pages/sport.py:_game_grid).
+    def _finished(g: dict) -> bool:
+        return _sports_live_state(g) == "final"
+    games_sorted = sorted(
+        games,
+        key=lambda g: (1 if _finished(g) else 0, g.get("commence_time") or ""),
+    )
+    cards = [_sports_shape_card(g, sport) for g in games_sorted]
+
+    # Odds quota banner -- silent unless the daily cap is hit.
+    odds_quota = None
+    try:
+        rv = app.test_client().get("/api/odds/usage")
+        u = rv.get_json(force=True, silent=True) or {}
+        if u.get("limit_reached"):
+            odds_quota = {
+                "count": int(u.get("count") or 0),
+                "limit": int(u.get("effective_limit") or 500),
+            }
+    except Exception:                                                      # noqa: BLE001
+        odds_quota = None
+
+    # Date nav: prev / next ISO + pretty label.
+    from datetime import date as _date, timedelta as _td
+    try:
+        d = _date.fromisoformat(date_str)
+        prev_iso = (d - _td(days=1)).isoformat()
+        next_iso = (d + _td(days=1)).isoformat()
+        pretty   = _sports_pretty_date(date_str, today_str)
+    except Exception:                                                      # noqa: BLE001
+        prev_iso = next_iso = date_str
+        pretty   = date_str
+
+    return {
+        "sport":       sport,
+        "sport_upper": sport.upper(),
+        "date":        date_str,
+        "today":       today_str,
+        "is_today":    date_str == today_str,
+        "pretty_date": pretty,
+        "prev_iso":    prev_iso,
+        "next_iso":    next_iso,
+        "pills": [
+            {"key": "mlb",  "label": "MLB",  "active": sport == "mlb"},
+            {"key": "wnba", "label": "WNBA", "active": sport == "wnba"},
+        ],
+        "cards":       cards,
+        "odds_quota":  odds_quota,
+        "empty_msg":   f"No {sport.upper()} games scheduled for {date_str}.",
+    }
+
+
+@app.route("/sports")
+def sports_default():
+    """Bare /sports -> /sports/mlb (matches the NiceGUI default)."""
+    return redirect("/sports/mlb")
+
+
+@app.route("/sports/<sport>")
+def sports_page(sport: str):
+    """Tailwind per-sport slate.  Compact card per game (matchup, status,
+    score, one-line pick, Track + View Details).  60s snapshot poll keeps
+    live scores / late analysis rows fresh without a reload."""
+    sport = (sport or "mlb").lower()
+    if sport not in ("mlb", "wnba"):
+        return redirect("/sports/mlb")
+    date_str = (request.args.get("date") or _today_et()).strip()
+    try:
+        from datetime import date as _date
+        _date.fromisoformat(date_str)                  # validate
+    except Exception:                                                      # noqa: BLE001
+        date_str = _today_et()
+    try:
+        vm = _sports_view_model(sport, date_str)
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"SPORTS render: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        vm = {
+            "sport": sport, "sport_upper": sport.upper(),
+            "date": date_str, "today": date_str, "is_today": True,
+            "pretty_date": date_str, "prev_iso": date_str, "next_iso": date_str,
+            "pills": [{"key": "mlb", "label": "MLB", "active": sport == "mlb"},
+                      {"key": "wnba", "label": "WNBA", "active": sport == "wnba"}],
+            "cards": [], "odds_quota": None,
+            "empty_msg": "Slate failed to load. Refresh in a moment.",
+        }
+    return render_template("sport.html", init_data=vm)
+
+
+@app.route("/api/sports/<sport>/snapshot", methods=["GET"])
+def sports_snapshot(sport: str):
+    """Same view-model dict as the /sports/<sport> render, JSON for the
+    60s client poll.  Mirrors NiceGUI's live_score 60s timer so scores +
+    late analysis rows populate without a reload."""
+    sport = (sport or "mlb").lower()
+    if sport not in ("mlb", "wnba"):
+        return jsonify({"error": f"unknown sport: {sport}"}), 400
+    date_str = (request.args.get("date") or _today_et()).strip()
+    try:
+        return jsonify(_py(_sports_view_model(sport, date_str)))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"SPORTS-SNAPSHOT: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc), "cards": []}), 500
 
 
 # ── /matchup (game_detail) Flask port ───────────────────────────────────────
