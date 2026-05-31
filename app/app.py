@@ -8262,6 +8262,442 @@ def model_history_data(sport, model):
                         "record": {}, "counts": {}}), 500
 
 
+# ── /matchup (game_detail) Flask port ───────────────────────────────────────
+# Ports pages/game_detail.py (1,555 lines NiceGUI) to Flask + Tailwind.  The
+# 3-strategy game resolver lives in src/game_detail_data.py (extracted so the
+# Flask port + the legacy NiceGUI page can share one implementation).  Two
+# route aliases serve the same handler -- the original NiceGUI page declared
+# both, and every inbound link uses /matchup/...
+
+from src import game_detail_data                                          # noqa: E402
+
+
+def _gd_pick_blocks(raw: dict, ser: dict, sport: str) -> list[dict]:
+    """Shape the model-picks rows: ML always; RL/Spread when present;
+    Totals when total_line is set.  Includes the top-3 SHAP factors so the
+    template renders the 'TOP FACTORS' list without any client logic.
+    Mirrors pages/game_detail.py:_section_model_picks lines 551-607."""
+    is_mlb = sport == "mlb"
+    out: list[dict] = []
+
+    def _edge_color(edge_pct: float) -> str:
+        return "pos" if edge_pct >= 0 else "neg"
+
+    def _shape_shap(shap: list) -> list[dict]:
+        rows = []
+        for s in (shap or [])[:3]:
+            label = s.get("label") or s.get("feature", "factor")
+            try:
+                val = float(s.get("shap_value") or 0)
+            except (TypeError, ValueError):
+                val = 0.0
+            rows.append({
+                "label": label,
+                "arrow": "↑" if val > 0 else ("↓" if val < 0 else "·"),
+                "color": "pos" if val > 0 else ("neg" if val < 0 else "dim"),
+            })
+        return rows
+
+    def _row(bet_type, label, pick, prob, edge, odds, kelly, agree, shap_src,
+             track_url, track_body):
+        prob_pct = float(prob or 0) * 100
+        edge_pct = float(edge or 0) * 100
+        return {
+            "bet_type":   bet_type,
+            "label":      label,
+            "pick":       pick,
+            "prob_pct":   round(prob_pct),
+            "edge_pct":   round(edge_pct, 1),
+            "edge_sign":  "+" if edge_pct >= 0 else "",
+            "edge_color": _edge_color(edge_pct),
+            "odds_s":     game_detail_data.odds_str(odds),
+            "kelly_s":    (f"½K  ${float(kelly):.0f}"
+                           if isinstance(kelly, (int, float)) and kelly > 0
+                           else "½K  —"),
+            "agree":      bool(agree),
+            "shap":       _shape_shap(shap_src),
+            "track_url":  track_url,
+            "track_body": track_body,
+        }
+
+    # Moneyline -- always present in serialized output.
+    if ser.get("pick_team"):
+        track_url = (f"/api/ledger/confirm/{ser.get('game_id') or ''}" if is_mlb
+                     else f"/api/wnba/ledger/confirm/{ser.get('game_id') or ''}")
+        out.append(_row(
+            "moneyline", "Moneyline", ser.get("pick_team", "—"),
+            ser.get("pick_prob"), ser.get("pick_edge"), ser.get("pick_odds"),
+            ser.get("bet_dollars"), ser.get("models_agree", True),
+            (raw.get("prediction") or {}).get("shap") or [],
+            track_url, {},   # bankroll added client-side
+        ))
+
+    # Run Line (MLB) / Spread (WNBA)
+    rl = ser.get("run_line") or ser.get("spread_pick")
+    if rl and rl.get("pick_team"):
+        bt = "run_line" if is_mlb else "spread"
+        line = rl.get("run_line_point") if is_mlb else rl.get("spread_line")
+        line_str = f" {float(line):+g}" if isinstance(line, (int, float)) else ""
+        out.append(_row(
+            bt, "Run Line" if is_mlb else "Spread",
+            f"{rl.get('pick_team', '')}{line_str}".strip(),
+            rl.get("pick_prob"), rl.get("edge"), rl.get("pick_odds"),
+            rl.get("bet_dollars"), rl.get("models_agree", True),
+            (raw.get("rl_pred") or raw.get("spread_pred") or {}).get("shap") or [],
+            "/api/ledger/track_prop",
+            {"game_id": ser.get("game_id"), "bet_type": "run_line"},
+        ))
+
+    # Totals
+    tot = ser.get("totals") or {}
+    if tot and tot.get("total_line") is not None:
+        direction = (tot.get("direction") or "over").title()
+        out.append(_row(
+            "totals", "Totals", f"{direction} {tot.get('total_line')}",
+            tot.get("pick_prob"), tot.get("edge"),
+            tot.get("over_odds") if direction == "Over" else tot.get("under_odds"),
+            tot.get("bet_dollars"), tot.get("models_agree", True),
+            (raw.get("totals_pred") or {}).get("shap") or [],
+            "/api/ledger/track_prop",
+            {"game_id": ser.get("game_id"), "bet_type": "totals"},
+        ))
+    return out
+
+
+def _gd_header_block(raw: dict, ser: dict, sport: str) -> dict:
+    """Shape the header card: meta row + odds folded into the matchup box.
+    Mirrors _section_header lines 358-473.  Live-score state is computed
+    here but not the live-score block itself (that's read off the same
+    live_score helper, gracefully degraded when missing)."""
+    game = raw.get("game") or {}
+    away_full = game.get("away_team") or ser.get("away_team") or "—"
+    home_full = game.get("home_team") or ser.get("home_team") or "—"
+    when = game_detail_data.fmt_when(
+        game.get("commence_time") or ser.get("commence_time", ""))
+    if isinstance(game.get("venue"), dict):
+        venue = (game.get("venue") or {}).get("name") or "—"
+    else:
+        venue = (game.get("venue_name") or ser.get("venue_name")
+                 or ser.get("venue") or "—")
+    upset = raw.get("upset") or {}
+    sgn = upset.get("series_game_number")
+    series_ctx = f"Game {sgn} of series" if sgn else None
+
+    # Live score lookup -- gracefully no-op when offline / off-hours.
+    live_state = "scheduled"
+    live = None
+    try:
+        from components import live_score as _ls
+        live = _ls.lookup(sport, game_id=(game.get("id") or ""),
+                          away_team=away_full, home_team=home_full)
+        live_state = _ls.state_of(live)
+    except Exception:                                                      # noqa: BLE001
+        live = None
+
+    away_ml = game_detail_data.odds_str(ser.get("away_odds"))
+    home_ml = game_detail_data.odds_str(ser.get("home_odds"))
+    rl_blob = ser.get("run_line") or ser.get("spread_pick") or {}
+    _pt = (rl_blob.get("run_line_point") if sport == "mlb"
+           else rl_blob.get("spread_line"))
+    away_rl = home_rl = None
+    if isinstance(_pt, (int, float)):
+        _h = game_detail_data.odds_str(
+            rl_blob.get("run_line_home_odds") or rl_blob.get("pick_odds"))
+        _a = game_detail_data.odds_str(
+            rl_blob.get("run_line_away_odds") or rl_blob.get("pick_odds"))
+        home_rl = f"{float(_pt):+g} {_h}".strip()
+        away_rl = f"{(-float(_pt)):+g} {_a}".strip()
+    tot = ser.get("totals") or {}
+    total_line = tot.get("total_line")
+    proj_total = tot.get("predicted_total")
+
+    return {
+        "sport":       sport,
+        "away_team":   away_full,
+        "home_team":   home_full,
+        "when":        when,
+        "venue":       venue if venue and venue != "—" else None,
+        "series_ctx":  series_ctx,
+        "live_state":  live_state,                # scheduled | live | final
+        "away_ml":     away_ml,
+        "home_ml":     home_ml,
+        "away_rl":     away_rl,
+        "home_rl":     home_rl,
+        "total_line":  total_line,
+        "proj_total":  (float(proj_total) if isinstance(proj_total, (int, float))
+                        else None),
+    }
+
+
+def _gd_venue_block(ser: dict, sport: str) -> dict | None:
+    """MLB-only venue card: ballpark + run factor + Hitter/Pitcher Friendly
+    tag.  Mirrors _section_venue."""
+    if sport != "mlb":
+        return None
+    park = ser.get("park_run_factor")
+    venue = ser.get("venue_name") or "—"
+    try:
+        pv = int(round(float(park))) if park is not None else None
+    except (TypeError, ValueError):
+        pv = None
+    if pv is None:
+        tag, tag_color = "—", "dim"
+    elif pv > 105:
+        tag, tag_color = "Hitter Friendly", "pos"
+    elif pv < 95:
+        tag, tag_color = "Pitcher Friendly", "neg"
+    else:
+        tag, tag_color = "Neutral", "dim"
+    return {"venue": venue, "run_factor": pv, "tag": tag, "tag_color": tag_color}
+
+
+def _gd_game_context_block(ser: dict) -> list[dict]:
+    """Weather + line movement rows.  Mirrors _section_game_context.
+    Umpire data line preserved verbatim ('Coming soon')."""
+    wx = ser.get("weather") or {}
+    line_move = (ser.get("meta") or {}).get("line_movement")
+    rows: list[dict] = []
+    if wx:
+        temp = wx.get("temperature")
+        wind = wx.get("wind_speed")
+        wdir = wx.get("wind_direction")
+        bits = []
+        if isinstance(temp, (int, float)): bits.append(f"{temp:.0f}°F")
+        if isinstance(wind, (int, float)): bits.append(f"wind {wind:.0f} mph")
+        if wdir: bits.append(f"({wdir})")
+        rows.append({"label": "Weather",
+                     "value": " ".join(bits) if bits else "—"})
+    else:
+        rows.append({"label": "Weather", "value": "—"})
+    if isinstance(line_move, (int, float)) and line_move:
+        sign = "+" if line_move > 0 else ""
+        rows.append({"label": "Line movement (vs opening)",
+                     "value": f"{sign}{line_move:.2f}"})
+    else:
+        rows.append({"label": "Line movement (vs opening)", "value": "—"})
+    rows.append({"label": "Umpire data", "value": "Coming soon"})
+    return rows
+
+
+def _gd_upset_block(ser: dict) -> dict:
+    """Chaos score + components (each 0..100% with a coloured bar).
+    Mirrors _section_upset_factor.  Returns {available, ...} so the
+    template can show the 'No upset-factor data' empty state."""
+    upset = ser.get("upset_factor") or {}
+    score = upset.get("score")
+    if score is None:
+        return {"available": False}
+    pretty = {
+        "run_scoring_var":      "Run scoring volatility",
+        "pitching_var":         "Pitching volatility",
+        "streak":               "Recent streak swing",
+        "underdog_win_rate":    "Underdog upset rate this season",
+        "blown_lead_rate":      "Blown leads recently",
+        "h2h_divergence":       "Head-to-head divergence",
+        "bullpen_volatility":   "Bullpen volatility",
+        "pitcher_consistency":  "Starting pitcher inconsistency",
+        "series_game":          "Series-game effect",
+    }
+    components = upset.get("components") or {}
+    rows: list[dict] = []
+    for key, label in pretty.items():
+        if key not in components:
+            continue
+        try:
+            v = float(components[key])
+        except (TypeError, ValueError):
+            v = 0.0
+        pct = max(0, min(100, int(round(v * 100))))
+        col = "neg" if pct > 65 else ("warn" if pct > 35 else "pos")
+        rows.append({"label": label, "pct": pct, "color": col})
+    return {"available": True, "score": int(score), "components": rows}
+
+
+def _game_detail_view_model(sport: str, game_id: str) -> dict:
+    """Core sections rendered immediately (header / picks / venue / game
+    context / upset).  Pitching, lineups, team context, and AI analysis
+    are lazy-loaded client-side via separate GET endpoints.  Returns
+    {found: false} for unknown game ids."""
+    sport = (sport or "mlb").lower()
+    _backend = sys.modules[__name__]
+    raw, ser = game_detail_data.resolve_game(_backend, sport, game_id)
+    if not ser:
+        return {"found": False, "sport": sport, "game_id": game_id}
+
+    raw_safe = raw or ser   # schedule stubs come back as raw=None
+    picks = _gd_pick_blocks(raw_safe, ser, sport) if raw else []
+
+    return {
+        "found":         True,
+        "sport":         sport,
+        "game_id":       game_id,
+        "has_raw":       bool(raw),
+        "header":        _gd_header_block(raw_safe, ser, sport),
+        "picks":         picks,
+        "picks_empty":   not bool(raw),
+        "venue":         _gd_venue_block(ser, sport),
+        "game_context":  _gd_game_context_block(ser),
+        "upset":         _gd_upset_block(ser),
+        "home_team":     ser.get("home_team") or "",
+        "away_team":     ser.get("away_team") or "",
+        "commence_time": ser.get("commence_time") or "",
+    }
+
+
+def _matchup_render(sport: str, game_id: str):
+    """Shared handler for both route aliases (/matchup + /game)."""
+    import traceback as _tb
+    print(f"[MATCHUP] route hit sport={sport} game_id={game_id}",
+          flush=True, file=sys.stderr)
+    try:
+        try:
+            hydrate_state()
+        except Exception:                                                  # noqa: BLE001
+            pass
+        vm = _game_detail_view_model(sport, game_id)
+    except Exception:                                                      # noqa: BLE001
+        _tb.print_exc(file=sys.stderr)
+        vm = {"found": False, "sport": sport, "game_id": game_id}
+    return render_template("game_detail.html", init_data=vm)
+
+
+@app.route("/matchup/<sport>/<game_id>")
+def matchup_page(sport, game_id):
+    """Tailwind game-detail page.  Alias of /game/<sport>/<game_id>."""
+    return _matchup_render(sport, game_id)
+
+
+@app.route("/game/<sport>/<game_id>")
+def game_detail_page_alias(sport, game_id):
+    """Legacy alias preserved from NiceGUI -- pages/game_detail.py declared
+    both /matchup and /game pointing at the same handler."""
+    return _matchup_render(sport, game_id)
+
+
+# ── 4 lazy GET endpoints (AI / pitching / lineups / team context) ──────────
+# Each mirrors a `ui.timer(0.05, once=True)` lazy load in the NiceGUI
+# page, so first paint never blocks on a slow upstream call.
+
+@app.route("/api/matchup/<sport>/<game_id>/ai", methods=["GET"])
+def matchup_ai(sport, game_id):
+    """AI analysis (3 tabbed takes: moneyline / run_line / run_total).
+    Wraps ai_summaries.get_game_bet_analysis -- cached per game per day
+    by that helper."""
+    try:
+        _, ser = game_detail_data.resolve_game(sys.modules[__name__], sport, game_id)
+        if not ser:
+            return jsonify({"error": "game not found"}), 404
+        from src import ai_summaries as _ais
+        data = _ais.get_game_bet_analysis(sport, ser) or {}
+        return jsonify(_py(data))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"MATCHUP-AI: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/matchup/<sport>/<game_id>/pitching", methods=["GET"])
+def matchup_pitching(sport, game_id):
+    """MLB starting-pitcher cards.  WNBA returns empty so the client
+    renders the 'Starting five coming soon' placeholder."""
+    try:
+        if sport.lower() != "mlb":
+            return jsonify({"away": {}, "home": {}, "sport": "wnba"})
+        _, ser = game_detail_data.resolve_game(sys.modules[__name__], sport, game_id)
+        if not ser:
+            return jsonify({"error": "game not found"}), 404
+        home_team = (ser.get("home_team") or "").strip()
+        away_team = (ser.get("away_team") or "").strip()
+        commence  = ser.get("commence_time") or ""
+        game_date = ""
+        if commence:
+            try:
+                dt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+                game_date = dt.astimezone(_ET).date().isoformat()
+            except Exception:                                              # noqa: BLE001
+                pass
+        if not game_date:
+            game_date = datetime.now(_ET).date().isoformat()
+        if not (home_team and away_team):
+            return jsonify({"away": {}, "home": {}})
+        from src.pitcher_client import get_pitcher_client
+        data = get_pitcher_client().get_starters_for_game(
+            home_team, away_team, game_date, commence_time=commence) or {}
+        return jsonify(_py({
+            "away":      data.get("away") or {},
+            "home":      data.get("home") or {},
+            "away_team": away_team,
+            "home_team": home_team,
+        }))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"MATCHUP-PITCHING: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/matchup/<sport>/<game_id>/lineups", methods=["GET"])
+def matchup_lineups(sport, game_id):
+    """Confirmed batting lineups via matchup_context.get_matchup_lineups
+    (MLB only; WNBA returns empty)."""
+    try:
+        if sport.lower() != "mlb":
+            return jsonify({})
+        _, ser = game_detail_data.resolve_game(sys.modules[__name__], sport, game_id)
+        if not ser:
+            return jsonify({"error": "game not found"}), 404
+        home_team = (ser.get("home_team") or "").strip()
+        away_team = (ser.get("away_team") or "").strip()
+        commence  = ser.get("commence_time") or ""
+        try:
+            game_date = (datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+                         .astimezone(_ET).date().isoformat())
+        except Exception:                                                  # noqa: BLE001
+            game_date = datetime.now(_ET).date().isoformat()
+        # Pitcher handedness comes from the same pitcher_client call used by
+        # the pitching endpoint -- request both so the lineup split-vs-hand
+        # calculation has the right opposing-hand value.
+        try:
+            from src.pitcher_client import get_pitcher_client
+            sp = get_pitcher_client().get_starters_for_game(
+                home_team, away_team, game_date, commence_time=commence) or {}
+        except Exception:                                                  # noqa: BLE001
+            sp = {}
+        home_sp_hand = (sp.get("home") or {}).get("hand")
+        away_sp_hand = (sp.get("away") or {}).get("hand")
+        from src.matchup_context import get_matchup_lineups
+        data = get_matchup_lineups(
+            home_team, away_team, game_date, home_sp_hand, away_sp_hand) or {}
+        return jsonify(_py(data))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"MATCHUP-LINEUPS: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/matchup/<sport>/<game_id>/team-context", methods=["GET"])
+def matchup_team_context(sport, game_id):
+    """Team-context card: last-10, streak, home/away splits, head-to-head."""
+    try:
+        _, ser = game_detail_data.resolve_game(sys.modules[__name__], sport, game_id)
+        if not ser:
+            return jsonify({"error": "game not found"}), 404
+        home_team = (ser.get("home_team") or "").strip()
+        away_team = (ser.get("away_team") or "").strip()
+        commence  = ser.get("commence_time") or ""
+        try:
+            game_date = (datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+                         .astimezone(_ET).date().isoformat())
+        except Exception:                                                  # noqa: BLE001
+            game_date = datetime.now(_ET).date().isoformat()
+        from src.matchup_context import get_team_context
+        data = get_team_context(home_team, away_team, game_date) or {}
+        return jsonify(_py({**data, "home_team": home_team, "away_team": away_team}))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"MATCHUP-TEAM-CTX: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
 def _load_explain_cache() -> dict:
     if _EXPLAIN_CACHE_FILE.exists():
         try:
