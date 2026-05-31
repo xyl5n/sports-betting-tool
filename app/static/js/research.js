@@ -75,11 +75,15 @@
     window.location = buildUrl(state);
   }
 
-  function onHeaderClick(e) {
+  // Headers are <th tabindex="0" role="button">, so they can take focus.
+  // Enter / Space trigger sort the same way a click would.
+  function onHeaderActivate(e) {
+    if (e.type === "keydown" && e.key !== "Enter" && e.key !== " ") return;
     var th = e.target.closest(".rs-th");
     if (!th) return;
     var key = th.getAttribute("data-sort");
     if (!key) return;
+    if (e.type === "keydown") e.preventDefault();
     var state = readState();
     if (state.sort_key === key) {
       state.sort_dir = (state.sort_dir === "desc" ? "asc" : "desc");
@@ -95,7 +99,8 @@
     if (filters) filters.addEventListener("click", onChipClick);
     var ths = document.querySelectorAll(".rs-th[data-sort]");
     for (var i = 0; i < ths.length; i++) {
-      ths[i].addEventListener("click", onHeaderClick);
+      ths[i].addEventListener("click",   onHeaderActivate);
+      ths[i].addEventListener("keydown", onHeaderActivate);
     }
   }
 

@@ -9609,13 +9609,13 @@ def _research_view_model(args) -> dict:
             "roi_color":  ("pos" if roi > 0 else "neg") if decided_total else "text",
         },
         "columns": [{
-            "label":   l,
+            "label":   label,
             "key":     k,
             "numeric": n,
             "active":  k == sort_key,
             "arrow":   ((" ▼" if sort_dir == "desc" else " ▲")
                         if k == sort_key else ""),
-        } for l, k, n in _RES_COLUMNS],
+        } for label, k, n in _RES_COLUMNS],
         "rows":      rows_out,
         "n_settled": int(agg.get("n_settled") or 0),
     }
