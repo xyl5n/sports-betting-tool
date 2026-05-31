@@ -8262,6 +8262,397 @@ def model_history_data(sport, model):
                         "record": {}, "counts": {}}), 500
 
 
+# ── /player/<sport>/<slug> Flask port (PR #1: Pick + Game Log) ──────────────
+# Ports pages/player.py (3,748 lines NiceGUI) -- the heaviest page in the
+# migration.  This PR ships the route, resolver, not-found, header (+ Track),
+# the Pick tab (per-market gamelog hit-rate + ECharts history chart), and the
+# full Game Log table.  Closes the existing /player/<sport>/<slug> X-Ray link
+# from props.js:628.  Overview + Matchup tabs follow in PR #2.
+#
+# Read-side data all comes from src.player_profile_client (already a src
+# module -- no extraction needed, unlike game_detail's resolver).  Only the
+# Track button mutates, reusing the existing /api/props/track endpoint.
+
+_PLAYER_PITCHER_MARKETS = [
+    "pitcher_strikeouts", "pitcher_outs", "pitcher_hits_allowed",
+    "pitcher_walks", "pitcher_earned_runs",
+]
+_PLAYER_BATTER_MARKETS = [
+    "batter_hits", "batter_total_bases", "batter_home_runs",
+    "batter_rbis", "batter_runs_scored", "batter_walks",
+    "batter_strikeouts", "batter_stolen_bases",
+]
+_PLAYER_MARKET_HUMAN = {
+    "pitcher_strikeouts": "Strikeouts", "pitcher_outs": "Outs",
+    "pitcher_earned_runs": "Earned Runs", "pitcher_hits_allowed": "Hits Allowed",
+    "pitcher_walks": "Walks", "batter_hits": "Hits",
+    "batter_total_bases": "Total Bases", "batter_home_runs": "Home Runs",
+    "batter_rbis": "RBIs", "batter_runs_scored": "Runs",
+    "batter_walks": "Walks", "batter_strikeouts": "Strikeouts",
+    "batter_stolen_bases": "Stolen Bases",
+}
+_PLAYER_MARKET_TAB = {
+    "pitcher_strikeouts": "K", "pitcher_outs": "OUTS", "pitcher_earned_runs": "ER",
+    "pitcher_hits_allowed": "H", "pitcher_walks": "BB",
+    "batter_hits": "H", "batter_total_bases": "TB", "batter_home_runs": "HR",
+    "batter_rbis": "RBI", "batter_runs_scored": "R", "batter_walks": "BB",
+    "batter_strikeouts": "SO", "batter_stolen_bases": "SB",
+}
+_PLAYER_MARKET_TO_STAT = {
+    "pitcher_strikeouts": "K", "pitcher_earned_runs": "ER",
+    "pitcher_hits_allowed": "H", "pitcher_walks": "BB", "pitcher_outs": "outs",
+    "batter_hits": "H", "batter_total_bases": "TB", "batter_home_runs": "HR",
+    "batter_rbis": "RBI", "batter_runs_scored": "R", "batter_walks": "BB",
+    "batter_strikeouts": "SO", "batter_stolen_bases": "SB",
+}
+
+
+def _player_stat_value(game, stat_key):
+    """Per-game stat read.  Mirrors pages/player.py _stat_value (outs = IP*3)."""
+    if stat_key == "outs":
+        ip = game.get("IP")
+        return float(round((ip if ip is not None else 0.0) * 3))
+    raw = game.get(stat_key)
+    try:
+        return float(raw if raw is not None else 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _player_chart_options(games, *, stat_key, prop_line, side):
+    """ECharts options for the per-market history bar chart.  Server-built
+    (same precedent as the home rotation chart, PR #332): the client calls
+    setOption on this dict.  Bar colour: green when the value is on the hit
+    side, red when missed, dim on a push; dashed white markLine at the book
+    line.  Palette mapped to the Flask hex tokens."""
+    POS, NEG, DIM, PRIMARY = "#22c55e", "#ef4444", "#6b7280", "#7C3AED"
+    labels, bar_items = [], []
+    for g in games:
+        date = (g.get("date") or "")[-5:]
+        opp  = (g.get("opp") or "").upper()
+        labels.append(f"{date}\n{opp}" if opp else date)
+        v = _player_stat_value(g, stat_key)
+        if prop_line is None:
+            col = PRIMARY
+        elif side == "Under":
+            col = POS if v < prop_line else (NEG if v > prop_line else DIM)
+        else:
+            col = POS if v > prop_line else (NEG if v < prop_line else DIM)
+        bar_items.append({"value": v, "itemStyle": {"color": col}})
+
+    mark_line = []
+    if prop_line is not None:
+        mark_line.append({
+            "yAxis": prop_line,
+            "label": {"formatter": f"  {prop_line}", "position": "insideEndTop",
+                      "color": "#ffffff", "fontSize": 10, "fontWeight": "bold"},
+            "lineStyle": {"color": "#ffffff", "type": "dashed",
+                          "width": 2, "opacity": 0.8},
+        })
+
+    return {
+        "backgroundColor": "transparent",
+        "grid": {"left": "2%", "right": "2%", "top": "16%", "bottom": "4%",
+                 "containLabel": True},
+        "tooltip": {"trigger": "axis", "backgroundColor": "#1a1a1a",
+                    "borderColor": "#2a2a2a",
+                    "textStyle": {"color": "#ffffff", "fontSize": 12},
+                    "formatter": "{b}: {c} " + stat_key},
+        "xAxis": {"type": "category", "data": labels,
+                  "axisLabel": {"color": "#6b7280", "fontSize": 9.5,
+                                "interval": "auto",
+                                "rotate": 45 if len(labels) > 10 else 0},
+                  "axisLine": {"lineStyle": {"color": "#2a2a2a"}}},
+        "yAxis": {"type": "value",
+                  "axisLabel": {"color": "#6b7280", "fontSize": 10},
+                  "splitLine": {"lineStyle": {"color": "#1a1a1a"}}},
+        "series": [{"type": "bar", "data": bar_items,
+                    "barMaxWidth": 28,
+                    "markLine": {"silent": True, "symbol": "none",
+                                 "data": mark_line} if mark_line else {}}],
+    }
+
+
+def _player_hit_rate(summary, win_key):
+    """(hits, games, pct_str) for a window from the prop summary, or
+    (0, 0, '—') when the window has no games."""
+    hits  = int(summary.get(f"{win_key}_hits") or 0)
+    total = int(summary.get(f"{win_key}_games") or 0)
+    if not total:
+        return 0, 0, "—"
+    return hits, total, f"{round(hits / total * 100)}%"
+
+
+def _player_market_block(info, games, is_pitcher, prop, opp_abbrev):
+    """Shape one per-market Pick sub-tab: header line chip + avg badge +
+    ECharts options + L5/L10/L20/SZN hit-rate pills.  Mirrors
+    pages/player.py _render_market_view (chart + summary parts)."""
+    market = prop.get("market", "")
+    try:
+        line_f = float(prop.get("line"))
+    except (TypeError, ValueError):
+        line_f = None
+    side  = (prop.get("side") or "Over").strip().title()
+    stat_key = _PLAYER_MARKET_TO_STAT.get(market) or ("K" if is_pitcher else "H")
+
+    vals = [_player_stat_value(g, stat_key) for g in games]
+    avg = (sum(vals) / len(vals)) if vals else None
+    avg_color = ("dim" if line_f is None else
+                 ("pos" if (avg is not None and avg >= line_f) else "neg"))
+
+    summary = {}
+    try:
+        from src.player_profile_client import get_player_prop_summary
+        summary = get_player_prop_summary(
+            info["name"], market, prop.get("line"), side,
+            opp_abbrev=opp_abbrev, is_pitcher=is_pitcher, games=games) or {}
+    except Exception:                                                      # noqa: BLE001
+        summary = {}
+
+    rates = []
+    for win_key, tag in (("last_5", "L5"), ("last_10", "L10"),
+                         ("last_20", "L20"), ("season", "SZN")):
+        h, n, pct = _player_hit_rate(summary, win_key)
+        rates.append({"tag": tag, "hits": h, "games": n, "pct": pct})
+
+    conf = prop.get("confidence")
+    conf_pct = (int(round(float(conf) * 100))
+                if isinstance(conf, (int, float)) else None)
+
+    return {
+        "market":     market,
+        "tab_label":  _PLAYER_MARKET_TAB.get(market, market.upper()),
+        "human":      _PLAYER_MARKET_HUMAN.get(market, market.replace("_", " ").title()),
+        "side":       side,
+        "line":       prop.get("line"),
+        "conf_pct":   conf_pct,
+        "avg":        (round(avg, 2) if avg is not None else None),
+        "avg_color":  avg_color,
+        "stat_key":   stat_key,
+        "chart":      _player_chart_options(games, stat_key=stat_key,
+                                            prop_line=line_f, side=side),
+        "rates":      rates,
+        "track_body": {
+            "player":          info.get("name") or prop.get("player"),
+            "market":          market,
+            "line":            prop.get("line"),
+            "side":            side,
+            "odds":            prop.get("best_odds") or prop.get("odds"),
+            "confidence":      prop.get("confidence"),
+            "predicted_value": prop.get("predicted_value"),
+            "team":            prop.get("team", ""),
+            "event_id":        prop.get("event_id"),
+            "commence_time":   prop.get("commence_time"),
+        },
+    }
+
+
+def _player_gamelog_rows(games, is_pitcher, highlighted_stat, line):
+    """Shape the Game Log table rows.  Highlighted column coloured per row vs
+    the active book line (pos/neg/warn).  Mirrors _game_log_table."""
+    if is_pitcher:
+        cols = ["Date", "OPP", "IP", "H", "ER", "BB", "K"]
+    else:
+        cols = ["Date", "OPP", "AB", "H", "HR", "RBI", "R", "BB", "SO", "TB"]
+    hl = (highlighted_stat or "").upper()
+
+    rows = []
+    for g in reversed(games):
+        cells = []
+        for col in cols:
+            if col == "Date":
+                raw = g.get("date")
+                cells.append({"col": col, "text": (raw[-5:] if raw else "—"),
+                              "align": "left", "color": "dim2"})
+            elif col == "OPP":
+                prefix = "vs" if g.get("is_home") else "@"
+                opp = g.get("opp") or g.get("park_team") or ""
+                cells.append({"col": col,
+                              "text": (f"{prefix} {opp}".strip() if opp else "—"),
+                              "align": "left", "color": "dim"})
+            elif col == "IP":
+                ipr = g.get("IP_raw")
+                if ipr is not None:
+                    txt = str(ipr).strip() or "—"
+                else:
+                    ipv = g.get("IP")
+                    txt = (f"{float(ipv):.1f}" if isinstance(ipv, (int, float)) else "—")
+                cells.append({"col": col, "text": txt, "align": "right",
+                              "color": "text", "weight": "400"})
+            else:
+                raw_val = g.get(col)
+                is_hl = (col == hl)
+                color, weight = "text", "400"
+                if is_hl and line is not None and isinstance(raw_val, (int, float)):
+                    color = ("pos" if raw_val > line else
+                             "neg" if raw_val < line else "warn")
+                    weight = "800"
+                elif is_hl:
+                    color, weight = "pos", "800"
+                cells.append({"col": col,
+                              "text": ("—" if raw_val is None else str(raw_val)),
+                              "align": "right", "color": color, "weight": weight})
+        rows.append(cells)
+    return {"cols": cols, "rows": rows}
+
+
+def _player_view_model(sport, slug):
+    """Shape the Pick + Game Log tabs for one player.  Returns {found: false}
+    when the slug can't resolve.  Read-only -- everything from
+    player_profile_client; gamelog is synchronous (feeds the default tab)."""
+    sport = (sport or "mlb").lower()
+    try:
+        from src.player_profile_client import (
+            resolve_player_id, get_player_info, get_player_gamelog,
+            get_today_prop, get_today_props_for_player,
+            get_player_today_opponent, _CURRENT_SEASON,
+        )
+        from components import live_score as _ls
+    except Exception as exc:                                               # noqa: BLE001
+        _eprint(f"PLAYER-VM import failed: {exc}")
+        return {"found": False, "sport": sport, "slug": slug,
+                "reason": "client unavailable"}
+
+    player_id = resolve_player_id(slug)
+    if player_id is None:
+        return {"found": False, "sport": sport, "slug": slug}
+    info = get_player_info(player_id) or {}
+    if not info.get("name"):
+        return {"found": False, "sport": sport, "slug": slug}
+
+    is_pitcher = (info.get("position_code") or "") == "1"
+    raw_games  = get_player_gamelog(player_id, _CURRENT_SEASON,
+                                    is_pitcher=is_pitcher) or []
+    games = ([g for g in raw_games if g.get("games_started", 0) > 0]
+             if is_pitcher else list(raw_games))
+
+    _backend = sys.modules[__name__]
+    today_props_raw = get_today_props_for_player(info["name"]) or []
+    today_props_all = [
+        p for p in today_props_raw
+        if not _ls.game_has_started(
+            _backend, commence_time=p.get("commence_time"),
+            home_team=p.get("home_team"), away_team=p.get("away_team"),
+            sport="mlb")
+    ]
+    started_filtered = bool(today_props_raw) and not today_props_all
+    today_prop = today_props_all[0] if today_props_all else get_today_prop(info["name"])
+
+    opp_abbrev = None
+    if today_props_all:
+        opp_abbrev = get_player_today_opponent(info["name"], today_props_all[0])
+    if not opp_abbrev and raw_games:
+        opp_abbrev = (raw_games[-1].get("opp") or "").upper() or None
+
+    # Highlighted game-log column = strongest prop's stat (else role default);
+    # its book line drives the per-row over/under colouring.
+    hl_line = None
+    if today_props_all:
+        hl_market = today_props_all[0].get("market", "")
+        highlighted = _PLAYER_MARKET_TO_STAT.get(hl_market) or ("K" if is_pitcher else "H")
+        try:
+            hl_line = float(today_props_all[0].get("line"))
+        except (TypeError, ValueError):
+            hl_line = None
+    else:
+        highlighted = "K" if is_pitcher else "H"
+
+    market_blocks = [_player_market_block(info, games, is_pitcher, p, opp_abbrev)
+                     for p in today_props_all]
+
+    # No-props fallback: market tabs sourced from gamelog columns that carry data.
+    gamelog_markets = []
+    if not today_props_all and games:
+        candidate = _PLAYER_PITCHER_MARKETS if is_pitcher else _PLAYER_BATTER_MARKETS
+        for m in candidate:
+            sk = _PLAYER_MARKET_TO_STAT.get(m) or ""
+            if any(_player_stat_value(g, sk) for g in games):
+                vals = [_player_stat_value(g, sk) for g in games]
+                avg = (sum(vals) / len(vals)) if vals else None
+                gamelog_markets.append({
+                    "market": m,
+                    "tab_label": _PLAYER_MARKET_TAB.get(m, m.upper()),
+                    "human": _PLAYER_MARKET_HUMAN.get(m, m.replace("_", " ").title()),
+                    "stat_key": sk,
+                    "avg": (round(avg, 2) if avg is not None else None),
+                    "avg_color": "dim",
+                    "chart": _player_chart_options(games, stat_key=sk,
+                                                   prop_line=None, side="Over"),
+                })
+
+    headshot = (f"https://img.mlbstatic.com/mlb-photos/image/upload/"
+                f"d_people:generic:headshot:67:current.png/w_213,q_auto:best/"
+                f"v1/people/{player_id}/headshot/67/current")
+
+    prop_chip = None
+    if today_prop and today_prop.get("recommendation") != "Pass":
+        c = today_prop.get("confidence")
+        prop_chip = {
+            "side": (today_prop.get("side") or "Over").strip().title(),
+            "line": today_prop.get("line"),
+            "conf_pct": (int(round(float(c) * 100))
+                         if isinstance(c, (int, float)) else None),
+        }
+
+    return {
+        "found":       True,
+        "sport":       sport,
+        "slug":        slug,
+        "player_id":   player_id,
+        "name":        info.get("name") or "—",
+        "position":    info.get("position_name") or info.get("position_code") or "",
+        "team":        info.get("team_abbrev") or info.get("team_name") or "",
+        "headshot":    headshot,
+        "is_pitcher":  is_pitcher,
+        "props_today": bool(today_props_all),
+        "started_filtered": started_filtered,
+        "prop_chip":   prop_chip,
+        "markets":     market_blocks,
+        "gamelog_markets": gamelog_markets,
+        "gamelog":     _player_gamelog_rows(games, is_pitcher, highlighted, hl_line),
+        "has_games":   bool(games),
+    }
+
+
+@app.route("/player/<sport>/<slug>")
+def player_page(sport, slug):
+    """Tailwind player-profile page (Pick + Game Log tabs).  Closes the
+    X-Ray props link /player/<sport>/<slug>."""
+    import traceback as _tb
+    print(f"[PLAYER] route hit sport={sport} slug={slug}",
+          flush=True, file=sys.stderr)
+    try:
+        vm = _player_view_model(sport, slug)
+    except Exception:                                                      # noqa: BLE001
+        _tb.print_exc(file=sys.stderr)
+        vm = {"found": False, "sport": (sport or "mlb").lower(), "slug": slug}
+    return render_template("player.html", init_data=vm)
+
+
+@app.route("/api/player/<sport>/<slug>/ai", methods=["GET"])
+def player_ai(sport, slug):
+    """Lazy AI player breakdown for the active market.  Query: ?market=<key>.
+    GET read -- mirrors the NiceGUI lazy AI section."""
+    try:
+        market = request.args.get("market") or ""
+        from src.player_profile_client import resolve_player_id, get_player_info
+        pid = resolve_player_id(slug)
+        if pid is None:
+            return jsonify({"error": "player not found"}), 404
+        info = get_player_info(pid) or {}
+        try:
+            from src import ai_summaries as _ais
+            text = _ais.get_player_breakdown(info.get("name") or slug, market) \
+                if hasattr(_ais, "get_player_breakdown") else ""
+        except Exception:                                                  # noqa: BLE001
+            text = ""
+        return jsonify({"analysis": text or ""})
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"PLAYER-AI: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc)}), 500
+
+
 # ── /matchup (game_detail) Flask port ───────────────────────────────────────
 # Ports pages/game_detail.py (1,555 lines NiceGUI) to Flask + Tailwind.  The
 # 3-strategy game resolver lives in src/game_detail_data.py (extracted so the
