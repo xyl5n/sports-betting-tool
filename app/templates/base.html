@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{% block title %}Sports Analysis{% endblock %}</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg: "#000000", card: "#1a1a1a", cardhi: "#222222",
+            border: "#2a2a2a", accent: "#7C3AED", accenthi: "#9F67FF",
+            pos: "#22c55e", neg: "#ef4444", warn: "#eab308",
+          },
+          fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    html, body { background: #000; }
+    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  </style>
+
+  {% block extra_head %}{% endblock %}
+</head>
+
+<body class="bg-bg text-white min-h-screen">
+
+  {# ── Shared sticky nav: brand left, links centered, hamburger on mobile.
+       Children set `{% set active_page = "..." %}` (e.g. "sports") and the
+       loop below applies the active class to the matching href. #}
+  {% set _nav_links = [
+    ("/",            "home",      "Home"),
+    ("/sports/mlb",  "sports",    "Sports"),
+    ("/props",       "props",     "Props"),
+    ("/modelbets",   "modelbets", "Model Bets"),
+    ("/mybets",      "mybets",    "My Bets"),
+    ("/top-picks",   "top-picks", "Top Picks"),
+    ("/research",    "research",  "Research"),
+    ("/admin",       "admin",     "Admin"),
+  ] %}
+  {% set _active = active_page | default('') %}
+
+  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
+    <div class="mx-auto max-w-7xl px-4 h-14 grid grid-cols-3 items-center">
+      {# Brand (left) #}
+      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg justify-self-start">
+        <span class="text-accent">●</span> Sports Analysis
+      </a>
+
+      {# Desktop links (center) #}
+      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400 justify-self-center">
+        {% for href, key, label in _nav_links %}
+          {% if key == _active %}
+        <a href="{{ href }}" class="text-accent font-semibold">{{ label }}</a>
+          {% else %}
+        <a href="{{ href }}" class="hover:text-white transition">{{ label }}</a>
+          {% endif %}
+        {% endfor %}
+      </div>
+
+      {# Mobile menu button (right) #}
+      <button type="button" id="nav-toggle"
+              class="sm:hidden justify-self-end inline-flex items-center justify-center
+                     w-10 h-10 rounded-md text-gray-300 hover:text-white hover:bg-cardhi"
+              aria-expanded="false" aria-controls="nav-mobile" aria-label="Open menu">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="3" y1="6"  x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+
+    {# Mobile dropdown panel — collapsed by default; toggle button flips `hidden`. #}
+    <div id="nav-mobile" class="sm:hidden hidden border-t border-border bg-bg/95 backdrop-blur">
+      <div class="mx-auto max-w-7xl px-4 py-2 flex flex-col">
+        {% for href, key, label in _nav_links %}
+          {% if key == _active %}
+        <a href="{{ href }}" class="py-2 text-sm text-accent font-semibold">{{ label }}</a>
+          {% else %}
+        <a href="{{ href }}" class="py-2 text-sm text-gray-400 hover:text-white transition">{{ label }}</a>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  </nav>
+
+  {% block content %}{% endblock %}
+
+  <script>
+    (function () {
+      var btn = document.getElementById('nav-toggle');
+      var menu = document.getElementById('nav-mobile');
+      if (!btn || !menu) return;
+      btn.addEventListener('click', function () {
+        var open = menu.classList.toggle('hidden') === false;
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+    })();
+  </script>
+
+  {% block extra_scripts %}{% endblock %}
+</body>
+</html>
