@@ -33,13 +33,31 @@
   // The first three fields drive the always-visible top bar (sport / stat
   // pills + sort dropdown).  The `panel` sub-object mirrors the NiceGUI
   // filter-bar state and AND-stacks with the top-bar filters via
-  // panelPasses().  Persisted to localStorage so reloads restore both
-  // surfaces; matches the NiceGUI _persist_filters semantics from
-  // pages/props.py.
+  // panelPasses().  `viewMode` ("list" | "game") swaps the flat grid for
+  // collapsible per-game groups (Phase 2d).  All persisted to localStorage.
   var state = {
     sport: "all", stat: "all", sort: "confidence",
+    viewMode: "list",
     panel: defaultPanel(),
   };
+
+  // Per-game expand/collapse flags for By-Game view (in-memory only --
+  // NiceGUI doesn't persist these either; default = all collapsed).
+  var expandedGames = {};
+
+  var VIEW_MODE_LS_KEY = "propsViewMode";
+
+  function loadPersistedViewMode() {
+    try {
+      var v = window.localStorage.getItem(VIEW_MODE_LS_KEY);
+      if (v === "list" || v === "game") state.viewMode = v;
+    } catch (e) { /* ignore */ }
+  }
+
+  function persistViewMode() {
+    try { window.localStorage.setItem(VIEW_MODE_LS_KEY, state.viewMode); }
+    catch (e) { /* ignore */ }
+  }
 
   function defaultPanel() {
     return {
@@ -273,17 +291,106 @@
   }
 
   function render() {
-    var grid = document.getElementById("card-grid");
-    var empty = document.getElementById("empty-state");
-    var rows = applyFilters();
+    var grid   = document.getElementById("card-grid");
+    var groups = document.getElementById("game-groups");
+    var empty  = document.getElementById("empty-state");
+    var rows   = applyFilters();
 
     if (!rows.length) {
-      grid.innerHTML = "";
+      grid.innerHTML = ""; if (groups) groups.innerHTML = "";
+      grid.classList.add("hidden");
+      if (groups) groups.classList.add("hidden");
       empty.classList.remove("hidden");
       return;
     }
     empty.classList.add("hidden");
-    grid.innerHTML = rows.map(function (r) { return cardHTML(r.p, r.i); }).join("");
+
+    if (state.viewMode === "game" && groups) {
+      grid.classList.add("hidden");
+      groups.classList.remove("hidden");
+      groups.innerHTML = renderByGameHTML(rows);
+    } else {
+      if (groups) groups.classList.add("hidden");
+      grid.classList.remove("hidden");
+      grid.innerHTML = rows.map(function (r) { return cardHTML(r.p, r.i); }).join("");
+    }
+  }
+
+  // ── By-Game grouping (Phase 2d) ───────────────────────────────────────
+  // Group the already-filtered/sorted rows by p.game_key, sort groups by
+  // earliest commence_time, render one collapsible card per game.
+  // No new data -- pure view-layer transform.
+  function renderByGameHTML(rows) {
+    var groups = {};
+    var order = [];
+    rows.forEach(function (r) {
+      var k = r.p.game_key || "_";
+      if (!groups[k]) {
+        groups[k] = { rows: [], rep: r.p, earliest: r.p.commence_time || "9999" };
+        order.push(k);
+      }
+      groups[k].rows.push(r);
+      var ct = r.p.commence_time || "9999";
+      if (ct < groups[k].earliest) {
+        groups[k].earliest = ct;
+        groups[k].rep      = r.p;     // earliest pick supplies the header data
+      }
+    });
+    order.sort(function (a, b) {
+      return String(groups[a].earliest).localeCompare(String(groups[b].earliest));
+    });
+    return order.map(function (k) { return groupHTML(k, groups[k]); }).join("");
+  }
+
+  function groupHTML(gkey, group) {
+    var rep   = group.rep;
+    var open  = !!expandedGames[gkey];
+    var label = rep.game_label || "";
+    var parts = label.split(" @ ");
+    var away  = (parts[0] || "?").trim();
+    var home  = (parts[1] || "?").trim();
+    var n     = group.rows.length;
+    var time  = etTime(rep.commence_time);
+    var cards = group.rows.map(function (r) { return cardHTML(r.p, r.i); }).join("");
+    return '' +
+      '<div class="gg-group" data-game-key="' + esc(gkey) + '">' +
+        '<div class="gg-header" data-gg-toggle="' + esc(gkey) + '"' +
+              ' role="button" aria-expanded="' + (open ? "true" : "false") + '">' +
+          '<span class="gg-abbr">' + esc(away) + '</span>' +
+          '<span class="gg-at">@</span>' +
+          '<span class="gg-abbr">' + esc(home) + '</span>' +
+          '<span class="gg-spacer"></span>' +
+          (time ? '<span class="gg-time">' + esc(time) + '</span>' : '') +
+          '<span class="gg-count">' + n + ' prop' + (n !== 1 ? 's' : '') + '</span>' +
+          '<svg class="gg-chev' + (open ? ' is-open' : '') +
+            '" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">' +
+            '<path d="M7 5l6 5-6 5V5z"/>' +
+          '</svg>' +
+        '</div>' +
+        '<div class="gg-body"' + (open ? '' : ' style="display:none;"') + '>' +
+          cards +
+        '</div>' +
+      '</div>';
+  }
+
+  // ISO UTC -> "7:05 PM ET" (matches NiceGUI _game_time_et).
+  function etTime(iso) {
+    if (!iso) return "";
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return "";
+      var parts = new Intl.DateTimeFormat("en-US", {
+        hour: "numeric", minute: "2-digit", timeZone: "America/New_York",
+      }).formatToParts(d);
+      var h = "", m = "", p = "";
+      parts.forEach(function (pt) {
+        if (pt.type === "hour")      h = pt.value;
+        else if (pt.type === "minute")    m = pt.value;
+        else if (pt.type === "dayPeriod") p = pt.value;
+      });
+      if (!h || !m) return "";
+      return h + ":" + m + " " + p + " ET";
+    } catch (e) { return ""; }
   }
 
   // ── Wiring ────────────────────────────────────────────────────────────
@@ -324,27 +431,90 @@
       render();
     });
 
-    // Card click delegation: handles both Over/Under toggle and Track button.
-    // One listener avoids the double-bind footgun when the grid re-renders.
-    document.getElementById("card-grid").addEventListener("click", function (e) {
-      var ouBtn = e.target.closest(".ou-btn");
-      if (ouBtn) {
-        var idx = ouBtn.getAttribute("data-idx");
-        sideOverride[idx] = ouBtn.getAttribute("data-side");
-        render();
-        return;
-      }
-      var trackBtn = e.target.closest(".track-btn");
-      if (trackBtn && !trackBtn.disabled) {
-        onTrackClick(trackBtn);
-        return;
-      }
-    });
+    // Card click delegation: shared between #card-grid (list view) and
+    // #game-groups (By-Game view).  The same routing handles Over/Under and
+    // Track button clicks no matter which container the card was rendered
+    // inside, so swapping views never breaks the wiring.
+    document.getElementById("card-grid").addEventListener("click", cardContainerClick);
+    var groupsRoot = document.getElementById("game-groups");
+    if (groupsRoot) {
+      groupsRoot.addEventListener("click", function (e) {
+        // Header click (chevron / toggle expand) -- routed first so a click
+        // on the header background doesn't accidentally fall through to a
+        // nested card handler.
+        var header = e.target.closest("[data-gg-toggle]");
+        if (header) {
+          toggleGameGroup(header);
+          return;
+        }
+        cardContainerClick(e);
+      });
+    }
 
     // ── Filter panel (Phase 2b) ───────────────────────────────────────
     initFilterPanel();
 
+    // ── View-mode toggle (Phase 2d) ──────────────────────────────────
+    initViewToggle();
+
     render();
+  }
+
+  function cardContainerClick(e) {
+    var ouBtn = e.target.closest(".ou-btn");
+    if (ouBtn) {
+      var idx = ouBtn.getAttribute("data-idx");
+      sideOverride[idx] = ouBtn.getAttribute("data-side");
+      render();
+      return;
+    }
+    var trackBtn = e.target.closest(".track-btn");
+    if (trackBtn && !trackBtn.disabled) {
+      onTrackClick(trackBtn);
+      return;
+    }
+  }
+
+  function toggleGameGroup(header) {
+    var gkey = header.getAttribute("data-gg-toggle");
+    if (!gkey) return;
+    var willOpen = !expandedGames[gkey];
+    expandedGames[gkey] = willOpen;
+    // Inline DOM mutation (no full re-render) keeps the scroll position
+    // and lets the chevron CSS transition play.
+    header.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    var body = header.nextElementSibling;
+    if (body) body.style.display = willOpen ? "" : "none";
+    var chev = header.querySelector(".gg-chev");
+    if (chev) chev.classList.toggle("is-open", willOpen);
+  }
+
+  function initViewToggle() {
+    loadPersistedViewMode();
+    syncViewPills();
+    var row = document.getElementById("view-pills");
+    if (!row) return;
+    row.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-view]");
+      if (!btn) return;
+      var v = btn.getAttribute("data-view");
+      if (v !== "list" && v !== "game") return;
+      if (v === state.viewMode) return;
+      state.viewMode = v;
+      persistViewMode();
+      syncViewPills();
+      render();
+    });
+  }
+
+  function syncViewPills() {
+    var row = document.getElementById("view-pills");
+    if (!row) return;
+    row.querySelectorAll("[data-view]").forEach(function (b) {
+      var on = b.getAttribute("data-view") === state.viewMode;
+      b.classList.toggle("view-pill-active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
   }
 
   // ── Filter panel wiring ────────────────────────────────────────────────
