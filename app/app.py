@@ -991,6 +991,19 @@ def _props_view_model(pick):
     game_label = (f"{away_team or '?'} @ {home_team or '?'}"
                   if (home_team or away_team) else "")
 
+    # ── Phase-2c track-button fields ───────────────────────────────────────
+    # Server-side "already tracked" check survives page reloads (parity
+    # with pages/props.py _track_button); the four payload fields below
+    # are passed through to /api/props/track unchanged.
+    try:
+        from src import props_picks_tracker as _ppt_check
+        tracked = bool(_ppt_check.is_tracked(
+            pick.get("player"), pick.get("market"),
+            pick.get("line"), side, event_id,
+        ))
+    except Exception:                                                      # noqa: BLE001
+        tracked = False
+
     return {
         "sport":          str(pick.get("sport") or "MLB").upper(),
         "player":         pick.get("player") or "",
@@ -1018,6 +1031,11 @@ def _props_view_model(pick):
         "game_key":       game_key,
         "game_label":     game_label,
         "prop_grade":     round(_props_grade_composite(pick), 4),
+        # ── track-button fields ──────────────────────────────────────────
+        "tracked":        tracked,
+        "event_id":       event_id,
+        "best_odds":      pick.get("best_odds"),
+        "predicted_value": pick.get("predicted_value"),
     }
 
 
