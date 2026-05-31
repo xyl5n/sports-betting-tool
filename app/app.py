@@ -8827,6 +8827,196 @@ def _import_pm():
     return _pm
 
 
+# ── /top-picks Flask port ───────────────────────────────────────────────────
+# Ports pages/top_picks.py (320 lines NiceGUI).  Single ranked list of every
+# game + prop pick today, scored 60% AI verdict + 40% model confidence, with
+# a scorecard header + filter pills + 20s poll (AI verdicts generate async
+# so `pending` rows populate without a reload).
+#
+# Retires pages/picks.py (a 91-line tab-wrapper around sport.py + props.py +
+# top_picks.py -- same structural shape as bets.py).  Card clicks already
+# route to /player/mlb/<slug> + /matchup/<sport>/<gid>, both already
+# migrated -- closes two more inbound loops.
+
+_TP_FILTERS = (("all", "All"), ("game", "Game Picks"), ("props", "Props"))
+
+
+def _tp_card_href(r):
+    """Where a card click navigates -- prop -> /player, game -> /matchup.
+    Mirrors top_picks.py's per-row href logic exactly."""
+    tr = r.get("_track") or {}
+    kind = r.get("kind")
+    if kind == "prop":
+        player = (tr.get("player") or r.get("name") or "").strip()
+        if player and player != "—":
+            slug = player.lower().replace(" ", "-")
+            return f"/player/mlb/{slug}"
+    else:
+        gid = tr.get("game_id")
+        if gid:
+            return f"/matchup/{tr.get('sport') or 'mlb'}/{gid}"
+    return None
+
+
+def _tp_track_payload(r):
+    """Pre-build the track payload + URL the client posts via SBT.apiPost.
+    Two shapes: props go to /api/props/track; game picks dispatch to
+    /api/ledger/confirm/<gid> (ML) or /api/ledger/track_prop (RL/Total),
+    same 3-way dispatch the admin + mybets pages use."""
+    tr = r.get("_track") or {}
+    kind = r.get("kind")
+    if kind == "prop":
+        return {
+            "url": "/api/props/track",
+            "body": {
+                "player":          tr.get("player") or r.get("name"),
+                "market":          tr.get("bet_type"),
+                "line":            tr.get("line"),
+                "side":            (tr.get("pick_side") or "Over").title(),
+                "odds":            tr.get("odds"),
+                "confidence":      tr.get("prob"),
+                "predicted_value": None,
+                "team":            "",
+                "event_id":        tr.get("event_id"),
+                "commence_time":   tr.get("commence_time"),
+            },
+        }
+    # game pick: ML uses /confirm, RL/Total uses /track_prop
+    gid = tr.get("game_id")
+    if not gid:
+        return None
+    sport = (tr.get("sport") or "mlb").lower()
+    bt = (tr.get("bet_type") or "ml").lower()
+    if bt == "ml":
+        path = (f"/api/ledger/confirm/{gid}" if sport == "mlb"
+                else f"/api/wnba/ledger/confirm/{gid}")
+        return {"url": path, "body": {}}    # bankroll added client-side
+    return {
+        "url":  "/api/ledger/track_prop",
+        "body": {
+            "game_id":  gid,
+            "bet_type": ("run_line" if bt in ("run_line", "rl") else "totals"),
+        },
+    }
+
+
+def _tp_shape_row(r, display_rank):
+    """Pre-format one ranking row for the template / snapshot JSON.  All
+    rounding + colour-token resolution happens here so the template stays
+    logic-free.  Mirrors pages/top_picks.py:_card."""
+    verdict_color = r.get("verdict_color") or "dim"     # pos/warn/neg
+    # Outline = AI-vs-model agreement.  agreement_outline_token returns
+    # 'pos' / 'neg' / None per the ai_tier; map None -> 'border'.
+    outline = "border"
+    try:
+        from src.player_ai_breakdown import agreement_outline_token
+        outline = agreement_outline_token(r.get("ai_tier")) or "border"
+    except Exception:                                                      # noqa: BLE001
+        outline = "border"
+    combined = float(r.get("combined_score") or 0) * 100
+    conf     = float(r.get("confidence")     or 0) * 100
+    mv       = r.get("model_version")
+    track    = _tp_track_payload(r)
+    return {
+        "rank":          display_rank,
+        "kind":          r.get("kind") or "",
+        "name":          r.get("name") or "—",
+        "pick_type":     r.get("pick_type") or "",
+        "side":          r.get("side") or "",
+        "combined_pct":  round(combined),
+        "conf_pct":      round(conf),
+        "verdict_label": (r.get("verdict_label") or "Neutral").upper(),
+        "verdict_color": verdict_color,
+        "outline_color": outline,
+        "agree":         bool(r.get("agree")),
+        "fade":          bool(r.get("fade")),
+        "pending":       bool(r.get("pending")),
+        "reasoning":     r.get("reasoning") or "",
+        "model_version_label": (f"Model {mv}" if mv else "—"),
+        "href":          _tp_card_href(r),
+        "track_url":     track["url"] if track else None,
+        "track_body":    track["body"] if track else None,
+    }
+
+
+def _top_picks_view_model() -> dict:
+    """Build the full /top-picks payload: scorecard + filter pills + ranked
+    rows.  Hydrates analysis state first so a post-redeploy cold process
+    still surfaces today's picks (mirrors NiceGUI's `_rebuild`)."""
+    try:
+        hydrate_state()
+    except Exception:                                                      # noqa: BLE001
+        pass
+
+    rows: list[dict] = []
+    try:
+        from src.top_picks import build_rankings
+        data = build_rankings(sys.modules[__name__]) or {}
+        raw_rows = data.get("rows") or []
+        rows = [_tp_shape_row(r, i + 1) for i, r in enumerate(raw_rows)]
+    except Exception as exc:                                               # noqa: BLE001
+        _eprint(f"TOP-PICKS build_rankings failed: {type(exc).__name__}: {exc}")
+
+    sc = {"wins": 0, "losses": 0, "win_pct": 0.0, "units": 0.0}
+    try:
+        from src import top_plays_tracker
+        sc = top_plays_tracker.scorecard() or sc
+    except Exception:                                                      # noqa: BLE001
+        pass
+    wins   = int(sc.get("wins")   or 0)
+    losses = int(sc.get("losses") or 0)
+    decided = wins + losses
+    pct = float(sc.get("win_pct") or 0.0)
+    units = float(sc.get("units") or 0.0)
+
+    return {
+        "rows":    rows,
+        "filters": [{"key": k, "label": l} for k, l in _TP_FILTERS],
+        "scorecard": {
+            "wins":         wins,
+            "losses":       losses,
+            "record":       f"{wins}-{losses}",
+            "pct_str":      (f"{pct:.1f}%" if decided else "—"),
+            "pct_color":    ("pos" if (pct >= 50.0 and decided) else
+                             ("neg" if decided else "dim")),
+            "units_str":    (f"{units:+.2f}u" if decided else "0.00u"),
+            "units_color":  ("pos" if units > 0 else ("neg" if units < 0 else "dim")),
+        },
+    }
+
+
+@app.route("/top-picks")
+def top_picks_page():
+    """Tailwind Top Picks page -- ranked list of every game + prop pick today
+    (60% AI verdict + 40% model confidence).  20s snapshot poll keeps pending
+    AI rows fresh."""
+    import traceback as _tb
+    print("[TOP-PICKS] route hit", flush=True, file=sys.stderr)
+    try:
+        vm = _top_picks_view_model()
+    except Exception:                                                      # noqa: BLE001
+        _tb.print_exc(file=sys.stderr)
+        vm = {"rows": [], "filters": [{"key": k, "label": l} for k, l in _TP_FILTERS],
+              "scorecard": {"wins": 0, "losses": 0, "record": "0-0",
+                            "pct_str": "—", "pct_color": "dim",
+                            "units_str": "0.00u", "units_color": "dim"}}
+    return render_template("top_picks.html", init_data=vm)
+
+
+@app.route("/api/top-picks/snapshot", methods=["GET"])
+def top_picks_snapshot():
+    """Same view-model dict as the /top-picks render, JSON for the 20s
+    client poll.  AI verdicts generate asynchronously, so pending rows
+    populate without a page reload (mirrors NiceGUI's ui.timer(20.0))."""
+    try:
+        return jsonify(_py(_top_picks_view_model()))
+    except Exception as exc:                                               # noqa: BLE001
+        import traceback as _tb
+        _eprint(f"TOP-PICKS-SNAPSHOT: {type(exc).__name__}: {exc}\n{_tb.format_exc()}")
+        return jsonify({"error": str(exc), "rows": [], "scorecard": {},
+                        "filters": []}), 500
+
+
 # ── /matchup (game_detail) Flask port ───────────────────────────────────────
 # Ports pages/game_detail.py (1,555 lines NiceGUI) to Flask + Tailwind.  The
 # 3-strategy game resolver lives in src/game_detail_data.py (extracted so the
