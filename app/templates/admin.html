@@ -437,6 +437,6 @@
 <script id="admin-init" type="application/json">{{ init_data | tojson }}</script>
 
 <!-- lib.js MUST load before admin.js (defines window.SBT.{toast,apiPost}). -->
-<script src="/static/js/lib.js" defer></script>
-<script src="/static/js/admin.js" defer></script>
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/admin.js') }}" defer></script>
 {% endblock %}
