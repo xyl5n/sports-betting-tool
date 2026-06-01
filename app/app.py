@@ -240,6 +240,33 @@ app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
 print("STARTUP [6/6]: Flask app created — registering routes...", flush=True, file=sys.stderr)
 
+
+# Per-file 8-char content hash, computed once at process boot (assets
+# don't change after the WSGI worker starts — every deploy restarts).
+# Templates call `{{ static_v('js/lib.js') }}` which produces
+# `/static/js/lib.js?v=<hash>`; Cloudflare + browsers treat the query
+# string as part of the cache key, so a byte change in one file forces
+# a refetch of just that file without busting unchanged neighbours.
+import hashlib as _hashlib
+from functools import lru_cache as _lru_cache
+
+@_lru_cache(maxsize=None)
+def _static_asset_hash(rel_path: str) -> str:
+    try:
+        full = os.path.join(app.static_folder, rel_path)
+        with open(full, 'rb') as f:
+            return _hashlib.md5(f.read()).hexdigest()[:8]
+    except OSError:
+        return "0"
+
+@app.context_processor
+def _inject_static_v():
+    from flask import url_for
+    def static_v(filename):
+        return url_for('static', filename=filename, v=_static_asset_hash(filename))
+    return {"static_v": static_v}
+
+
 _ANALYSIS_TTL        = 900  # 15 minutes — skip API if last run was within this window
 
 # Step 2: single lock so concurrent requests (init + analyze) never race on the file.

@@ -301,6 +301,6 @@
 <script id="gd-init" type="application/json">{{ init_data | tojson }}</script>
 
 <!-- lib.js MUST load before game_detail.js -->
-<script src="/static/js/lib.js" defer></script>
-<script src="/static/js/game_detail.js" defer></script>
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/game_detail.js') }}" defer></script>
 {% endblock %}
