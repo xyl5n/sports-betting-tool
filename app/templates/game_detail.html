@@ -1,344 +1,306 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Matchup</title>
+{% extends "base.html" %}
+{# /matchup is a drill-down from the Sports slate; highlight Sports. #}
+{% set active_page = "sports" %}
+{% block title %}Matchup{% endblock %}
 
-  <script src="https://cdn.tailwindcss.com"></script>
+{% block extra_head %}
+<style>
+  .gd-text-pos { color: #22c55e; }
+  .gd-text-neg { color: #ef4444; }
+  .gd-text-warn{ color: #eab308; }
+  .gd-text-dim { color: #9ca3af; }
+  .gd-text-text{ color: #ffffff; }
+  .gd-bar-pos  { background: #22c55e; }
+  .gd-bar-neg  { background: #ef4444; }
+  .gd-bar-warn { background: #eab308; }
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  .toast-stack {
+    position: fixed; bottom: 20px; right: 20px;
+    display: flex; flex-direction: column-reverse; gap: 8px;
+    z-index: 60; pointer-events: none; max-width: calc(100vw - 40px);
+  }
+  .toast {
+    pointer-events: auto; background: #1a1a1a; color: #e5e7eb;
+    border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
+    border-radius: 8px; padding: 10px 14px; font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+    min-width: 220px; max-width: 360px;
+    transform: translateX(20px); opacity: 0;
+    transition: transform .18s ease, opacity .18s ease;
+  }
+  .toast.show     { transform: translateX(0); opacity: 1; }
+  .toast.positive { border-left-color: #22c55e; }
+  .toast.negative { border-left-color: #ef4444; }
+  .toast.info     { border-left-color: #7C3AED; }
 
-  <script>
-    tailwind.config = {
-      theme: { extend: { colors: {
-        bg:"#000000",card:"#1a1a1a",cardhi:"#222222",border:"#2a2a2a",
-        accent:"#7C3AED",accenthi:"#9F67FF",
-        pos:"#22c55e",neg:"#ef4444",warn:"#eab308",
-      }, fontFamily: { sans: ["Inter","system-ui","sans-serif"] } } },
-    };
-  </script>
+  .gd-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px;
+    padding: 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .gd-card-title {
+    font-size: 12px; font-weight: 800; letter-spacing: .8px; color: #ffffff;
+  }
+  .gd-pill {
+    background: #222222; font-size: 9.5px; font-weight: 800;
+    letter-spacing: .5px; padding: 3px 9px; border-radius: 999px;
+  }
+  .gd-pillhi { background: #2a2a2a; color: #d1d5db; }
+  .gd-track-btn {
+    background: #7C3AED; color: #000; font-weight: 800; font-size: 11px;
+    letter-spacing: .3px; padding: 6px 14px; border-radius: 6px;
+    border: 0; cursor: pointer; line-height: 1;
+  }
+  .gd-track-btn:hover:not(:disabled) { background: #9F67FF; }
+  .gd-track-btn:disabled { opacity: .65; cursor: default; }
+  .gd-track-btn.is-tracked {
+    background: #222; color: #22c55e; border: 1px solid #22c55e; padding: 5px 13px;
+  }
+  .gd-track-btn.is-pending { opacity: .7; cursor: progress; }
+  .gd-analyze-btn {
+    background: #1a1a1a; color: #7C3AED; border: 1px solid #7C3AED;
+    font-weight: 700; font-size: 11.5px; padding: 6px 14px; border-radius: 6px;
+    cursor: pointer; line-height: 1;
+  }
+  .gd-analyze-btn:hover:not(:disabled) { background: #2a1f3f; }
+  .gd-analyze-btn:disabled { opacity: .65; cursor: default; }
 
-  <style>
-    html, body { background: #000; }
-    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .gd-tab {
+    background: transparent; color: #9ca3af; border: 0;
+    font-size: 12px; font-weight: 700; padding: 6px 10px; cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .gd-tab.active { color: #ffffff; border-bottom-color: #7C3AED; }
 
-    .gd-text-pos { color: #22c55e; }
-    .gd-text-neg { color: #ef4444; }
-    .gd-text-warn{ color: #eab308; }
-    .gd-text-dim { color: #9ca3af; }
-    .gd-text-text{ color: #ffffff; }
-    .gd-bar-pos  { background: #22c55e; }
-    .gd-bar-neg  { background: #ef4444; }
-    .gd-bar-warn { background: #eab308; }
+  .gd-empty {
+    color: #9ca3af; font-size: 12px; font-style: italic; text-align: center;
+    background: #1a1a1a; border: 1px dashed #2a2a2a; border-radius: 10px;
+    padding: 16px;
+  }
+  .gd-skeleton {
+    color: #6b7280; font-size: 12px; font-style: italic;
+    padding: 8px 0;
+  }
+  .gd-bar-track {
+    flex: 1; height: 6px; background: #222; border-radius: 3px; overflow: hidden;
+  }
+</style>
+{% endblock %}
 
-    .toast-stack {
-      position: fixed; bottom: 20px; right: 20px;
-      display: flex; flex-direction: column-reverse; gap: 8px;
-      z-index: 60; pointer-events: none; max-width: calc(100vw - 40px);
-    }
-    .toast {
-      pointer-events: auto; background: #1a1a1a; color: #e5e7eb;
-      border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
-      border-radius: 8px; padding: 10px 14px; font-size: 12.5px; font-weight: 600;
-      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
-      min-width: 220px; max-width: 360px;
-      transform: translateX(20px); opacity: 0;
-      transition: transform .18s ease, opacity .18s ease;
-    }
-    .toast.show     { transform: translateX(0); opacity: 1; }
-    .toast.positive { border-left-color: #22c55e; }
-    .toast.negative { border-left-color: #ef4444; }
-    .toast.info     { border-left-color: #7C3AED; }
+{% block content %}
+<main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-4">
+  <a href="/" class="text-[12px] text-accent hover:underline w-fit">← Back to slate</a>
 
-    .gd-card {
-      background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px;
-      padding: 14px; display: flex; flex-direction: column; gap: 8px;
-    }
-    .gd-card-title {
-      font-size: 12px; font-weight: 800; letter-spacing: .8px; color: #ffffff;
-    }
-    .gd-pill {
-      background: #222222; font-size: 9.5px; font-weight: 800;
-      letter-spacing: .5px; padding: 3px 9px; border-radius: 999px;
-    }
-    .gd-pillhi { background: #2a2a2a; color: #d1d5db; }
-    .gd-track-btn {
-      background: #7C3AED; color: #000; font-weight: 800; font-size: 11px;
-      letter-spacing: .3px; padding: 6px 14px; border-radius: 6px;
-      border: 0; cursor: pointer; line-height: 1;
-    }
-    .gd-track-btn:hover:not(:disabled) { background: #9F67FF; }
-    .gd-track-btn:disabled { opacity: .65; cursor: default; }
-    .gd-track-btn.is-tracked {
-      background: #222; color: #22c55e; border: 1px solid #22c55e; padding: 5px 13px;
-    }
-    .gd-track-btn.is-pending { opacity: .7; cursor: progress; }
-    .gd-analyze-btn {
-      background: #1a1a1a; color: #7C3AED; border: 1px solid #7C3AED;
-      font-weight: 700; font-size: 11.5px; padding: 6px 14px; border-radius: 6px;
-      cursor: pointer; line-height: 1;
-    }
-    .gd-analyze-btn:hover:not(:disabled) { background: #2a1f3f; }
-    .gd-analyze-btn:disabled { opacity: .65; cursor: default; }
-
-    .gd-tab {
-      background: transparent; color: #9ca3af; border: 0;
-      font-size: 12px; font-weight: 700; padding: 6px 10px; cursor: pointer;
-      border-bottom: 2px solid transparent;
-    }
-    .gd-tab.active { color: #ffffff; border-bottom-color: #7C3AED; }
-
-    .gd-empty {
-      color: #9ca3af; font-size: 12px; font-style: italic; text-align: center;
-      background: #1a1a1a; border: 1px dashed #2a2a2a; border-radius: 10px;
-      padding: 16px;
-    }
-    .gd-skeleton {
-      color: #6b7280; font-size: 12px; font-style: italic;
-      padding: 8px 0;
-    }
-    .gd-bar-track {
-      flex: 1; height: 6px; background: #222; border-radius: 3px; overflow: hidden;
-    }
-  </style>
-</head>
-
-<body class="bg-bg text-white min-h-screen">
-
-  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
-      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
-        <span class="text-accent">●</span> Sports Analysis
-      </a>
-      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
-        <a href="/" class="hover:text-white transition">Home</a>
-        <a href="/sports/mlb" class="hover:text-white transition">Sports</a>
-        <a href="/props" class="hover:text-white transition">Props</a>
-        <a href="/modelbets" class="hover:text-white transition">Model Bets</a>
-        <a href="/mybets" class="hover:text-white transition">My Bets</a>
-        <a href="/top-picks" class="hover:text-white transition">Top Picks</a>
-        <a href="/research" class="hover:text-white transition">Research</a>
-        <a href="/admin" class="hover:text-white transition">Admin</a>
-      </div>
-    </div>
-  </nav>
-
-  <main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-4">
-    <a href="/" class="text-[12px] text-accent hover:underline w-fit">← Back to slate</a>
-
-    {% if init_data.found %}
-    {# ── 1. Header card (immediate render) ───────────────────────── #}
-    <div class="gd-card" id="gd-header">
-      <div class="flex items-center flex-wrap gap-[10px]">
-        <span class="gd-pill gd-pillhi gd-text-text">{{ init_data.sport | upper }}</span>
-        <span class="text-[13px] gd-text-dim">{{ init_data.header.when }}</span>
-        {% if init_data.header.venue %}
-        <span class="text-[12.5px] text-gray-500">@ {{ init_data.header.venue }}</span>
-        {% endif %}
-        {% if init_data.header.series_ctx %}
-        <span class="gd-pill gd-pillhi text-gray-500">{{ init_data.header.series_ctx }}</span>
-        {% endif %}
-        {% if init_data.header.live_state == "live" %}
-        <span class="ml-auto text-[10px] font-extrabold tracking-wider gd-text-pos">● LIVE</span>
-        {% elif init_data.header.live_state == "final" %}
-        <span class="ml-auto text-[10px] font-extrabold tracking-wider gd-text-dim">FINAL</span>
-        {% endif %}
-      </div>
-
-      <div class="flex items-start gap-3 mt-1">
-        <div class="flex-1 min-w-0 flex flex-col items-center gap-1.5">
-          <div class="text-[16px] font-bold text-center">{{ init_data.header.away_team }}</div>
-          <div class="flex flex-col items-center text-[11.5px] font-mono gap-[2px]">
-            <span class="gd-text-text font-bold">ML {{ init_data.header.away_ml }}</span>
-            {% if init_data.header.away_rl %}
-            <span class="gd-text-dim">{{ init_data.header.away_rl }}</span>
-            {% endif %}
-          </div>
-        </div>
-        <div class="flex flex-col items-center gap-[2px] flex-shrink-0 self-center">
-          {% if init_data.header.total_line is not none %}
-          <span class="text-[14px] font-extrabold font-mono gd-text-text">O/U {{ init_data.header.total_line }}</span>
-          {% if init_data.header.proj_total is not none %}
-          <span class="text-[11px] font-bold font-mono" style="color:#9F67FF;">{{ "%.1f"|format(init_data.header.proj_total) }} proj</span>
-          {% endif %}
-          {% else %}
-          <span class="text-[18px] text-gray-500">@</span>
-          {% endif %}
-        </div>
-        <div class="flex-1 min-w-0 flex flex-col items-center gap-1.5">
-          <div class="text-[16px] font-bold text-center">{{ init_data.header.home_team }}</div>
-          <div class="flex flex-col items-center text-[11.5px] font-mono gap-[2px]">
-            <span class="gd-text-text font-bold">ML {{ init_data.header.home_ml }}</span>
-            {% if init_data.header.home_rl %}
-            <span class="gd-text-dim">{{ init_data.header.home_rl }}</span>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-    </div>
-
-    {# ── 2. AI analysis (lazy GET) ───────────────────────────────── #}
-    <div class="gd-card">
-      <div class="gd-card-title">AI ANALYSIS</div>
-      <div id="gd-ai-tabs" class="flex gap-1 border-b border-border"></div>
-      <div id="gd-ai-body" class="gd-skeleton">Generating analysis…</div>
-    </div>
-
-    {# ── 3. Model picks (immediate render) ───────────────────────── #}
-    {% if init_data.has_raw %}
-    <div class="gd-card">
-      <div class="gd-card-title">MODEL PICKS</div>
-      {% if init_data.picks %}
-      <div id="gd-picks" class="flex flex-col gap-2">
-        {% for p in init_data.picks %}
-        <div class="rounded-lg p-3 flex flex-col gap-2" style="background:#222;border:1px solid #2a2a2a;"
-             data-pick-bet-type="{{ p.bet_type }}">
-          <div class="flex items-center gap-3">
-            <span class="text-[10px] font-extrabold tracking-wider text-gray-500 uppercase">{{ p.label }}</span>
-            <span class="flex-1 text-[14px] font-bold truncate">{{ p.pick }}</span>
-            <span class="text-[12.5px] font-bold font-mono">{{ p.odds_s }}</span>
-          </div>
-          <div class="flex flex-wrap items-center gap-3 text-[11.5px] font-mono">
-            <span style="color:#7C3AED;">{{ p.prob_pct }}% confidence</span>
-            <span class="gd-text-{{ p.edge_color }} font-bold">{{ p.edge_sign }}{{ p.edge_pct }}% Edge</span>
-            <span class="gd-text-dim">{{ p.kelly_s }}</span>
-            <span class="text-[11px] font-bold {% if p.agree %}text-gray-500{% else %}gd-text-warn{% endif %}">
-              {% if p.agree %}models agree{% else %}MODELS SPLIT{% endif %}
-            </span>
-          </div>
-          {% if p.shap %}
-          <div class="text-[9.5px] font-extrabold tracking-wider text-gray-500 mt-1">TOP FACTORS</div>
-          <div class="flex flex-col gap-[2px]">
-            {% for s in p.shap %}
-            <div class="flex items-center gap-2">
-              <span class="font-extrabold font-mono w-[12px] gd-text-{{ s.color }}">{{ s.arrow }}</span>
-              <span class="text-[12px]">{{ s.label }}</span>
-            </div>
-            {% endfor %}
-          </div>
-          {% endif %}
-          <div class="flex justify-end gap-2 mt-1">
-            <button class="gd-analyze-btn" data-analyze="{{ p.bet_type }}">Analyze</button>
-            <button class="gd-track-btn"
-                    data-track-url="{{ p.track_url }}"
-                    data-track-body='{{ p.track_body | tojson }}'
-                    data-pick-label="{{ p.pick }}">Track</button>
-          </div>
-          <div class="gd-analyze-out hidden text-[12px] text-gray-300 mt-1 leading-relaxed"></div>
-        </div>
-        {% endfor %}
-      </div>
-      {% else %}
-      <div class="gd-empty">No model picks for this game.</div>
+  {% if init_data.found %}
+  {# ── 1. Header card (immediate render) ───────────────────────── #}
+  <div class="gd-card" id="gd-header">
+    <div class="flex items-center flex-wrap gap-[10px]">
+      <span class="gd-pill gd-pillhi gd-text-text">{{ init_data.sport | upper }}</span>
+      <span class="text-[13px] gd-text-dim">{{ init_data.header.when }}</span>
+      {% if init_data.header.venue %}
+      <span class="text-[12.5px] text-gray-500">@ {{ init_data.header.venue }}</span>
       {% endif %}
-    </div>
-    {% endif %}
-
-    {# ── 4. Pitching (MLB lazy) or Starting Five placeholder (WNBA) ── #}
-    <div class="gd-card">
-      <div class="gd-card-title">{% if init_data.sport == "mlb" %}PITCHING MATCHUP{% else %}STARTING FIVE{% endif %}</div>
-      {% if init_data.sport == "mlb" %}
-      <div id="gd-pitching" class="gd-skeleton">Loading pitchers…</div>
-      {% else %}
-      <div class="gd-empty">Starting five + key player stats coming soon — requires WNBA Stats API integration.</div>
+      {% if init_data.header.series_ctx %}
+      <span class="gd-pill gd-pillhi text-gray-500">{{ init_data.header.series_ctx }}</span>
+      {% endif %}
+      {% if init_data.header.live_state == "live" %}
+      <span class="ml-auto text-[10px] font-extrabold tracking-wider gd-text-pos">● LIVE</span>
+      {% elif init_data.header.live_state == "final" %}
+      <span class="ml-auto text-[10px] font-extrabold tracking-wider gd-text-dim">FINAL</span>
       {% endif %}
     </div>
 
-    {# ── 5. Venue (MLB only) ─────────────────────────────────────── #}
-    {% if init_data.venue %}
-    <div class="gd-card">
-      <div class="gd-card-title">VENUE</div>
-      <div class="flex items-center gap-3 pt-1">
-        <div class="flex-1 min-w-0 flex flex-col gap-[2px]">
-          <span class="text-[10.5px] font-bold tracking-wider text-gray-500">Ballpark</span>
-          <span class="text-[14px] font-bold truncate">{{ init_data.venue.venue }}</span>
+    <div class="flex items-start gap-3 mt-1">
+      <div class="flex-1 min-w-0 flex flex-col items-center gap-1.5">
+        <div class="text-[16px] font-bold text-center">{{ init_data.header.away_team }}</div>
+        <div class="flex flex-col items-center text-[11.5px] font-mono gap-[2px]">
+          <span class="gd-text-text font-bold">ML {{ init_data.header.away_ml }}</span>
+          {% if init_data.header.away_rl %}
+          <span class="gd-text-dim">{{ init_data.header.away_rl }}</span>
+          {% endif %}
         </div>
-        <div class="flex flex-col gap-[2px] items-end">
-          <span class="text-[10.5px] font-bold tracking-wider text-gray-500">Run Factor</span>
-          <span class="text-[22px] font-extrabold font-mono">{% if init_data.venue.run_factor is not none %}{{ init_data.venue.run_factor }}{% else %}N/A{% endif %}</span>
+      </div>
+      <div class="flex flex-col items-center gap-[2px] flex-shrink-0 self-center">
+        {% if init_data.header.total_line is not none %}
+        <span class="text-[14px] font-extrabold font-mono gd-text-text">O/U {{ init_data.header.total_line }}</span>
+        {% if init_data.header.proj_total is not none %}
+        <span class="text-[11px] font-bold font-mono" style="color:#9F67FF;">{{ "%.1f"|format(init_data.header.proj_total) }} proj</span>
+        {% endif %}
+        {% else %}
+        <span class="text-[18px] text-gray-500">@</span>
+        {% endif %}
+      </div>
+      <div class="flex-1 min-w-0 flex flex-col items-center gap-1.5">
+        <div class="text-[16px] font-bold text-center">{{ init_data.header.home_team }}</div>
+        <div class="flex flex-col items-center text-[11.5px] font-mono gap-[2px]">
+          <span class="gd-text-text font-bold">ML {{ init_data.header.home_ml }}</span>
+          {% if init_data.header.home_rl %}
+          <span class="gd-text-dim">{{ init_data.header.home_rl }}</span>
+          {% endif %}
         </div>
-        <span class="gd-pill gd-pillhi gd-text-{{ init_data.venue.tag_color }} font-extrabold">{{ init_data.venue.tag }}</span>
       </div>
     </div>
-    {% endif %}
+  </div>
 
-    {# ── 6. Lineups (MLB lazy) ───────────────────────────────────── #}
-    {% if init_data.sport == "mlb" %}
-    <div class="gd-card">
-      <div class="gd-card-title">CONFIRMED LINEUPS</div>
-      <div id="gd-lineups" class="gd-skeleton">Loading lineups…</div>
-    </div>
-    {% endif %}
+  {# ── 2. AI analysis (lazy GET) ───────────────────────────────── #}
+  <div class="gd-card">
+    <div class="gd-card-title">AI ANALYSIS</div>
+    <div id="gd-ai-tabs" class="flex gap-1 border-b border-border"></div>
+    <div id="gd-ai-body" class="gd-skeleton">Generating analysis…</div>
+  </div>
 
-    {# ── 7. Team context (lazy) ──────────────────────────────────── #}
-    <div class="gd-card">
-      <div class="gd-card-title">TEAM CONTEXT</div>
-      <div id="gd-team-context" class="gd-skeleton">Loading team context…</div>
-    </div>
-
-    {# ── 8. Game context (immediate) ─────────────────────────────── #}
-    <div class="gd-card">
-      <div class="gd-card-title">GAME CONTEXT</div>
-      {% for row in init_data.game_context %}
-      <div class="flex items-center gap-3 py-[6px] border-b border-[#161616] last:border-0">
-        <span class="flex-[0_0_40%] text-[12px] gd-text-dim">{{ row.label }}</span>
-        <span class="flex-1 text-[12.5px] font-mono {% if row.value in ['—','Coming soon'] %}text-gray-500{% endif %}">
-          {{ row.value }}
-        </span>
+  {# ── 3. Model picks (immediate render) ───────────────────────── #}
+  {% if init_data.has_raw %}
+  <div class="gd-card">
+    <div class="gd-card-title">MODEL PICKS</div>
+    {% if init_data.picks %}
+    <div id="gd-picks" class="flex flex-col gap-2">
+      {% for p in init_data.picks %}
+      <div class="rounded-lg p-3 flex flex-col gap-2" style="background:#222;border:1px solid #2a2a2a;"
+           data-pick-bet-type="{{ p.bet_type }}">
+        <div class="flex items-center gap-3">
+          <span class="text-[10px] font-extrabold tracking-wider text-gray-500 uppercase">{{ p.label }}</span>
+          <span class="flex-1 text-[14px] font-bold truncate">{{ p.pick }}</span>
+          <span class="text-[12.5px] font-bold font-mono">{{ p.odds_s }}</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3 text-[11.5px] font-mono">
+          <span style="color:#7C3AED;">{{ p.prob_pct }}% confidence</span>
+          <span class="gd-text-{{ p.edge_color }} font-bold">{{ p.edge_sign }}{{ p.edge_pct }}% Edge</span>
+          <span class="gd-text-dim">{{ p.kelly_s }}</span>
+          <span class="text-[11px] font-bold {% if p.agree %}text-gray-500{% else %}gd-text-warn{% endif %}">
+            {% if p.agree %}models agree{% else %}MODELS SPLIT{% endif %}
+          </span>
+        </div>
+        {% if p.shap %}
+        <div class="text-[9.5px] font-extrabold tracking-wider text-gray-500 mt-1">TOP FACTORS</div>
+        <div class="flex flex-col gap-[2px]">
+          {% for s in p.shap %}
+          <div class="flex items-center gap-2">
+            <span class="font-extrabold font-mono w-[12px] gd-text-{{ s.color }}">{{ s.arrow }}</span>
+            <span class="text-[12px]">{{ s.label }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+        <div class="flex justify-end gap-2 mt-1">
+          <button class="gd-analyze-btn" data-analyze="{{ p.bet_type }}">Analyze</button>
+          <button class="gd-track-btn"
+                  data-track-url="{{ p.track_url }}"
+                  data-track-body='{{ p.track_body | tojson }}'
+                  data-pick-label="{{ p.pick }}">Track</button>
+        </div>
+        <div class="gd-analyze-out hidden text-[12px] text-gray-300 mt-1 leading-relaxed"></div>
       </div>
       {% endfor %}
     </div>
-
-    {# ── 9. Upset factor (immediate) ─────────────────────────────── #}
-    <div class="gd-card">
-      <div class="gd-card-title">UPSET FACTOR</div>
-      {% if init_data.upset.available %}
-      <div class="flex items-center gap-3 py-1">
-        <span class="text-[11.5px] gd-text-dim">Chaos score</span>
-        <span class="text-[22px] font-extrabold font-mono gd-text-warn">{{ init_data.upset.score }} / 10</span>
-        <span class="ml-auto text-[11px] text-gray-500">Higher = more unpredictable.</span>
-      </div>
-      {% for c in init_data.upset.components %}
-      <div class="flex items-center gap-[10px] py-[5px]">
-        <span class="flex-[0_0_50%] text-[11.5px]">{{ c.label }}</span>
-        <div class="gd-bar-track">
-          <div class="h-full gd-bar-{{ c.color }}" style="width:{{ c.pct }}%;"></div>
-        </div>
-        <span class="text-[11px] font-mono min-w-[40px] text-right gd-text-{{ c.color }}">{{ c.pct }}%</span>
-      </div>
-      {% endfor %}
-      {% else %}
-      <div class="gd-empty">No upset-factor data for this game.</div>
-      {% endif %}
-    </div>
-
     {% else %}
-    {# ── Not-found state ─────────────────────────────────────────── #}
-    <div class="gd-card">
-      <div class="gd-card-title gd-text-warn">GAME NOT FOUND</div>
-      <div class="text-[13px] text-gray-300 leading-relaxed">
-        We couldn't find an entry for
-        <code class="font-mono gd-text-text">{{ init_data.sport | upper }} / {{ init_data.game_id }}</code>.
-        This usually happens when the game has rolled off the analysis cache,
-        the URL was bookmarked from a previous day, or the slate is still loading.
-      </div>
-      <div class="flex gap-2 mt-2">
-        <a href="/" class="gd-analyze-btn">← Back to slate</a>
-        <a href="/admin" class="gd-analyze-btn" style="color:#9ca3af;border-color:#2a2a2a;">Open Admin</a>
-      </div>
-    </div>
+    <div class="gd-empty">No model picks for this game.</div>
     {% endif %}
-  </main>
+  </div>
+  {% endif %}
 
-  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+  {# ── 4. Pitching (MLB lazy) or Starting Five placeholder (WNBA) ── #}
+  <div class="gd-card">
+    <div class="gd-card-title">{% if init_data.sport == "mlb" %}PITCHING MATCHUP{% else %}STARTING FIVE{% endif %}</div>
+    {% if init_data.sport == "mlb" %}
+    <div id="gd-pitching" class="gd-skeleton">Loading pitchers…</div>
+    {% else %}
+    <div class="gd-empty">Starting five + key player stats coming soon — requires WNBA Stats API integration.</div>
+    {% endif %}
+  </div>
 
-  <script id="gd-init" type="application/json">{{ init_data | tojson }}</script>
+  {# ── 5. Venue (MLB only) ─────────────────────────────────────── #}
+  {% if init_data.venue %}
+  <div class="gd-card">
+    <div class="gd-card-title">VENUE</div>
+    <div class="flex items-center gap-3 pt-1">
+      <div class="flex-1 min-w-0 flex flex-col gap-[2px]">
+        <span class="text-[10.5px] font-bold tracking-wider text-gray-500">Ballpark</span>
+        <span class="text-[14px] font-bold truncate">{{ init_data.venue.venue }}</span>
+      </div>
+      <div class="flex flex-col gap-[2px] items-end">
+        <span class="text-[10.5px] font-bold tracking-wider text-gray-500">Run Factor</span>
+        <span class="text-[22px] font-extrabold font-mono">{% if init_data.venue.run_factor is not none %}{{ init_data.venue.run_factor }}{% else %}N/A{% endif %}</span>
+      </div>
+      <span class="gd-pill gd-pillhi gd-text-{{ init_data.venue.tag_color }} font-extrabold">{{ init_data.venue.tag }}</span>
+    </div>
+  </div>
+  {% endif %}
 
-  <!-- lib.js MUST load before game_detail.js -->
-  <script src="/static/js/lib.js" defer></script>
-  <script src="/static/js/game_detail.js" defer></script>
-</body>
-</html>
+  {# ── 6. Lineups (MLB lazy) ───────────────────────────────────── #}
+  {% if init_data.sport == "mlb" %}
+  <div class="gd-card">
+    <div class="gd-card-title">CONFIRMED LINEUPS</div>
+    <div id="gd-lineups" class="gd-skeleton">Loading lineups…</div>
+  </div>
+  {% endif %}
+
+  {# ── 7. Team context (lazy) ──────────────────────────────────── #}
+  <div class="gd-card">
+    <div class="gd-card-title">TEAM CONTEXT</div>
+    <div id="gd-team-context" class="gd-skeleton">Loading team context…</div>
+  </div>
+
+  {# ── 8. Game context (immediate) ─────────────────────────────── #}
+  <div class="gd-card">
+    <div class="gd-card-title">GAME CONTEXT</div>
+    {% for row in init_data.game_context %}
+    <div class="flex items-center gap-3 py-[6px] border-b border-[#161616] last:border-0">
+      <span class="flex-[0_0_40%] text-[12px] gd-text-dim">{{ row.label }}</span>
+      <span class="flex-1 text-[12.5px] font-mono {% if row.value in ['—','Coming soon'] %}text-gray-500{% endif %}">
+        {{ row.value }}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# ── 9. Upset factor (immediate) ─────────────────────────────── #}
+  <div class="gd-card">
+    <div class="gd-card-title">UPSET FACTOR</div>
+    {% if init_data.upset.available %}
+    <div class="flex items-center gap-3 py-1">
+      <span class="text-[11.5px] gd-text-dim">Chaos score</span>
+      <span class="text-[22px] font-extrabold font-mono gd-text-warn">{{ init_data.upset.score }} / 10</span>
+      <span class="ml-auto text-[11px] text-gray-500">Higher = more unpredictable.</span>
+    </div>
+    {% for c in init_data.upset.components %}
+    <div class="flex items-center gap-[10px] py-[5px]">
+      <span class="flex-[0_0_50%] text-[11.5px]">{{ c.label }}</span>
+      <div class="gd-bar-track">
+        <div class="h-full gd-bar-{{ c.color }}" style="width:{{ c.pct }}%;"></div>
+      </div>
+      <span class="text-[11px] font-mono min-w-[40px] text-right gd-text-{{ c.color }}">{{ c.pct }}%</span>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="gd-empty">No upset-factor data for this game.</div>
+    {% endif %}
+  </div>
+
+  {% else %}
+  {# ── Not-found state ─────────────────────────────────────────── #}
+  <div class="gd-card">
+    <div class="gd-card-title gd-text-warn">GAME NOT FOUND</div>
+    <div class="text-[13px] text-gray-300 leading-relaxed">
+      We couldn't find an entry for
+      <code class="font-mono gd-text-text">{{ init_data.sport | upper }} / {{ init_data.game_id }}</code>.
+      This usually happens when the game has rolled off the analysis cache,
+      the URL was bookmarked from a previous day, or the slate is still loading.
+    </div>
+    <div class="flex gap-2 mt-2">
+      <a href="/" class="gd-analyze-btn">← Back to slate</a>
+      <a href="/admin" class="gd-analyze-btn" style="color:#9ca3af;border-color:#2a2a2a;">Open Admin</a>
+    </div>
+  </div>
+  {% endif %}
+</main>
+
+<div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script id="gd-init" type="application/json">{{ init_data | tojson }}</script>
+
+<!-- lib.js MUST load before game_detail.js -->
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/game_detail.js') }}" defer></script>
+{% endblock %}

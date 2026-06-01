@@ -1,208 +1,156 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Model Bets</title>
+{% extends "base.html" %}
+{% set active_page = "modelbets" %}
+{% block title %}Model Bets{% endblock %}
 
-  <script src="https://cdn.tailwindcss.com"></script>
+{% block extra_head %}
+<style>
+  /* Colour tokens (view-model emits short keys; CSS maps to hex). */
+  .mb-text-pos     { color: #22c55e; }
+  .mb-text-neg     { color: #ef4444; }
+  .mb-text-warn    { color: #eab308; }
+  .mb-text-text    { color: #ffffff; }
+  .mb-text-dim     { color: #9ca3af; }
+  .mb-text-primary { color: #9F67FF; }
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  /* Toast stack (kept for SBT.toast on snapshot-error feedback). */
+  .toast-stack {
+    position: fixed; bottom: 20px; right: 20px;
+    display: flex; flex-direction: column-reverse; gap: 8px;
+    z-index: 60; pointer-events: none; max-width: calc(100vw - 40px);
+  }
+  .toast {
+    pointer-events: auto; background: #1a1a1a; color: #e5e7eb;
+    border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
+    border-radius: 8px; padding: 10px 14px; font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,.6); min-width: 220px; max-width: 360px;
+    transform: translateX(20px); opacity: 0;
+    transition: transform .18s ease, opacity .18s ease;
+  }
+  .toast.show     { transform: translateX(0); opacity: 1; }
+  .toast.positive { border-left-color: #22c55e; }
+  .toast.negative { border-left-color: #ef4444; }
+  .toast.info     { border-left-color: #7C3AED; }
 
-  <script>
-    /* Same palette as the other migrated pages. */
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            bg:     "#000000",
-            card:   "#1a1a1a",
-            cardhi: "#222222",
-            border: "#2a2a2a",
-            accent: "#7C3AED",
-            accenthi: "#9F67FF",
-            pos:    "#22c55e",
-            neg:    "#ef4444",
-            warn:   "#eab308",
-          },
-          fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] },
-        },
-      },
-    };
-  </script>
+  .mb-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px;
+    padding: 16px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .mb-title { font-size: 11px; font-weight: 800; letter-spacing: .8px; color: #6b7280; }
+  .mb-sub   { font-size: 10.5px; color: #6b7280; }
 
-  <style>
-    html, body { background: #000; }
-    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .mb-stat {
+    flex: 1; background: #222222; border: 1px solid #2a2a2a; border-radius: 8px;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .mb-stat-label { font-size: 10px; font-weight: 700; letter-spacing: .8px; color: #6b7280; }
+  .mb-stat-value { font-size: 18px; font-weight: 800; font-family: ui-monospace, monospace; letter-spacing: -.2px; }
 
-    /* Colour tokens (view-model emits short keys; CSS maps to hex). */
-    .mb-text-pos     { color: #22c55e; }
-    .mb-text-neg     { color: #ef4444; }
-    .mb-text-warn    { color: #eab308; }
-    .mb-text-text    { color: #ffffff; }
-    .mb-text-dim     { color: #9ca3af; }
-    .mb-text-primary { color: #9F67FF; }
+  .mb-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 6px 0; border-bottom: 1px solid #161616;
+  }
+  .mb-pick-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 0; border-bottom: 1px solid #161616;
+  }
+  .mb-rank { color: #9ca3af; font-weight: 800; min-width: 18px;
+             font-family: ui-monospace, monospace; text-align: center; }
+  .mb-badge {
+    background: #222222; color: #9ca3af; font-size: 9.5px; font-weight: 800;
+    letter-spacing: .5px; padding: 1px 7px; border-radius: 999px; flex-shrink: 0;
+  }
+  .mb-count {
+    background: #222222; color: #9ca3af; font-size: 10px; font-weight: 700;
+    padding: 2px 8px; border-radius: 999px;
+  }
+  .mb-mono { font-family: ui-monospace, monospace; }
 
-    /* Toast stack (kept for SBT.toast on snapshot-error feedback). */
-    .toast-stack {
-      position: fixed; bottom: 20px; right: 20px;
-      display: flex; flex-direction: column-reverse; gap: 8px;
-      z-index: 60; pointer-events: none; max-width: calc(100vw - 40px);
-    }
-    .toast {
-      pointer-events: auto; background: #1a1a1a; color: #e5e7eb;
-      border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
-      border-radius: 8px; padding: 10px 14px; font-size: 12.5px; font-weight: 600;
-      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6); min-width: 220px; max-width: 360px;
-      transform: translateX(20px); opacity: 0;
-      transition: transform .18s ease, opacity .18s ease;
-    }
-    .toast.show     { transform: translateX(0); opacity: 1; }
-    .toast.positive { border-left-color: #22c55e; }
-    .toast.negative { border-left-color: #ef4444; }
-    .toast.info     { border-left-color: #7C3AED; }
+  .mb-clf {
+    flex: 1; min-width: 0; background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .mb-clf.best  { background: rgba(34,197,94,0.10);  border-color: #22c55e;
+                  box-shadow: 0 0 12px rgba(34,197,94,.18); }
+  .mb-clf.worst { background: rgba(239,68,68,0.10);  border-color: #ef4444;
+                  box-shadow: 0 0 12px rgba(239,68,68,.14); }
+  .mb-empty {
+    color: #9ca3af; font-size: 12px; font-style: italic; text-align: center;
+    background: #1a1a1a; border: 1px dashed #2a2a2a; border-radius: 10px; padding: 16px;
+  }
+</style>
+{% endblock %}
 
-    .mb-card {
-      background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px;
-      padding: 16px; display: flex; flex-direction: column; gap: 12px;
-    }
-    .mb-title { font-size: 11px; font-weight: 800; letter-spacing: .8px; color: #6b7280; }
-    .mb-sub   { font-size: 10.5px; color: #6b7280; }
+{% block content %}
+<main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-5">
+  <h1 class="text-[22px] font-extrabold tracking-tight">MODEL BETS</h1>
 
-    .mb-stat {
-      flex: 1; background: #222222; border: 1px solid #2a2a2a; border-radius: 8px;
-      padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;
-    }
-    .mb-stat-label { font-size: 10px; font-weight: 700; letter-spacing: .8px; color: #6b7280; }
-    .mb-stat-value { font-size: 18px; font-weight: 800; font-family: ui-monospace, monospace; letter-spacing: -.2px; }
-
-    .mb-row {
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 10px; padding: 6px 0; border-bottom: 1px solid #161616;
-    }
-    .mb-pick-row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 6px 0; border-bottom: 1px solid #161616;
-    }
-    .mb-rank { color: #9ca3af; font-weight: 800; min-width: 18px;
-               font-family: ui-monospace, monospace; text-align: center; }
-    .mb-badge {
-      background: #222222; color: #9ca3af; font-size: 9.5px; font-weight: 800;
-      letter-spacing: .5px; padding: 1px 7px; border-radius: 999px; flex-shrink: 0;
-    }
-    .mb-count {
-      background: #222222; color: #9ca3af; font-size: 10px; font-weight: 700;
-      padding: 2px 8px; border-radius: 999px;
-    }
-    .mb-mono { font-family: ui-monospace, monospace; }
-
-    .mb-clf {
-      flex: 1; min-width: 0; background: #1a1a1a; border: 1px solid #2a2a2a;
-      border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px;
-    }
-    .mb-clf.best  { background: rgba(34,197,94,0.10);  border-color: #22c55e;
-                    box-shadow: 0 0 12px rgba(34,197,94,.18); }
-    .mb-clf.worst { background: rgba(239,68,68,0.10);  border-color: #ef4444;
-                    box-shadow: 0 0 12px rgba(239,68,68,.14); }
-    .mb-empty {
-      color: #9ca3af; font-size: 12px; font-style: italic; text-align: center;
-      background: #1a1a1a; border: 1px dashed #2a2a2a; border-radius: 10px; padding: 16px;
-    }
-  </style>
-</head>
-
-<body class="bg-bg text-white min-h-screen">
-
-  <!-- ── Standardized nav (Home / Props / Model Bets / My Bets / Admin) ── -->
-  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
-      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
-        <span class="text-accent">●</span> Sports Analysis
-      </a>
-      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
-        <a href="/" class="hover:text-white transition">Home</a>
-        <a href="/sports/mlb" class="hover:text-white transition">Sports</a>
-        <a href="/props" class="hover:text-white transition">Props</a>
-        <a href="/modelbets" class="text-white font-semibold">Model Bets</a>
-        <a href="/mybets" class="hover:text-white transition">My Bets</a>
-        <a href="/top-picks" class="hover:text-white transition">Top Picks</a>
-        <a href="/research" class="hover:text-white transition">Research</a>
-        <a href="/admin" class="hover:text-white transition">Admin</a>
+  {# ── 1. Model bankroll hero ── #}
+  <div class="mb-card">
+    <div class="mb-title">MODEL BANKROLL</div>
+    <div class="flex gap-3">
+      <div class="mb-stat">
+        <span class="mb-stat-label">START</span>
+        <span class="mb-stat-value mb-text-dim" id="mb-bk-start"></span>
+      </div>
+      <div class="mb-stat">
+        <span class="mb-stat-label">CURRENT</span>
+        <span class="mb-stat-value mb-text-text" id="mb-bk-current"></span>
+      </div>
+      <div class="mb-stat">
+        <span class="mb-stat-label">P / L</span>
+        <span class="mb-stat-value" id="mb-bk-pnl"></span>
       </div>
     </div>
-  </nav>
+    <div class="flex justify-between gap-3 pt-1">
+      <span class="mb-mono text-[12px] mb-text-dim" id="mb-bk-record"></span>
+      <span class="mb-mono text-[12px] mb-text-warn" id="mb-bk-atrisk"></span>
+    </div>
+  </div>
 
-  <main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-5">
-    <h1 class="text-[22px] font-extrabold tracking-tight">MODEL BETS</h1>
+  {# ── 2. Record by bet type ── #}
+  <div class="mb-card">
+    <div class="mb-title">RECORD BY BET TYPE</div>
+    <div class="mb-sub">Across every settled pick in the model_picks store (union across all three classifiers + bet types).</div>
+    <div id="mb-type-records" class="flex flex-col"></div>
+  </div>
 
-    {# ── 1. Model bankroll hero ── #}
-    <div class="mb-card">
-      <div class="mb-title">MODEL BANKROLL</div>
-      <div class="flex gap-3">
-        <div class="mb-stat">
-          <span class="mb-stat-label">START</span>
-          <span class="mb-stat-value mb-text-dim" id="mb-bk-start"></span>
-        </div>
-        <div class="mb-stat">
-          <span class="mb-stat-label">CURRENT</span>
-          <span class="mb-stat-value mb-text-text" id="mb-bk-current"></span>
-        </div>
-        <div class="mb-stat">
-          <span class="mb-stat-label">P / L</span>
-          <span class="mb-stat-value" id="mb-bk-pnl"></span>
-        </div>
+  {# ── 3. Today's model picks ── #}
+  <div class="flex flex-col gap-3">
+    <div class="mb-title">TODAY'S MODEL PICKS</div>
+
+    <div class="mb-card" id="mb-game-card">
+      <div class="flex items-center justify-between">
+        <span class="text-[12px] font-extrabold tracking-widest text-white">GAME PICKS</span>
+        <span class="mb-count" id="mb-game-count">0</span>
       </div>
-      <div class="flex justify-between gap-3 pt-1">
-        <span class="mb-mono text-[12px] mb-text-dim" id="mb-bk-record"></span>
-        <span class="mb-mono text-[12px] mb-text-warn" id="mb-bk-atrisk"></span>
-      </div>
+      <div id="mb-game-picks" class="flex flex-col"></div>
     </div>
 
-    {# ── 2. Record by bet type ── #}
-    <div class="mb-card">
-      <div class="mb-title">RECORD BY BET TYPE</div>
-      <div class="mb-sub">Across every settled pick in the model_picks store (union across all three classifiers + bet types).</div>
-      <div id="mb-type-records" class="flex flex-col"></div>
-    </div>
-
-    {# ── 3. Today's model picks ── #}
-    <div class="flex flex-col gap-3">
-      <div class="mb-title">TODAY'S MODEL PICKS</div>
-
-      <div class="mb-card" id="mb-game-card">
-        <div class="flex items-center justify-between">
-          <span class="text-[12px] font-extrabold tracking-widest text-white">GAME PICKS</span>
-          <span class="mb-count" id="mb-game-count">0</span>
-        </div>
-        <div id="mb-game-picks" class="flex flex-col"></div>
+    <div class="mb-card" id="mb-prop-card">
+      <div class="flex items-center justify-between">
+        <span class="text-[12px] font-extrabold tracking-widest text-white">PROP PICKS</span>
+        <span class="mb-count" id="mb-prop-count">0</span>
       </div>
-
-      <div class="mb-card" id="mb-prop-card">
-        <div class="flex items-center justify-between">
-          <span class="text-[12px] font-extrabold tracking-widest text-white">PROP PICKS</span>
-          <span class="mb-count" id="mb-prop-count">0</span>
-        </div>
-        <div id="mb-prop-picks" class="flex flex-col"></div>
-      </div>
+      <div id="mb-prop-picks" class="flex flex-col"></div>
     </div>
+  </div>
 
-    {# ── 4. Classifier accuracy ── #}
-    <div class="mb-card">
-      <div class="mb-title">CLASSIFIER ACCURACY</div>
-      <div class="mb-sub">Across every game predicted (full slate, not just placed picks). Source: per-classifier tracker history.</div>
-      <div id="mb-classifiers" class="flex flex-col sm:flex-row gap-3"></div>
-    </div>
+  {# ── 4. Classifier accuracy ── #}
+  <div class="mb-card">
+    <div class="mb-title">CLASSIFIER ACCURACY</div>
+    <div class="mb-sub">Across every game predicted (full slate, not just placed picks). Source: per-classifier tracker history.</div>
+    <div id="mb-classifiers" class="flex flex-col sm:flex-row gap-3"></div>
+  </div>
 
-  </main>
+</main>
 
-  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+<div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+{% endblock %}
 
-  <script id="modelbets-init" type="application/json">{{ init_data | tojson }}</script>
+{% block extra_scripts %}
+<script id="modelbets-init" type="application/json">{{ init_data | tojson }}</script>
 
-  <!-- lib.js MUST load before modelbets.js (defines window.SBT). -->
-  <script src="/static/js/lib.js" defer></script>
-  <script src="/static/js/modelbets.js" defer></script>
-</body>
-</html>
+<!-- lib.js MUST load before modelbets.js (defines window.SBT). -->
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/modelbets.js') }}" defer></script>
+{% endblock %}

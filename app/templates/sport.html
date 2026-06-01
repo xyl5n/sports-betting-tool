@@ -1,198 +1,159 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>{{ init_data.sport_upper }} — Slate</title>
+{% extends "base.html" %}
+{% set active_page = "sports" %}
+{% block title %}{{ init_data.sport_upper }} — Slate{% endblock %}
 
-  <script src="https://cdn.tailwindcss.com"></script>
+{% block extra_head %}
+<style>
+  .sp-text-pos{color:#22c55e;} .sp-text-neg{color:#ef4444;} .sp-text-warn{color:#eab308;}
+  .sp-text-text{color:#fff;} .sp-text-dim{color:#9ca3af;} .sp-text-dim2{color:#6b7280;}
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  .toast-stack{position:fixed;bottom:20px;right:20px;display:flex;
+    flex-direction:column-reverse;gap:8px;z-index:60;pointer-events:none;
+    max-width:calc(100vw - 40px);}
+  .toast{pointer-events:auto;background:#1a1a1a;color:#e5e7eb;border:1px solid #2a2a2a;
+    border-left:4px solid #6b7280;border-radius:8px;padding:10px 14px;font-size:12.5px;
+    font-weight:600;box-shadow:0 10px 30px -10px rgba(0,0,0,.6);min-width:220px;max-width:360px;
+    transform:translateX(20px);opacity:0;
+    transition:transform .18s ease,opacity .18s ease;}
+  .toast.show{transform:translateX(0);opacity:1;}
+  .toast.positive{border-left-color:#22c55e;}
+  .toast.negative{border-left-color:#ef4444;}
+  .toast.info{border-left-color:#7C3AED;}
 
-  <script>
-    tailwind.config = {
-      theme: { extend: { colors: {
-        bg:"#000000",card:"#1a1a1a",cardhi:"#222222",border:"#2a2a2a",
-        accent:"#7C3AED",accenthi:"#9F67FF",
-        pos:"#22c55e",neg:"#ef4444",warn:"#eab308",
-      }, fontFamily: { sans: ["Inter","system-ui","sans-serif"] } } },
-    };
-  </script>
+  .sp-pill{font-size:11.5px;font-weight:800;padding:5px 14px;border-radius:999px;
+    border:0;cursor:pointer;line-height:1;text-decoration:none;}
+  .sp-pill.active{background:#7C3AED;color:#000;}
+  .sp-pill.inactive{background:#222;color:#9ca3af;}
+  .sp-pill.inactive:hover{background:#2a2a2a;color:#fff;}
 
-  <style>
-    html, body { background: #000; }
-    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .sp-datebar{display:flex;align-items:center;gap:8px;background:#1a1a1a;
+    border:1px solid #2a2a2a;border-radius:8px;padding:6px 10px;justify-content:center;
+    flex-wrap:wrap;}
+  .sp-arrow{background:#222;color:#fff;border:0;border-radius:8px;
+    width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;
+    cursor:pointer;font-size:18px;line-height:1;}
+  .sp-arrow:hover{background:#2a2a2a;}
+  .sp-datelbl{font-size:14px;font-weight:700;color:#fff;letter-spacing:.2px;}
+  .sp-dateinput{background:#222;border:1px solid #2a2a2a;color:#e5e7eb;
+    font-size:12.5px;padding:6px 8px;border-radius:8px;width:150px;}
+  .sp-dateinput:focus{outline:none;border-color:#7C3AED;}
 
-    .sp-text-pos{color:#22c55e;} .sp-text-neg{color:#ef4444;} .sp-text-warn{color:#eab308;}
-    .sp-text-text{color:#fff;} .sp-text-dim{color:#9ca3af;} .sp-text-dim2{color:#6b7280;}
+  .sp-grid{display:grid;gap:12px;grid-template-columns:1fr;}
+  @media (min-width: 900px) { .sp-grid{grid-template-columns:1fr 1fr;} }
 
-    .toast-stack{position:fixed;bottom:20px;right:20px;display:flex;
-      flex-direction:column-reverse;gap:8px;z-index:60;pointer-events:none;
-      max-width:calc(100vw - 40px);}
-    .toast{pointer-events:auto;background:#1a1a1a;color:#e5e7eb;border:1px solid #2a2a2a;
-      border-left:4px solid #6b7280;border-radius:8px;padding:10px 14px;font-size:12.5px;
-      font-weight:600;box-shadow:0 10px 30px -10px rgba(0,0,0,.6);min-width:220px;max-width:360px;
-      transform:translateX(20px);opacity:0;
-      transition:transform .18s ease,opacity .18s ease;}
-    .toast.show{transform:translateX(0);opacity:1;}
-    .toast.positive{border-left-color:#22c55e;}
-    .toast.negative{border-left-color:#ef4444;}
-    .toast.info{border-left-color:#7C3AED;}
+  .sp-card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;
+    padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0;}
+  .sp-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .sp-chip{background:#222;color:#fff;font-size:9.5px;font-weight:800;
+    letter-spacing:.5px;padding:2px 7px;border-radius:999px;flex-shrink:0;}
+  .sp-time{font-size:12px;color:#9ca3af;}
+  .sp-matchup-pill{background:#222;color:#9F67FF;border:1px solid #2a2a2a;
+    font-size:10px;font-weight:700;letter-spacing:.3px;padding:2px 9px;
+    border-radius:999px;text-decoration:none;line-height:1.4;}
+  .sp-matchup-pill:hover{background:#2a2a2a;}
+  .sp-state-live{font-size:9.5px;font-weight:800;letter-spacing:.8px;color:#22c55e;
+    margin-left:auto;display:inline-flex;align-items:center;gap:4px;}
+  .sp-livedot{width:6px;height:6px;border-radius:50%;background:#22c55e;
+    box-shadow:0 0 6px #22c55e;animation:sp-pulse 1.2s ease-in-out infinite;}
+  @keyframes sp-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+  .sp-state-final{font-size:9.5px;font-weight:800;letter-spacing:.8px;color:#9ca3af;
+    margin-left:auto;}
 
-    .sp-pill{font-size:11.5px;font-weight:800;padding:5px 14px;border-radius:999px;
-      border:0;cursor:pointer;line-height:1;text-decoration:none;}
-    .sp-pill.active{background:#7C3AED;color:#000;}
-    .sp-pill.inactive{background:#222;color:#9ca3af;}
-    .sp-pill.inactive:hover{background:#2a2a2a;color:#fff;}
+  .sp-teams{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .sp-team{font-size:15px;font-weight:800;color:#fff;flex:1;min-width:0;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .sp-team.away{text-align:left;}
+  .sp-team.home{text-align:right;}
+  .sp-vs{font-size:10.5px;font-weight:700;color:#6b7280;letter-spacing:.5px;}
 
-    .sp-datebar{display:flex;align-items:center;gap:8px;background:#1a1a1a;
-      border:1px solid #2a2a2a;border-radius:8px;padding:6px 10px;justify-content:center;
-      flex-wrap:wrap;}
-    .sp-arrow{background:#222;color:#fff;border:0;border-radius:8px;
-      width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;
-      cursor:pointer;font-size:18px;line-height:1;}
-    .sp-arrow:hover{background:#2a2a2a;}
-    .sp-datelbl{font-size:14px;font-weight:700;color:#fff;letter-spacing:.2px;}
-    .sp-dateinput{background:#222;border:1px solid #2a2a2a;color:#e5e7eb;
-      font-size:12.5px;padding:6px 8px;border-radius:8px;width:150px;}
-    .sp-dateinput:focus{outline:none;border-color:#7C3AED;}
+  .sp-score{font-size:14px;font-weight:800;font-family:ui-monospace,monospace;
+    color:#fff;text-align:center;background:#222;border-radius:8px;
+    padding:6px 10px;letter-spacing:.3px;}
+  .sp-score.live{color:#22c55e;}
+  .sp-score.final{color:#9ca3af;}
 
-    .sp-grid{display:grid;gap:12px;grid-template-columns:1fr;}
-    @media (min-width: 900px) { .sp-grid{grid-template-columns:1fr 1fr;} }
+  .sp-pick-line{font-size:12px;font-weight:600;font-family:ui-monospace,monospace;
+    padding:6px 10px;background:#222;border-radius:6px;line-height:1.4;
+    white-space:normal;word-break:break-word;}
 
-    .sp-card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;
-      padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0;}
-    .sp-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-    .sp-chip{background:#222;color:#fff;font-size:9.5px;font-weight:800;
-      letter-spacing:.5px;padding:2px 7px;border-radius:999px;flex-shrink:0;}
-    .sp-time{font-size:12px;color:#9ca3af;}
-    .sp-matchup-pill{background:#222;color:#9F67FF;border:1px solid #2a2a2a;
-      font-size:10px;font-weight:700;letter-spacing:.3px;padding:2px 9px;
-      border-radius:999px;text-decoration:none;line-height:1.4;}
-    .sp-matchup-pill:hover{background:#2a2a2a;}
-    .sp-state-live{font-size:9.5px;font-weight:800;letter-spacing:.8px;color:#22c55e;
-      margin-left:auto;display:inline-flex;align-items:center;gap:4px;}
-    .sp-livedot{width:6px;height:6px;border-radius:50%;background:#22c55e;
-      box-shadow:0 0 6px #22c55e;animation:sp-pulse 1.2s ease-in-out infinite;}
-    @keyframes sp-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
-    .sp-state-final{font-size:9.5px;font-weight:800;letter-spacing:.8px;color:#9ca3af;
-      margin-left:auto;}
+  .sp-bottom{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    margin-top:2px;}
+  .sp-details{color:#9F67FF;text-decoration:none;font-size:11.5px;font-weight:700;
+    padding:4px 0;}
+  .sp-details:hover{text-decoration:underline;}
+  .sp-track-btn{background:#7C3AED;color:#000;font-weight:800;font-size:11px;
+    padding:6px 14px;border-radius:6px;border:0;cursor:pointer;line-height:1;}
+  .sp-track-btn:hover:not(:disabled){background:#9F67FF;}
+  .sp-track-btn:disabled{opacity:.65;cursor:default;}
+  .sp-track-btn.is-tracked{background:#222;color:#22c55e;border:1px solid #22c55e;padding:5px 13px;}
+  .sp-track-btn.is-pending{opacity:.7;cursor:progress;}
 
-    .sp-teams{display:flex;align-items:center;justify-content:space-between;gap:10px;}
-    .sp-team{font-size:15px;font-weight:800;color:#fff;flex:1;min-width:0;
-      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-    .sp-team.away{text-align:left;}
-    .sp-team.home{text-align:right;}
-    .sp-vs{font-size:10.5px;font-weight:700;color:#6b7280;letter-spacing:.5px;}
+  .sp-quota{display:flex;align-items:center;gap:10px;background:#1a1a1a;
+    border:1px dashed #ef4444;border-radius:8px;padding:10px 14px;}
+  .sp-quota-icon{font-size:16px;color:#ef4444;}
+  .sp-quota-title{font-size:12.5px;font-weight:700;color:#ef4444;}
+  .sp-quota-sub{font-size:11.5px;color:#9ca3af;}
 
-    .sp-score{font-size:14px;font-weight:800;font-family:ui-monospace,monospace;
-      color:#fff;text-align:center;background:#222;border-radius:8px;
-      padding:6px 10px;letter-spacing:.3px;}
-    .sp-score.live{color:#22c55e;}
-    .sp-score.final{color:#9ca3af;}
+  .sp-empty{color:#9ca3af;font-size:12.5px;font-style:italic;text-align:center;
+    background:#1a1a1a;border:1px dashed #2a2a2a;border-radius:10px;padding:16px;}
+</style>
+{% endblock %}
 
-    .sp-pick-line{font-size:12px;font-weight:600;font-family:ui-monospace,monospace;
-      padding:6px 10px;background:#222;border-radius:6px;line-height:1.4;
-      white-space:normal;word-break:break-word;}
+{% block content %}
+<main class="mx-auto max-w-5xl px-4 py-5 flex flex-col gap-4">
 
-    .sp-bottom{display:flex;align-items:center;justify-content:space-between;gap:8px;
-      margin-top:2px;}
-    .sp-details{color:#9F67FF;text-decoration:none;font-size:11.5px;font-weight:700;
-      padding:4px 0;}
-    .sp-details:hover{text-decoration:underline;}
-    .sp-track-btn{background:#7C3AED;color:#000;font-weight:800;font-size:11px;
-      padding:6px 14px;border-radius:6px;border:0;cursor:pointer;line-height:1;}
-    .sp-track-btn:hover:not(:disabled){background:#9F67FF;}
-    .sp-track-btn:disabled{opacity:.65;cursor:default;}
-    .sp-track-btn.is-tracked{background:#222;color:#22c55e;border:1px solid #22c55e;padding:5px 13px;}
-    .sp-track-btn.is-pending{opacity:.7;cursor:progress;}
-
-    .sp-quota{display:flex;align-items:center;gap:10px;background:#1a1a1a;
-      border:1px dashed #ef4444;border-radius:8px;padding:10px 14px;}
-    .sp-quota-icon{font-size:16px;color:#ef4444;}
-    .sp-quota-title{font-size:12.5px;font-weight:700;color:#ef4444;}
-    .sp-quota-sub{font-size:11.5px;color:#9ca3af;}
-
-    .sp-empty{color:#9ca3af;font-size:12.5px;font-style:italic;text-align:center;
-      background:#1a1a1a;border:1px dashed #2a2a2a;border-radius:10px;padding:16px;}
-  </style>
-</head>
-
-<body class="bg-bg text-white min-h-screen">
-
-  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
-      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
-        <span class="text-accent">●</span> Sports Analysis
-      </a>
-      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
-        <a href="/" class="hover:text-white transition">Home</a>
-        <a href="/sports/mlb" class="text-white font-semibold">Sports</a>
-        <a href="/props" class="hover:text-white transition">Props</a>
-        <a href="/modelbets" class="hover:text-white transition">Model Bets</a>
-        <a href="/mybets" class="hover:text-white transition">My Bets</a>
-        <a href="/top-picks" class="hover:text-white transition">Top Picks</a>
-        <a href="/research" class="hover:text-white transition">Research</a>
-        <a href="/admin" class="hover:text-white transition">Admin</a>
-      </div>
+  {# ── Header: sport + pill switcher ─────────────────────────── #}
+  <div class="flex items-center flex-wrap gap-3">
+    <h1 class="text-[22px] font-extrabold tracking-tight">{{ init_data.sport_upper }}</h1>
+    <span class="text-[12px] sp-text-dim">today's slate</span>
+    <div class="ml-auto flex items-center gap-1.5">
+      {% for p in init_data.pills %}
+      <a href="/sports/{{ p.key }}{% if not init_data.is_today %}?date={{ init_data.date }}{% endif %}"
+         class="sp-pill {% if p.active %}active{% else %}inactive{% endif %}">{{ p.label }}</a>
+      {% endfor %}
     </div>
-  </nav>
+  </div>
 
-  <main class="mx-auto max-w-5xl px-4 py-5 flex flex-col gap-4">
+  {# ── Date nav: prev | label | next | native picker ────────── #}
+  <div class="sp-datebar">
+    <a href="/sports/{{ init_data.sport }}?date={{ init_data.prev_iso }}"
+       class="sp-arrow" aria-label="Previous day">&#8249;</a>
+    <span class="sp-datelbl">{{ init_data.pretty_date }}</span>
+    <a href="/sports/{{ init_data.sport }}?date={{ init_data.next_iso }}"
+       class="sp-arrow" aria-label="Next day">&#8250;</a>
+    <input type="date" id="sp-date" class="sp-dateinput"
+           value="{{ init_data.date }}" data-sport="{{ init_data.sport }}">
+  </div>
 
-    {# ── Header: sport + pill switcher ─────────────────────────── #}
-    <div class="flex items-center flex-wrap gap-3">
-      <h1 class="text-[22px] font-extrabold tracking-tight">{{ init_data.sport_upper }}</h1>
-      <span class="text-[12px] sp-text-dim">today's slate</span>
-      <div class="ml-auto flex items-center gap-1.5">
-        {% for p in init_data.pills %}
-        <a href="/sports/{{ p.key }}{% if not init_data.is_today %}?date={{ init_data.date }}{% endif %}"
-           class="sp-pill {% if p.active %}active{% else %}inactive{% endif %}">{{ p.label }}</a>
-        {% endfor %}
-      </div>
+  {# ── Odds quota banner (silent unless cap hit) ────────────── #}
+  {% if init_data.odds_quota %}
+  <div class="sp-quota">
+    <span class="sp-quota-icon">&#9888;</span>
+    <div class="flex flex-col gap-0.5">
+      <span class="sp-quota-title">
+        Daily Odds API limit of {{ init_data.odds_quota.limit }} reached,
+        additional pulls require manual approval.
+      </span>
+      <span class="sp-quota-sub">
+        {{ init_data.odds_quota.count }} / {{ init_data.odds_quota.limit }}
+        requests used today. Open <a href="/admin" class="text-accent hover:underline">/admin</a>
+        and click Approve Additional Odds Pull (+50) to allow more.
+      </span>
     </div>
+  </div>
+  {% endif %}
 
-    {# ── Date nav: prev | label | next | native picker ────────── #}
-    <div class="sp-datebar">
-      <a href="/sports/{{ init_data.sport }}?date={{ init_data.prev_iso }}"
-         class="sp-arrow" aria-label="Previous day">&#8249;</a>
-      <span class="sp-datelbl">{{ init_data.pretty_date }}</span>
-      <a href="/sports/{{ init_data.sport }}?date={{ init_data.next_iso }}"
-         class="sp-arrow" aria-label="Next day">&#8250;</a>
-      <input type="date" id="sp-date" class="sp-dateinput"
-             value="{{ init_data.date }}" data-sport="{{ init_data.sport }}">
-    </div>
+  {# ── Game grid (rendered client-side from sp-init JSON) ───── #}
+  <div id="sp-grid" class="sp-grid"></div>
+  <div id="sp-empty" class="sp-empty hidden">{{ init_data.empty_msg }}</div>
 
-    {# ── Odds quota banner (silent unless cap hit) ────────────── #}
-    {% if init_data.odds_quota %}
-    <div class="sp-quota">
-      <span class="sp-quota-icon">&#9888;</span>
-      <div class="flex flex-col gap-0.5">
-        <span class="sp-quota-title">
-          Daily Odds API limit of {{ init_data.odds_quota.limit }} reached,
-          additional pulls require manual approval.
-        </span>
-        <span class="sp-quota-sub">
-          {{ init_data.odds_quota.count }} / {{ init_data.odds_quota.limit }}
-          requests used today. Open <a href="/admin" class="text-accent hover:underline">/admin</a>
-          and click Approve Additional Odds Pull (+50) to allow more.
-        </span>
-      </div>
-    </div>
-    {% endif %}
+</main>
 
-    {# ── Game grid (rendered client-side from sp-init JSON) ───── #}
-    <div id="sp-grid" class="sp-grid"></div>
-    <div id="sp-empty" class="sp-empty hidden">{{ init_data.empty_msg }}</div>
+<div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+{% endblock %}
 
-  </main>
-
-  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
-
-  <script id="sp-init" type="application/json">{{ init_data | tojson }}</script>
-  <script src="/static/js/lib.js" defer></script>
-  <script src="/static/js/sport.js" defer></script>
-</body>
-</html>
+{% block extra_scripts %}
+<script id="sp-init" type="application/json">{{ init_data | tojson }}</script>
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/sport.js') }}" defer></script>
+{% endblock %}

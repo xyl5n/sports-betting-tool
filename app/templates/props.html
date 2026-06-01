@@ -1,650 +1,597 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Player Props</title>
+{% extends "base.html" %}
+{% set active_page = "props" %}
+{% block title %}Player Props{% endblock %}
 
-  <!-- Tailwind via CDN (no build step) -->
-  <script src="https://cdn.tailwindcss.com"></script>
+{% block extra_head %}
+<style>
+  /* Hide scrollbar on the horizontal stat-pill row but keep it scrollable. */
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  /* Card hover: subtle lift + purple glow. */
+  .prop-card { transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease; }
+  .prop-card:hover { transform: translateY(-3px); box-shadow: 0 10px 30px -10px rgba(124,58,237,.55); }
+  .dimmed { opacity: .6; }
 
-  <!-- Inter -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  /* ── Filter panel (Phase 2b) ── */
+  .fp-chip {
+    cursor: pointer;
+    border: 1px solid #2a2a2a;
+    background: #1a1a1a;
+    color: #d1d5db;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+    line-height: 1.2;
+  }
+  .fp-chip.active {
+    background: rgba(34,197,94,0.15);
+    border-color: #22c55e;
+    color: #22c55e;
+  }
+  .fp-select {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    color: #e5e7eb;
+    font-size: 12.5px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    width: 100%;
+    min-width: 0;
+  }
+  .fp-select:focus { outline: none; border-color: #7C3AED; }
+  .fp-label {
+    display: block;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .4px;
+    color: #6b7280;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  /* Filter button when filters are active (green-tinted pill). */
+  #filter-toggle.has-active {
+    background: #22c55e !important;
+    color: #000 !important;
+    border-color: #22c55e !important;
+  }
+  /* Switch (alt-lines toggle). */
+  .fp-switch {
+    position: relative;
+    display: inline-block;
+    width: 34px; height: 18px;
+    flex-shrink: 0;
+  }
+  .fp-switch input { opacity: 0; width: 0; height: 0; }
+  .fp-switch .slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background: #2a2a2a; border-radius: 999px;
+    transition: background .15s ease;
+  }
+  .fp-switch .slider::before {
+    content: "";
+    position: absolute;
+    width: 14px; height: 14px;
+    left: 2px; top: 2px;
+    background: #d1d5db; border-radius: 50%;
+    transition: transform .15s ease, background .15s ease;
+  }
+  .fp-switch input:checked + .slider { background: #22c55e; }
+  .fp-switch input:checked + .slider::before {
+    transform: translateX(16px); background: #000;
+  }
 
-  <script>
-    // Theme tokens shared with Tailwind utilities.
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            bg:     "#000000",
-            card:   "#1a1a1a",
-            cardhi: "#222222",
-            border: "#2a2a2a",
-            accent: "#7C3AED",
-            accenthi: "#9F67FF",
-            pos:    "#22c55e",
-            neg:    "#ef4444",
-            warn:   "#eab308",
-          },
-          fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] },
-        },
-      },
-    };
-  </script>
+  /* ── Track button + toast (Phase 2c) ── */
+  .track-btn {
+    background: #7C3AED; color: #ffffff;
+    font-weight: 800; font-size: 11px;
+    padding: 5px 12px; border-radius: 6px;
+    border: 0; cursor: pointer; line-height: 1;
+    letter-spacing: .3px;
+    transition: background .15s ease, opacity .15s ease;
+  }
+  .track-btn:hover:not(:disabled) { background: #9F67FF; }
+  .track-btn:disabled { cursor: default; opacity: .85; }
+  .track-btn.is-tracked {
+    background: #222222;
+    color: #22c55e;
+    border: 1px solid #22c55e;
+    padding: 4px 11px;            /* compensate for the 1px border */
+  }
+  .track-btn.is-pending { opacity: .65; cursor: progress; }
 
-  <style>
-    html, body { background: #000; }
-    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
-    /* Hide scrollbar on the horizontal stat-pill row but keep it scrollable. */
-    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-    .no-scrollbar::-webkit-scrollbar { display: none; }
-    /* Card hover: subtle lift + purple glow. */
-    .prop-card { transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease; }
-    .prop-card:hover { transform: translateY(-3px); box-shadow: 0 10px 30px -10px rgba(124,58,237,.55); }
-    .dimmed { opacity: .6; }
+  /* Toast stack -- fixed bottom-right, stacks newest on top */
+  .toast-stack {
+    position: fixed; bottom: 20px; right: 20px;
+    display: flex; flex-direction: column-reverse; gap: 8px;
+    z-index: 60; pointer-events: none;
+    max-width: calc(100vw - 40px);
+  }
+  .toast {
+    pointer-events: auto;
+    background: #1a1a1a; color: #e5e7eb;
+    border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
+    border-radius: 8px; padding: 10px 14px;
+    font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+    min-width: 220px; max-width: 360px;
+    transform: translateX(20px); opacity: 0;
+    transition: transform .18s ease, opacity .18s ease;
+  }
+  .toast.show { transform: translateX(0); opacity: 1; }
+  .toast.positive { border-left-color: #22c55e; }
+  .toast.negative { border-left-color: #ef4444; }
+  .toast.info     { border-left-color: #7C3AED; }
 
-    /* ── Filter panel (Phase 2b) ── */
-    .fp-chip {
-      cursor: pointer;
-      border: 1px solid #2a2a2a;
-      background: #1a1a1a;
-      color: #d1d5db;
-      font-size: 12px;
-      font-weight: 600;
-      padding: 4px 10px;
-      border-radius: 999px;
-      white-space: nowrap;
-      line-height: 1.2;
-    }
-    .fp-chip.active {
-      background: rgba(34,197,94,0.15);
-      border-color: #22c55e;
-      color: #22c55e;
-    }
-    .fp-select {
-      background: #1a1a1a;
-      border: 1px solid #2a2a2a;
-      color: #e5e7eb;
-      font-size: 12.5px;
-      padding: 6px 8px;
-      border-radius: 8px;
-      width: 100%;
-      min-width: 0;
-    }
-    .fp-select:focus { outline: none; border-color: #7C3AED; }
-    .fp-label {
-      display: block;
-      font-size: 10.5px;
-      font-weight: 700;
-      letter-spacing: .4px;
-      color: #6b7280;
-      text-transform: uppercase;
-      margin-bottom: 4px;
-    }
-    /* Filter button when filters are active (green-tinted pill). */
-    #filter-toggle.has-active {
-      background: #22c55e !important;
-      color: #000 !important;
-      border-color: #22c55e !important;
-    }
-    /* Switch (alt-lines toggle). */
-    .fp-switch {
-      position: relative;
-      display: inline-block;
-      width: 34px; height: 18px;
-      flex-shrink: 0;
-    }
-    .fp-switch input { opacity: 0; width: 0; height: 0; }
-    .fp-switch .slider {
-      position: absolute; cursor: pointer; inset: 0;
-      background: #2a2a2a; border-radius: 999px;
-      transition: background .15s ease;
-    }
-    .fp-switch .slider::before {
-      content: "";
-      position: absolute;
-      width: 14px; height: 14px;
-      left: 2px; top: 2px;
-      background: #d1d5db; border-radius: 50%;
-      transition: transform .15s ease, background .15s ease;
-    }
-    .fp-switch input:checked + .slider { background: #22c55e; }
-    .fp-switch input:checked + .slider::before {
-      transform: translateX(16px); background: #000;
-    }
+  /* ── View mode toggle + By-Game grouping (Phase 2d) ── */
+  .view-pill {
+    background: #1a1a1a; color: #9ca3af;
+    border: 1px solid #2a2a2a;
+    font-size: 11.5px; font-weight: 700;
+    padding: 4px 10px; border-radius: 999px;
+    cursor: pointer; line-height: 1; letter-spacing: .3px;
+    transition: background .12s ease, color .12s ease, border-color .12s ease;
+  }
+  .view-pill:hover { color: #e5e7eb; }
+  .view-pill-active {
+    background: #7C3AED; color: #ffffff; border-color: #7C3AED;
+  }
+  .view-pill-active:hover { color: #ffffff; }
 
-    /* ── Track button + toast (Phase 2c) ── */
-    .track-btn {
-      background: #7C3AED; color: #ffffff;
-      font-weight: 800; font-size: 11px;
-      padding: 5px 12px; border-radius: 6px;
-      border: 0; cursor: pointer; line-height: 1;
-      letter-spacing: .3px;
-      transition: background .15s ease, opacity .15s ease;
-    }
-    .track-btn:hover:not(:disabled) { background: #9F67FF; }
-    .track-btn:disabled { cursor: default; opacity: .85; }
-    .track-btn.is-tracked {
-      background: #222222;
-      color: #22c55e;
-      border: 1px solid #22c55e;
-      padding: 4px 11px;            /* compensate for the 1px border */
-    }
-    .track-btn.is-pending { opacity: .65; cursor: progress; }
+  /* Group header (clickable row) */
+  .gg-header {
+    display: flex; align-items: center; gap: 10px;
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 10px; padding: 10px 12px;
+    cursor: pointer; min-width: 0;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  .gg-header:hover { background: #222222; border-color: #3a3a3a; }
+  .gg-abbr   { font-size: 12.5px; font-weight: 800; color: #ffffff; white-space: nowrap; }
+  .gg-at     { font-size: 11px;   color: #6b7280; }
+  .gg-spacer { flex: 1; min-width: 4px; }
+  .gg-time {
+    font-size: 11px; color: #6b7280;
+    font-family: ui-monospace, monospace; white-space: nowrap; flex-shrink: 0;
+  }
+  .gg-count {
+    background: #222222; color: #d1d5db;
+    font-size: 10.5px; font-weight: 700;
+    padding: 2px 8px; border-radius: 999px;
+    flex-shrink: 0; white-space: nowrap;
+  }
+  .gg-chev {
+    color: #9ca3af; transform: rotate(0deg);
+    transition: transform .15s ease; flex-shrink: 0;
+    width: 16px; height: 16px; display: inline-block;
+  }
+  .gg-chev.is-open { transform: rotate(90deg); }
 
-    /* Toast stack -- fixed bottom-right, stacks newest on top */
-    .toast-stack {
-      position: fixed; bottom: 20px; right: 20px;
-      display: flex; flex-direction: column-reverse; gap: 8px;
-      z-index: 60; pointer-events: none;
-      max-width: calc(100vw - 40px);
-    }
-    .toast {
-      pointer-events: auto;
-      background: #1a1a1a; color: #e5e7eb;
-      border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
-      border-radius: 8px; padding: 10px 14px;
-      font-size: 12.5px; font-weight: 600;
-      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
-      min-width: 220px; max-width: 360px;
-      transform: translateX(20px); opacity: 0;
-      transition: transform .18s ease, opacity .18s ease;
-    }
-    .toast.show { transform: translateX(0); opacity: 1; }
-    .toast.positive { border-left-color: #22c55e; }
-    .toast.negative { border-left-color: #ef4444; }
-    .toast.info     { border-left-color: #7C3AED; }
+  /* Group body: same prop-card grid, left-bordered to show nesting */
+  .gg-body {
+    margin: 6px 0 4px 0; padding-left: 10px;
+    border-left: 2px solid #2a2a2a;
+    display: grid; grid-template-columns: repeat(1, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  @media (min-width: 640px) { .gg-body { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (min-width: 1024px) { .gg-body { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (min-width: 1280px) { .gg-body { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 
-    /* ── View mode toggle + By-Game grouping (Phase 2d) ── */
-    .view-pill {
-      background: #1a1a1a; color: #9ca3af;
-      border: 1px solid #2a2a2a;
-      font-size: 11.5px; font-weight: 700;
-      padding: 4px 10px; border-radius: 999px;
-      cursor: pointer; line-height: 1; letter-spacing: .3px;
-      transition: background .12s ease, color .12s ease, border-color .12s ease;
-    }
-    .view-pill:hover { color: #e5e7eb; }
-    .view-pill-active {
-      background: #7C3AED; color: #ffffff; border-color: #7C3AED;
-    }
-    .view-pill-active:hover { color: #ffffff; }
+  /* ── X-Ray data table (Phase 2e) ── */
+  .xr-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    background: #111111;
+  }
+  /* Header row + data rows share these flex specs so columns line up. */
+  .xr-row {
+    display: flex; flex-direction: row; align-items: center;
+    min-width: 900px;
+  }
+  .xr-header {
+    background: #1a1a1a;
+    border-bottom: 2px solid #2a2a2a;
+    position: sticky; top: 0; z-index: 10;
+  }
+  .xr-data {
+    height: 44px; background: #111111;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .xr-data.xr-alt { background: rgba(255,255,255,0.025); }
+  .xr-data:hover  { background: rgba(124,58,237,0.06); }
+  .xr-data:last-child { border-bottom: 0; }
 
-    /* Group header (clickable row) */
-    .gg-header {
-      display: flex; align-items: center; gap: 10px;
-      background: #1a1a1a; border: 1px solid #2a2a2a;
-      border-radius: 10px; padding: 10px 12px;
-      cursor: pointer; min-width: 0;
-      transition: background .12s ease, border-color .12s ease;
-    }
-    .gg-header:hover { background: #222222; border-color: #3a3a3a; }
-    .gg-abbr   { font-size: 12.5px; font-weight: 800; color: #ffffff; white-space: nowrap; }
-    .gg-at     { font-size: 11px;   color: #6b7280; }
-    .gg-spacer { flex: 1; min-width: 4px; }
-    .gg-time {
-      font-size: 11px; color: #6b7280;
-      font-family: ui-monospace, monospace; white-space: nowrap; flex-shrink: 0;
-    }
-    .gg-count {
-      background: #222222; color: #d1d5db;
-      font-size: 10.5px; font-weight: 700;
-      padding: 2px 8px; border-radius: 999px;
-      flex-shrink: 0; white-space: nowrap;
-    }
-    .gg-chev {
-      color: #9ca3af; transform: rotate(0deg);
-      transition: transform .15s ease; flex-shrink: 0;
-      width: 16px; height: 16px; display: inline-block;
-    }
-    .gg-chev.is-open { transform: rotate(90deg); }
+  .xr-cell {
+    display: flex; align-items: center;
+    padding: 0 12px;
+  }
+  .xr-cell.center { justify-content: center; }
+  .xr-cell.right  { justify-content: flex-end; }
+  .xr-cell.col-stack {
+    flex-direction: column; gap: 1px; justify-content: center;
+  }
 
-    /* Group body: same prop-card grid, left-bordered to show nesting */
-    .gg-body {
-      margin: 6px 0 4px 0; padding-left: 10px;
-      border-left: 2px solid #2a2a2a;
-      display: grid; grid-template-columns: repeat(1, minmax(0, 1fr));
-      gap: 1rem;
-    }
-    @media (min-width: 640px) { .gg-body { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    @media (min-width: 1024px) { .gg-body { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-    @media (min-width: 1280px) { .gg-body { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  /* Column flex-basis -- matches NiceGUI _XRAY_COLS to the pixel */
+  .xr-col-player { flex: 1 1 180px; min-width: 160px; overflow: hidden; }
+  .xr-col-line   { flex: 0 0 80px; }
+  .xr-col-odds   { flex: 0 0 72px; }
+  .xr-col-conf   { flex: 0 0 72px; }
+  .xr-col-ev     { flex: 0 0 90px; }
+  .xr-col-l5     { flex: 0 0 110px; }
+  .xr-col-l10    { flex: 0 0 110px; }
+  .xr-col-szn    { flex: 0 0 72px; }
+  .xr-col-track  { flex: 0 0 90px; }
 
-    /* ── X-Ray data table (Phase 2e) ── */
-    .xr-wrap {
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-      width: 100%;
-      border: 1px solid #2a2a2a;
-      border-radius: 10px;
-      background: #111111;
-    }
-    /* Header row + data rows share these flex specs so columns line up. */
-    .xr-row {
-      display: flex; flex-direction: row; align-items: center;
-      min-width: 900px;
-    }
-    .xr-header {
-      background: #1a1a1a;
-      border-bottom: 2px solid #2a2a2a;
-      position: sticky; top: 0; z-index: 10;
-    }
-    .xr-data {
-      height: 44px; background: #111111;
-      border-bottom: 1px solid rgba(255,255,255,0.04);
-    }
-    .xr-data.xr-alt { background: rgba(255,255,255,0.025); }
-    .xr-data:hover  { background: rgba(124,58,237,0.06); }
-    .xr-data:last-child { border-bottom: 0; }
+  /* Header cell text */
+  .xr-h {
+    height: 36px;
+    font-size: 9px; font-weight: 800; letter-spacing: .6px;
+    color: #6b7280; white-space: nowrap; user-select: none;
+  }
+  .xr-h.sortable { cursor: pointer; }
+  .xr-h.sortable:hover { color: #d1d5db; }
+  .xr-h.is-active { color: #ffffff; }
 
-    .xr-cell {
-      display: flex; align-items: center;
-      padding: 0 12px;
-    }
-    .xr-cell.center { justify-content: center; }
-    .xr-cell.right  { justify-content: flex-end; }
-    .xr-cell.col-stack {
-      flex-direction: column; gap: 1px; justify-content: center;
-    }
+  /* Player cell */
+  .xr-avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #222222; border: 1px solid #2a2a2a;
+    display: flex; align-items: center; justify-content: center;
+    object-fit: cover; flex-shrink: 0; font-size: 14px;
+  }
+  .xr-player-name {
+    font-size: 12px; font-weight: 700; color: #ffffff;
+    text-decoration: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    display: block; max-width: 140px;
+  }
+  .xr-player-name:hover { text-decoration: underline; }
+  .xr-player-sub {
+    font-size: 8px; font-weight: 800; letter-spacing: .4px;
+    color: #6b7280; text-transform: uppercase; white-space: nowrap;
+  }
 
-    /* Column flex-basis -- matches NiceGUI _XRAY_COLS to the pixel */
-    .xr-col-player { flex: 1 1 180px; min-width: 160px; overflow: hidden; }
-    .xr-col-line   { flex: 0 0 80px; }
-    .xr-col-odds   { flex: 0 0 72px; }
-    .xr-col-conf   { flex: 0 0 72px; }
-    .xr-col-ev     { flex: 0 0 90px; }
-    .xr-col-l5     { flex: 0 0 110px; }
-    .xr-col-l10    { flex: 0 0 110px; }
-    .xr-col-szn    { flex: 0 0 72px; }
-    .xr-col-track  { flex: 0 0 90px; }
+  /* LINE pill */
+  .xr-line-pill {
+    font-family: ui-monospace, monospace;
+    font-size: 11px; font-weight: 800; letter-spacing: .3px;
+    padding: 2px 8px; border-radius: 6px; white-space: nowrap;
+    color: #000;
+  }
+  .xr-line-pill.over  { background: #22c55e; }
+  .xr-line-pill.under { background: #ef4444; color: #ffffff; }
 
-    /* Header cell text */
-    .xr-h {
-      height: 36px;
-      font-size: 9px; font-weight: 800; letter-spacing: .6px;
-      color: #6b7280; white-space: nowrap; user-select: none;
-    }
-    .xr-h.sortable { cursor: pointer; }
-    .xr-h.sortable:hover { color: #d1d5db; }
-    .xr-h.is-active { color: #ffffff; }
+  /* ODDS */
+  .xr-odds {
+    font-size: 12px; font-weight: 700;
+    font-family: ui-monospace, monospace; color: #d1d5db;
+  }
 
-    /* Player cell */
-    .xr-avatar {
-      width: 28px; height: 28px; border-radius: 50%;
-      background: #222222; border: 1px solid #2a2a2a;
-      display: flex; align-items: center; justify-content: center;
-      object-fit: cover; flex-shrink: 0; font-size: 14px;
-    }
-    .xr-player-name {
-      font-size: 12px; font-weight: 700; color: #ffffff;
-      text-decoration: none;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      display: block; max-width: 140px;
-    }
-    .xr-player-name:hover { text-decoration: underline; }
-    .xr-player-sub {
-      font-size: 8px; font-weight: 800; letter-spacing: .4px;
-      color: #6b7280; text-transform: uppercase; white-space: nowrap;
-    }
+  /* CONF percentage (threshold colour) */
+  .xr-conf {
+    font-size: 13px; font-weight: 800;
+    font-family: ui-monospace, monospace;
+  }
+  .xr-conf-good { color: #22c55e; }
+  .xr-conf-mid  { color: #f59e0b; }
+  .xr-conf-dim  { color: #9ca3af; }
 
-    /* LINE pill */
-    .xr-line-pill {
-      font-family: ui-monospace, monospace;
-      font-size: 11px; font-weight: 800; letter-spacing: .3px;
-      padding: 2px 8px; border-radius: 6px; white-space: nowrap;
-      color: #000;
-    }
-    .xr-line-pill.over  { background: #22c55e; }
-    .xr-line-pill.under { background: #ef4444; color: #ffffff; }
+  /* EV badge (small chip) */
+  .xr-ev-chip {
+    background: #1a1a1a;
+    font-size: 10px; font-weight: 800; letter-spacing: .3px;
+    padding: 2px 6px; border-radius: 999px;
+    font-family: ui-monospace, monospace; white-space: nowrap;
+  }
+  .xr-ev-pos { color: #22c55e; }
+  .xr-ev-neg { color: #ef4444; }
+  .xr-ev-dim { color: #6b7280; }
 
-    /* ODDS */
-    .xr-odds {
-      font-size: 12px; font-weight: 700;
-      font-family: ui-monospace, monospace; color: #d1d5db;
-    }
+  /* Hit-rate cell ("hits/total · pct%") + ROI sub-text */
+  .xr-hr-pill {
+    font-size: 10.5px; font-weight: 800; color: #ffffff;
+    font-family: ui-monospace, monospace; white-space: nowrap;
+    padding: 2px 7px; border-radius: 999px;
+  }
+  .xr-hr-plain {
+    font-size: 10.5px; color: #ffffff;
+    font-family: ui-monospace, monospace; white-space: nowrap;
+  }
+  .xr-hr-dash {
+    font-family: ui-monospace, monospace; color: #6b7280;
+  }
+  .xr-roi {
+    font-size: 8px; font-weight: 800;
+    font-family: ui-monospace, monospace; letter-spacing: .2px;
+  }
+  .xr-roi-pos { color: #22c55e; }
+  .xr-roi-neg { color: #ef4444; }
+  .xr-roi-dim { color: #6b7280; }
 
-    /* CONF percentage (threshold colour) */
-    .xr-conf {
-      font-size: 13px; font-weight: 800;
-      font-family: ui-monospace, monospace;
-    }
-    .xr-conf-good { color: #22c55e; }
-    .xr-conf-mid  { color: #f59e0b; }
-    .xr-conf-dim  { color: #9ca3af; }
+  /* SZN average */
+  .xr-szn {
+    font-size: 12px; color: #d1d5db;
+    font-family: ui-monospace, monospace;
+  }
 
-    /* EV badge (small chip) */
-    .xr-ev-chip {
-      background: #1a1a1a;
-      font-size: 10px; font-weight: 800; letter-spacing: .3px;
-      padding: 2px 6px; border-radius: 999px;
-      font-family: ui-monospace, monospace; white-space: nowrap;
-    }
-    .xr-ev-pos { color: #22c55e; }
-    .xr-ev-neg { color: #ef4444; }
-    .xr-ev-dim { color: #6b7280; }
+  /* Track button inside x-ray rows: shrink to fit the 90px col */
+  .xr-cell .track-btn { padding: 4px 10px; font-size: 10.5px; }
+  .xr-cell .track-btn.is-tracked { padding: 3px 9px; }
 
-    /* Hit-rate cell ("hits/total · pct%") + ROI sub-text */
-    .xr-hr-pill {
-      font-size: 10.5px; font-weight: 800; color: #ffffff;
-      font-family: ui-monospace, monospace; white-space: nowrap;
-      padding: 2px 7px; border-radius: 999px;
-    }
-    .xr-hr-plain {
-      font-size: 10.5px; color: #ffffff;
-      font-family: ui-monospace, monospace; white-space: nowrap;
-    }
-    .xr-hr-dash {
-      font-family: ui-monospace, monospace; color: #6b7280;
-    }
-    .xr-roi {
-      font-size: 8px; font-weight: 800;
-      font-family: ui-monospace, monospace; letter-spacing: .2px;
-    }
-    .xr-roi-pos { color: #22c55e; }
-    .xr-roi-neg { color: #ef4444; }
-    .xr-roi-dim { color: #6b7280; }
+  /* ── Swipe mode (Phase 2f) ── */
+  .sw-counter {
+    font-size: 11px; color: #6b7280; text-align: center;
+    font-family: ui-monospace, monospace;
+    width: 100%; padding: 2px 0 8px;
+    user-select: none;
+  }
+  .sw-stage {
+    position: relative;
+    width: 100%; max-width: 480px; margin: 0 auto;
+  }
+  /* Translucent ✓ / ✗ overlay that fades in during drag */
+  .sw-hint {
+    position: absolute; top: 50%; left: 50%; z-index: 20;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    font-size: 72px; font-weight: 900;
+    opacity: 0;
+    transition: opacity 0.08s linear;
+    will-change: opacity;
+  }
+  /* The swipeable wrapper -- gestures apply translate + rotate here. */
+  .sw-card-wrap {
+    cursor: grab;
+    touch-action: none;             /* let pointermove fire on touch */
+    will-change: transform, opacity;
+    transform-origin: center 80%;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+  }
+  .sw-card-wrap.is-dragging {
+    transition: none;               /* follow the finger 1:1 */
+    cursor: grabbing;
+  }
+  .sw-card-wrap > .prop-card {
+    transform: none !important;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+  }
+  .sw-card-wrap > .prop-card:hover {
+    transform: none !important;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+  }
+  /* Action buttons row below the card */
+  .sw-buttons {
+    display: flex; justify-content: center;
+    gap: 32px; padding: 18px 0 8px;
+  }
+  .sw-btn {
+    width: 60px; height: 60px;
+    border-radius: 50%;
+    font-size: 24px; font-weight: 900;
+    cursor: pointer; user-select: none;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent;
+    transition: background .15s ease, transform .12s ease;
+  }
+  .sw-btn:active { transform: scale(0.94); }
+  .sw-btn-dismiss {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444; border: 2px solid #ef4444;
+  }
+  .sw-btn-dismiss:hover { background: rgba(239, 68, 68, 0.22); }
+  .sw-btn-track {
+    background: rgba(34, 197, 94, 0.12);
+    color: #22c55e; border: 2px solid #22c55e;
+  }
+  .sw-btn-track:hover { background: rgba(34, 197, 94, 0.22); }
+  /* Empty state ("All caught up!") */
+  .sw-empty {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 14px; padding: 48px 20px;
+    text-align: center;
+  }
+  .sw-empty-icon { font-size: 48px; color: #22c55e; line-height: 1; }
+  .sw-empty-title { font-size: 18px; font-weight: 800; color: #ffffff; }
+  .sw-empty-body  { font-size: 13px; color: #9ca3af; max-width: 320px; }
+  .sw-reset-btn {
+    margin-top: 4px;
+    background: #1a1a1a; color: #d1d5db;
+    border: 1px solid #2a2a2a;
+    font-size: 11.5px; font-weight: 700; letter-spacing: .3px;
+    padding: 6px 14px; border-radius: 999px;
+    cursor: pointer;
+  }
+  .sw-reset-btn:hover { background: #222222; color: #ffffff; }
+</style>
+{% endblock %}
 
-    /* SZN average */
-    .xr-szn {
-      font-size: 12px; color: #d1d5db;
-      font-family: ui-monospace, monospace;
-    }
+{% block content %}
+<!-- ── Sticky filter bar (sits below the nav from base.html, which is h-14) ── -->
+<div class="sticky top-14 z-20 bg-bg/95 backdrop-blur border-b border-border">
+  <div class="mx-auto max-w-7xl px-4 py-3 space-y-3">
 
-    /* Track button inside x-ray rows: shrink to fit the 90px col */
-    .xr-cell .track-btn { padding: 4px 10px; font-size: 10.5px; }
-    .xr-cell .track-btn.is-tracked { padding: 3px 9px; }
-
-    /* ── Swipe mode (Phase 2f) ── */
-    .sw-counter {
-      font-size: 11px; color: #6b7280; text-align: center;
-      font-family: ui-monospace, monospace;
-      width: 100%; padding: 2px 0 8px;
-      user-select: none;
-    }
-    .sw-stage {
-      position: relative;
-      width: 100%; max-width: 480px; margin: 0 auto;
-    }
-    /* Translucent ✓ / ✗ overlay that fades in during drag */
-    .sw-hint {
-      position: absolute; top: 50%; left: 50%; z-index: 20;
-      transform: translate(-50%, -50%);
-      pointer-events: none;
-      font-size: 72px; font-weight: 900;
-      opacity: 0;
-      transition: opacity 0.08s linear;
-      will-change: opacity;
-    }
-    /* The swipeable wrapper -- gestures apply translate + rotate here. */
-    .sw-card-wrap {
-      cursor: grab;
-      touch-action: none;             /* let pointermove fire on touch */
-      will-change: transform, opacity;
-      transform-origin: center 80%;
-      transition: transform 0.3s ease, opacity 0.3s ease;
-    }
-    .sw-card-wrap.is-dragging {
-      transition: none;               /* follow the finger 1:1 */
-      cursor: grabbing;
-    }
-    .sw-card-wrap > .prop-card {
-      transform: none !important;
-      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
-    }
-    .sw-card-wrap > .prop-card:hover {
-      transform: none !important;
-      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
-    }
-    /* Action buttons row below the card */
-    .sw-buttons {
-      display: flex; justify-content: center;
-      gap: 32px; padding: 18px 0 8px;
-    }
-    .sw-btn {
-      width: 60px; height: 60px;
-      border-radius: 50%;
-      font-size: 24px; font-weight: 900;
-      cursor: pointer; user-select: none;
-      display: flex; align-items: center; justify-content: center;
-      background: transparent;
-      transition: background .15s ease, transform .12s ease;
-    }
-    .sw-btn:active { transform: scale(0.94); }
-    .sw-btn-dismiss {
-      background: rgba(239, 68, 68, 0.12);
-      color: #ef4444; border: 2px solid #ef4444;
-    }
-    .sw-btn-dismiss:hover { background: rgba(239, 68, 68, 0.22); }
-    .sw-btn-track {
-      background: rgba(34, 197, 94, 0.12);
-      color: #22c55e; border: 2px solid #22c55e;
-    }
-    .sw-btn-track:hover { background: rgba(34, 197, 94, 0.22); }
-    /* Empty state ("All caught up!") */
-    .sw-empty {
-      display: flex; flex-direction: column; align-items: center;
-      gap: 14px; padding: 48px 20px;
-      text-align: center;
-    }
-    .sw-empty-icon { font-size: 48px; color: #22c55e; line-height: 1; }
-    .sw-empty-title { font-size: 18px; font-weight: 800; color: #ffffff; }
-    .sw-empty-body  { font-size: 13px; color: #9ca3af; max-width: 320px; }
-    .sw-reset-btn {
-      margin-top: 4px;
-      background: #1a1a1a; color: #d1d5db;
-      border: 1px solid #2a2a2a;
-      font-size: 11.5px; font-weight: 700; letter-spacing: .3px;
-      padding: 6px 14px; border-radius: 999px;
-      cursor: pointer;
-    }
-    .sw-reset-btn:hover { background: #222222; color: #ffffff; }
-  </style>
-</head>
-
-<body class="bg-bg text-white min-h-screen">
-
-  <!-- ── Sticky top nav ────────────────────────────────────────────── -->
-  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
-      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
-        <span class="text-accent">●</span> Sports Analysis
-      </a>
-      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
-        <a href="/" class="hover:text-white transition">Home</a>
-        <a href="/sports/mlb" class="hover:text-white transition">Sports</a>
-        <a href="/props" class="text-white font-semibold">Props</a>
-        <a href="/modelbets" class="hover:text-white transition">Model Bets</a>
-        <a href="/mybets" class="hover:text-white transition">My Bets</a>
-        <a href="/top-picks" class="hover:text-white transition">Top Picks</a>
-        <a href="/research" class="hover:text-white transition">Research</a>
-        <a href="/admin" class="hover:text-white transition">Admin</a>
+    <!-- Row 1: sport pills + sort -->
+    <div class="flex items-center justify-between gap-3">
+      <div id="sport-pills" class="flex items-center gap-2">
+        <button data-sport="all" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-accent text-white">All</button>
+        <button data-sport="mlb" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-card text-gray-300 border border-border">MLB</button>
+        <button data-sport="wnba" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-card text-gray-300 border border-border">WNBA</button>
       </div>
-    </div>
-  </nav>
 
-  <!-- ── Sticky filter bar ─────────────────────────────────────────── -->
-  <div class="sticky top-14 z-20 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 py-3 space-y-3">
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="filter-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="filter-panel"
+                class="bg-card border border-border text-gray-300 text-xs font-bold rounded-full px-3 py-1.5 transition">
+          <span>Filters</span><span id="filter-count" class="hidden ml-1"></span>
+        </button>
+        <button id="filter-reset"
+                type="button"
+                class="hidden text-xs text-gray-400 hover:text-white font-semibold px-2 py-1">
+          Reset
+        </button>
 
-      <!-- Row 1: sport pills + sort -->
-      <div class="flex items-center justify-between gap-3">
-        <div id="sport-pills" class="flex items-center gap-2">
-          <button data-sport="all" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-accent text-white">All</button>
-          <button data-sport="mlb" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-card text-gray-300 border border-border">MLB</button>
-          <button data-sport="wnba" class="sport-pill px-3 py-1.5 rounded-full text-sm font-semibold bg-card text-gray-300 border border-border">WNBA</button>
+        <!-- View mode toggle (Phase 2d + 2e): List | By Game | X-Ray -->
+        <div id="view-pills" class="flex items-center gap-1 ml-1"
+             role="tablist" aria-label="View mode">
+          <button type="button"
+                  data-view="list"
+                  class="view-pill view-pill-active"
+                  role="tab" aria-selected="true">List</button>
+          <button type="button"
+                  data-view="game"
+                  class="view-pill"
+                  role="tab" aria-selected="false">By Game</button>
+          <button type="button"
+                  data-view="xray"
+                  class="view-pill"
+                  role="tab" aria-selected="false">X-Ray</button>
+          <button type="button"
+                  data-view="swipe"
+                  class="view-pill"
+                  role="tab" aria-selected="false">Swipe</button>
         </div>
 
-        <div class="flex items-center gap-2 shrink-0">
-          <button id="filter-toggle"
-                  type="button"
-                  aria-expanded="false"
-                  aria-controls="filter-panel"
-                  class="bg-card border border-border text-gray-300 text-xs font-bold rounded-full px-3 py-1.5 transition">
-            <span>Filters</span><span id="filter-count" class="hidden ml-1"></span>
-          </button>
-          <button id="filter-reset"
-                  type="button"
-                  class="hidden text-xs text-gray-400 hover:text-white font-semibold px-2 py-1">
-            Reset
-          </button>
+        <label for="sort-select" class="text-xs text-gray-500 hidden sm:inline">Sort</label>
+        <select id="sort-select"
+                class="bg-card border border-border text-sm rounded-lg px-2.5 py-1.5 text-gray-200 focus:outline-none focus:border-accent">
+          <option value="confidence">Confidence ↓</option>
+          <option value="edge">Edge ↓</option>
+          <option value="time">Game Time ↑</option>
+        </select>
+      </div>
+    </div>
 
-          <!-- View mode toggle (Phase 2d + 2e): List | By Game | X-Ray -->
-          <div id="view-pills" class="flex items-center gap-1 ml-1"
-               role="tablist" aria-label="View mode">
-            <button type="button"
-                    data-view="list"
-                    class="view-pill view-pill-active"
-                    role="tab" aria-selected="true">List</button>
-            <button type="button"
-                    data-view="game"
-                    class="view-pill"
-                    role="tab" aria-selected="false">By Game</button>
-            <button type="button"
-                    data-view="xray"
-                    class="view-pill"
-                    role="tab" aria-selected="false">X-Ray</button>
-            <button type="button"
-                    data-view="swipe"
-                    class="view-pill"
-                    role="tab" aria-selected="false">Swipe</button>
-          </div>
+    <!-- Row 2: stat-type pills (horizontal scroll, quick filter) -->
+    <div id="stat-pills" class="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-1 px-1">
+      <button data-stat="all"
+              class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-accent text-white bg-accent/20">All</button>
+      {% for label in stat_labels %}
+      <button data-stat="{{ label }}"
+              class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-border text-gray-300 bg-card">{{ label }}</button>
+      {% endfor %}
+    </div>
 
-          <label for="sort-select" class="text-xs text-gray-500 hidden sm:inline">Sort</label>
-          <select id="sort-select"
-                  class="bg-card border border-border text-sm rounded-lg px-2.5 py-1.5 text-gray-200 focus:outline-none focus:border-accent">
-            <option value="confidence">Confidence ↓</option>
-            <option value="edge">Edge ↓</option>
-            <option value="time">Game Time ↑</option>
+    <!-- Row 3: collapsible filter panel (Phase 2b) -->
+    <!-- Hidden by default; #filter-toggle opens.  All controls write into
+         the global state via props.js and re-render the grid. -->
+    <div id="filter-panel"
+         class="hidden bg-card border border-border rounded-xl p-3 space-y-3">
+
+      <!-- Single-value selects: hit rate, confidence, grade -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div>
+          <span class="fp-label">Min last-10 hit rate</span>
+          <select id="f-min-l10" class="fp-select">
+            <option value="0">Any</option>
+            <option value="5">5+/10</option>
+            <option value="6">6+/10</option>
+            <option value="7">7+/10</option>
+            <option value="8">8+/10</option>
+            <option value="9">9+/10</option>
+          </select>
+        </div>
+        <div>
+          <span class="fp-label">Min model confidence</span>
+          <select id="f-min-conf" class="fp-select">
+            <option value="0">Any</option>
+            <option value="0.55">55%+</option>
+            <option value="0.60">60%+</option>
+            <option value="0.65">65%+</option>
+            <option value="0.70">70%+</option>
+            <option value="0.75">75%+</option>
+          </select>
+        </div>
+        <div>
+          <span class="fp-label">Min matchup grade</span>
+          <select id="f-min-grade" class="fp-select">
+            <option value="0">Any</option>
+            <option value="0.52">B- or better</option>
+            <option value="0.60">B or better</option>
+            <option value="0.68">B+ or better</option>
+            <option value="0.76">A- or better</option>
+            <option value="0.84">A or better</option>
           </select>
         </div>
       </div>
 
-      <!-- Row 2: stat-type pills (horizontal scroll, quick filter) -->
-      <div id="stat-pills" class="flex items-center gap-2 overflow-x-auto no-scrollbar -mx-1 px-1">
-        <button data-stat="all"
-                class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-accent text-white bg-accent/20">All</button>
-        {% for label in stat_labels %}
-        <button data-stat="{{ label }}"
-                class="stat-pill whitespace-nowrap px-3 py-1.5 rounded-full text-sm font-medium border border-border text-gray-300 bg-card">{{ label }}</button>
-        {% endfor %}
+      <!-- Multi-select chip groups: prop type, game -->
+      <div>
+        <span class="fp-label">Prop type</span>
+        <div id="f-markets" class="flex flex-wrap gap-2">
+          {% for m in market_options %}
+          <button type="button"
+                  class="fp-chip"
+                  data-market-key="{{ m.key }}">{{ m.label }}</button>
+          {% endfor %}
+          {% if not market_options %}
+          <span class="text-xs text-gray-600 italic">No props loaded yet.</span>
+          {% endif %}
+        </div>
       </div>
 
-      <!-- Row 3: collapsible filter panel (Phase 2b) -->
-      <!-- Hidden by default; #filter-toggle opens.  All controls write into
-           the global state via props.js and re-render the grid. -->
-      <div id="filter-panel"
-           class="hidden bg-card border border-border rounded-xl p-3 space-y-3">
-
-        <!-- Single-value selects: hit rate, confidence, grade -->
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div>
-            <span class="fp-label">Min last-10 hit rate</span>
-            <select id="f-min-l10" class="fp-select">
-              <option value="0">Any</option>
-              <option value="5">5+/10</option>
-              <option value="6">6+/10</option>
-              <option value="7">7+/10</option>
-              <option value="8">8+/10</option>
-              <option value="9">9+/10</option>
-            </select>
-          </div>
-          <div>
-            <span class="fp-label">Min model confidence</span>
-            <select id="f-min-conf" class="fp-select">
-              <option value="0">Any</option>
-              <option value="0.55">55%+</option>
-              <option value="0.60">60%+</option>
-              <option value="0.65">65%+</option>
-              <option value="0.70">70%+</option>
-              <option value="0.75">75%+</option>
-            </select>
-          </div>
-          <div>
-            <span class="fp-label">Min matchup grade</span>
-            <select id="f-min-grade" class="fp-select">
-              <option value="0">Any</option>
-              <option value="0.52">B- or better</option>
-              <option value="0.60">B or better</option>
-              <option value="0.68">B+ or better</option>
-              <option value="0.76">A- or better</option>
-              <option value="0.84">A or better</option>
-            </select>
-          </div>
+      <div>
+        <span class="fp-label">Game</span>
+        <div id="f-games" class="flex flex-wrap gap-2">
+          {% for g in game_options %}
+          <button type="button"
+                  class="fp-chip"
+                  data-game-key="{{ g.key }}">{{ g.label }}</button>
+          {% endfor %}
+          {% if not game_options %}
+          <span class="text-xs text-gray-600 italic">No games loaded yet.</span>
+          {% endif %}
         </div>
-
-        <!-- Multi-select chip groups: prop type, game -->
-        <div>
-          <span class="fp-label">Prop type</span>
-          <div id="f-markets" class="flex flex-wrap gap-2">
-            {% for m in market_options %}
-            <button type="button"
-                    class="fp-chip"
-                    data-market-key="{{ m.key }}">{{ m.label }}</button>
-            {% endfor %}
-            {% if not market_options %}
-            <span class="text-xs text-gray-600 italic">No props loaded yet.</span>
-            {% endif %}
-          </div>
-        </div>
-
-        <div>
-          <span class="fp-label">Game</span>
-          <div id="f-games" class="flex flex-wrap gap-2">
-            {% for g in game_options %}
-            <button type="button"
-                    class="fp-chip"
-                    data-game-key="{{ g.key }}">{{ g.label }}</button>
-            {% endfor %}
-            {% if not game_options %}
-            <span class="text-xs text-gray-600 italic">No games loaded yet.</span>
-            {% endif %}
-          </div>
-        </div>
-
-        <!-- Alt lines toggle -->
-        <label class="flex items-center gap-2.5 pt-1 select-none cursor-pointer">
-          <span class="fp-switch">
-            <input type="checkbox" id="f-show-alt">
-            <span class="slider"></span>
-          </span>
-          <span class="text-xs font-semibold text-gray-300">Show alternative lines</span>
-        </label>
-
       </div>
+
+      <!-- Alt lines toggle -->
+      <label class="flex items-center gap-2.5 pt-1 select-none cursor-pointer">
+        <span class="fp-switch">
+          <input type="checkbox" id="f-show-alt">
+          <span class="slider"></span>
+        </span>
+        <span class="text-xs font-semibold text-gray-300">Show alternative lines</span>
+      </label>
+
     </div>
   </div>
+</div>
 
-  <!-- ── Card grid ─────────────────────────────────────────────────── -->
-  <main class="mx-auto max-w-7xl px-4 py-5">
-    <div id="empty-state"
-         class="hidden text-center text-gray-500 py-20 text-sm">
-      No props match these filters.
-    </div>
-    <div id="card-grid"
-         class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-      <!-- cards injected by props.js (list view) -->
-    </div>
-    <div id="game-groups" class="hidden flex flex-col gap-2">
-      <!-- collapsible game groups injected by props.js (by-game view) -->
-    </div>
-    <div id="xray-table" class="hidden">
-      <!-- sortable data table injected by props.js (x-ray view) -->
-    </div>
-    <div id="swipe-stage" class="hidden">
-      <!-- single-card swipe deck injected by props.js (swipe view) -->
-    </div>
-  </main>
+<!-- ── Card grid ─────────────────────────────────────────────────── -->
+<main class="mx-auto max-w-7xl px-4 py-5">
+  <div id="empty-state"
+       class="hidden text-center text-gray-500 py-20 text-sm">
+    No props match these filters.
+  </div>
+  <div id="card-grid"
+       class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+    <!-- cards injected by props.js (list view) -->
+  </div>
+  <div id="game-groups" class="hidden flex flex-col gap-2">
+    <!-- collapsible game groups injected by props.js (by-game view) -->
+  </div>
+  <div id="xray-table" class="hidden">
+    <!-- sortable data table injected by props.js (x-ray view) -->
+  </div>
+  <div id="swipe-stage" class="hidden">
+    <!-- single-card swipe deck injected by props.js (swipe view) -->
+  </div>
+</main>
 
-  <!-- Toast stack (Phase 2c -- Track button feedback) -->
-  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+<!-- Toast stack (Phase 2c -- Track button feedback) -->
+<div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+{% endblock %}
 
-  <!-- Server data handed to the client as JSON; all filtering is client-side. -->
-  <script id="props-data" type="application/json">{{ props | tojson }}</script>
-  <!-- lib.js MUST load before props.js (defines window.SBT.{toast,apiPost}). -->
-  <script src="/static/js/lib.js" defer></script>
-  <script src="/static/js/props.js" defer></script>
-</body>
-</html>
+{% block extra_scripts %}
+<!-- Server data handed to the client as JSON; all filtering is client-side. -->
+<script id="props-data" type="application/json">{{ props | tojson }}</script>
+<!-- lib.js MUST load before props.js (defines window.SBT.{toast,apiPost}). -->
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/props.js') }}" defer></script>
+{% endblock %}

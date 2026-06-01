@@ -1,143 +1,104 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Top Picks</title>
+{% extends "base.html" %}
+{% set active_page = "top-picks" %}
+{% block title %}Top Picks{% endblock %}
 
-  <script src="https://cdn.tailwindcss.com"></script>
+{% block extra_head %}
+<style>
+  .tp-text-pos{color:#22c55e;} .tp-text-neg{color:#ef4444;} .tp-text-warn{color:#eab308;}
+  .tp-text-text{color:#fff;} .tp-text-dim{color:#9ca3af;} .tp-text-dim2{color:#6b7280;}
+  .tp-bg-pos{background:#22c55e;color:#000;} .tp-bg-warn{background:#eab308;color:#000;}
+  .tp-bg-neg{background:#ef4444;color:#000;} .tp-bg-dim{background:#6b7280;color:#fff;}
+  .tp-border-pos{border-color:#22c55e;} .tp-border-neg{border-color:#ef4444;}
+  .tp-border-border{border-color:#2a2a2a;}
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  .toast-stack{position:fixed;bottom:20px;right:20px;display:flex;
+    flex-direction:column-reverse;gap:8px;z-index:60;pointer-events:none;
+    max-width:calc(100vw - 40px);}
+  .toast{pointer-events:auto;background:#1a1a1a;color:#e5e7eb;border:1px solid #2a2a2a;
+    border-left:4px solid #6b7280;border-radius:8px;padding:10px 14px;font-size:12.5px;
+    font-weight:600;box-shadow:0 10px 30px -10px rgba(0,0,0,.6);min-width:220px;max-width:360px;
+    transform:translateX(20px);opacity:0;
+    transition:transform .18s ease,opacity .18s ease;}
+  .toast.show{transform:translateX(0);opacity:1;}
+  .toast.positive{border-left-color:#22c55e;}
+  .toast.negative{border-left-color:#ef4444;}
+  .toast.info{border-left-color:#7C3AED;}
 
-  <script>
-    tailwind.config = {
-      theme: { extend: { colors: {
-        bg:"#000000",card:"#1a1a1a",cardhi:"#222222",border:"#2a2a2a",
-        accent:"#7C3AED",accenthi:"#9F67FF",
-        pos:"#22c55e",neg:"#ef4444",warn:"#eab308",
-      }, fontFamily: { sans: ["Inter","system-ui","sans-serif"] } } },
-    };
-  </script>
+  .tp-card{background:#1a1a1a;border:2px solid #2a2a2a;border-radius:10px;
+    padding:10px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;}
+  .tp-card.clickable{cursor:pointer;}
+  .tp-card.clickable:hover{background:#1f1f1f;}
+  .tp-pill{font-size:11.5px;font-weight:800;padding:5px 14px;border-radius:999px;
+    border:0;cursor:pointer;line-height:1;}
+  .tp-pill.active{background:#7C3AED;color:#000;}
+  .tp-pill.inactive{background:#222;color:#9ca3af;}
+  .tp-chip{font-size:9.5px;font-weight:800;letter-spacing:.4px;padding:2px 9px;
+    border-radius:999px;line-height:1.4;}
+  .tp-chip-agree{background:rgba(34,197,94,.15);color:#22c55e;border:1px solid #22c55e;}
+  .tp-chip-fade {background:rgba(239,68,68,.15);color:#ef4444;border:1px solid #ef4444;}
+  .tp-scorebox{flex:1 1 0;min-width:0;background:#1a1a1a;border:1px solid #2a2a2a;
+    border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:4px;}
+  .tp-track-btn{background:#7C3AED;color:#000;font-weight:800;font-size:11px;
+    padding:6px 14px;border-radius:6px;border:0;cursor:pointer;line-height:1;}
+  .tp-track-btn:hover:not(:disabled){background:#9F67FF;}
+  .tp-track-btn:disabled{opacity:.65;cursor:default;}
+  .tp-track-btn.is-tracked{background:#222;color:#22c55e;border:1px solid #22c55e;padding:5px 13px;}
+  .tp-track-btn.is-pending{opacity:.7;cursor:progress;}
 
-  <style>
-    html, body { background: #000; }
-    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .tp-empty{color:#9ca3af;font-size:12.5px;font-style:italic;text-align:center;
+    background:#1a1a1a;border:1px dashed #2a2a2a;border-radius:10px;padding:16px;}
+  .tp-spinner{display:inline-block;width:12px;height:12px;border:2px solid #2a2a2a;
+    border-top-color:#7C3AED;border-radius:50%;animation:tp-spin 0.8s linear infinite;
+    vertical-align:middle;}
+  @keyframes tp-spin { to { transform: rotate(360deg); } }
+</style>
+{% endblock %}
 
-    .tp-text-pos{color:#22c55e;} .tp-text-neg{color:#ef4444;} .tp-text-warn{color:#eab308;}
-    .tp-text-text{color:#fff;} .tp-text-dim{color:#9ca3af;} .tp-text-dim2{color:#6b7280;}
-    .tp-bg-pos{background:#22c55e;color:#000;} .tp-bg-warn{background:#eab308;color:#000;}
-    .tp-bg-neg{background:#ef4444;color:#000;} .tp-bg-dim{background:#6b7280;color:#fff;}
-    .tp-border-pos{border-color:#22c55e;} .tp-border-neg{border-color:#ef4444;}
-    .tp-border-border{border-color:#2a2a2a;}
+{% block content %}
+<main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-4">
+  <div>
+    <h1 class="text-[22px] font-extrabold tracking-tight">TOP PICKS</h1>
+    <div class="text-[12.5px] tp-text-dim mt-1">Today's best plays, ranked by AI verdict (60%) + model confidence (40%). Everything is shown — you decide where to cut off.</div>
+  </div>
 
-    .toast-stack{position:fixed;bottom:20px;right:20px;display:flex;
-      flex-direction:column-reverse;gap:8px;z-index:60;pointer-events:none;
-      max-width:calc(100vw - 40px);}
-    .toast{pointer-events:auto;background:#1a1a1a;color:#e5e7eb;border:1px solid #2a2a2a;
-      border-left:4px solid #6b7280;border-radius:8px;padding:10px 14px;font-size:12.5px;
-      font-weight:600;box-shadow:0 10px 30px -10px rgba(0,0,0,.6);min-width:220px;max-width:360px;
-      transform:translateX(20px);opacity:0;
-      transition:transform .18s ease,opacity .18s ease;}
-    .toast.show{transform:translateX(0);opacity:1;}
-    .toast.positive{border-left-color:#22c55e;}
-    .toast.negative{border-left-color:#ef4444;}
-    .toast.info{border-left-color:#7C3AED;}
-
-    .tp-card{background:#1a1a1a;border:2px solid #2a2a2a;border-radius:10px;
-      padding:10px 14px;display:flex;flex-direction:column;gap:6px;min-width:0;}
-    .tp-card.clickable{cursor:pointer;}
-    .tp-card.clickable:hover{background:#1f1f1f;}
-    .tp-pill{font-size:11.5px;font-weight:800;padding:5px 14px;border-radius:999px;
-      border:0;cursor:pointer;line-height:1;}
-    .tp-pill.active{background:#7C3AED;color:#000;}
-    .tp-pill.inactive{background:#222;color:#9ca3af;}
-    .tp-chip{font-size:9.5px;font-weight:800;letter-spacing:.4px;padding:2px 9px;
-      border-radius:999px;line-height:1.4;}
-    .tp-chip-agree{background:rgba(34,197,94,.15);color:#22c55e;border:1px solid #22c55e;}
-    .tp-chip-fade {background:rgba(239,68,68,.15);color:#ef4444;border:1px solid #ef4444;}
-    .tp-scorebox{flex:1 1 0;min-width:0;background:#1a1a1a;border:1px solid #2a2a2a;
-      border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:4px;}
-    .tp-track-btn{background:#7C3AED;color:#000;font-weight:800;font-size:11px;
-      padding:6px 14px;border-radius:6px;border:0;cursor:pointer;line-height:1;}
-    .tp-track-btn:hover:not(:disabled){background:#9F67FF;}
-    .tp-track-btn:disabled{opacity:.65;cursor:default;}
-    .tp-track-btn.is-tracked{background:#222;color:#22c55e;border:1px solid #22c55e;padding:5px 13px;}
-    .tp-track-btn.is-pending{opacity:.7;cursor:progress;}
-
-    .tp-empty{color:#9ca3af;font-size:12.5px;font-style:italic;text-align:center;
-      background:#1a1a1a;border:1px dashed #2a2a2a;border-radius:10px;padding:16px;}
-    .tp-spinner{display:inline-block;width:12px;height:12px;border:2px solid #2a2a2a;
-      border-top-color:#7C3AED;border-radius:50%;animation:tp-spin 0.8s linear infinite;
-      vertical-align:middle;}
-    @keyframes tp-spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-
-<body class="bg-bg text-white min-h-screen">
-
-  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
-      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
-        <span class="text-accent">●</span> Sports Analysis
-      </a>
-      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
-        <a href="/" class="hover:text-white transition">Home</a>
-        <a href="/sports/mlb" class="hover:text-white transition">Sports</a>
-        <a href="/props" class="hover:text-white transition">Props</a>
-        <a href="/modelbets" class="hover:text-white transition">Model Bets</a>
-        <a href="/mybets" class="hover:text-white transition">My Bets</a>
-        <a href="/top-picks" class="text-white font-semibold">Top Picks</a>
-        <a href="/research" class="hover:text-white transition">Research</a>
-        <a href="/admin" class="hover:text-white transition">Admin</a>
+  {# ── Scorecard ───────────────────────────────────────────────── #}
+  <div class="flex flex-wrap gap-2.5">
+    <div class="tp-scorebox">
+      <div class="text-[10px] font-extrabold tracking-wider tp-text-dim2">WIN %</div>
+      <div class="flex items-baseline gap-2">
+        <span class="text-[26px] font-extrabold font-mono tp-text-{{ init_data.scorecard.pct_color }}" id="tp-pct">{{ init_data.scorecard.pct_str }}</span>
+        <span class="text-[13px] font-bold font-mono tp-text-dim" id="tp-record">{{ init_data.scorecard.record }}</span>
       </div>
     </div>
-  </nav>
-
-  <main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-4">
-    <div>
-      <h1 class="text-[22px] font-extrabold tracking-tight">TOP PICKS</h1>
-      <div class="text-[12.5px] tp-text-dim mt-1">Today's best plays, ranked by AI verdict (60%) + model confidence (40%). Everything is shown — you decide where to cut off.</div>
-    </div>
-
-    {# ── Scorecard ───────────────────────────────────────────────── #}
-    <div class="flex flex-wrap gap-2.5">
-      <div class="tp-scorebox">
-        <div class="text-[10px] font-extrabold tracking-wider tp-text-dim2">WIN %</div>
-        <div class="flex items-baseline gap-2">
-          <span class="text-[26px] font-extrabold font-mono tp-text-{{ init_data.scorecard.pct_color }}" id="tp-pct">{{ init_data.scorecard.pct_str }}</span>
-          <span class="text-[13px] font-bold font-mono tp-text-dim" id="tp-record">{{ init_data.scorecard.record }}</span>
-        </div>
-      </div>
-      <div class="tp-scorebox">
-        <div class="text-[10px] font-extrabold tracking-wider tp-text-dim2">UNITS WON / LOST</div>
-        <div class="flex items-baseline gap-2">
-          <span class="text-[26px] font-extrabold font-mono tp-text-{{ init_data.scorecard.units_color }}" id="tp-units">{{ init_data.scorecard.units_str }}</span>
-        </div>
+    <div class="tp-scorebox">
+      <div class="text-[10px] font-extrabold tracking-wider tp-text-dim2">UNITS WON / LOST</div>
+      <div class="flex items-baseline gap-2">
+        <span class="text-[26px] font-extrabold font-mono tp-text-{{ init_data.scorecard.units_color }}" id="tp-units">{{ init_data.scorecard.units_str }}</span>
       </div>
     </div>
+  </div>
 
-    {# ── Filter pills ────────────────────────────────────────────── #}
-    <div id="tp-filters" class="flex items-center flex-wrap gap-1.5">
-      {% for f in init_data.filters %}
-      <button type="button"
-              class="tp-pill {% if loop.first %}active{% else %}inactive{% endif %}"
-              data-filter="{{ f.key }}">{{ f.label }}</button>
-      {% endfor %}
-    </div>
+  {# ── Filter pills ────────────────────────────────────────────── #}
+  <div id="tp-filters" class="flex items-center flex-wrap gap-1.5">
+    {% for f in init_data.filters %}
+    <button type="button"
+            class="tp-pill {% if loop.first %}active{% else %}inactive{% endif %}"
+            data-filter="{{ f.key }}">{{ f.label }}</button>
+    {% endfor %}
+  </div>
 
-    {# ── Ranked list ─────────────────────────────────────────────── #}
-    <div id="tp-list" class="flex flex-col gap-2"></div>
-    <div id="tp-empty" class="tp-empty hidden">
-      No picks available yet. Run today's analysis first.
-    </div>
-  </main>
+  {# ── Ranked list ─────────────────────────────────────────────── #}
+  <div id="tp-list" class="flex flex-col gap-2"></div>
+  <div id="tp-empty" class="tp-empty hidden">
+    No picks available yet. Run today's analysis first.
+  </div>
+</main>
 
-  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+<div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+{% endblock %}
 
-  <script id="tp-init" type="application/json">{{ init_data | tojson }}</script>
-  <script src="/static/js/lib.js" defer></script>
-  <script src="/static/js/top_picks.js" defer></script>
-</body>
-</html>
+{% block extra_scripts %}
+<script id="tp-init" type="application/json">{{ init_data | tojson }}</script>
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/top_picks.js') }}" defer></script>
+{% endblock %}

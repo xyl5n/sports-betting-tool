@@ -1,335 +1,283 @@
-<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>My Bets</title>
+{% extends "base.html" %}
+{% set active_page = "mybets" %}
+{% block title %}My Bets{% endblock %}
 
-  <script src="https://cdn.tailwindcss.com"></script>
+{% block extra_head %}
+<style>
+  /* ── Bet card border colour tokens (driven by view-model 'border_color') ── */
+  .mb-border-border { border-color: #2a2a2a; }
+  .mb-border-pos    { border-color: #22c55e; }
+  .mb-border-neg    { border-color: #ef4444; }
+  .mb-border-warn   { border-color: #eab308; }
+  .mb-border-dim    { border-color: #6b7280; }
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  /* Color tokens for text (driven by 'color' fields the VM emits as
+     short keys; CSS maps short -> hex so the template just writes
+     class="mb-text-{{ pick_color }}").  */
+  .mb-text-pos  { color: #22c55e; }
+  .mb-text-neg  { color: #ef4444; }
+  .mb-text-warn { color: #eab308; }
+  .mb-text-text { color: #ffffff; }
+  .mb-text-dim  { color: #9ca3af; }
+  .mb-text-dim2 { color: #6b7280; }
 
-  <script>
-    /* Same palette as /props so cross-page navigation stays visually flush. */
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            bg:     "#000000",
-            card:   "#1a1a1a",
-            cardhi: "#222222",
-            border: "#2a2a2a",
-            accent: "#7C3AED",
-            accenthi: "#9F67FF",
-            pos:    "#22c55e",
-            neg:    "#ef4444",
-            warn:   "#eab308",
-          },
-          fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] },
-        },
-      },
-    };
-  </script>
+  /* ── Toast stack (shared with /props CSS in spirit, scoped here) ── */
+  .toast-stack {
+    position: fixed; bottom: 20px; right: 20px;
+    display: flex; flex-direction: column-reverse; gap: 8px;
+    z-index: 60; pointer-events: none;
+    max-width: calc(100vw - 40px);
+  }
+  .toast {
+    pointer-events: auto;
+    background: #1a1a1a; color: #e5e7eb;
+    border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
+    border-radius: 8px; padding: 10px 14px;
+    font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
+    min-width: 220px; max-width: 360px;
+    transform: translateX(20px); opacity: 0;
+    transition: transform .18s ease, opacity .18s ease;
+  }
+  .toast.show     { transform: translateX(0); opacity: 1; }
+  .toast.positive { border-left-color: #22c55e; }
+  .toast.negative { border-left-color: #ef4444; }
+  .toast.info     { border-left-color: #7C3AED; }
 
-  <style>
-    html, body { background: #000; }
-    body { font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  /* Inline edit panel + modal share an input style */
+  .mb-input {
+    background: #222222; border: 1px solid #2a2a2a;
+    color: #e5e7eb; font-size: 12.5px;
+    padding: 6px 8px; border-radius: 6px; width: 100%;
+  }
+  .mb-input:focus { outline: none; border-color: #7C3AED; }
 
-    /* ── Bet card border colour tokens (driven by view-model 'border_color') ── */
-    .mb-border-border { border-color: #2a2a2a; }
-    .mb-border-pos    { border-color: #22c55e; }
-    .mb-border-neg    { border-color: #ef4444; }
-    .mb-border-warn   { border-color: #eab308; }
-    .mb-border-dim    { border-color: #6b7280; }
+  .mb-icon-btn {
+    width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; border: 0;
+    font-size: 13px; font-weight: 800;
+    cursor: pointer; user-select: none;
+    border-radius: 4px;
+  }
+  .mb-icon-btn:hover { background: #2a2a2a; }
+  .mb-icon-btn.danger { color: #ef4444; }
+  .mb-icon-btn.neutral { color: #9ca3af; }
 
-    /* Color tokens for text (driven by 'color' fields the VM emits as
-       short keys; CSS maps short -> hex so the template just writes
-       class="mb-text-{{ pick_color }}").  */
-    .mb-text-pos  { color: #22c55e; }
-    .mb-text-neg  { color: #ef4444; }
-    .mb-text-warn { color: #eab308; }
-    .mb-text-text { color: #ffffff; }
-    .mb-text-dim  { color: #9ca3af; }
-    .mb-text-dim2 { color: #6b7280; }
+  /* Add Bet modal overlay */
+  .mb-modal-backdrop {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+  }
+  .mb-modal-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 10px; padding: 18px;
+    width: 480px; max-width: 94vw;
+    max-height: calc(100vh - 32px); overflow-y: auto;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .mb-step-pill {
+    background: #222222; color: #6b7280;
+    font-size: 10px; font-weight: 700;
+    padding: 2px 8px; border-radius: 999px;
+  }
+  /* Selection pills inside the modal */
+  .mb-pill {
+    background: #222222; color: #ffffff;
+    font-weight: 800; font-size: 13px;
+    padding: 12px 18px; border-radius: 6px;
+    border: 0; cursor: pointer; flex: 1; min-width: 0;
+    text-align: center;
+  }
+  .mb-pill.active { background: #7C3AED; color: #000; }
+  .mb-pill:hover:not(.active) { background: #2a2a2a; }
 
-    /* ── Toast stack (shared with /props CSS in spirit, scoped here) ── */
-    .toast-stack {
-      position: fixed; bottom: 20px; right: 20px;
-      display: flex; flex-direction: column-reverse; gap: 8px;
-      z-index: 60; pointer-events: none;
-      max-width: calc(100vw - 40px);
-    }
-    .toast {
-      pointer-events: auto;
-      background: #1a1a1a; color: #e5e7eb;
-      border: 1px solid #2a2a2a; border-left: 4px solid #6b7280;
-      border-radius: 8px; padding: 10px 14px;
-      font-size: 12.5px; font-weight: 600;
-      box-shadow: 0 10px 30px -10px rgba(0,0,0,.6);
-      min-width: 220px; max-width: 360px;
-      transform: translateX(20px); opacity: 0;
-      transition: transform .18s ease, opacity .18s ease;
-    }
-    .toast.show     { transform: translateX(0); opacity: 1; }
-    .toast.positive { border-left-color: #22c55e; }
-    .toast.negative { border-left-color: #ef4444; }
-    .toast.info     { border-left-color: #7C3AED; }
+  .mb-kelly-card {
+    background: #222222; border-radius: 6px;
+    padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .mb-kelly-label {
+    font-size: 9px; font-weight: 800; letter-spacing: .5px;
+    color: #6b7280;
+  }
+  .mb-kelly-value {
+    font-size: 22px; font-weight: 800; color: #9F67FF;
+    font-family: ui-monospace, monospace;
+  }
 
-    /* Inline edit panel + modal share an input style */
-    .mb-input {
-      background: #222222; border: 1px solid #2a2a2a;
-      color: #e5e7eb; font-size: 12.5px;
-      padding: 6px 8px; border-radius: 6px; width: 100%;
-    }
-    .mb-input:focus { outline: none; border-color: #7C3AED; }
+  .mb-rec-row, .mb-bet-row {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 8px; padding: 10px 12px;
+  }
+  .mb-section-title {
+    font-size: 13px; font-weight: 800;
+    letter-spacing: .8px; color: #ffffff;
+  }
+  .mb-sub-pill {
+    background: #222222; color: #9ca3af;
+    font-size: 11px; font-weight: 700;
+    padding: 2px 8px; border-radius: 999px;
+  }
+  .mb-stat-label {
+    font-size: 10px; font-weight: 700;
+    letter-spacing: .8px; color: #6b7280;
+  }
+  .mb-stat-value {
+    font-size: 20px; font-weight: 800;
+    font-family: ui-monospace, monospace;
+    letter-spacing: -.2px;
+  }
+</style>
+{% endblock %}
 
-    .mb-icon-btn {
-      width: 26px; height: 26px;
-      display: inline-flex; align-items: center; justify-content: center;
-      background: transparent; border: 0;
-      font-size: 13px; font-weight: 800;
-      cursor: pointer; user-select: none;
-      border-radius: 4px;
-    }
-    .mb-icon-btn:hover { background: #2a2a2a; }
-    .mb-icon-btn.danger { color: #ef4444; }
-    .mb-icon-btn.neutral { color: #9ca3af; }
+{% block content %}
+<main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-5">
 
-    /* Add Bet modal overlay */
-    .mb-modal-backdrop {
-      position: fixed; inset: 0; z-index: 50;
-      background: rgba(0,0,0,0.7);
-      display: flex; align-items: center; justify-content: center;
-      padding: 16px;
-    }
-    .mb-modal-card {
-      background: #1a1a1a; border: 1px solid #2a2a2a;
-      border-radius: 10px; padding: 18px;
-      width: 480px; max-width: 94vw;
-      max-height: calc(100vh - 32px); overflow-y: auto;
-      display: flex; flex-direction: column; gap: 12px;
-    }
-    .mb-step-pill {
-      background: #222222; color: #6b7280;
-      font-size: 10px; font-weight: 700;
-      padding: 2px 8px; border-radius: 999px;
-    }
-    /* Selection pills inside the modal */
-    .mb-pill {
-      background: #222222; color: #ffffff;
-      font-weight: 800; font-size: 13px;
-      padding: 12px 18px; border-radius: 6px;
-      border: 0; cursor: pointer; flex: 1; min-width: 0;
-      text-align: center;
-    }
-    .mb-pill.active { background: #7C3AED; color: #000; }
-    .mb-pill:hover:not(.active) { background: #2a2a2a; }
-
-    .mb-kelly-card {
-      background: #222222; border-radius: 6px;
-      padding: 10px 12px;
-      display: flex; flex-direction: column; gap: 2px;
-    }
-    .mb-kelly-label {
-      font-size: 9px; font-weight: 800; letter-spacing: .5px;
-      color: #6b7280;
-    }
-    .mb-kelly-value {
-      font-size: 22px; font-weight: 800; color: #9F67FF;
-      font-family: ui-monospace, monospace;
-    }
-
-    .mb-rec-row, .mb-bet-row {
-      background: #1a1a1a; border: 1px solid #2a2a2a;
-      border-radius: 8px; padding: 10px 12px;
-    }
-    .mb-section-title {
-      font-size: 13px; font-weight: 800;
-      letter-spacing: .8px; color: #ffffff;
-    }
-    .mb-sub-pill {
-      background: #222222; color: #9ca3af;
-      font-size: 11px; font-weight: 700;
-      padding: 2px 8px; border-radius: 999px;
-    }
-    .mb-stat-label {
-      font-size: 10px; font-weight: 700;
-      letter-spacing: .8px; color: #6b7280;
-    }
-    .mb-stat-value {
-      font-size: 20px; font-weight: 800;
-      font-family: ui-monospace, monospace;
-      letter-spacing: -.2px;
-    }
-  </style>
-</head>
-
-<body class="bg-bg text-white min-h-screen">
-
-  <!-- ── Sticky top nav (mirrors /props nav) ────────────────────── -->
-  <nav class="sticky top-0 z-30 bg-bg/95 backdrop-blur border-b border-border">
-    <div class="mx-auto max-w-7xl px-4 h-14 flex items-center justify-between">
-      <a href="/" class="flex items-center gap-2 font-extrabold tracking-tight text-lg">
-        <span class="text-accent">●</span> Sports Analysis
-      </a>
-      <div class="hidden sm:flex items-center gap-5 text-sm text-gray-400">
-        <a href="/" class="hover:text-white transition">Home</a>
-        <a href="/sports/mlb" class="hover:text-white transition">Sports</a>
-        <a href="/props" class="hover:text-white transition">Props</a>
-        <a href="/modelbets" class="hover:text-white transition">Model Bets</a>
-        <a href="/mybets" class="text-white font-semibold">My Bets</a>
-        <a href="/top-picks" class="hover:text-white transition">Top Picks</a>
-        <a href="/research" class="hover:text-white transition">Research</a>
-        <a href="/admin" class="hover:text-white transition">Admin</a>
-      </div>
-    </div>
-  </nav>
-
-  <main class="mx-auto max-w-3xl px-4 py-5 flex flex-col gap-5">
-
-    {# ── 1. Add Bet bar ────────────────────────────────────────── #}
-    <div class="flex justify-end">
-      <button id="mb-add-bet" type="button"
-              class="bg-accent text-black font-extrabold text-xs tracking-wide
-                     px-4 py-2 rounded">+ Add Bet</button>
-    </div>
-
-    {# ── 2. Personal bankroll hero ─────────────────────────────── #}
-    <div class="bg-card border border-border rounded-2xl p-5">
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-6">
-        <div class="flex flex-col gap-1">
-          <span class="mb-stat-label">START</span>
-          <span class="mb-stat-value mb-text-dim">${{ "{:,.2f}".format(bankroll.start) }}</span>
-        </div>
-        <div class="flex flex-col gap-1">
-          <span class="mb-stat-label">CURRENT</span>
-          <span class="mb-stat-value mb-text-text">${{ "{:,.2f}".format(bankroll.current) }}</span>
-        </div>
-        <div class="flex flex-col gap-1">
-          <span class="mb-stat-label">P / L</span>
-          <span class="mb-stat-value mb-text-{{ bankroll.pnl_color }}"
-                id="mb-pnl">{{ bankroll.pnl_sign }}${{ "{:,.2f}".format(bankroll.pnl_abs) }}</span>
-        </div>
-        <div class="flex flex-col gap-1">
-          <span class="mb-stat-label">AT RISK</span>
-          <span class="mb-stat-value mb-text-warn" id="mb-at-risk">${{ "{:,.2f}".format(bankroll.at_risk) }}</span>
-        </div>
-      </div>
-    </div>
-
-    {# Today's budget bar #}
-    <div class="bg-card border border-border rounded-lg px-3 py-2 flex items-center gap-2"
-         title="Daily cap: 20% of bankroll, 5% max on any single bet. Resets at 2 AM ET.">
-      <span class="text-xs font-bold text-gray-400 flex-1 truncate" id="mb-budget-line">
-        Today's Budget: ${{ "{:,.0f}".format(bankroll.budget_total) }} total
-        / ${{ "{:,.0f}".format(bankroll.budget_max) }} max per bet
-      </span>
-      <span class="text-xs font-extrabold font-mono whitespace-nowrap mb-text-{{ bankroll.remaining_color }}"
-            id="mb-budget-remaining">
-        ${{ "{:,.0f}".format(bankroll.budget_remaining) }} left today
-      </span>
-    </div>
-
-    {# ── 3. Unified tracked bets ───────────────────────────────── #}
-    <div class="flex flex-col gap-2">
-      <div class="flex items-center gap-2">
-        <span class="mb-section-title">TRACKED BETS</span>
-        <span class="mb-sub-pill" id="mb-open-count">{{ open_count }}</span>
-      </div>
-      <div id="mb-open-list" class="flex flex-col gap-2">
-        {# Server-rendered initial cards.  60s snapshot poll re-renders into
-           this container via mybets.js renderOpenList(). #}
-      </div>
-      <div id="mb-open-empty"
-           class="text-gray-400 text-xs italic text-center
-                  bg-card border border-dashed border-border rounded-lg p-4
-                  {% if open_count %}hidden{% endif %}">
-        No open bets yet. Track picks from the slate or the Props page.
-      </div>
-    </div>
-
-    <div class="flex flex-col gap-2">
-      <div class="flex items-center gap-2">
-        <span class="mb-section-title">SETTLED</span>
-        <span class="mb-sub-pill" id="mb-settled-count">{{ settled_count }}</span>
-      </div>
-      <div id="mb-settled-list" class="flex flex-col gap-2">
-        {# JS-rendered #}
-      </div>
-      <div id="mb-settled-empty"
-           class="text-gray-400 text-xs italic text-center
-                  bg-card border border-dashed border-border rounded-lg p-4
-                  {% if settled_count %}hidden{% endif %}">
-        No settled bets yet.
-      </div>
-    </div>
-
-    {# ── 4. Today's Recommendations ────────────────────────────── #}
-    <div class="flex flex-col gap-2">
-      <div class="flex items-center gap-2">
-        <span class="mb-section-title">TODAY'S RECOMMENDATIONS</span>
-        <span class="mb-sub-pill" id="mb-rec-total">{{ rec_total }}</span>
-        <span class="flex-1"></span>
-        <button id="mb-rec-more" type="button"
-                class="bg-cardhi text-white text-[10.5px] font-extrabold
-                       tracking-wide px-3 py-1 rounded hidden">
-          Show more
-        </button>
-      </div>
-
-      {# Empty state when both recommendation lists are empty. #}
-      <div id="mb-rec-empty"
-           class="text-gray-400 text-xs italic text-center
-                  bg-card border border-dashed border-border rounded-lg p-4
-                  {% if rec_total %}hidden{% endif %}">
-        No upcoming recommendations for today. Picks appear here for games
-        that haven't started yet.
-      </div>
-
-      <div id="mb-rec-games-wrap" class="flex flex-col gap-2 {% if not rec_games %}hidden{% endif %}">
-        <div class="flex items-center gap-2 mt-1">
-          <span class="text-[10.5px] font-extrabold tracking-wide text-gray-400">GAME PICKS</span>
-          <span class="mb-sub-pill text-[9.5px]" id="mb-rec-games-count">{{ rec_games|length }}</span>
-        </div>
-        <div id="mb-rec-games-list" class="flex flex-col gap-2"></div>
-      </div>
-      <div id="mb-rec-props-wrap" class="flex flex-col gap-2 {% if not rec_props %}hidden{% endif %}">
-        <div class="flex items-center gap-2 mt-1">
-          <span class="text-[10.5px] font-extrabold tracking-wide text-gray-400">PROP PICKS</span>
-          <span class="mb-sub-pill text-[9.5px]" id="mb-rec-props-count">{{ rec_props|length }}</span>
-        </div>
-        <div id="mb-rec-props-list" class="flex flex-col gap-2"></div>
-      </div>
-    </div>
-
-  </main>
-
-  {# ── 5. Add Bet modal scaffold (hidden by default) ──────────── #}
-  <div id="mb-modal-root" class="hidden">
-    {# Populated by mybets.js renderModal(); host element receives
-       the .mb-modal-backdrop + .mb-modal-card layout in JS. #}
+  {# ── 1. Add Bet bar ────────────────────────────────────────── #}
+  <div class="flex justify-end">
+    <button id="mb-add-bet" type="button"
+            class="bg-accent text-black font-extrabold text-xs tracking-wide
+                   px-4 py-2 rounded">+ Add Bet</button>
   </div>
 
-  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+  {# ── 2. Personal bankroll hero ─────────────────────────────── #}
+  <div class="bg-card border border-border rounded-2xl p-5">
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-6">
+      <div class="flex flex-col gap-1">
+        <span class="mb-stat-label">START</span>
+        <span class="mb-stat-value mb-text-dim">${{ "{:,.2f}".format(bankroll.start) }}</span>
+      </div>
+      <div class="flex flex-col gap-1">
+        <span class="mb-stat-label">CURRENT</span>
+        <span class="mb-stat-value mb-text-text">${{ "{:,.2f}".format(bankroll.current) }}</span>
+      </div>
+      <div class="flex flex-col gap-1">
+        <span class="mb-stat-label">P / L</span>
+        <span class="mb-stat-value mb-text-{{ bankroll.pnl_color }}"
+              id="mb-pnl">{{ bankroll.pnl_sign }}${{ "{:,.2f}".format(bankroll.pnl_abs) }}</span>
+      </div>
+      <div class="flex flex-col gap-1">
+        <span class="mb-stat-label">AT RISK</span>
+        <span class="mb-stat-value mb-text-warn" id="mb-at-risk">${{ "{:,.2f}".format(bankroll.at_risk) }}</span>
+      </div>
+    </div>
+  </div>
 
-  {# Server data island.  Same JSON shape the /api/mybets/snapshot endpoint
-     returns -- mybets.js reads this once on load, then 60 s poll replaces
-     state.vm with fresh data and re-renders. #}
-  <script id="mybets-data" type="application/json">{{
-    {"bankroll":     bankroll,
-     "open_bets":    open_bets,
-     "settled_bets": settled_bets,
-     "open_count":   open_count,
-     "settled_count": settled_count,
-     "rec_games":    rec_games,
-     "rec_props":    rec_props,
-     "rec_total":    rec_total} | tojson
-  }}</script>
+  {# Today's budget bar #}
+  <div class="bg-card border border-border rounded-lg px-3 py-2 flex items-center gap-2"
+       title="Daily cap: 20% of bankroll, 5% max on any single bet. Resets at 2 AM ET.">
+    <span class="text-xs font-bold text-gray-400 flex-1 truncate" id="mb-budget-line">
+      Today's Budget: ${{ "{:,.0f}".format(bankroll.budget_total) }} total
+      / ${{ "{:,.0f}".format(bankroll.budget_max) }} max per bet
+    </span>
+    <span class="text-xs font-extrabold font-mono whitespace-nowrap mb-text-{{ bankroll.remaining_color }}"
+          id="mb-budget-remaining">
+      ${{ "{:,.0f}".format(bankroll.budget_remaining) }} left today
+    </span>
+  </div>
 
-  <!-- lib.js MUST load before mybets.js (defines window.SBT.{toast,apiPost}). -->
-  <script src="/static/js/lib.js" defer></script>
-  <script src="/static/js/mybets.js" defer></script>
-</body>
-</html>
+  {# ── 3. Unified tracked bets ───────────────────────────────── #}
+  <div class="flex flex-col gap-2">
+    <div class="flex items-center gap-2">
+      <span class="mb-section-title">TRACKED BETS</span>
+      <span class="mb-sub-pill" id="mb-open-count">{{ open_count }}</span>
+    </div>
+    <div id="mb-open-list" class="flex flex-col gap-2">
+      {# Server-rendered initial cards.  60s snapshot poll re-renders into
+         this container via mybets.js renderOpenList(). #}
+    </div>
+    <div id="mb-open-empty"
+         class="text-gray-400 text-xs italic text-center
+                bg-card border border-dashed border-border rounded-lg p-4
+                {% if open_count %}hidden{% endif %}">
+      No open bets yet. Track picks from the slate or the Props page.
+    </div>
+  </div>
+
+  <div class="flex flex-col gap-2">
+    <div class="flex items-center gap-2">
+      <span class="mb-section-title">SETTLED</span>
+      <span class="mb-sub-pill" id="mb-settled-count">{{ settled_count }}</span>
+    </div>
+    <div id="mb-settled-list" class="flex flex-col gap-2">
+      {# JS-rendered #}
+    </div>
+    <div id="mb-settled-empty"
+         class="text-gray-400 text-xs italic text-center
+                bg-card border border-dashed border-border rounded-lg p-4
+                {% if settled_count %}hidden{% endif %}">
+      No settled bets yet.
+    </div>
+  </div>
+
+  {# ── 4. Today's Recommendations ────────────────────────────── #}
+  <div class="flex flex-col gap-2">
+    <div class="flex items-center gap-2">
+      <span class="mb-section-title">TODAY'S RECOMMENDATIONS</span>
+      <span class="mb-sub-pill" id="mb-rec-total">{{ rec_total }}</span>
+      <span class="flex-1"></span>
+      <button id="mb-rec-more" type="button"
+              class="bg-cardhi text-white text-[10.5px] font-extrabold
+                     tracking-wide px-3 py-1 rounded hidden">
+        Show more
+      </button>
+    </div>
+
+    {# Empty state when both recommendation lists are empty. #}
+    <div id="mb-rec-empty"
+         class="text-gray-400 text-xs italic text-center
+                bg-card border border-dashed border-border rounded-lg p-4
+                {% if rec_total %}hidden{% endif %}">
+      No upcoming recommendations for today. Picks appear here for games
+      that haven't started yet.
+    </div>
+
+    <div id="mb-rec-games-wrap" class="flex flex-col gap-2 {% if not rec_games %}hidden{% endif %}">
+      <div class="flex items-center gap-2 mt-1">
+        <span class="text-[10.5px] font-extrabold tracking-wide text-gray-400">GAME PICKS</span>
+        <span class="mb-sub-pill text-[9.5px]" id="mb-rec-games-count">{{ rec_games|length }}</span>
+      </div>
+      <div id="mb-rec-games-list" class="flex flex-col gap-2"></div>
+    </div>
+    <div id="mb-rec-props-wrap" class="flex flex-col gap-2 {% if not rec_props %}hidden{% endif %}">
+      <div class="flex items-center gap-2 mt-1">
+        <span class="text-[10.5px] font-extrabold tracking-wide text-gray-400">PROP PICKS</span>
+        <span class="mb-sub-pill text-[9.5px]" id="mb-rec-props-count">{{ rec_props|length }}</span>
+      </div>
+      <div id="mb-rec-props-list" class="flex flex-col gap-2"></div>
+    </div>
+  </div>
+
+</main>
+
+{# ── 5. Add Bet modal scaffold (hidden by default) ──────────── #}
+<div id="mb-modal-root" class="hidden">
+  {# Populated by mybets.js renderModal(); host element receives
+     the .mb-modal-backdrop + .mb-modal-card layout in JS. #}
+</div>
+
+<div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+{% endblock %}
+
+{% block extra_scripts %}
+{# Server data island.  Same JSON shape the /api/mybets/snapshot endpoint
+   returns -- mybets.js reads this once on load, then 60 s poll replaces
+   state.vm with fresh data and re-renders. #}
+<script id="mybets-data" type="application/json">{{
+  {"bankroll":     bankroll,
+   "open_bets":    open_bets,
+   "settled_bets": settled_bets,
+   "open_count":   open_count,
+   "settled_count": settled_count,
+   "rec_games":    rec_games,
+   "rec_props":    rec_props,
+   "rec_total":    rec_total} | tojson
+}}</script>
+
+<!-- lib.js MUST load before mybets.js (defines window.SBT.{toast,apiPost}). -->
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/mybets.js') }}" defer></script>
+{% endblock %}
