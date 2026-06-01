@@ -212,5 +212,5 @@
 
 {% block extra_scripts %}
 <script id="rs-init" type="application/json">{{ init_data | tojson }}</script>
-<script src="/static/js/research.js" defer></script>
+<script src="{{ static_v('js/research.js') }}" defer></script>
 {% endblock %}

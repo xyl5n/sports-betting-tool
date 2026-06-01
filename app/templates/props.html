@@ -592,6 +592,6 @@
 <!-- Server data handed to the client as JSON; all filtering is client-side. -->
 <script id="props-data" type="application/json">{{ props | tojson }}</script>
 <!-- lib.js MUST load before props.js (defines window.SBT.{toast,apiPost}). -->
-<script src="/static/js/lib.js" defer></script>
-<script src="/static/js/props.js" defer></script>
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/props.js') }}" defer></script>
 {% endblock %}

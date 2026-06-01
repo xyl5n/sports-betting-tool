@@ -151,6 +151,6 @@
 <script id="modelbets-init" type="application/json">{{ init_data | tojson }}</script>
 
 <!-- lib.js MUST load before modelbets.js (defines window.SBT). -->
-<script src="/static/js/lib.js" defer></script>
-<script src="/static/js/modelbets.js" defer></script>
+<script src="{{ static_v('js/lib.js') }}" defer></script>
+<script src="{{ static_v('js/modelbets.js') }}" defer></script>
 {% endblock %}
