@@ -9,7 +9,7 @@
   /* ── Chip row ── */
   .chip-row { display: flex; flex-wrap: nowrap; gap: 10px; }
   .chip     { flex: 1 1 0; min-width: 0; overflow: hidden;
-              background: #1a1f2e; border: 1px solid #2a3040;
+              background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
               border-radius: 10px; padding: 14px 16px; }
 
   /* ── Carousel shared ── */
@@ -26,7 +26,7 @@
   .ev-card {
     flex-shrink: 0; scroll-snap-align: start;
     width: calc((100% - 16px) / 3);
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 12px 14px;
     cursor: pointer; transition: border-color .15s;
   }
@@ -39,7 +39,7 @@
   .conf-card {
     flex-shrink: 0; scroll-snap-align: start;
     min-width: 200px; max-width: 200px;
-    background: #1e2436; border: 1px solid #2a3040;
+    background: #111111; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 12px 14px;
     cursor: pointer; transition: border-color .15s;
   }
@@ -48,14 +48,14 @@
   /* ── Arrow buttons ── */
   .carousel-arrow {
     position: absolute; top: 50%; transform: translateY(-50%);
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     color: #94a3b8; border-radius: 50%;
     width: 28px; height: 28px;
     display: flex; align-items: center; justify-content: center;
     cursor: pointer; z-index: 10; font-size: 13px;
     transition: background .15s;
   }
-  .carousel-arrow:hover { background: #2a3040; }
+  .carousel-arrow:hover { background: rgba(255,255,255,0.12); }
   .carousel-arrow.left  { left: -14px; }
   .carousel-arrow.right { right: -14px; }
 
@@ -69,27 +69,21 @@
   /* ── Empty state ── */
   .empty-state {
     color: #64748b; font-size: 13px; font-style: italic;
-    background: #1a1f2e; border: 1px dashed #2a3040;
+    background: #0a0a0a; border: 1px dashed rgba(255,255,255,0.12);
     border-radius: 10px; padding: 20px; text-align: center;
   }
 
-  /* ── News ── */
-  .news-cards {
-    display: grid; gap: 12px;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  }
-  @media (max-width: 640px) {
-    .news-cards {
-      display: flex; gap: 12px;
-      overflow-x: auto; scroll-snap-type: x mandatory;
-      grid-template-columns: none;
-      scrollbar-width: none;
-    }
-    .news-cards::-webkit-scrollbar { display: none; }
-    .news-card { flex: 0 0 80%; scroll-snap-align: start; }
+  /* ── News carousel (3 at a time, transform-based) ── */
+  .news-carousel { position: relative; width: 100%; }
+  .news-viewport { width: 100%; overflow: hidden; }
+  .news-track {
+    display: flex; gap: 12px;
+    transition: transform .35s ease;
+    will-change: transform;
   }
   .news-card {
-    background: #1a1f2e; border: 1px solid #2a3040;
+    flex: 0 0 calc((100% - 24px) / 3);
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; overflow: hidden;
     text-decoration: none; color: #e2e8f0;
     display: flex; flex-direction: column;
@@ -99,8 +93,17 @@
   .news-thumb {
     position: relative;
     width: 100%; aspect-ratio: 16/9;
-    background-size: cover; background-position: center;
-    background-color: #2a3040;
+    background-color: #0a0a0a;
+  }
+  .news-img {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+  .news-img-fallback {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    background: #0a0a0a;
   }
   .news-badge {
     position: absolute; bottom: 8px; left: 8px;
@@ -125,28 +128,28 @@
   .perf-row { display: flex; flex-wrap: nowrap; gap: 10px; align-items: stretch; }
   .perf-stat {
     flex: 1 1 0; min-width: 0; overflow: hidden;
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 14px 16px;
   }
 
   /* ── AI banner ── */
   .ai-banner {
     display: flex; align-items: center; width: 100%;
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 16px; padding: 14px 16px; gap: 14px;
     text-decoration: none; transition: border-color .15s;
   }
   .ai-banner:hover { border-color: #4f6ef7; }
 
   /* ── Heatmap ── */
-  .heatmap-wrap   { background: #1a1f2e; border: 1px solid #2a3040;
+  .heatmap-wrap   { background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
                     border-radius: 10px; overflow: hidden; }
   .heatmap-table  { width: 100%; border-collapse: collapse;
                     table-layout: fixed; font-size: 12px; }
   .heatmap-table thead th {
     padding: 12px 10px 8px;
     font-size: 10px; font-weight: 700; letter-spacing: .7px;
-    color: #64748b; border-bottom: 1px solid #2a3040;
+    color: #64748b; border-bottom: 1px solid rgba(255,255,255,0.12);
     white-space: nowrap;
   }
   .heatmap-table tbody td {
@@ -165,13 +168,13 @@
 
   /* ── Stub card ── */
   .stub-card {
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 14px 16px;
   }
 
   /* ── Games table (Phase 2c) ── */
   .games-card {
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; overflow: hidden; width: 100%;
   }
   .games-row {
@@ -186,13 +189,13 @@
     flex: 1 1 auto; min-width: 0; overflow: hidden;
   }
   .games-badge {
-    background: #2a3040; color: #94a3b8;
+    background: rgba(255,255,255,0.12); color: #94a3b8;
     font-size: 9px; font-weight: 800; letter-spacing: .4px;
     padding: 2px 6px; border-radius: 999px;
     white-space: nowrap; flex-shrink: 0;
   }
   .games-badge-final {
-    background: #2a3040; color: #94a3b8;
+    background: rgba(255,255,255,0.12); color: #94a3b8;
     font-size: 8.5px; font-weight: 800; letter-spacing: .4px;
     padding: 2px 6px; border-radius: 999px;
     white-space: nowrap; flex-shrink: 0;
@@ -217,7 +220,7 @@
   /* sport toggle pills */
   .g-pills    { display: flex; gap: 3px; flex-shrink: 0; }
   .g-pill {
-    background: #2a3040; color: #94a3b8;
+    background: rgba(255,255,255,0.12); color: #94a3b8;
     font-size: 10.5px; font-weight: 700;
     padding: 4px 10px; border-radius: 999px;
     border: 0; cursor: pointer; line-height: 1;
@@ -226,20 +229,20 @@
 
   .games-empty {
     color: #94a3b8; font-size: 12px; text-align: center;
-    background: #1a1f2e; border: 1px dashed #2a3040;
+    background: #0a0a0a; border: 1px dashed rgba(255,255,255,0.12);
     border-radius: 10px; padding: 16px; width: 100%;
   }
 
   /* ── Team Rotation chart (Phase 2d) ── */
   .rot-wrap {
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 12px 8px 8px;
     width: 100%; box-sizing: border-box;
   }
   .rot-chart { width: 100%; height: 400px; }
   /* Sport toggle: subtle outline (distinct from filled metric pills) */
   .rot-pill-sport {
-    background: #2a3040; color: #64748b;
+    background: rgba(255,255,255,0.12); color: #64748b;
     font-size: 10.5px; font-weight: 700;
     padding: 4px 10px; border-radius: 999px;
     border: 0; cursor: pointer; line-height: 1;
@@ -249,7 +252,7 @@
   }
   .rot-empty {
     color: #94a3b8; font-size: 13px; text-align: center;
-    background: #1a1f2e; border: 1px solid #2a3040;
+    background: #0a0a0a; border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 48px 20px; width: 100%;
   }
 </style>
@@ -274,7 +277,7 @@
   <div class="flex flex-col gap-3">
     <div class="flex items-center gap-2">
       <span class="text-[13px] font-extrabold tracking-widest text-white">TODAY'S GAMES</span>
-      <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[10.5px] font-bold c-warn">Analysis pending</span>
+      <span class="rounded-full bg-[#111111] px-2 py-0.5 text-[10.5px] font-bold c-warn">Analysis pending</span>
     </div>
     <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
       {% for g in stubs %}
@@ -307,7 +310,7 @@
     <div class="flex items-center gap-2">
       <span class="text-[13px] font-extrabold tracking-widest text-white">EV SCAN</span>
       <span class="text-[11px] c-dim">edge ≥ {{ ev_min_pct }}</span>
-      <span class="ml-auto rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ ev_count }}</span>
+      <span class="ml-auto rounded-full bg-[#111111] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ ev_count }}</span>
     </div>
 
     {% if ev_empty_reason %}
@@ -363,23 +366,42 @@
     <div class="flex items-center gap-2">
       <span class="text-[13px] font-extrabold tracking-widest text-white">NEWS</span>
       {% if news_count %}
-      <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ news_count }}</span>
+      <span class="rounded-full bg-[#111111] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ news_count }}</span>
       {% endif %}
       <span class="ml-auto text-[10.5px] c-dim">via ESPN · {{ news_tag_label }}</span>
     </div>
     {% if news_items %}
-    <div class="news-cards">
-      {% for item in news_items %}
-      <a class="news-card" href="{{ item.link }}" target="_blank" rel="noopener noreferrer">
-        <div class="news-thumb"{% if item.image %} style="background-image: url('{{ item.image|e }}');"{% endif %}>
-          <span class="news-badge news-badge-{{ news_sport }}">{{ news_tag_label }}</span>
+    <div class="news-carousel">
+      {% if news_items|length > 3 %}
+      <button type="button" class="carousel-arrow left" aria-label="Previous news"
+              onclick="slideNews('left')">&#8249;</button>
+      {% endif %}
+      <div class="news-viewport">
+        <div class="news-track" id="news-track">
+          {% for item in news_items %}
+          <a class="news-card" href="{{ item.link }}" target="_blank" rel="noopener noreferrer">
+            <div class="news-thumb">
+              {% if item.image %}
+              <img class="news-img" src="{{ item.image|e }}" alt="" loading="lazy"
+                   onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+              <div class="news-img-fallback" style="display:none;"></div>
+              {% else %}
+              <div class="news-img-fallback"></div>
+              {% endif %}
+              <span class="news-badge news-badge-{{ news_sport }}">{{ news_tag_label }}</span>
+            </div>
+            <div class="news-body">
+              <div class="news-title">{{ item.title|safe }}</div>
+              {% if item.time_ago %}<div class="news-time">{{ item.time_ago }}</div>{% endif %}
+            </div>
+          </a>
+          {% endfor %}
         </div>
-        <div class="news-body">
-          <div class="news-title">{{ item.title|safe }}</div>
-          {% if item.time_ago %}<div class="news-time">{{ item.time_ago }}</div>{% endif %}
-        </div>
-      </a>
-      {% endfor %}
+      </div>
+      {% if news_items|length > 3 %}
+      <button type="button" class="carousel-arrow right" aria-label="Next news"
+              onclick="slideNews('right')">&#8250;</button>
+      {% endif %}
     </div>
     {% else %}
     <div class="empty-state">Headlines unavailable — check back shortly.</div>
@@ -397,7 +419,7 @@
     {# ── Upcoming header + sport toggle ── #}
     <div class="flex items-center gap-2 w-full">
       <span class="text-[13px] font-extrabold tracking-widest text-white">UPCOMING</span>
-      <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ games[sk].upcoming | length }}</span>
+      <span class="rounded-full bg-[#111111] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ games[sk].upcoming | length }}</span>
       <div class="flex-1 min-w-[4px]"></div>
       <div class="g-pills">
         {% for tk, tl in [('mlb', 'MLB'), ('wnba', 'WNBA')] %}
@@ -438,7 +460,7 @@
     {# ── Final header ── #}
     <div class="flex items-center gap-2 w-full pt-1">
       <span class="text-[13px] font-extrabold tracking-widest text-white">FINAL</span>
-      <span class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ games[sk].final | length }}</span>
+      <span class="rounded-full bg-[#111111] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ games[sk].final | length }}</span>
     </div>
 
     {# ── Final rows ── #}
@@ -469,7 +491,7 @@
   <div class="flex flex-col gap-3">
     <div class="flex flex-wrap items-center gap-2 w-full">
       <span class="text-[13px] font-extrabold tracking-widest text-white">TEAM ROTATION</span>
-      <span id="rot-count" class="rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ rotation.count }}</span>
+      <span id="rot-count" class="rounded-full bg-[#111111] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ rotation.count }}</span>
       <div class="flex-1 min-w-[4px]"></div>
 
       {# Sport toggle — subtle outline #}
@@ -508,7 +530,7 @@
     <div class="flex items-center gap-2">
       <span class="text-[13px] font-extrabold tracking-widest text-white">SEASON HEATMAP</span>
       <span class="text-[11px] c-dim">MLB · ML</span>
-      <span class="ml-auto rounded-full bg-[#1e2436] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ heatmap_count }}</span>
+      <span class="ml-auto rounded-full bg-[#111111] px-2 py-0.5 text-[11px] font-bold text-slate-400">{{ heatmap_count }}</span>
     </div>
 
     {% if heatmap_rows %}
@@ -585,6 +607,27 @@
     const w = card ? card.offsetWidth + 8 : 216;
     el.scrollBy({ left: dir === 'left' ? -w : w, behavior: 'smooth' });
   }
+
+  /* ── News carousel: slide one group of 3 at a time ── */
+  var newsGroup = 0;
+  function slideNews(dir) {
+    var track = document.getElementById('news-track');
+    if (!track) return;
+    var viewport = track.parentElement;
+    var perView = 3, gap = 12;
+    var groups = Math.max(1, Math.ceil(track.children.length / perView));
+    newsGroup += (dir === 'left' ? -1 : 1);
+    if (newsGroup < 0) newsGroup = 0;
+    if (newsGroup > groups - 1) newsGroup = groups - 1;
+    var shift = newsGroup * (viewport.clientWidth + gap);
+    track.style.transform = 'translateX(' + (-shift) + 'px)';
+  }
+  window.addEventListener('resize', function() {
+    var track = document.getElementById('news-track');
+    if (!track) return;
+    track.style.transform =
+      'translateX(' + (-(newsGroup * (track.parentElement.clientWidth + 12))) + 'px)';
+  });
 
   function showGames(sport) {
     ['mlb', 'wnba'].forEach(function(s) {

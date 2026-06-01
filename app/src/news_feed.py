@@ -27,6 +27,7 @@ miss are acceptable; the dict assignment is atomic in CPython.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import html as _html
 import sys
 import time
@@ -34,7 +35,10 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from typing import Optional
+
+import requests
 
 _FEEDS: dict[str, str] = {
     "mlb":  "https://www.espn.com/espn/rss/mlb/news",
@@ -105,6 +109,94 @@ def _extract_image(elem: ET.Element) -> str:
     return ""
 
 
+# ── og:image enrichment ─────────────────────────────────────────────────────
+# ESPN's RSS feeds frequently omit <media:*>/<enclosure> art (the MLB feed
+# carries none), so when an item has no inline image we scrape the article's
+# Open Graph <meta property="og:image"> tag.  Scrapes run in parallel with a
+# tight per-request timeout and are cached per-URL for the same TTL as the
+# feed, so a hot page reload pays at most one scrape per article per 5 min.
+
+# {url: {"ts": monotonic, "image": str}}  ("" image == scraped, none found)
+_IMG_CACHE: dict[str, dict] = {}
+
+_OG_SCRAPE_TIMEOUT = 1.5   # seconds, per HTTP request
+_OG_MAX_WORKERS    = 8
+
+
+class _OGImageParser(HTMLParser):
+    """Minimal parser that captures the first <meta property="og:image">.
+
+    Stops recording once found.  Also accepts the url/secure_url variants
+    ESPN occasionally emits.  Never raises on malformed markup.
+    """
+    _WANTED = {"og:image", "og:image:url", "og:image:secure_url"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.image = ""
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if self.image or tag != "meta":
+            return
+        a = dict(attrs)
+        prop = (a.get("property") or a.get("name") or "").lower()
+        if prop in self._WANTED:
+            self.image = (a.get("content") or "").strip()
+
+
+def _scrape_og_image(url: str) -> str:
+    """Fetch *url* and return its og:image URL, or "" on any failure.
+
+    The result (including "") is cached per-URL for _TTL seconds so repeated
+    renders within the cache window never re-hit the network.  Silent: every
+    failure mode (timeout, DNS, non-200, bad markup) maps to "".
+    """
+    if not url:
+        return ""
+    hit = _IMG_CACHE.get(url)
+    if hit and (time.monotonic() - hit["ts"]) < _TTL:
+        return hit["image"]
+
+    image = ""
+    try:
+        resp = requests.get(
+            url,
+            timeout=_OG_SCRAPE_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; sports-betting-ai/1.0)"},
+        )
+        if resp.status_code == 200 and resp.text:
+            parser = _OGImageParser()
+            parser.feed(resp.text)
+            image = parser.image
+    except Exception:                                                      # noqa: BLE001
+        image = ""
+
+    _IMG_CACHE[url] = {"ts": time.monotonic(), "image": image}
+    return image
+
+
+def _enrich_images(items: list[dict]) -> None:
+    """In-place: fill item['image'] for items lacking one via og:image scrape.
+
+    Scrapes run concurrently in a thread pool, each request bounded by
+    _OG_SCRAPE_TIMEOUT.  Items that already carry a media/enclosure image are
+    left untouched and never scraped.  Any per-item failure leaves "" silently.
+    """
+    targets = [it for it in items if not it.get("image")]
+    if not targets:
+        return
+    workers = min(_OG_MAX_WORKERS, len(targets))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            results = ex.map(_scrape_og_image, [it["link"] for it in targets])
+            for it, img in zip(targets, results):
+                if img:
+                    it["image"] = img
+    except Exception:                                                      # noqa: BLE001
+        # A pool/scheduling failure must never break the feed.
+        pass
+
+
 def _parse_items(xml_bytes: bytes) -> list[dict]:
     """Parse RSS 2.0 bytes and return a list of item dicts.
 
@@ -130,6 +222,7 @@ def _parse_items(xml_bytes: bytes) -> list[dict]:
             "image":    _extract_image(elem),
             "source":   "ESPN",
         })
+    _enrich_images(items)
     return items
 
 
