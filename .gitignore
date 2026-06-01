@@ -87,3 +87,8 @@ app/.cache/
 app/src/__pycache__/
 **/__pycache__/
 **/*.pyc
+
+# Local dev/test artifacts -- Playwright MCP captures + ad-hoc screenshots.
+# Generated during local verification runs; never source.
+.playwright-mcp/
+screenshots/

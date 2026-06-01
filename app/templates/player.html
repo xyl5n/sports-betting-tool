@@ -9,23 +9,23 @@
 <style>
   .pl-text-pos{color:#22c55e;} .pl-text-neg{color:#ef4444;} .pl-text-warn{color:#eab308;}
   .pl-text-text{color:#fff;} .pl-text-dim{color:#9ca3af;} .pl-text-dim2{color:#6b7280;}
-  .pl-text-primary{color:#9F67FF;}
+  .pl-text-primary{color:#00E5FF;}
 
   .toast-stack{position:fixed;bottom:20px;right:20px;display:flex;
     flex-direction:column-reverse;gap:8px;z-index:60;pointer-events:none;max-width:calc(100vw - 40px);}
-  .toast{pointer-events:auto;background:#1a1a1a;color:#e5e7eb;border:1px solid #2a2a2a;
+  .toast{pointer-events:auto;background:#0a0a0a;color:#e5e7eb;border:1px solid rgba(255,255,255,0.12);
     border-left:4px solid #6b7280;border-radius:8px;padding:10px 14px;font-size:12.5px;
     font-weight:600;box-shadow:0 10px 30px -10px rgba(0,0,0,.6);min-width:220px;max-width:360px;
     transform:translateX(20px);opacity:0;transition:transform .18s ease,opacity .18s ease;}
   .toast.show{transform:translateX(0);opacity:1;}
   .toast.positive{border-left-color:#22c55e;} .toast.negative{border-left-color:#ef4444;}
-  .toast.info{border-left-color:#7C3AED;}
+  .toast.info{border-left-color:#00E5FF;}
 
-  .pl-card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;
+  .pl-card{background:#0a0a0a;border:1px solid rgba(255,255,255,0.12);border-radius:12px;
     padding:14px;display:flex;flex-direction:column;gap:10px;}
   .pl-tab{background:transparent;color:#9ca3af;border:0;font-size:13px;font-weight:700;
     padding:8px 12px;cursor:pointer;border-bottom:2px solid transparent;}
-  .pl-tab.active{color:#9F67FF;border-bottom-color:#7C3AED;}
+  .pl-tab.active{color:#00E5FF;border-bottom-color:#00E5FF;}
   .pl-subtab{background:transparent;color:#9ca3af;border:0;font-size:12px;font-weight:700;
     padding:6px 10px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;}
   .pl-subtab.active{color:#22c55e;border-bottom-color:#22c55e;}
@@ -37,19 +37,19 @@
   .pl-rate-pct{font-size:14px;font-weight:800;font-family:ui-monospace,monospace;}
   .pl-rate-tag{font-size:9.5px;font-weight:700;color:#6b7280;letter-spacing:.5px;}
   .pl-chart{width:100%;height:250px;}
-  .pl-track-btn{background:#7C3AED;color:#000;font-weight:800;font-size:11px;
+  .pl-track-btn{background:#00E5FF;color:#000;font-weight:800;font-size:11px;
     padding:6px 14px;border-radius:6px;border:0;cursor:pointer;line-height:1;}
-  .pl-track-btn:hover:not(:disabled){background:#9F67FF;}
+  .pl-track-btn:hover:not(:disabled){background:#00E5FF;}
   .pl-track-btn:disabled{opacity:.65;cursor:default;}
   .pl-track-btn.is-tracked{background:#222;color:#22c55e;border:1px solid #22c55e;padding:5px 13px;}
   .pl-track-btn.is-pending{opacity:.7;cursor:progress;}
   .pl-table{width:100%;border-collapse:collapse;}
   .pl-table th{font-size:10px;font-weight:800;letter-spacing:.5px;color:#6b7280;
-    padding:6px 10px;border-bottom:1px solid #2a2a2a;white-space:nowrap;}
+    padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.12);white-space:nowrap;}
   .pl-table td{font-size:12px;font-family:ui-monospace,monospace;padding:6px 10px;
     border-bottom:1px solid #161616;white-space:nowrap;}
   .pl-empty{color:#9ca3af;font-size:12.5px;font-style:italic;text-align:center;
-    background:#1a1a1a;border:1px dashed #2a2a2a;border-radius:10px;padding:16px;}
+    background:#0a0a0a;border:1px dashed rgba(255,255,255,0.12);border-radius:10px;padding:16px;}
   .pl-skeleton{color:#6b7280;font-size:12px;font-style:italic;padding:8px 0;}
 </style>
 {% endblock %}
@@ -63,7 +63,7 @@
   <div class="pl-card" style="flex-direction:row;align-items:center;gap:14px;">
     <img src="{{ init_data.headshot }}" alt="{{ init_data.name }}"
          style="width:64px;height:64px;border-radius:50%;object-fit:cover;
-                background:#222;border:2px solid #2a2a2a;flex-shrink:0;"
+                background:#222;border:2px solid rgba(255,255,255,0.12);flex-shrink:0;"
          onerror="this.style.opacity='.3';">
     <div class="flex flex-col gap-[3px] flex-1 min-w-0">
       <div class="text-[18px] font-extrabold truncate">{{ init_data.name }}</div>

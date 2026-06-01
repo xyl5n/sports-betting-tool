@@ -260,7 +260,7 @@
     return '<div class="flex items-center gap-2 py-[5px] border-b border-[#161616] last:border-0">' +
       '<span class="text-[11px] font-bold pl-text-dim min-w-[110px]">' + esc(r.label || "") + '</span>' +
       '<span class="text-[12px] font-mono font-bold pl-text-text min-w-[50px] text-right">' + esc(v) + '</span>' +
-      '<div style="flex:1;height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden;">' +
+      '<div style="flex:1;height:6px;background:#0a0a0a;border-radius:3px;overflow:hidden;">' +
         '<div style="height:100%;width:' + width + '%;background:' + col + ';"></div>' +
       '</div>' +
       '<span class="text-[11px] font-mono font-bold min-w-[28px] text-right" style="color:' + col + ';">' +
@@ -475,7 +475,7 @@
         splitLine = '<span class="text-[10.5px] italic pl-text-dim2" style="padding-left:24px;">' +
           esc(splitLabel) + ': no split data</span>';
       }
-      return '<div class="flex flex-col gap-[3px] py-2 border-b border-[#1a1a1a] last:border-0">' +
+      return '<div class="flex flex-col gap-[3px] py-2 border-b border-[#0a0a0a] last:border-0">' +
         '<div class="flex items-center gap-2">' +
           '<span class="text-[11px] font-extrabold font-mono pl-text-dim2 min-w-[16px]">' +
             esc(String(b.order || "")) + '</span>' +
@@ -492,7 +492,7 @@
   // ── Shared render helpers ─────────────────────────────────────────────
   function section(title, bodyHtml) {
     return '<div class="pl-card">' +
-      '<div class="text-[10px] font-extrabold tracking-wider" style="color:#9F67FF;letter-spacing:.8px;">' +
+      '<div class="text-[10px] font-extrabold tracking-wider" style="color:#00E5FF;letter-spacing:.8px;">' +
         esc(title) + '</div>' +
       bodyHtml +
     '</div>';
@@ -506,14 +506,14 @@
   }
   function statBox(label, value) {
     return '<div class="flex-1 flex flex-col items-center gap-[2px] py-[10px] px-3" ' +
-      'style="background:#222;border:1px solid #2a2a2a;border-radius:10px;">' +
+      'style="background:#222;border:1px solid #111111;border-radius:10px;">' +
       '<span class="text-[10px] font-bold tracking-wider pl-text-dim2">' + esc(label) + '</span>' +
       '<span class="text-[18px] font-extrabold font-mono pl-text-text">' + esc(value) + '</span>' +
     '</div>';
   }
   function statBoxColor(label, value, color) {
     return '<div class="flex-1 flex flex-col items-center gap-[2px] py-[10px] px-3" ' +
-      'style="background:#222;border:1px solid #2a2a2a;border-radius:10px;">' +
+      'style="background:#222;border:1px solid #111111;border-radius:10px;">' +
       '<span class="text-[10px] font-bold tracking-wider pl-text-dim2">' + esc(label) + '</span>' +
       '<span class="text-[18px] font-extrabold font-mono" style="color:' + color + ';">' +
         esc(value) + '</span>' +
@@ -521,8 +521,8 @@
   }
   function colorToken(name) {
     return {pos: "#22c55e", neg: "#ef4444", warn: "#eab308",
-            dim: "#9ca3af", primary: "#7C3AED",
-            primary_hi: "#9F67FF"}[name] || "#fff";
+            dim: "#9ca3af", primary: "#00E5FF",
+            primary_hi: "#00E5FF"}[name] || "#fff";
   }
 
   // ── Percentile split-pill delegation (event-delegated on the host) ────

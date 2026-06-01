@@ -219,6 +219,8 @@
       ? "bg-neg text-white"
       : "bg-card text-gray-400 border border-border";
 
+    var playerSlug = (p.player || "").toLowerCase().replace(/ /g, "-");
+
     return '' +
       '<div class="prop-card' + dimmed + ' rounded-2xl bg-card border border-border overflow-hidden flex flex-col" data-idx="' + idx + '">' +
 
@@ -235,7 +237,9 @@
         '<div class="px-4 py-2 flex items-center gap-3">' +
           avatar +
           '<div class="min-w-0">' +
-            '<div class="font-bold text-[15px] truncate">' + esc(p.player || "Unknown") + '</div>' +
+            '<a href="/player/' + esc(p.sport) + '/' + esc(playerSlug) + '" class="player-name-link">' +
+              '<div class="font-bold text-[15px] truncate">' + esc(p.player || "Unknown") + '</div>' +
+            '</a>' +
             '<div class="text-[11px] text-gray-500 truncate">' +
               (p.position ? esc(p.position) : '') +
               (p.team ? (p.position ? ' · ' : '') + esc(p.team) : '') +
