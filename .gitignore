@@ -77,3 +77,13 @@ env/
 # admin manual).  Tracking it meant Railway re-cloned a stale committed copy
 # on every redeploy.  Same pattern as the ledger files above.
 **/data/ensemble_picks_today.json
+
+# Pycache + app runtime cache (blanket).  The per-file .cache rules above are
+# kept for clarity; these blanket rules keep regenerated Python bytecode and
+# newly-written runtime cache files out of the working-tree diff entirely.
+# (Already-tracked .cache data artifacts stay tracked -- gitignore does not
+# untrack them; this only stops new runtime files from showing as dirty.)
+app/.cache/
+app/src/__pycache__/
+**/__pycache__/
+**/*.pyc
