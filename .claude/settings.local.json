@@ -50,7 +50,8 @@
       "Bash(git push *)",
       "Bash(gh pr create --title 'Expand props model training: multi-season data, 40+ new features, SHAP analysis' --body ' *)",
       "Bash(git add *)",
-      "Bash(where gh *)"
+      "Bash(where gh *)",
+      "Bash(claude mcp *)"
     ]
   }
 }
